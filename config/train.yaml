@@ -1,8 +1,8 @@
 data:
   folder:
-    0: ../../gan3d/data/generated/slices/0
-    1: ../../gan3d/data/generated/slices/1
-    2: ../../gan3d/data/generated/slices/2
+    0: ../data/generated/slices/0
+    1: ../data/generated/slices/1
+    2: ../data/generated/slices/2
   crop_size: 128
   patch_size: 64
   num_phases: 3
@@ -22,6 +22,10 @@ diffusion:
   beta_min: 0.1
   beta_max: 20.0
 
+anchor:
+  probability: 0.5
+  loss_weight: 1.0
+
 optim:
   generator_lr: 0.00016
   critic_lr: 0.0001
@@ -31,13 +35,9 @@ optim:
   r1_interval: 16
 
 train:
-  checkpoint: null
-  steps: 1000
+  steps: 30000
   volume_batch_size: 1
-  slices_per_axis: 8
+  slices_per_axis: 16
   mixed_precision: true
   ema_decay: 0.999
-  save_every_steps: 100
-
-output:
-  run_root: ../run
+  save_every_steps: 1000

@@ -1,0 +1,14 @@
+output:
+  data_dir: ../data/generated
+  count: 25
+  axes: [0, 1, 2]
+
+geometry:
+  size: 128
+
+  big_elongation: 1.0
+  big_radius: 14
+  big_fraction: 0.4
+
+  small_radius: 7
+  small_fraction: 0.2

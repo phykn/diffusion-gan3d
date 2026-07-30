@@ -61,6 +61,14 @@ class Denoiser3D(nn.Module):
             nn.Linear(embedding_channels, embedding_channels),
         )
         self.input = nn.Conv3d(num_phases, channels[0], 3, padding=1)
+        self.anchor_input = nn.Conv3d(
+            num_phases + 1,
+            channels[0],
+            3,
+            padding=1,
+        )
+        nn.init.zeros_(self.anchor_input.weight)
+        nn.init.zeros_(self.anchor_input.bias)
 
         self.encoder = nn.ModuleList()
         self.downsample = nn.ModuleList()
@@ -113,10 +121,44 @@ class Denoiser3D(nn.Module):
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
+        *,
+        anchor_image: torch.Tensor | None = None,
+        anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self._validate_inputs(x_current, time, latent)
+        logits = self.forward_logits(
+            x_current,
+            time,
+            latent,
+            anchor_image=anchor_image,
+            anchor_mask=anchor_mask,
+        )
+        return self.clean_from_logits(logits)
+
+    def forward_logits(
+        self,
+        x_current: torch.Tensor,
+        time: torch.Tensor,
+        latent: torch.Tensor,
+        *,
+        anchor_image: torch.Tensor | None = None,
+        anchor_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        self._validate_inputs(
+            x_current,
+            time,
+            latent,
+            anchor_image=anchor_image,
+            anchor_mask=anchor_mask,
+        )
         embedding = self._conditioning(x_current, time, latent)
         hidden = self.input(x_current)
+        anchor_features = self._anchor_features(
+            x_current,
+            anchor_image=anchor_image,
+            anchor_mask=anchor_mask,
+        )
+        if anchor_features is not None:
+            hidden = hidden + anchor_features
         skips = []
         for index, block in enumerate(self.encoder):
             hidden = self._block(block, hidden, embedding)
@@ -141,6 +183,10 @@ class Denoiser3D(nn.Module):
             hidden = self._block(block, hidden, embedding)
 
         logits = self.output(F.silu(self.output_norm(hidden)))
+        return logits
+
+    @staticmethod
+    def clean_from_logits(logits: torch.Tensor) -> torch.Tensor:
         return 2.0 * logits.softmax(dim=1) - 1.0
 
     def _conditioning(
@@ -176,11 +222,32 @@ class Denoiser3D(nn.Module):
             )
         return block(inputs, embedding)
 
+    def _anchor_features(
+        self,
+        inputs: torch.Tensor,
+        *,
+        anchor_image: torch.Tensor | None,
+        anchor_mask: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if anchor_image is None or anchor_mask is None:
+            return None
+        mask = anchor_mask.to(device=inputs.device, dtype=inputs.dtype)
+        active = mask.flatten(start_dim=1).any(dim=1)
+        if not bool(active.any().item()):
+            return None
+        clean = anchor_image.to(device=inputs.device, dtype=inputs.dtype)
+        probabilities = (clean + 1.0) * 0.5 * mask
+        features = self.anchor_input(torch.cat((probabilities, mask), dim=1))
+        return features * active.to(features.dtype)[:, None, None, None, None]
+
     def _validate_inputs(
         self,
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
+        *,
+        anchor_image: torch.Tensor | None,
+        anchor_mask: torch.Tensor | None,
     ) -> None:
         if not isinstance(x_current, torch.Tensor) or x_current.ndim != 5:
             raise ValueError("x_current must have shape [B, P, D, H, W].")
@@ -204,6 +271,28 @@ class Denoiser3D(nn.Module):
             )
         if not latent.is_floating_point():
             raise ValueError("latent must be floating point.")
+        if (anchor_image is None) != (anchor_mask is None):
+            raise ValueError(
+                "anchor_image and anchor_mask must be provided together."
+            )
+        if anchor_image is None or anchor_mask is None:
+            return
+        if anchor_image.shape != x_current.shape:
+            raise ValueError("anchor_image must have the same shape as x_current.")
+        expected_mask = (x_current.shape[0], 1, *x_current.shape[-3:])
+        if anchor_mask.shape != expected_mask:
+            raise ValueError(f"anchor_mask must have shape {expected_mask}.")
+        if not anchor_image.is_floating_point():
+            raise ValueError("anchor_image must be floating point.")
+        if not torch.isfinite(anchor_image).all():
+            raise ValueError("anchor_image must be finite.")
+        if anchor_mask.dtype != torch.bool:
+            if not anchor_mask.is_floating_point():
+                raise ValueError("anchor_mask must be boolean or floating point.")
+            if not torch.isfinite(anchor_mask).all():
+                raise ValueError("anchor_mask must be finite.")
+            if bool(((anchor_mask < 0.0) | (anchor_mask > 1.0)).any().item()):
+                raise ValueError("anchor_mask values must be between zero and one.")
 
 
 def _positive_channels(values: Sequence[int]) -> tuple[int, ...]:

@@ -38,6 +38,10 @@ def _config_values() -> dict[str, object]:
             "beta_min": 0.1,
             "beta_max": 1.0,
         },
+        "anchor": {
+            "probability": 0.5,
+            "loss_weight": 1.0,
+        },
         "optim": {
             "generator_lr": 0.0002,
             "critic_lr": 0.0001,
@@ -47,16 +51,12 @@ def _config_values() -> dict[str, object]:
             "r1_interval": 4,
         },
         "train": {
-            "checkpoint": "weights/last.pt",
             "steps": 5,
             "volume_batch_size": 1,
             "slices_per_axis": 2,
             "mixed_precision": False,
             "ema_decay": 0.9,
             "save_every_steps": 2,
-        },
-        "output": {
-            "run_root": "runs",
         },
     }
 
@@ -83,18 +83,9 @@ class TrainConfigTest(unittest.TestCase):
             config.data.folder[0],
             (root / "config" / "data" / "slices" / "0").resolve(),
         )
-        self.assertEqual(
-            config.train.checkpoint,
-            (root / "config" / "weights" / "last.pt").resolve(),
-        )
-        self.assertEqual(
-            config.output.run_root,
-            (root / "config" / "runs").resolve(),
-        )
-
     def test_sections_are_strict(self):
         cases = (
-            ("missing", lambda values: values.pop("output"), "missing sections"),
+            ("missing", lambda values: values.pop("optim"), "missing sections"),
             (
                 "unknown",
                 lambda values: values.update({"legacy": {}}),
@@ -118,6 +109,26 @@ class TrainConfigTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "volume_path"):
                 load_train_config(path)
+
+    def test_anchor_section_is_required_and_validated_as_one_feature(self):
+        values = _config_values()
+        with tempfile.TemporaryDirectory() as temp:
+            anchored = load_train_config(_write_config(Path(temp), values))
+        self.assertTrue(anchored.anchor.enabled)
+
+        values.pop("anchor")
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            self.assertRaisesRegex(ValueError, "missing sections: anchor"),
+        ):
+            load_train_config(_write_config(Path(temp), values))
+
+        values["anchor"] = {"probability": 0.5, "loss_weight": 0.0}
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            self.assertRaisesRegex(ValueError, "must both be positive"),
+        ):
+            load_train_config(_write_config(Path(temp), values))
 
     def test_patch_divisibility_follows_the_configured_model_depth(self):
         shallow = _config_values()

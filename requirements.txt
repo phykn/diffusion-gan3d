@@ -1,7 +1,9 @@
 matplotlib
+napari[all]
 numpy
 Pillow
 PyYAML
 tensorboard
 torch
+tifffile
 tqdm

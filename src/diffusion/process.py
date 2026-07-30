@@ -1,5 +1,5 @@
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from numbers import Integral
 
@@ -241,19 +241,20 @@ class DiffusionProcess(nn.Module):
         *,
         no_grad: bool = True,
         return_history: bool = False,
-        generator: torch.Generator | None = None,
+        model_kwargs: Mapping[str, object] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Run ``x_T -> ... -> x_0`` using a fresh latent at every step.
 
-        The model is called as ``model(x_current, transition, z)`` and must
-        predict a clean tensor with the same shape as ``x_current``. When
-        requested, history is ordered ``(x_T, x_{T-1}, ..., x_0)``.
+        The model is called as ``model(x_current, transition, z, **kwargs)``
+        and must predict a clean tensor with the same shape as ``x_current``.
+        When requested, history is ordered ``(x_T, x_{T-1}, ..., x_0)``.
         """
         self._validate_batch("terminal", terminal)
         latent_dimensions = self._latent_dimensions(latent_shape)
         current = terminal
         history = [current] if return_history else None
         context = torch.no_grad() if no_grad else nullcontext()
+        kwargs = {} if model_kwargs is None else dict(model_kwargs)
 
         with context:
             for transition in reversed(range(self.timesteps)):
@@ -268,9 +269,13 @@ class DiffusionProcess(nn.Module):
                     *latent_dimensions,
                     device=current.device,
                     dtype=current.dtype,
-                    generator=generator,
                 )
-                clean_prediction = model(current, batch_timesteps, latent)
+                clean_prediction = model(
+                    current,
+                    batch_timesteps,
+                    latent,
+                    **kwargs,
+                )
                 if not isinstance(clean_prediction, torch.Tensor):
                     raise TypeError("model must return a torch.Tensor.")
                 self._validate_matching(
@@ -286,7 +291,6 @@ class DiffusionProcess(nn.Module):
                         current.shape,
                         device=current.device,
                         dtype=current.dtype,
-                        generator=generator,
                     ),
                 )
                 if history is not None:

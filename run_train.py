@@ -13,12 +13,12 @@ from src.misc import save_mapping
 from src.train import (
     DiffusionGANTrainer,
     build_ema,
-    load_checkpoint,
     load_train_config,
-    save_checkpoint,
+    save_model_weights,
 )
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config" / "train.yaml"
+RUN_ROOT = Path(__file__).resolve().parent / "run"
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,28 +56,8 @@ def main() -> None:
         beta_max=cfg.diffusion.beta_max,
     ).to(device)
 
-    if cfg.train.checkpoint is None:
-        run_dir = _new_run_dir(Path(cfg.output.run_root))
-        start_step = 0
-        save_mapping(run_dir / "train.yaml", cfg.as_dict())
-    else:
-        run_dir = Path(cfg.train.checkpoint).parent
-        start_step = load_checkpoint(
-            cfg.train.checkpoint,
-            denoiser=denoiser,
-            ema_denoiser=ema_denoiser,
-            critics=_critic_sequence(critics),
-            denoiser_optimizer=denoiser_optimizer,
-            critic_optimizers=critic_optimizers,
-            scaler=scaler,
-            config_signature=cfg.resume_signature(),
-        )
-    if start_step >= cfg.train.steps:
-        print(
-            f"Checkpoint already contains {start_step} completed steps; "
-            f"train.steps={cfg.train.steps}."
-        )
-        return
+    run_dir = _new_run_dir(RUN_ROOT)
+    save_mapping(run_dir / "train.yaml", cfg.as_dict())
 
     streams = build_axis_streams(cfg.data, device=device)
     trainer = DiffusionGANTrainer(
@@ -99,17 +79,18 @@ def main() -> None:
         r1_gamma=cfg.optim.r1_gamma,
         r1_interval=cfg.optim.r1_interval,
         device=device,
+        anchor_probability=cfg.anchor.probability,
+        anchor_weight=cfg.anchor.loss_weight,
     )
 
-    completed = start_step
+    completed = 0
     print(
-        f"Training Diffusion GAN3D steps={start_step}->{cfg.train.steps} "
+        f"Training Diffusion GAN3D steps=0->{cfg.train.steps} "
         f"device={device} run={run_dir}"
     )
     writer = SummaryWriter(run_dir / "tensorboard")
     progress = tqdm(
-        range(start_step, cfg.train.steps),
-        initial=start_step,
+        range(cfg.train.steps),
         total=cfg.train.steps,
         desc="Diffusion GAN3D",
         dynamic_ncols=True,
@@ -123,43 +104,14 @@ def main() -> None:
                 G=f"{metrics.generator:.4g}",
                 D=f"{metrics.critic:.4g}",
                 t=metrics.transition,
+                A=int(metrics.anchor_used),
             )
             if completed % cfg.train.save_every_steps == 0:
-                _save(
-                    run_dir,
-                    completed,
-                    cfg,
-                    denoiser,
-                    ema_denoiser,
-                    critics,
-                    denoiser_optimizer,
-                    critic_optimizers,
-                    scaler,
-                )
-        _save(
-            run_dir,
-            completed,
-            cfg,
-            denoiser,
-            ema_denoiser,
-            critics,
-            denoiser_optimizer,
-            critic_optimizers,
-            scaler,
-        )
+                _save(run_dir, ema_denoiser, critics)
+        _save(run_dir, ema_denoiser, critics)
     except KeyboardInterrupt:
-        path = _save(
-            run_dir,
-            completed,
-            cfg,
-            denoiser,
-            ema_denoiser,
-            critics,
-            denoiser_optimizer,
-            critic_optimizers,
-            scaler,
-        )
-        print(f"Training interrupted after step {completed}; checkpoint={path}")
+        path = _save(run_dir, ema_denoiser, critics)
+        print(f"Training interrupted after step {completed}; weights={path}")
     finally:
         progress.close()
         writer.close()
@@ -172,39 +124,28 @@ def _new_run_dir(root: Path) -> Path:
     return run_dir
 
 
-def _critic_sequence(critics: torch.nn.ModuleDict) -> tuple[torch.nn.Module, ...]:
-    return tuple(critics[str(axis)] for axis in AXES)
-
-
 def _save(
-    run_dir,
-    step,
-    cfg,
-    denoiser,
-    ema_denoiser,
-    critics,
-    denoiser_optimizer,
-    critic_optimizers,
-    scaler,
+    run_dir: Path,
+    ema_denoiser: torch.nn.Module,
+    critics: torch.nn.ModuleDict,
 ) -> Path:
-    return save_checkpoint(
-        run_dir,
-        step=step,
-        denoiser=denoiser,
-        ema_denoiser=ema_denoiser,
-        critics=_critic_sequence(critics),
-        denoiser_optimizer=denoiser_optimizer,
-        critic_optimizers=critic_optimizers,
-        scaler=scaler,
-        config_signature=cfg.resume_signature(),
-    )
+    return save_model_weights(run_dir, ema_denoiser, critics)
 
 
 def _write_metrics(writer, step, metrics) -> None:
     writer.add_scalar("loss/generator", metrics.generator, step)
+    writer.add_scalar("loss/generator_total", metrics.generator_total, step)
     writer.add_scalar("loss/critic_total", metrics.critic, step)
     writer.add_scalar("loss/r1_raw", metrics.r1, step)
     writer.add_scalar("train/transition", metrics.transition, step)
+    writer.add_scalar("conditioning/anchor_used", metrics.anchor_used, step)
+    if metrics.anchor_used:
+        writer.add_scalar("loss/anchor", metrics.anchor_loss, step)
+        writer.add_scalar(
+            "conditioning/anchor_accuracy",
+            metrics.anchor_accuracy,
+            step,
+        )
     for axis, value in zip(AXES, metrics.critic_axes, strict=True):
         writer.add_scalar(f"loss/critic_axis_{axis}", value, step)
 

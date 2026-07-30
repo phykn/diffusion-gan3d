@@ -80,6 +80,8 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
         r1_gamma=optim.r1_gamma,
         r1_interval=16,
         device=device,
+        anchor_probability=1.0,
+        anchor_weight=1.0,
     )
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
@@ -90,6 +92,8 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
 
     assert math.isfinite(metrics.generator)
     assert math.isfinite(metrics.critic)
+    assert metrics.anchor_used
+    assert math.isfinite(metrics.anchor_loss)
     assert metrics.r1 > 0.0
     assert peak < 6 * 1024**3
     print(f"peak CUDA allocation: {peak / 1024**3:.2f} GiB")

@@ -6,7 +6,6 @@ def sample_volume_slices(
     *,
     axis: int,
     count: int,
-    generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if volume.ndim != 5:
         raise ValueError("volume must have shape [B, C, D, H, W].")
@@ -20,13 +19,11 @@ def sample_volume_slices(
         batch,
         (count,),
         device=volume.device,
-        generator=generator,
     )
     plane_indices = torch.randint(
         size,
         (count,),
         device=volume.device,
-        generator=generator,
     )
     selected = []
     for volume_index, plane_index in zip(
@@ -45,7 +42,6 @@ def sample_volume_pair_slices(
     *,
     axis: int,
     count: int,
-    generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if previous.shape != current.shape:
         raise ValueError("previous and current volumes must have the same shape.")
@@ -62,13 +58,11 @@ def sample_volume_pair_slices(
         batch,
         (count,),
         device=previous.device,
-        generator=generator,
     )
     plane_indices = torch.randint(
         size,
         (count,),
         device=previous.device,
-        generator=generator,
     )
     previous_slices = []
     current_slices = []

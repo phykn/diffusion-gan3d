@@ -1,29 +1,32 @@
-import secrets
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
 
+from ..anchor import PlaneAnchor, assemble_anchors
 from ..diffusion import DiffusionProcess
 from ..model import Denoiser3D
 from ..train import TrainConfig, load_train_config
-from ..train.checkpoint import FORMAT_VERSION
+from ..train.weights import MODEL_WEIGHTS_NAME
 
 
-def latest_checkpoint(run_root: str | Path) -> Path:
+def latest_model_weights(run_root: str | Path) -> Path:
     root = Path(run_root)
-    paths = tuple(root.glob("*/last.pt"))
+    paths = tuple(root.glob(f"*/{MODEL_WEIGHTS_NAME}"))
     if not paths:
-        raise FileNotFoundError(f"no last.pt checkpoint was found under {root}.")
+        raise FileNotFoundError(
+            f"no {MODEL_WEIGHTS_NAME} file was found under {root}."
+        )
     return max(paths, key=lambda path: path.stat().st_mtime_ns)
 
 
-def load_ema_denoiser(
-    checkpoint: str | Path,
+def load_denoiser_weights(
+    weights: str | Path,
     *,
     device: torch.device,
-) -> tuple[Denoiser3D, TrainConfig, int]:
-    checkpoint_path = Path(checkpoint).resolve()
-    cfg = load_train_config(checkpoint_path.parent / "train.yaml")
+) -> tuple[Denoiser3D, TrainConfig]:
+    weights_path = Path(weights).resolve()
+    cfg = load_train_config(weights_path.parent / "train.yaml")
     model = Denoiser3D(
         num_phases=cfg.data.num_phases,
         base_channels=cfg.model.base_channels,
@@ -33,22 +36,19 @@ def load_ema_denoiser(
         gradient_checkpointing=False,
     ).to(device)
     try:
-        values = torch.load(
-            checkpoint_path,
+        state_dict = torch.load(
+            weights_path,
             map_location="cpu",
             weights_only=True,
         )
-        if values["format_version"] != FORMAT_VERSION:
-            raise ValueError("checkpoint format version is not supported.")
-        model.load_state_dict(values["models"]["ema_denoiser"], strict=True)
-        step = int(values["step"])
-    except (KeyError, TypeError, RuntimeError, ValueError) as exc:
+        model.load_state_dict(state_dict, strict=True)
+    except (TypeError, RuntimeError, ValueError) as exc:
         raise ValueError(
-            f"checkpoint does not contain a compatible EMA denoiser: "
-            f"{checkpoint_path}"
+            f"weights file is not compatible with the configured denoiser: "
+            f"{weights_path}"
         ) from exc
     model.eval()
-    return model, cfg, step
+    return model, cfg
 
 
 @torch.no_grad()
@@ -58,9 +58,9 @@ def generate_labels(
     *,
     device: torch.device,
     size: int | None = None,
-    seed: int | None = None,
     mixed_precision: bool | None = None,
-) -> tuple[torch.Tensor, int]:
+    anchors: Sequence[PlaneAnchor] = (),
+) -> torch.Tensor:
     size = cfg.data.patch_size if size is None else size
     if not isinstance(size, int) or size < 1:
         raise ValueError("size must be a positive integer.")
@@ -68,18 +68,12 @@ def generate_labels(
         raise ValueError(
             f"size must be divisible by {model.downsample_factor}."
         )
-    if seed is None:
-        seed = secrets.randbits(63)
-    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
-        raise ValueError("seed must be a non-negative integer.")
     use_amp = (
         cfg.train.mixed_precision
         if mixed_precision is None
         else mixed_precision
     )
     use_amp = bool(use_amp and device.type == "cuda")
-    generator = torch.Generator(device=device)
-    generator.manual_seed(seed)
     terminal = torch.randn(
         1,
         cfg.data.num_phases,
@@ -88,8 +82,17 @@ def generate_labels(
         size,
         device=device,
         dtype=torch.float32,
-        generator=generator,
     )
+    anchor = assemble_anchors(
+        anchors,
+        batch_size=terminal.shape[0],
+        num_phases=cfg.data.num_phases,
+        volume_size=size,
+        device=device,
+        dtype=terminal.dtype,
+    )
+    if anchor is not None and not cfg.anchor.enabled:
+        raise ValueError("selected weights were trained with anchors disabled.")
     diffusion = DiffusionProcess(
         cfg.diffusion.timesteps,
         beta_min=cfg.diffusion.beta_min,
@@ -104,7 +107,14 @@ def generate_labels(
             model,
             terminal,
             cfg.model.latent_channels,
-            generator=generator,
+            model_kwargs=(
+                None
+                if anchor is None
+                else {
+                    "anchor_image": anchor.image,
+                    "anchor_mask": anchor.mask,
+                }
+            ),
         )
     labels = clean.argmax(dim=1).squeeze(0).to(torch.uint8).cpu()
-    return labels, seed
+    return labels

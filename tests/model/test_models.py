@@ -5,7 +5,10 @@ import torch
 from src.model import Denoiser3D, PairCritic2D
 
 
-def _denoiser(*, checkpointing: bool = False) -> Denoiser3D:
+def _denoiser(
+    *,
+    checkpointing: bool = False,
+) -> Denoiser3D:
     return Denoiser3D(
         num_phases=3,
         base_channels=4,
@@ -27,7 +30,6 @@ def _critic(*, checkpointing: bool = False) -> PairCritic2D:
 
 class Denoiser3DTest(unittest.TestCase):
     def test_clean_output_is_a_latent_conditioned_simplex_with_gradients(self):
-        torch.manual_seed(7)
         model = _denoiser()
         inputs = torch.randn(2, 3, 4, 6, 8, requires_grad=True)
         time = torch.tensor([0.0, 1.0])
@@ -75,10 +77,66 @@ class Denoiser3DTest(unittest.TestCase):
                 torch.zeros(1, 4),
             )
 
+    def test_soft_anchor_adapter_preserves_null_path_and_receives_gradients(self):
+        model = _denoiser()
+        inputs = torch.randn(1, 3, 4, 4, 4)
+        time = torch.zeros(1)
+        latent = torch.randn(1, 4)
+        anchor_image = torch.zeros_like(inputs)
+        anchor_image[:, 0, 2] = 1.0
+        anchor_image[:, 1:, 2] = -1.0
+        anchor_mask = torch.zeros(1, 1, 4, 4, 4, dtype=torch.bool)
+        anchor_mask[:, :, 2] = True
+
+        plain = model(inputs, time, latent)
+        anchored = model(
+            inputs,
+            time,
+            latent,
+            anchor_image=anchor_image,
+            anchor_mask=anchor_mask,
+        )
+        empty = model(
+            inputs,
+            time,
+            latent,
+            anchor_image=torch.zeros_like(inputs),
+            anchor_mask=torch.zeros_like(anchor_mask),
+        )
+
+        self.assertTrue(torch.equal(plain, anchored))
+        self.assertTrue(torch.equal(plain, empty))
+        anchored.square().mean().backward()
+        self.assertIsNotNone(model.anchor_input.weight.grad)
+        self.assertGreater(float(model.anchor_input.weight.grad.abs().sum()), 0.0)
+
+        with torch.no_grad():
+            model.anchor_input.bias.fill_(0.5)
+        learned_plain = model(inputs, time, latent)
+        learned_empty = model(
+            inputs,
+            time,
+            latent,
+            anchor_image=torch.zeros_like(inputs),
+            anchor_mask=torch.zeros_like(anchor_mask),
+        )
+        self.assertTrue(torch.equal(learned_plain, learned_empty))
+
+    def test_anchor_image_and_mask_must_be_passed_together(self):
+        model = _denoiser()
+        inputs = torch.randn(1, 3, 4, 4, 4)
+
+        with self.assertRaisesRegex(ValueError, "provided together"):
+            model(
+                inputs,
+                torch.zeros(1),
+                torch.randn(1, 4),
+                anchor_image=torch.zeros_like(inputs),
+            )
+
 
 class PairCritic2DTest(unittest.TestCase):
     def test_pair_and_time_conditioning_return_one_logit_with_input_gradients(self):
-        torch.manual_seed(11)
         model = _critic()
         previous = torch.randn(2, 3, 6, 8, requires_grad=True)
         current = torch.randn(2, 3, 6, 8, requires_grad=True)

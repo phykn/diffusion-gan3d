@@ -60,6 +60,34 @@ class DiffusionConfig:
 
 
 @dataclass(frozen=True)
+class AnchorConfig:
+    probability: float = 0.0
+    loss_weight: float = 0.0
+
+    def __post_init__(self) -> None:
+        probability = require_number(
+            "anchor.probability",
+            self.probability,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        weight = require_number(
+            "anchor.loss_weight",
+            self.loss_weight,
+            minimum=0.0,
+        )
+        if (probability > 0.0) != (weight > 0.0):
+            raise ValueError(
+                "anchor.probability and anchor.loss_weight must both be "
+                "positive or both be zero."
+            )
+
+    @property
+    def enabled(self) -> bool:
+        return self.probability > 0.0
+
+
+@dataclass(frozen=True)
 class OptimConfig:
     generator_lr: float
     critic_lr: float
@@ -91,7 +119,6 @@ class TrainingConfig:
     mixed_precision: bool
     ema_decay: float
     save_every_steps: int
-    checkpoint: str | Path | None = None
 
     def __post_init__(self) -> None:
         require_int("train.steps", self.steps, minimum=1)
@@ -106,18 +133,13 @@ class TrainingConfig:
 
 
 @dataclass(frozen=True)
-class OutputConfig:
-    run_root: str | Path
-
-
-@dataclass(frozen=True)
 class TrainConfig:
     data: DataConfig
     model: ModelConfig
     diffusion: DiffusionConfig
+    anchor: AnchorConfig
     optim: OptimConfig
     train: TrainingConfig
-    output: OutputConfig
 
     def __post_init__(self) -> None:
         generator_factor = 2 ** (len(self.model.channel_multipliers) - 1)
@@ -132,24 +154,15 @@ class TrainConfig:
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
 
-    def resume_signature(self) -> dict[str, object]:
-        values = self.as_dict()
-        values["train"] = dict(values["train"])
-        values["train"].pop("steps")
-        values["train"].pop("save_every_steps")
-        values["train"].pop("checkpoint")
-        values.pop("output")
-        return values
-
 
 _T = TypeVar("_T")
 _SECTIONS = {
     "data": DataConfig,
     "model": ModelConfig,
     "diffusion": DiffusionConfig,
+    "anchor": AnchorConfig,
     "optim": OptimConfig,
     "train": TrainingConfig,
-    "output": OutputConfig,
 }
 
 
@@ -170,22 +183,13 @@ def load_train_config(path: str | Path) -> TrainConfig:
     data = replace(data, folder=_resolve_folders(data.folder, config_path.parent))
     model = _make_model(values["model"])
     train = _make(TrainingConfig, values["train"], "train")
-    train = replace(
-        train,
-        checkpoint=_resolve_optional_path(train.checkpoint, config_path.parent),
-    )
-    output = _make(OutputConfig, values["output"], "output")
-    output = replace(
-        output,
-        run_root=_resolve_path(output.run_root, config_path.parent, "output.run_root"),
-    )
     return TrainConfig(
         data=data,
         model=model,
         diffusion=_make(DiffusionConfig, values["diffusion"], "diffusion"),
+        anchor=_make(AnchorConfig, values["anchor"], "anchor"),
         optim=_make(OptimConfig, values["optim"], "optim"),
         train=train,
-        output=output,
     )
 
 
@@ -217,12 +221,6 @@ def _resolve_folders(value: object, root: Path) -> dict[int, Path]:
         axis: _resolve_path(path, root, f"data.folder.{axis}")
         for axis, path in value.items()
     }
-
-
-def _resolve_optional_path(value: object, root: Path) -> Path | None:
-    if value is None:
-        return None
-    return _resolve_path(value, root, "train.checkpoint")
 
 
 def _resolve_path(value: object, root: Path, name: str) -> Path:

@@ -7,7 +7,7 @@ from torch import nn
 
 
 def build_ema(model: nn.Module) -> nn.Module:
-    """Create a frozen evaluation copy used for generation and checkpoints."""
+    """Create a frozen evaluation copy used for generation and saved weights."""
     if not isinstance(model, nn.Module):
         raise TypeError("model must be a torch module.")
 

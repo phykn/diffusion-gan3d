@@ -95,13 +95,11 @@ class AxisDataTest(unittest.TestCase):
 
         for axis in range(3):
             with self.subTest(axis=axis):
-                random = torch.Generator().manual_seed(100 + axis)
                 previous_slices, current_slices = sample_volume_pair_slices(
                     previous,
                     current,
                     axis=axis,
                     count=7,
-                    generator=random,
                 )
 
                 self.assertEqual(previous_slices.shape, current_slices.shape)

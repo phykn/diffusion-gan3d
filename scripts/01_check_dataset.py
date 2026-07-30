@@ -30,10 +30,9 @@ def main() -> None:
         squeeze=False,
         figsize=(3 * args.samples, 8),
     )
-    random = np.random.default_rng()
     for row, axis in enumerate(AXES):
         for column in range(args.samples):
-            path = paths[axis][random.integers(len(paths[axis]))]
+            path = paths[axis][np.random.randint(len(paths[axis]))]
             dataset = LabelPatchDataset(
                 (path,),
                 crop_size=cfg.data.crop_size,
@@ -43,7 +42,7 @@ def main() -> None:
             labels = dataset[0].numpy()
             axes[row, column].imshow(
                 labels,
-                cmap="tab10",
+                cmap="gray",
                 vmin=-0.5,
                 vmax=cfg.data.num_phases - 0.5,
                 interpolation="nearest",

@@ -17,7 +17,7 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
         folder = tmp_path / "slices" / str(axis)
         folder.mkdir(parents=True)
         Image.fromarray(
-            np.random.default_rng(axis).integers(
+            np.random.randint(
                 0,
                 3,
                 size=(8, 8),
@@ -52,6 +52,10 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
                 "beta_min": 0.1,
                 "beta_max": 2.0,
             },
+            "anchor": {
+                "probability": 1.0,
+                "loss_weight": 1.0,
+            },
             "optim": {
                 "generator_lr": 0.001,
                 "critic_lr": 0.001,
@@ -61,7 +65,6 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
                 "r1_interval": 2,
             },
             "train": {
-                "checkpoint": None,
                 "steps": 1,
                 "volume_batch_size": 1,
                 "slices_per_axis": 2,
@@ -69,15 +72,23 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
                 "ema_decay": 0.9,
                 "save_every_steps": 1,
             },
-            "output": {"run_root": str(run_root)},
         },
     )
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(PROJECT_ROOT)
+    runner = (
+        "import sys; "
+        "from pathlib import Path; "
+        "import run_train; "
+        "run_train.RUN_ROOT = Path(sys.argv.pop(1)); "
+        "run_train.main()"
+    )
     result = subprocess.run(
         [
             sys.executable,
-            str(PROJECT_ROOT / "run_train.py"),
+            "-c",
+            runner,
+            str(run_root),
             "--config",
             str(config),
             "--device",
@@ -94,8 +105,13 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     run_dirs = tuple(run_root.iterdir())
     assert len(run_dirs) == 1
-    checkpoint = run_dirs[0] / "last.pt"
-    assert checkpoint.is_file()
+    weights = run_dirs[0] / "model.pt"
+    assert weights.is_file()
+    assert all(
+        (run_dirs[0] / f"critic_{axis}.pt").is_file()
+        for axis in (0, 1, 2)
+    )
     assert (run_dirs[0] / "train.yaml").is_file()
-    values = __import__("torch").load(checkpoint, weights_only=True)
-    assert values["step"] == 1
+    values = __import__("torch").load(weights, weights_only=True)
+    assert values
+    assert all(isinstance(value, __import__("torch").Tensor) for value in values.values())
