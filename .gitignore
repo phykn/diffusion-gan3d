@@ -6,3 +6,6 @@ __pycache__/
 run/
 /data/
 *.bat
+/pytest.ini
+/requirements-dev.txt
+/tests/
