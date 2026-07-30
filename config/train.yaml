@@ -1,0 +1,43 @@
+data:
+  folder:
+    0: ../../gan3d/data/generated/slices/0
+    1: ../../gan3d/data/generated/slices/1
+    2: ../../gan3d/data/generated/slices/2
+  crop_size: 128
+  patch_size: 64
+  num_phases: 3
+  batch_size: 8
+  num_workers: 0
+
+model:
+  base_channels: 16
+  channel_multipliers: [1, 2, 4, 4]
+  embedding_channels: 128
+  latent_channels: 64
+  critic_channels: [32, 64, 128, 256]
+  gradient_checkpointing: true
+
+diffusion:
+  timesteps: 11
+  beta_min: 0.1
+  beta_max: 20.0
+
+optim:
+  generator_lr: 0.00016
+  critic_lr: 0.0001
+  beta1: 0.5
+  beta2: 0.9
+  r1_gamma: 0.05
+  r1_interval: 16
+
+train:
+  checkpoint: null
+  steps: 1000
+  volume_batch_size: 1
+  slices_per_axis: 8
+  mixed_precision: true
+  ema_decay: 0.999
+  save_every_steps: 100
+
+output:
+  run_root: ../run

@@ -1,0 +1,139 @@
+import unittest
+
+import torch
+
+from src.model import Denoiser3D, PairCritic2D
+
+
+def _denoiser(*, checkpointing: bool = False) -> Denoiser3D:
+    return Denoiser3D(
+        num_phases=3,
+        base_channels=4,
+        channel_multipliers=(1, 2),
+        embedding_channels=8,
+        latent_channels=4,
+        gradient_checkpointing=checkpointing,
+    )
+
+
+def _critic(*, checkpointing: bool = False) -> PairCritic2D:
+    return PairCritic2D(
+        num_phases=3,
+        channels=(4, 8),
+        embedding_channels=8,
+        gradient_checkpointing=checkpointing,
+    )
+
+
+class Denoiser3DTest(unittest.TestCase):
+    def test_clean_output_is_a_latent_conditioned_simplex_with_gradients(self):
+        torch.manual_seed(7)
+        model = _denoiser()
+        inputs = torch.randn(2, 3, 4, 6, 8, requires_grad=True)
+        time = torch.tensor([0.0, 1.0])
+        first_latent = torch.zeros(2, 4)
+        second_latent = torch.ones(2, 4, requires_grad=True)
+
+        first = model(inputs, time, first_latent)
+        clean = model(inputs, time, second_latent)
+        probabilities = (clean + 1.0) / 2.0
+
+        self.assertEqual(clean.shape, inputs.shape)
+        self.assertGreaterEqual(float(clean.detach().min()), -1.0)
+        self.assertLessEqual(float(clean.detach().max()), 1.0)
+        self.assertTrue(
+            torch.allclose(
+                probabilities.sum(dim=1),
+                torch.ones_like(probabilities[:, 0]),
+                atol=1.0e-6,
+            )
+        )
+        self.assertFalse(torch.equal(first, clean))
+
+        clean.square().mean().backward()
+
+        self.assertIsNotNone(inputs.grad)
+        self.assertIsNotNone(second_latent.grad)
+        self.assertTrue(bool(torch.isfinite(inputs.grad).all()))
+        self.assertTrue(bool(torch.isfinite(second_latent.grad).all()))
+        self.assertGreater(float(inputs.grad.abs().sum()), 0.0)
+        self.assertGreater(float(second_latent.grad.abs().sum()), 0.0)
+
+    def test_rejects_spatial_sizes_outside_the_level_multiple(self):
+        model = Denoiser3D(
+            num_phases=3,
+            base_channels=4,
+            channel_multipliers=(1, 2, 4),
+            embedding_channels=8,
+            latent_channels=4,
+        )
+
+        with self.assertRaisesRegex(ValueError, "divisible by 4"):
+            model(
+                torch.randn(1, 3, 8, 8, 10),
+                torch.zeros(1),
+                torch.zeros(1, 4),
+            )
+
+
+class PairCritic2DTest(unittest.TestCase):
+    def test_pair_and_time_conditioning_return_one_logit_with_input_gradients(self):
+        torch.manual_seed(11)
+        model = _critic()
+        previous = torch.randn(2, 3, 6, 8, requires_grad=True)
+        current = torch.randn(2, 3, 6, 8, requires_grad=True)
+
+        first = model(previous, current, torch.zeros(2))
+        scores = model(previous, current, torch.ones(2))
+
+        self.assertEqual(scores.shape, torch.Size([2]))
+        self.assertFalse(torch.equal(first, scores))
+
+        scores.mean().backward()
+
+        self.assertIsNotNone(previous.grad)
+        self.assertIsNotNone(current.grad)
+        self.assertTrue(bool(torch.isfinite(previous.grad).all()))
+        self.assertTrue(bool(torch.isfinite(current.grad).all()))
+        self.assertGreater(float(previous.grad.abs().sum()), 0.0)
+        self.assertGreater(float(current.grad.abs().sum()), 0.0)
+        with self.assertRaisesRegex(ValueError, r"time must have shape \[B\]"):
+            model(previous.detach(), current.detach(), torch.zeros(2, 1))
+
+    def test_rejects_spatial_sizes_outside_the_level_multiple(self):
+        model = PairCritic2D(
+            num_phases=3,
+            channels=(4, 8, 16),
+            embedding_channels=8,
+        )
+        previous = torch.randn(1, 3, 8, 10)
+
+        with self.assertRaisesRegex(ValueError, "divisible by 4"):
+            model(previous, previous.clone(), torch.zeros(1))
+
+
+class GradientCheckpointingTest(unittest.TestCase):
+    def test_denoiser_and_critic_forward_backward(self):
+        denoiser = _denoiser(checkpointing=True).train()
+        inputs = torch.randn(1, 3, 4, 4, 4, requires_grad=True)
+        latent = torch.randn(1, 4, requires_grad=True)
+        clean = denoiser(inputs, torch.zeros(1), latent)
+        clean.square().mean().backward()
+
+        self.assertEqual(clean.shape, inputs.shape)
+        self.assertGreater(float(inputs.grad.abs().sum()), 0.0)
+        self.assertGreater(float(latent.grad.abs().sum()), 0.0)
+
+        critic = _critic(checkpointing=True).train()
+        previous = torch.randn(1, 3, 4, 4, requires_grad=True)
+        current = torch.randn(1, 3, 4, 4, requires_grad=True)
+        score = critic(previous, current, torch.zeros(1))
+        score.sum().backward()
+
+        self.assertEqual(score.shape, torch.Size([1]))
+        self.assertGreater(float(previous.grad.abs().sum()), 0.0)
+        self.assertGreater(float(current.grad.abs().sum()), 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
