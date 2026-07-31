@@ -1,4 +1,8 @@
 /.venv/
+/.github/workflows/
+/pytest.ini
+/requirements-dev.txt
+/tests/
 
 __pycache__/
 *.py[cod]
