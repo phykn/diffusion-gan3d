@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 
-def load_prepared_volume(
+def load_volume(
     path: Path,
     *,
     crop_size: int,
@@ -23,8 +23,7 @@ def load_prepared_volume(
             )
         if series.dtype != np.dtype(np.uint8):
             raise ValueError(
-                f"anchor TIF must contain uint8 labels, got "
-                f"{series.dtype}: {path}"
+                f"anchor TIF must contain uint8 labels, got {series.dtype}: {path}"
             )
         volume = np.asarray(series.asarray())
 
@@ -40,10 +39,7 @@ def load_prepared_volume(
         )
 
     starts = tuple((size - crop_size) // 2 for size in volume.shape)
-    selection = tuple(
-        slice(start, start + crop_size)
-        for start in starts
-    )
+    selection = tuple(slice(start, start + crop_size) for start in starts)
     labels = torch.from_numpy(np.array(volume[selection], copy=True)).long()
     if crop_size != output_size:
         labels = F.interpolate(
@@ -54,7 +50,7 @@ def load_prepared_volume(
     return labels, starts
 
 
-def axis_slices(volume: torch.Tensor, axis: int) -> torch.Tensor:
+def slice_axis(volume: torch.Tensor, axis: int) -> torch.Tensor:
     if volume.ndim != 3:
         raise ValueError("volume must have shape [D, H, W].")
     if axis not in (0, 1, 2):
@@ -62,7 +58,7 @@ def axis_slices(volume: torch.Tensor, axis: int) -> torch.Tensor:
     return volume.movedim(axis, 0)
 
 
-def phase_scores(
+def score_phases(
     generated: torch.Tensor,
     target: torch.Tensor,
     *,

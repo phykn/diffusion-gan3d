@@ -1,10 +1,9 @@
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TypeVar
 
-from ..data import AXES
-from ..misc import (
-    load_mapping,
+from ..config import (
+    load_yaml,
     require_int,
     require_number,
 )
@@ -14,16 +13,9 @@ from ..misc import (
 class OutputConfig:
     data_dir: str | Path
     count: int
-    axes: tuple[int, ...] | list[int]
 
     def __post_init__(self) -> None:
-        require_int("output.count", self.count)
-        if self.count <= 0:
-            raise ValueError("output.count must be positive.")
-        axes = tuple(self.axes)
-        if axes != AXES:
-            raise ValueError("output.axes must contain exactly 0, 1, and 2.")
-        object.__setattr__(self, "axes", axes)
+        require_int("output.count", self.count, minimum=1)
 
 
 @dataclass(frozen=True)
@@ -74,9 +66,6 @@ class SimulationConfig:
     output: OutputConfig
     geometry: GeometryConfig
 
-    def as_dict(self) -> dict[str, object]:
-        return asdict(self)
-
 
 _T = TypeVar("_T")
 _SECTIONS = {
@@ -85,9 +74,9 @@ _SECTIONS = {
 }
 
 
-def load_simulation_config(path: str | Path) -> SimulationConfig:
+def load_config(path: str | Path) -> SimulationConfig:
     path = Path(path).resolve()
-    values = load_mapping(path, label="simulation config")
+    values = load_yaml(path, label="simulation config")
     names = set(values)
     expected = set(_SECTIONS)
     if names != expected:
@@ -100,7 +89,7 @@ def load_simulation_config(path: str | Path) -> SimulationConfig:
             parts.append(f"unknown sections: {', '.join(extra)}")
         raise ValueError(f"simulation config has {'; '.join(parts)}.")
 
-    output = _make(OutputConfig, values["output"], "output")
+    output = _build_section(OutputConfig, values["output"], "output")
     output = replace(
         output,
         data_dir=_resolve_dir(
@@ -111,11 +100,11 @@ def load_simulation_config(path: str | Path) -> SimulationConfig:
     )
     return SimulationConfig(
         output=output,
-        geometry=_make(GeometryConfig, values["geometry"], "geometry"),
+        geometry=_build_section(GeometryConfig, values["geometry"], "geometry"),
     )
 
 
-def _make(cls: type[_T], value: object, name: str) -> _T:
+def _build_section(cls: type[_T], value: object, name: str) -> _T:
     if not isinstance(value, dict):
         raise TypeError(f"simulation config section {name} must be a mapping.")
     try:

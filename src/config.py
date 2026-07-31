@@ -1,43 +1,28 @@
 import math
-import os
 from collections.abc import Mapping
 from numbers import Real
 from pathlib import Path
-from uuid import uuid4
 
-import torch
 import yaml
 
 
-def load_mapping(path: str | Path, *, label: str) -> dict:
-    config_path = Path(path)
+def load_yaml(path: str | Path, *, label: str) -> dict:
+    src = Path(path)
     try:
-        with open(config_path, encoding="utf-8") as file:
-            values = yaml.safe_load(file) or {}
+        with src.open(encoding="utf-8") as file:
+            data = yaml.safe_load(file) or {}
     except yaml.YAMLError as exc:
-        raise ValueError(f"{label} is malformed: {config_path}") from exc
-    if not isinstance(values, dict):
+        raise ValueError(f"{label} is malformed: {src}") from exc
+    if not isinstance(data, dict):
         raise TypeError(f"{label} must contain a mapping.")
-    return values
+    return data
 
 
-def save_mapping(path: str | Path, values: Mapping[object, object]) -> None:
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    encoded = _encode(values)
-    with open(output, "w", encoding="utf-8") as file:
-        yaml.safe_dump(encoded, file, sort_keys=False)
-
-
-def atomic_torch_save(values: object, path: str | Path) -> None:
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(f".{output.name}.{uuid4().hex}.tmp")
-    try:
-        torch.save(values, temporary)
-        os.replace(temporary, output)
-    finally:
-        temporary.unlink(missing_ok=True)
+def save_yaml(path: str | Path, data: Mapping[object, object]) -> None:
+    dst = Path(path)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with dst.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(_encode(data), file, sort_keys=False)
 
 
 def require_int(name: str, value: object, *, minimum: int | None = None) -> int:
@@ -65,11 +50,6 @@ def require_number(
     if maximum is not None and result > maximum:
         raise ValueError(f"{name} must be at most {maximum}.")
     return result
-
-
-def require_finite(name: str, values: torch.Tensor) -> None:
-    if not bool(torch.isfinite(values).all().item()):
-        raise ValueError(f"{name} must contain only finite values.")
 
 
 def _encode(value: object) -> object:

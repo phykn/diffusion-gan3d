@@ -54,7 +54,7 @@ During anchored training steps:
 - cross-entropy is applied to the predicted clean logits on that plane; and
 - the ordinary three-axis adversarial objective still evaluates the volume.
 
-The anchor is a learned condition, not a hard constraint. Its labels are never copied into the final output, so anchor accuracy must be evaluated after training.
+In ordinary generation the anchor is a learned condition, not a hard constraint, so its labels are not copied into the final output. Overlap scale-up hard-projects shared planes only into its cached blocks so later multi-plane anchors cannot conflict.
 
 ## Training
 
@@ -67,7 +67,7 @@ python run_train.py
 
 ## Outputs
 
-Each run stores the EMA denoiser, three axis critics, resolved training settings, and TensorBoard metrics under `run/<timestamp>/`. Optimizer state is not saved, so training cannot be resumed exactly.
+Each run stores the EMA denoiser as `model.pt`, resolved training settings, and TensorBoard metrics under `run/<timestamp>/`. Critic and optimizer states are not saved, so training cannot be resumed.
 
 ## Scope
 

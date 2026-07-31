@@ -8,13 +8,12 @@ from torch.utils.checkpoint import checkpoint
 from .blocks import (
     AdaptiveResBlock2D,
     SinusoidalTimeEmbedding,
-    group_count,
+    check_channels,
+    choose_groups,
 )
 
 
 class PairCritic2D(nn.Module):
-    """Scores a time-conditioned `(x_previous, x_current)` slice pair."""
-
     def __init__(
         self,
         *,
@@ -30,7 +29,7 @@ class PairCritic2D(nn.Module):
             raise ValueError("embedding_channels must be an integer of at least 4.")
         if not isinstance(gradient_checkpointing, bool):
             raise TypeError("gradient_checkpointing must be a boolean.")
-        hidden_channels = _positive_channels(channels)
+        hidden_channels = check_channels("channels", channels, minimum=2)
 
         self.num_phases = num_phases
         self.downsample_factor = 2 ** (len(hidden_channels) - 1)
@@ -57,7 +56,7 @@ class PairCritic2D(nn.Module):
             for index in range(len(hidden_channels) - 1)
         )
         self.output_norm = nn.GroupNorm(
-            group_count(hidden_channels[-1]),
+            choose_groups(hidden_channels[-1]),
             hidden_channels[-1],
         )
         self.output = nn.Linear(hidden_channels[-1], 1)
@@ -68,7 +67,7 @@ class PairCritic2D(nn.Module):
         x_current: torch.Tensor,
         time: torch.Tensor,
     ) -> torch.Tensor:
-        self._validate_inputs(x_previous, x_current, time)
+        self._check_inputs(x_previous, x_current, time)
         embedding = self.time_mlp(
             self.time_embedding(time.to(device=x_previous.device)).to(
                 dtype=x_previous.dtype
@@ -76,23 +75,19 @@ class PairCritic2D(nn.Module):
         )
         hidden = self.input(torch.cat((x_previous, x_current), dim=1))
         for index, block in enumerate(self.blocks):
-            hidden = self._block(block, hidden, embedding)
+            hidden = self._run_block(block, hidden, embedding)
             if index < len(self.downsample):
                 hidden = self.downsample[index](hidden)
         hidden = F.silu(self.output_norm(hidden)).mean(dim=(-2, -1))
         return self.output(hidden).squeeze(1)
 
-    def _block(
+    def _run_block(
         self,
         block: nn.Module,
         inputs: torch.Tensor,
         embedding: torch.Tensor,
     ) -> torch.Tensor:
-        if (
-            self.gradient_checkpointing
-            and self.training
-            and torch.is_grad_enabled()
-        ):
+        if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
             return checkpoint(
                 block,
                 inputs,
@@ -101,7 +96,7 @@ class PairCritic2D(nn.Module):
             )
         return block(inputs, embedding)
 
-    def _validate_inputs(
+    def _check_inputs(
         self,
         x_previous: torch.Tensor,
         x_current: torch.Tensor,
@@ -119,26 +114,7 @@ class PairCritic2D(nn.Module):
             raise ValueError("slice pairs have the wrong number of phase channels.")
         if any(size % self.downsample_factor for size in x_previous.shape[-2:]):
             raise ValueError(
-                "every spatial size must be divisible by "
-                f"{self.downsample_factor}."
+                f"every spatial size must be divisible by {self.downsample_factor}."
             )
-        if not isinstance(time, torch.Tensor) or time.shape != (
-            x_previous.shape[0],
-        ):
+        if not isinstance(time, torch.Tensor) or time.shape != (x_previous.shape[0],):
             raise ValueError("time must have shape [B].")
-
-
-def _positive_channels(values: Sequence[int]) -> tuple[int, ...]:
-    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-        raise TypeError("channels must be a non-empty sequence.")
-    channels = tuple(values)
-    if not channels:
-        raise ValueError("channels must be a non-empty sequence.")
-    if any(
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or value <= 0
-        for value in channels
-    ):
-        raise ValueError("channels must contain positive integers.")
-    return channels

@@ -1,18 +1,16 @@
 import math
-from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
+from collections.abc import Mapping
 from numbers import Integral
 
 import torch
 from torch import nn
 
 
-def extract(
+def _extract(
     values: torch.Tensor,
     timesteps: torch.Tensor,
     reference: torch.Tensor,
 ) -> torch.Tensor:
-    """Gather one scalar per batch item and add trailing singleton dimensions."""
     if values.ndim != 1:
         raise ValueError("values must be one-dimensional.")
     if timesteps.ndim != 1:
@@ -42,7 +40,7 @@ def extract(
     return selected.reshape(reference.shape[0], *([1] * (reference.ndim - 1)))
 
 
-class DiffusionProcess(nn.Module):
+class Diffusion(nn.Module):
     """Variance-preserving Gaussian diffusion with ``T`` discrete transitions.
 
     State indices run from ``0`` (clean) through ``T`` (most noisy). Transition
@@ -92,7 +90,7 @@ class DiffusionProcess(nn.Module):
         self.register_buffer("alphas", alphas.to(torch.float32))
         self.register_buffer("betas", betas.to(torch.float32))
 
-    def q_sample(
+    def add_noise(
         self,
         clean: torch.Tensor,
         state: int | torch.Tensor,
@@ -112,10 +110,10 @@ class DiffusionProcess(nn.Module):
         else:
             self._validate_matching("noise", noise, clean)
 
-        alpha_bar = extract(self.alpha_bars, states, clean)
+        alpha_bar = _extract(self.alpha_bars, states, clean)
         return alpha_bar.sqrt() * clean + (1.0 - alpha_bar).clamp_min(0).sqrt() * noise
 
-    def forward_pair(
+    def sample_pair(
         self,
         clean: torch.Tensor,
         transition: int | torch.Tensor,
@@ -136,7 +134,7 @@ class DiffusionProcess(nn.Module):
             maximum=self.timesteps - 1,
             label="transition",
         )
-        previous = self.q_sample(
+        previous = self.add_noise(
             clean,
             transitions,
             noise=previous_noise,
@@ -147,12 +145,12 @@ class DiffusionProcess(nn.Module):
             self._validate_matching("step_noise", step_noise, clean)
 
         current_states = transitions + 1
-        alpha = extract(self.alphas, current_states, clean)
-        beta = extract(self.betas, current_states, clean)
+        alpha = _extract(self.alphas, current_states, clean)
+        beta = _extract(self.betas, current_states, clean)
         current = alpha.sqrt() * previous + beta.clamp_min(0).sqrt() * step_noise
         return previous, current
 
-    def posterior_mean_variance(
+    def get_posterior(
         self,
         current: torch.Tensor,
         clean_prediction: torch.Tensor,
@@ -169,30 +167,21 @@ class DiffusionProcess(nn.Module):
         )
         current_states = transitions + 1
 
-        alpha_bar_previous = extract(self.alpha_bars, transitions, current)
-        alpha_bar_current = extract(self.alpha_bars, current_states, current)
-        alpha = extract(self.alphas, current_states, current)
-        beta = extract(self.betas, current_states, current)
+        alpha_bar_previous = _extract(self.alpha_bars, transitions, current)
+        alpha_bar_current = _extract(self.alpha_bars, current_states, current)
+        alpha = _extract(self.alphas, current_states, current)
+        beta = _extract(self.betas, current_states, current)
         denominator = (1.0 - alpha_bar_current).clamp_min(
             torch.finfo(current.dtype).tiny
         )
 
         clean_coefficient = beta * alpha_bar_previous.sqrt() / denominator
-        current_coefficient = (
-            alpha.sqrt() * (1.0 - alpha_bar_previous) / denominator
-        )
-        mean = (
-            clean_coefficient * clean_prediction
-            + current_coefficient * current
-        )
-        variance = (
-            beta
-            * (1.0 - alpha_bar_previous)
-            / denominator
-        ).clamp_min(0)
+        current_coefficient = alpha.sqrt() * (1.0 - alpha_bar_previous) / denominator
+        mean = clean_coefficient * clean_prediction + current_coefficient * current
+        variance = (beta * (1.0 - alpha_bar_previous) / denominator).clamp_min(0)
         return mean, variance
 
-    def posterior_sample(
+    def sample_posterior(
         self,
         current: torch.Tensor,
         clean_prediction: torch.Tensor,
@@ -205,7 +194,7 @@ class DiffusionProcess(nn.Module):
         Transition ``t=0`` is deterministic and returns the posterior mean,
         with an explicit exact return of ``clean_prediction``.
         """
-        mean, variance = self.posterior_mean_variance(
+        mean, variance = self.get_posterior(
             current,
             clean_prediction,
             transition,
@@ -216,13 +205,15 @@ class DiffusionProcess(nn.Module):
             maximum=self.timesteps - 1,
             label="transition",
         )
+        stochastic = transitions != 0
+        if not bool(stochastic.any().item()):
+            return clean_prediction
         if noise is None:
             noise = torch.randn_like(current)
         else:
             self._validate_matching("noise", noise, current)
 
-        stochastic = (transitions != 0).to(current.dtype)
-        stochastic = stochastic.reshape(
+        stochastic = stochastic.to(current.dtype).reshape(
             current.shape[0],
             *([1] * (current.ndim - 1)),
         )
@@ -233,72 +224,49 @@ class DiffusionProcess(nn.Module):
             clean_prediction,
         )
 
-    def reverse_chain(
+    @torch.no_grad()
+    def sample(
         self,
         model: nn.Module,
         terminal: torch.Tensor,
-        latent_shape: int | Sequence[int],
+        latent_channels: int,
         *,
-        no_grad: bool = True,
-        return_history: bool = False,
         model_kwargs: Mapping[str, object] | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor:
         """Run ``x_T -> ... -> x_0`` using a fresh latent at every step.
 
         The model is called as ``model(x_current, transition, z, **kwargs)``
         and must predict a clean tensor with the same shape as ``x_current``.
-        When requested, history is ordered ``(x_T, x_{T-1}, ..., x_0)``.
         """
         self._validate_batch("terminal", terminal)
-        latent_dimensions = self._latent_dimensions(latent_shape)
+        if (
+            not isinstance(latent_channels, int)
+            or isinstance(latent_channels, bool)
+            or latent_channels < 1
+        ):
+            raise ValueError("latent_channels must be a positive integer.")
         current = terminal
-        history = [current] if return_history else None
-        context = torch.no_grad() if no_grad else nullcontext()
         kwargs = {} if model_kwargs is None else dict(model_kwargs)
 
-        with context:
-            for transition in reversed(range(self.timesteps)):
-                batch_timesteps = torch.full(
-                    (current.shape[0],),
-                    transition,
-                    device=current.device,
-                    dtype=torch.long,
-                )
-                latent = torch.randn(
-                    current.shape[0],
-                    *latent_dimensions,
-                    device=current.device,
-                    dtype=current.dtype,
-                )
-                clean_prediction = model(
-                    current,
-                    batch_timesteps,
-                    latent,
-                    **kwargs,
-                )
-                if not isinstance(clean_prediction, torch.Tensor):
-                    raise TypeError("model must return a torch.Tensor.")
-                self._validate_matching(
-                    "model output",
-                    clean_prediction,
-                    current,
-                )
-                current = self.posterior_sample(
-                    current,
-                    clean_prediction,
-                    batch_timesteps,
-                    noise=torch.randn(
-                        current.shape,
-                        device=current.device,
-                        dtype=current.dtype,
-                    ),
-                )
-                if history is not None:
-                    history.append(current)
-
-        if history is None:
-            return current
-        return current, tuple(history)
+        for transition in reversed(range(self.timesteps)):
+            times = torch.full(
+                (current.shape[0],),
+                transition,
+                device=current.device,
+                dtype=torch.long,
+            )
+            latent = torch.randn(
+                current.shape[0],
+                latent_channels,
+                device=current.device,
+                dtype=current.dtype,
+            )
+            clean = model(current, times, latent, **kwargs)
+            if not isinstance(clean, torch.Tensor):
+                raise TypeError("model must return a torch.Tensor.")
+            self._validate_matching("model output", clean, current)
+            current = self.sample_posterior(current, clean, times)
+        return current
 
     @staticmethod
     def _validate_batch(name: str, values: torch.Tensor) -> None:
@@ -365,21 +333,4 @@ class DiffusionProcess(nn.Module):
 
         if int(result.min().item()) < 0 or int(result.max().item()) > maximum:
             raise ValueError(f"{label} must be between 0 and {maximum}.")
-        return result
-
-    @staticmethod
-    def _latent_dimensions(value: int | Sequence[int]) -> tuple[int, ...]:
-        if isinstance(value, int) and not isinstance(value, bool):
-            result = (value,)
-        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            result = tuple(value)
-        else:
-            raise TypeError("latent_shape must be an integer or sequence.")
-        if not result or any(
-            not isinstance(size, int)
-            or isinstance(size, bool)
-            or size < 1
-            for size in result
-        ):
-            raise ValueError("latent_shape must contain positive integers.")
         return result

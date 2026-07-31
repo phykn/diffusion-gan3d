@@ -9,9 +9,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.generate import (
-    generate_labels,
-    latest_model_weights,
-    load_denoiser_weights,
+    Sampler,
+    find_weights,
+    load_model,
 )
 
 
@@ -25,13 +25,13 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    weights = latest_model_weights(PROJECT_ROOT / "run")
-    model, cfg = load_denoiser_weights(weights, device=device)
-    labels = generate_labels(
+    weights = find_weights(PROJECT_ROOT / "run")
+    model, cfg = load_model(weights, device=device)
+    labels = Sampler(
         model,
         cfg,
         device=device,
-    )
+    ).generate()
     if args.napari:
         _show_napari(labels)
     else:

@@ -1,18 +1,22 @@
-from .axes import AXES, load_axis_paths
-from .dataset import LabelPatchDataset
-from .image import load_labels
-from .labels import labels_to_clean
-from .loader import BatchStream, build_batch_stream
-from .slices import sample_volume_pair_slices, sample_volume_slices
+from .dataset import (
+    AXES,
+    BatchStream,
+    SliceDataset,
+    build_stream,
+    crop_labels,
+    find_slices,
+    resize_labels,
+)
+from .slices import encode_labels, sample_pairs
 
 __all__ = [
     "AXES",
     "BatchStream",
-    "LabelPatchDataset",
-    "build_batch_stream",
-    "labels_to_clean",
-    "load_axis_paths",
-    "load_labels",
-    "sample_volume_pair_slices",
-    "sample_volume_slices",
+    "SliceDataset",
+    "build_stream",
+    "crop_labels",
+    "encode_labels",
+    "find_slices",
+    "resize_labels",
+    "sample_pairs",
 ]

@@ -2,7 +2,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TypeVar
 
-from ..misc import load_mapping, require_int, require_number
+from ..config import load_yaml, require_int, require_number
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,8 @@ class DataConfig:
         require_int("data.crop_size", self.crop_size, minimum=1)
         require_int("data.patch_size", self.patch_size, minimum=8)
         require_int("data.num_phases", self.num_phases, minimum=2)
+        if self.num_phases > 256:
+            raise ValueError("data.num_phases must not exceed 256.")
         require_int("data.batch_size", self.batch_size, minimum=1)
         require_int("data.num_workers", self.num_workers, minimum=0)
         if self.crop_size < self.patch_size:
@@ -39,8 +41,8 @@ class ModelConfig:
         require_int("model.latent_channels", self.latent_channels, minimum=1)
         if not isinstance(self.gradient_checkpointing, bool):
             raise TypeError("model.gradient_checkpointing must be a boolean.")
-        _positive_tuple("model.channel_multipliers", self.channel_multipliers)
-        _positive_tuple("model.critic_channels", self.critic_channels)
+        _require_ints("model.channel_multipliers", self.channel_multipliers)
+        _require_ints("model.critic_channels", self.critic_channels, minimum=2)
 
 
 @dataclass(frozen=True)
@@ -103,16 +105,16 @@ class OptimConfig:
         ):
             if require_number(f"optim.{name}", value, minimum=0.0) <= 0.0:
                 raise ValueError(f"optim.{name} must be positive.")
-        beta1 = require_number("optim.beta1", self.beta1, minimum=0.0, maximum=1.0)
-        beta2 = require_number("optim.beta2", self.beta2, minimum=0.0, maximum=1.0)
-        if beta1 >= beta2:
-            raise ValueError("optim.beta1 must be smaller than optim.beta2.")
+        beta1 = require_number("optim.beta1", self.beta1, minimum=0.0)
+        beta2 = require_number("optim.beta2", self.beta2, minimum=0.0)
+        if not beta1 < beta2 < 1.0:
+            raise ValueError("optim betas must satisfy 0 <= beta1 < beta2 < 1.")
         require_number("optim.r1_gamma", self.r1_gamma, minimum=0.0)
         require_int("optim.r1_interval", self.r1_interval, minimum=1)
 
 
 @dataclass(frozen=True)
-class TrainingConfig:
+class LoopConfig:
     steps: int
     volume_batch_size: int
     slices_per_axis: int
@@ -139,7 +141,7 @@ class TrainConfig:
     diffusion: DiffusionConfig
     anchor: AnchorConfig
     optim: OptimConfig
-    train: TrainingConfig
+    train: LoopConfig
 
     def __post_init__(self) -> None:
         generator_factor = 2 ** (len(self.model.channel_multipliers) - 1)
@@ -162,13 +164,13 @@ _SECTIONS = {
     "diffusion": DiffusionConfig,
     "anchor": AnchorConfig,
     "optim": OptimConfig,
-    "train": TrainingConfig,
+    "train": LoopConfig,
 }
 
 
-def load_train_config(path: str | Path) -> TrainConfig:
+def load_config(path: str | Path) -> TrainConfig:
     config_path = Path(path).resolve()
-    values = load_mapping(config_path, label="training config")
+    values = load_yaml(config_path, label="training config")
     if set(values) != set(_SECTIONS):
         missing = sorted(set(_SECTIONS) - set(values))
         extra = sorted(set(values) - set(_SECTIONS))
@@ -179,21 +181,25 @@ def load_train_config(path: str | Path) -> TrainConfig:
             details.append(f"unknown sections: {', '.join(extra)}")
         raise ValueError(f"training config has {'; '.join(details)}.")
 
-    data = _make(DataConfig, values["data"], "data")
+    data = _build_section(DataConfig, values["data"], "data")
     data = replace(data, folder=_resolve_folders(data.folder, config_path.parent))
-    model = _make_model(values["model"])
-    train = _make(TrainingConfig, values["train"], "train")
+    model = _build_model_config(values["model"])
+    train = _build_section(LoopConfig, values["train"], "train")
     return TrainConfig(
         data=data,
         model=model,
-        diffusion=_make(DiffusionConfig, values["diffusion"], "diffusion"),
-        anchor=_make(AnchorConfig, values["anchor"], "anchor"),
-        optim=_make(OptimConfig, values["optim"], "optim"),
+        diffusion=_build_section(
+            DiffusionConfig,
+            values["diffusion"],
+            "diffusion",
+        ),
+        anchor=_build_section(AnchorConfig, values["anchor"], "anchor"),
+        optim=_build_section(OptimConfig, values["optim"], "optim"),
         train=train,
     )
 
 
-def _make(cls: type[_T], value: object, name: str) -> _T:
+def _build_section(cls: type[_T], value: object, name: str) -> _T:
     if not isinstance(value, dict):
         raise TypeError(f"training config section {name} must be a mapping.")
     try:
@@ -202,7 +208,7 @@ def _make(cls: type[_T], value: object, name: str) -> _T:
         raise ValueError(f"training config section {name} is invalid: {exc}") from exc
 
 
-def _make_model(value: object) -> ModelConfig:
+def _build_model_config(value: object) -> ModelConfig:
     if not isinstance(value, dict):
         raise TypeError("training config section model must be a mapping.")
     values = dict(value)
@@ -211,7 +217,7 @@ def _make_model(value: object) -> ModelConfig:
         if not isinstance(item, list):
             raise TypeError(f"model.{name} must be a list.")
         values[name] = tuple(item)
-    return _make(ModelConfig, values, "model")
+    return _build_section(ModelConfig, values, "model")
 
 
 def _resolve_folders(value: object, root: Path) -> dict[int, Path]:
@@ -230,8 +236,13 @@ def _resolve_path(value: object, root: Path, name: str) -> Path:
     return (path if path.is_absolute() else root / path).resolve()
 
 
-def _positive_tuple(name: str, values: object) -> None:
+def _require_ints(
+    name: str,
+    values: object,
+    *,
+    minimum: int = 1,
+) -> None:
     if not isinstance(values, tuple) or not values:
         raise ValueError(f"{name} must be a non-empty list.")
     for value in values:
-        require_int(name, value, minimum=1)
+        require_int(name, value, minimum=minimum)

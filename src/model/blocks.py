@@ -1,4 +1,5 @@
 import math
+from collections.abc import Sequence
 
 import torch
 import torch.nn.functional as F
@@ -7,13 +8,32 @@ from torch import nn
 _INV_SQRT_TWO = 1.0 / math.sqrt(2.0)
 
 
-def group_count(channels: int, *, maximum: int = 32) -> int:
+def choose_groups(channels: int, *, maximum: int = 32) -> int:
     if not isinstance(channels, int) or isinstance(channels, bool) or channels <= 0:
         raise ValueError("channels must be a positive integer.")
-    for groups in range(min(maximum, channels), 0, -1):
+    limit = min(maximum, max(channels // 2, 1))
+    for groups in range(limit, 0, -1):
         if channels % groups == 0:
             return groups
-    raise RuntimeError("a valid GroupNorm group count could not be found.")
+
+
+def check_channels(
+    name: str,
+    values: Sequence[int],
+    *,
+    minimum: int = 1,
+) -> tuple[int, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise TypeError(f"{name} must be a non-empty sequence.")
+    channels = tuple(values)
+    if not channels:
+        raise ValueError(f"{name} must be a non-empty sequence.")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < minimum
+        for value in channels
+    ):
+        raise ValueError(f"{name} must contain integers of at least {minimum}.")
+    return channels
 
 
 class SinusoidalTimeEmbedding(nn.Module):
@@ -48,7 +68,7 @@ class AdaptiveGroupNorm(nn.Module):
     def __init__(self, channels: int, embedding_channels: int) -> None:
         super().__init__()
         self.norm = nn.GroupNorm(
-            group_count(channels),
+            choose_groups(channels),
             channels,
             affine=False,
         )

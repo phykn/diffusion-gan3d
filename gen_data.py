@@ -3,8 +3,8 @@ from pathlib import Path
 
 from src.simul import (
     SimulationConfig,
-    load_simulation_config,
-    save_simulation,
+    generate,
+    load_config,
 )
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config" / "simul.yaml"
@@ -15,19 +15,14 @@ def parse_args(argv: list[str] | None = None) -> SimulationConfig:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     args = parser.parse_args(argv)
     try:
-        return load_simulation_config(args.config)
+        return load_config(args.config)
     except (TypeError, ValueError) as exc:
         parser.error(str(exc))
 
 
 def main() -> None:
     cfg = parse_args()
-    result = save_simulation(
-        cfg.output.data_dir,
-        count=cfg.output.count,
-        axes=cfg.output.axes,
-        geometry=cfg.as_dict()["geometry"],
-    )
+    result = generate(cfg)
     slice_count = sum(len(paths) for paths in result.slices.values())
     print(f"volumes={len(result.volumes)}")
     print(f"slices={slice_count} dir={cfg.output.data_dir}")

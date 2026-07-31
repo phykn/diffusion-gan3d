@@ -1,14 +1,14 @@
-from .config import TrainConfig, load_train_config
+from .config import TrainConfig, load_config
 from .ema import build_ema, update_ema
-from .engine import DiffusionGANTrainer, StepMetrics
-from .weights import save_model_weights
+from .engine import Metrics, Trainer
+from .weights import save_weights
 
 __all__ = [
-    "DiffusionGANTrainer",
-    "StepMetrics",
+    "Metrics",
     "TrainConfig",
+    "Trainer",
     "build_ema",
-    "load_train_config",
-    "save_model_weights",
+    "load_config",
+    "save_weights",
     "update_ema",
 ]

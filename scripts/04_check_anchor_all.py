@@ -13,15 +13,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts._anchor_check import (
-    axis_slices,
-    load_prepared_volume,
-    phase_scores,
+    load_volume,
+    score_phases,
+    slice_axis,
 )
 from src.generate import (
     PlaneAnchor,
-    generate_labels,
-    latest_model_weights,
-    load_denoiser_weights,
+    Sampler,
+    find_weights,
+    load_model,
 )
 
 VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tif"
@@ -35,21 +35,19 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = (
-        latest_model_weights(PROJECT_ROOT / "run")
-        if args.weights is None
-        else args.weights
+        find_weights(PROJECT_ROOT / "run") if args.weights is None else args.weights
     )
-    model, cfg = load_denoiser_weights(weights, device=device)
+    model, cfg = load_model(weights, device=device)
     if not cfg.anchor.enabled:
         raise ValueError("selected weights were trained with anchors disabled.")
 
-    target, starts = load_prepared_volume(
+    target, starts = load_volume(
         VOLUME_PATH,
         crop_size=cfg.data.crop_size,
         output_size=cfg.data.patch_size,
         num_phases=cfg.data.num_phases,
     )
-    target_slices = axis_slices(target, AXIS)
+    target_slices = slice_axis(target, AXIS)
     anchors = tuple(
         PlaneAnchor(
             labels=target_slices[index],
@@ -58,20 +56,21 @@ def main() -> None:
         )
         for index in range(target_slices.shape[0])
     )
-    generated = generate_labels(
+    generated = Sampler(
         model,
         cfg,
         device=device,
+    ).generate(
         anchors=anchors,
     )
-    generated_slices = axis_slices(generated, AXIS)
+    generated_slices = slice_axis(generated, AXIS)
     slice_accuracy = (
-        generated_slices == target_slices
-    ).to(torch.float32).mean(dim=(1, 2))
+        (generated_slices == target_slices).to(torch.float32).mean(dim=(1, 2))
+    )
     overall_accuracy = float((generated == target).to(torch.float32).mean())
     worst_index = int(slice_accuracy.argmin())
     mismatch = generated_slices[worst_index] != target_slices[worst_index]
-    iou, recall = phase_scores(
+    iou, recall = score_phases(
         generated,
         target,
         num_phases=cfg.data.num_phases,

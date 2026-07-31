@@ -11,15 +11,14 @@ from .blocks import (
     Downsample3D,
     SinusoidalTimeEmbedding,
     Upsample3D,
-    group_count,
+    check_channels,
+    choose_groups,
 )
 
 _INV_SQRT_TWO = 1.0 / math.sqrt(2.0)
 
 
 class Denoiser3D(nn.Module):
-    """Time- and latent-conditioned 3D U-Net for clean categorical samples."""
-
     def __init__(
         self,
         *,
@@ -41,7 +40,7 @@ class Denoiser3D(nn.Module):
             raise ValueError("latent_channels must be a positive integer.")
         if not isinstance(gradient_checkpointing, bool):
             raise TypeError("gradient_checkpointing must be a boolean.")
-        multipliers = _positive_channels(channel_multipliers)
+        multipliers = check_channels("channel_multipliers", channel_multipliers)
 
         channels = tuple(base_channels * multiplier for multiplier in multipliers)
         self.num_phases = num_phases
@@ -67,6 +66,7 @@ class Denoiser3D(nn.Module):
             3,
             padding=1,
         )
+        # Zero initialization preserves unconditioned behavior at training start.
         nn.init.zeros_(self.anchor_input.weight)
         nn.init.zeros_(self.anchor_input.bias)
 
@@ -113,7 +113,7 @@ class Denoiser3D(nn.Module):
             )
             current = skip_channels
 
-        self.output_norm = nn.GroupNorm(group_count(channels[0]), channels[0])
+        self.output_norm = nn.GroupNorm(choose_groups(channels[0]), channels[0])
         self.output = nn.Conv3d(channels[0], num_phases, 3, padding=1)
 
     def forward(
@@ -125,16 +125,16 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        logits = self.forward_logits(
+        logits = self.predict_logits(
             x_current,
             time,
             latent,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
         )
-        return self.clean_from_logits(logits)
+        return self.decode(logits)
 
-    def forward_logits(
+    def predict_logits(
         self,
         x_current: torch.Tensor,
         time: torch.Tensor,
@@ -143,16 +143,16 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self._validate_inputs(
+        self._check_inputs(
             x_current,
             time,
             latent,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
         )
-        embedding = self._conditioning(x_current, time, latent)
+        embedding = self._embed(x_current, time, latent)
         hidden = self.input(x_current)
-        anchor_features = self._anchor_features(
+        anchor_features = self._encode_anchor(
             x_current,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
@@ -161,13 +161,13 @@ class Denoiser3D(nn.Module):
             hidden = hidden + anchor_features
         skips = []
         for index, block in enumerate(self.encoder):
-            hidden = self._block(block, hidden, embedding)
+            hidden = self._run_block(block, hidden, embedding)
             if index < len(self.downsample):
                 skips.append(hidden)
                 hidden = self.downsample[index](hidden)
 
         for block in self.middle:
-            hidden = self._block(block, hidden, embedding)
+            hidden = self._run_block(block, hidden, embedding)
 
         for upsample, block, skip in zip(
             self.upsample,
@@ -180,16 +180,16 @@ class Denoiser3D(nn.Module):
                 (hidden * _INV_SQRT_TWO, skip * _INV_SQRT_TWO),
                 dim=1,
             )
-            hidden = self._block(block, hidden, embedding)
+            hidden = self._run_block(block, hidden, embedding)
 
         logits = self.output(F.silu(self.output_norm(hidden)))
         return logits
 
     @staticmethod
-    def clean_from_logits(logits: torch.Tensor) -> torch.Tensor:
+    def decode(logits: torch.Tensor) -> torch.Tensor:
         return 2.0 * logits.softmax(dim=1) - 1.0
 
-    def _conditioning(
+    def _embed(
         self,
         inputs: torch.Tensor,
         time: torch.Tensor,
@@ -197,23 +197,17 @@ class Denoiser3D(nn.Module):
     ) -> torch.Tensor:
         time = time.to(device=inputs.device)
         latent = latent.to(device=inputs.device, dtype=inputs.dtype)
-        time_embedding = self.time_mlp(
-            self.time_embedding(time).to(dtype=inputs.dtype)
-        )
+        time_embedding = self.time_mlp(self.time_embedding(time).to(dtype=inputs.dtype))
         latent_embedding = self.latent_mlp(latent)
         return (time_embedding + latent_embedding) * _INV_SQRT_TWO
 
-    def _block(
+    def _run_block(
         self,
         block: nn.Module,
         inputs: torch.Tensor,
         embedding: torch.Tensor,
     ) -> torch.Tensor:
-        if (
-            self.gradient_checkpointing
-            and self.training
-            and torch.is_grad_enabled()
-        ):
+        if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
             return checkpoint(
                 block,
                 inputs,
@@ -222,7 +216,7 @@ class Denoiser3D(nn.Module):
             )
         return block(inputs, embedding)
 
-    def _anchor_features(
+    def _encode_anchor(
         self,
         inputs: torch.Tensor,
         *,
@@ -240,7 +234,7 @@ class Denoiser3D(nn.Module):
         features = self.anchor_input(torch.cat((probabilities, mask), dim=1))
         return features * active.to(features.dtype)[:, None, None, None, None]
 
-    def _validate_inputs(
+    def _check_inputs(
         self,
         x_current: torch.Tensor,
         time: torch.Tensor,
@@ -257,8 +251,7 @@ class Denoiser3D(nn.Module):
             raise ValueError("x_current has the wrong number of phase channels.")
         if any(size % self.downsample_factor for size in x_current.shape[-3:]):
             raise ValueError(
-                "every spatial size must be divisible by "
-                f"{self.downsample_factor}."
+                f"every spatial size must be divisible by {self.downsample_factor}."
             )
         if not isinstance(time, torch.Tensor) or time.shape != (x_current.shape[0],):
             raise ValueError("time must have shape [B].")
@@ -266,15 +259,11 @@ class Denoiser3D(nn.Module):
             x_current.shape[0],
             self.latent_channels,
         ):
-            raise ValueError(
-                f"latent must have shape [B, {self.latent_channels}]."
-            )
+            raise ValueError(f"latent must have shape [B, {self.latent_channels}].")
         if not latent.is_floating_point():
             raise ValueError("latent must be floating point.")
         if (anchor_image is None) != (anchor_mask is None):
-            raise ValueError(
-                "anchor_image and anchor_mask must be provided together."
-            )
+            raise ValueError("anchor_image and anchor_mask must be provided together.")
         if anchor_image is None or anchor_mask is None:
             return
         if anchor_image.shape != x_current.shape:
@@ -293,19 +282,3 @@ class Denoiser3D(nn.Module):
                 raise ValueError("anchor_mask must be finite.")
             if bool(((anchor_mask < 0.0) | (anchor_mask > 1.0)).any().item()):
                 raise ValueError("anchor_mask values must be between zero and one.")
-
-
-def _positive_channels(values: Sequence[int]) -> tuple[int, ...]:
-    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-        raise TypeError("channel_multipliers must be a non-empty sequence.")
-    channels = tuple(values)
-    if not channels:
-        raise ValueError("channel_multipliers must be a non-empty sequence.")
-    if any(
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or value <= 0
-        for value in channels
-    ):
-        raise ValueError("channel_multipliers must contain positive integers.")
-    return channels

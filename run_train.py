@@ -6,15 +6,19 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.build import build_axis_streams, build_models, build_optimizers
+from src.build import (
+    build_diffusion,
+    build_models,
+    build_optimizers,
+    build_streams,
+)
+from src.config import save_yaml
 from src.data import AXES
-from src.diffusion import DiffusionProcess
-from src.misc import save_mapping
 from src.train import (
-    DiffusionGANTrainer,
+    Trainer,
     build_ema,
-    load_train_config,
-    save_model_weights,
+    load_config,
+    save_weights,
 )
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config" / "train.yaml"
@@ -34,7 +38,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    cfg = load_train_config(args.config)
+    cfg = load_config(args.config)
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available.")
@@ -50,17 +54,13 @@ def main() -> None:
     )
     amp_enabled = cfg.train.mixed_precision and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
-    diffusion = DiffusionProcess(
-        cfg.diffusion.timesteps,
-        beta_min=cfg.diffusion.beta_min,
-        beta_max=cfg.diffusion.beta_max,
-    ).to(device)
+    diffusion = build_diffusion(cfg.diffusion).to(device)
 
-    run_dir = _new_run_dir(RUN_ROOT)
-    save_mapping(run_dir / "train.yaml", cfg.as_dict())
+    run_dir = _make_run_dir(RUN_ROOT)
+    save_yaml(run_dir / "train.yaml", cfg.as_dict())
 
-    streams = build_axis_streams(cfg.data, device=device)
-    trainer = DiffusionGANTrainer(
+    streams = build_streams(cfg.data, device=device)
+    trainer = Trainer(
         denoiser=denoiser,
         ema_denoiser=ema_denoiser,
         critics=critics,
@@ -69,18 +69,8 @@ def main() -> None:
         denoiser_optimizer=denoiser_optimizer,
         critic_optimizers=critic_optimizers,
         scaler=scaler,
-        num_phases=cfg.data.num_phases,
-        patch_size=cfg.data.patch_size,
-        latent_channels=cfg.model.latent_channels,
-        volume_batch_size=cfg.train.volume_batch_size,
-        slices_per_axis=cfg.train.slices_per_axis,
-        mixed_precision=cfg.train.mixed_precision,
-        ema_decay=cfg.train.ema_decay,
-        r1_gamma=cfg.optim.r1_gamma,
-        r1_interval=cfg.optim.r1_interval,
+        cfg=cfg,
         device=device,
-        anchor_probability=cfg.anchor.probability,
-        anchor_weight=cfg.anchor.loss_weight,
     )
 
     completed = 0
@@ -97,7 +87,7 @@ def main() -> None:
     )
     try:
         for step in progress:
-            metrics = trainer.train_step(step)
+            metrics = trainer.step(step)
             completed = step + 1
             _write_metrics(writer, completed, metrics)
             progress.set_postfix(
@@ -107,29 +97,22 @@ def main() -> None:
                 A=int(metrics.anchor_used),
             )
             if completed % cfg.train.save_every_steps == 0:
-                _save(run_dir, ema_denoiser, critics)
-        _save(run_dir, ema_denoiser, critics)
+                save_weights(run_dir, ema_denoiser)
+        if completed % cfg.train.save_every_steps:
+            save_weights(run_dir, ema_denoiser)
     except KeyboardInterrupt:
-        path = _save(run_dir, ema_denoiser, critics)
+        path = save_weights(run_dir, ema_denoiser)
         print(f"Training interrupted after step {completed}; weights={path}")
     finally:
         progress.close()
         writer.close()
 
 
-def _new_run_dir(root: Path) -> Path:
+def _make_run_dir(root: Path) -> Path:
     name = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
     run_dir = root / name
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
-
-
-def _save(
-    run_dir: Path,
-    ema_denoiser: torch.nn.Module,
-    critics: torch.nn.ModuleDict,
-) -> Path:
-    return save_model_weights(run_dir, ema_denoiser, critics)
 
 
 def _write_metrics(writer, step, metrics) -> None:

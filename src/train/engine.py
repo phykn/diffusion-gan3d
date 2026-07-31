@@ -1,4 +1,3 @@
-import math
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 
@@ -6,20 +5,22 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from ..anchor import AnchorCondition, PlaneAnchor, assemble_anchors
+from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
 from ..data import (
     AXES,
     BatchStream,
-    labels_to_clean,
-    sample_volume_pair_slices,
+    encode_labels,
+    sample_pairs,
 )
-from ..diffusion import DiffusionProcess
+from ..diffusion import Diffusion
+from ..model import Denoiser3D
+from .config import TrainConfig
 from .ema import update_ema
 from .loss import critic_logistic_loss, generator_logistic_loss, r1_penalty
 
 
 @dataclass(frozen=True)
-class StepMetrics:
+class Metrics:
     generator: float
     generator_total: float
     critic: float
@@ -31,47 +32,25 @@ class StepMetrics:
     anchor_accuracy: float
 
 
-class DiffusionGANTrainer:
+class Trainer:
     def __init__(
         self,
         *,
-        denoiser: nn.Module,
-        ema_denoiser: nn.Module,
+        denoiser: Denoiser3D,
+        ema_denoiser: Denoiser3D,
         critics: nn.ModuleDict,
         streams: dict[int, BatchStream],
-        diffusion: DiffusionProcess,
+        diffusion: Diffusion,
         denoiser_optimizer: torch.optim.Optimizer,
         critic_optimizers: dict[str, torch.optim.Optimizer],
-        scaler,
-        num_phases: int,
-        patch_size: int,
-        latent_channels: int,
-        volume_batch_size: int,
-        slices_per_axis: int,
-        mixed_precision: bool,
-        ema_decay: float,
-        r1_gamma: float,
-        r1_interval: int,
+        scaler: torch.amp.GradScaler,
+        cfg: TrainConfig,
         device: torch.device,
-        anchor_probability: float = 0.0,
-        anchor_weight: float = 0.0,
     ) -> None:
         if set(streams) != set(AXES):
             raise ValueError("streams must contain axes 0, 1, and 2.")
         if set(critic_optimizers) != {str(axis) for axis in AXES}:
             raise ValueError("critic optimizers must contain axes 0, 1, and 2.")
-        if (
-            not math.isfinite(anchor_probability)
-            or not 0.0 <= anchor_probability <= 1.0
-        ):
-            raise ValueError("anchor_probability must be between zero and one.")
-        if not math.isfinite(anchor_weight) or anchor_weight < 0.0:
-            raise ValueError("anchor_weight must be finite and non-negative.")
-        if (anchor_probability > 0.0) != (anchor_weight > 0.0):
-            raise ValueError(
-                "anchor_probability and anchor_weight must both be positive "
-                "or both be zero."
-            )
         self.denoiser = denoiser
         self.ema_denoiser = ema_denoiser
         self.critics = critics
@@ -80,25 +59,18 @@ class DiffusionGANTrainer:
         self.denoiser_optimizer = denoiser_optimizer
         self.critic_optimizers = critic_optimizers
         self.scaler = scaler
-        self.num_phases = num_phases
-        self.patch_size = patch_size
-        self.latent_channels = latent_channels
-        self.volume_batch_size = volume_batch_size
-        self.slices_per_axis = slices_per_axis
-        self.amp_enabled = mixed_precision and device.type == "cuda"
-        self.ema_decay = ema_decay
-        self.r1_gamma = r1_gamma
-        self.r1_interval = r1_interval
+        self.cfg = cfg
+        self.amp_enabled = cfg.train.mixed_precision and device.type == "cuda"
         self.device = device
-        self.anchor_probability = float(anchor_probability)
-        self.anchor_weight = float(anchor_weight)
 
-    def train_step(
+    def step(
         self,
         step: int,
         *,
         transition: int | None = None,
-    ) -> StepMetrics:
+    ) -> Metrics:
+        if not isinstance(step, int) or isinstance(step, bool) or step < 0:
+            raise ValueError("step must be a non-negative integer.")
         self.denoiser.train()
         self.critics.train()
         if transition is None:
@@ -109,19 +81,23 @@ class DiffusionGANTrainer:
                     device=self.device,
                 ).item()
             )
-        elif not 0 <= transition < self.diffusion.timesteps:
+        elif (
+            not isinstance(transition, int)
+            or isinstance(transition, bool)
+            or not 0 <= transition < self.diffusion.timesteps
+        ):
             raise ValueError("transition is outside the diffusion schedule.")
         anchor = self._sample_anchor()
-        previous_volume, current_volume, clean_logits = self._fake_transition(
+        previous_volume, current_volume, clean_logits = self._generate_pair(
             transition,
             anchor,
         )
         fake_pairs = {
-            axis: sample_volume_pair_slices(
+            axis: sample_pairs(
                 previous_volume,
                 current_volume,
                 axis=axis,
-                count=self.slices_per_axis,
+                count=self.cfg.train.slices_per_axis,
             )
             for axis in AXES
         }
@@ -142,8 +118,8 @@ class DiffusionGANTrainer:
             clean_logits,
             anchor,
         )
-        update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
-        return StepMetrics(
+        update_ema(self.ema_denoiser, self.denoiser, self.cfg.train.ema_decay)
+        return Metrics(
             generator=generator_value,
             generator_total=generator_total,
             critic=sum(critic_values),
@@ -155,42 +131,42 @@ class DiffusionGANTrainer:
             anchor_accuracy=anchor_accuracy,
         )
 
-    def _fake_transition(
+    def _generate_pair(
         self,
         transition: int,
         anchor: AnchorCondition | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         shape = (
-            self.volume_batch_size,
-            self.num_phases,
-            self.patch_size,
-            self.patch_size,
-            self.patch_size,
+            self.cfg.train.volume_batch_size,
+            self.cfg.data.num_phases,
+            self.cfg.data.patch_size,
+            self.cfg.data.patch_size,
+            self.cfg.data.patch_size,
         )
         current = torch.randn(shape, device=self.device, dtype=torch.float32)
         with torch.no_grad(), self._autocast():
             for index in reversed(range(transition + 1, self.diffusion.timesteps)):
-                times = self._times(index, current.shape[0])
-                latent = self._latent(current.shape[0], dtype=current.dtype)
+                times = self._make_times(index, current.shape[0])
+                latent = self._sample_latent(current.shape[0], dtype=current.dtype)
                 clean = self._denoise(current, times, latent, anchor)
-                current = self.diffusion.posterior_sample(
+                current = self.diffusion.sample_posterior(
                     current,
                     clean,
                     times,
                 )
 
         current = current.detach()
-        times = self._times(transition, current.shape[0])
-        latent = self._latent(current.shape[0], dtype=current.dtype)
+        times = self._make_times(transition, current.shape[0])
+        latent = self._sample_latent(current.shape[0], dtype=current.dtype)
         with self._autocast():
-            clean_logits = self._denoise_logits(
+            clean_logits = self._predict_logits(
                 current,
                 times,
                 latent,
                 anchor,
             )
-            clean = 2.0 * clean_logits.softmax(dim=1) - 1.0
-            previous = self.diffusion.posterior_sample(
+            clean = self.denoiser.decode(clean_logits)
+            previous = self.diffusion.sample_posterior(
                 current,
                 clean,
                 times,
@@ -203,7 +179,10 @@ class DiffusionGANTrainer:
         fake_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]],
         step: int,
     ) -> tuple[list[float], float]:
-        apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
+        apply_r1 = (
+            self.cfg.optim.r1_gamma > 0.0
+            and (step + 1) % self.cfg.optim.r1_interval == 0
+        )
         critic_values = []
         total_r1 = 0.0
         for axis in AXES:
@@ -211,13 +190,17 @@ class DiffusionGANTrainer:
             optimizer = self.critic_optimizers[str(axis)]
             optimizer.zero_grad(set_to_none=True)
 
-            labels = self.streams[axis].next().to(
-                self.device,
-                non_blocking=True,
+            labels = (
+                self.streams[axis]
+                .next()
+                .to(
+                    self.device,
+                    non_blocking=True,
+                )
             )
-            real_clean = labels_to_clean(labels, self.num_phases)
-            real_times = self._times(transition, real_clean.shape[0])
-            real_previous, real_current = self.diffusion.forward_pair(
+            real_clean = encode_labels(labels, self.cfg.data.num_phases)
+            real_times = self._make_times(transition, real_clean.shape[0])
+            real_previous, real_current = self.diffusion.sample_pair(
                 real_clean,
                 real_times,
             )
@@ -225,7 +208,7 @@ class DiffusionGANTrainer:
             fake_previous, fake_current = fake_pairs[axis]
             fake_previous = fake_previous.detach().float()
             fake_current = fake_current.detach().float()
-            fake_times = self._times(transition, fake_previous.shape[0])
+            fake_times = self._make_times(transition, fake_previous.shape[0])
 
             autocast = self._autocast(enabled=self.amp_enabled and not apply_r1)
             with autocast:
@@ -241,8 +224,8 @@ class DiffusionGANTrainer:
                 loss = (
                     loss
                     + 0.5
-                    * self.r1_gamma
-                    * self.r1_interval
+                    * self.cfg.optim.r1_gamma
+                    * self.cfg.optim.r1_interval
                     * penalty
                 )
             self.scaler.scale(loss).backward()
@@ -266,7 +249,7 @@ class DiffusionGANTrainer:
             with self._autocast():
                 for axis in AXES:
                     fake_previous, fake_current = fake_pairs[axis]
-                    times = self._times(transition, fake_previous.shape[0])
+                    times = self._make_times(transition, fake_previous.shape[0])
                     logits = self.critics[str(axis)](
                         fake_previous,
                         fake_current,
@@ -282,9 +265,11 @@ class DiffusionGANTrainer:
                     selected_logits = clean_logits.movedim(1, -1)[selected]
                     anchor_loss = F.cross_entropy(selected_logits, target)
                     anchor_accuracy = (
-                        selected_logits.argmax(dim=1) == target
-                    ).to(torch.float32).mean()
-                total = adversarial + self.anchor_weight * anchor_loss
+                        (selected_logits.argmax(dim=1) == target)
+                        .to(torch.float32)
+                        .mean()
+                    )
+                total = adversarial + self.cfg.anchor.loss_weight * anchor_loss
             self.scaler.scale(total).backward()
             self.scaler.step(self.denoiser_optimizer)
             self.scaler.update()
@@ -299,38 +284,38 @@ class DiffusionGANTrainer:
         )
 
     def _sample_anchor(self) -> AnchorCondition | None:
-        if self.anchor_probability <= 0.0:
+        if not self.cfg.anchor.enabled:
             return None
-        if not bool(
-            torch.rand((), device=self.device) < self.anchor_probability
-        ):
+        if not bool(torch.rand((), device=self.device) < self.cfg.anchor.probability):
             return None
         axis = int(torch.randint(len(AXES), (), device=self.device).item())
-        labels = self.streams[axis].next().to(
-            self.device,
-            non_blocking=True,
+        labels = (
+            self.streams[axis]
+            .next()
+            .to(
+                self.device,
+                non_blocking=True,
+            )
         )
         if labels.ndim != 3 or labels.shape[-2:] != (
-            self.patch_size,
-            self.patch_size,
+            self.cfg.data.patch_size,
+            self.cfg.data.patch_size,
         ):
-            raise ValueError(
-                f"axis {axis} anchor batch must have shape [B, H, W]."
-            )
+            raise ValueError(f"axis {axis} anchor batch must have shape [B, H, W].")
         indices = torch.randint(
             labels.shape[0],
-            (self.volume_batch_size,),
+            (self.cfg.train.volume_batch_size,),
             device=self.device,
         )
         selected = labels.index_select(0, indices)
         plane_index = int(
             torch.randint(
-                self.patch_size,
+                self.cfg.data.patch_size,
                 (),
                 device=self.device,
             ).item()
         )
-        return assemble_anchors(
+        return build_anchors(
             (
                 PlaneAnchor(
                     labels=selected,
@@ -338,9 +323,9 @@ class DiffusionGANTrainer:
                     index=plane_index,
                 ),
             ),
-            batch_size=self.volume_batch_size,
-            num_phases=self.num_phases,
-            volume_size=self.patch_size,
+            batch_size=self.cfg.train.volume_batch_size,
+            num_phases=self.cfg.data.num_phases,
+            volume_size=self.cfg.data.patch_size,
             device=self.device,
             dtype=torch.float32,
         )
@@ -362,19 +347,16 @@ class DiffusionGANTrainer:
             anchor_mask=anchor.mask,
         )
 
-    def _denoise_logits(
+    def _predict_logits(
         self,
         current: torch.Tensor,
         times: torch.Tensor,
         latent: torch.Tensor,
         anchor: AnchorCondition | None,
     ) -> torch.Tensor:
-        forward_logits = getattr(self.denoiser, "forward_logits", None)
-        if not callable(forward_logits):
-            raise TypeError("denoiser must provide forward_logits().")
         if anchor is None:
-            return forward_logits(current, times, latent)
-        return forward_logits(
+            return self.denoiser.predict_logits(current, times, latent)
+        return self.denoiser.predict_logits(
             current,
             times,
             latent,
@@ -382,7 +364,7 @@ class DiffusionGANTrainer:
             anchor_mask=anchor.mask,
         )
 
-    def _times(self, transition: int, batch: int) -> torch.Tensor:
+    def _make_times(self, transition: int, batch: int) -> torch.Tensor:
         return torch.full(
             (batch,),
             transition,
@@ -390,10 +372,10 @@ class DiffusionGANTrainer:
             dtype=torch.long,
         )
 
-    def _latent(self, batch: int, *, dtype: torch.dtype) -> torch.Tensor:
+    def _sample_latent(self, batch: int, *, dtype: torch.dtype) -> torch.Tensor:
         return torch.randn(
             batch,
-            self.latent_channels,
+            self.cfg.model.latent_channels,
             device=self.device,
             dtype=dtype,
         )

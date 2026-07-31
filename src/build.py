@@ -1,20 +1,26 @@
 import torch
 from torch import nn
 
-from .data import AXES, LabelPatchDataset, build_batch_stream, load_axis_paths
+from .data import AXES, SliceDataset, build_stream, find_slices
+from .diffusion import Diffusion
 from .model import Denoiser3D, PairCritic2D
-from .train.config import DataConfig, ModelConfig, OptimConfig
+from .train.config import (
+    DataConfig,
+    DiffusionConfig,
+    ModelConfig,
+    OptimConfig,
+)
 
 
-def build_axis_streams(
+def build_streams(
     cfg: DataConfig,
     *,
     device: torch.device,
 ):
-    grouped = load_axis_paths(cfg.folder)
+    grouped = find_slices(cfg.folder)
     return {
-        axis: build_batch_stream(
-            LabelPatchDataset(
+        axis: build_stream(
+            SliceDataset(
                 grouped[axis],
                 crop_size=cfg.crop_size,
                 patch_size=cfg.patch_size,
@@ -32,14 +38,7 @@ def build_models(
     data: DataConfig,
     model: ModelConfig,
 ) -> tuple[Denoiser3D, nn.ModuleDict]:
-    denoiser = Denoiser3D(
-        num_phases=data.num_phases,
-        base_channels=model.base_channels,
-        channel_multipliers=model.channel_multipliers,
-        embedding_channels=model.embedding_channels,
-        latent_channels=model.latent_channels,
-        gradient_checkpointing=model.gradient_checkpointing,
-    )
+    denoiser = build_denoiser(data, model)
     critics = nn.ModuleDict(
         {
             str(axis): PairCritic2D(
@@ -52,6 +51,33 @@ def build_models(
         }
     )
     return denoiser, critics
+
+
+def build_denoiser(
+    data: DataConfig,
+    model: ModelConfig,
+    *,
+    checkpointing: bool | None = None,
+) -> Denoiser3D:
+    use_checkpointing = (
+        model.gradient_checkpointing if checkpointing is None else checkpointing
+    )
+    return Denoiser3D(
+        num_phases=data.num_phases,
+        base_channels=model.base_channels,
+        channel_multipliers=model.channel_multipliers,
+        embedding_channels=model.embedding_channels,
+        latent_channels=model.latent_channels,
+        gradient_checkpointing=use_checkpointing,
+    )
+
+
+def build_diffusion(cfg: DiffusionConfig) -> Diffusion:
+    return Diffusion(
+        cfg.timesteps,
+        beta_min=cfg.beta_min,
+        beta_max=cfg.beta_max,
+    )
 
 
 def build_optimizers(

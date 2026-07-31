@@ -12,15 +12,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts._anchor_check import (
-    axis_slices,
-    load_prepared_volume,
-    phase_scores,
+    load_volume,
+    score_phases,
+    slice_axis,
 )
 from src.generate import (
     PlaneAnchor,
-    generate_labels,
-    latest_model_weights,
-    load_denoiser_weights,
+    Sampler,
+    find_weights,
+    load_model,
 )
 
 VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tif"
@@ -34,26 +34,25 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = (
-        latest_model_weights(PROJECT_ROOT / "run")
-        if args.weights is None
-        else args.weights
+        find_weights(PROJECT_ROOT / "run") if args.weights is None else args.weights
     )
-    model, cfg = load_denoiser_weights(weights, device=device)
+    model, cfg = load_model(weights, device=device)
     if not cfg.anchor.enabled:
         raise ValueError("selected weights were trained with anchors disabled.")
 
-    target, starts = load_prepared_volume(
+    target, starts = load_volume(
         VOLUME_PATH,
         crop_size=cfg.data.crop_size,
         output_size=cfg.data.patch_size,
         num_phases=cfg.data.num_phases,
     )
     index = cfg.data.patch_size // 2
-    target_plane = axis_slices(target, AXIS)[index]
-    generated = generate_labels(
+    target_plane = slice_axis(target, AXIS)[index]
+    generated = Sampler(
         model,
         cfg,
         device=device,
+    ).generate(
         anchors=(
             PlaneAnchor(
                 labels=target_plane,
@@ -62,11 +61,11 @@ def main() -> None:
             ),
         ),
     )
-    generated_slices = axis_slices(generated, AXIS)
+    generated_slices = slice_axis(generated, AXIS)
     generated_plane = generated_slices[index]
     mismatch = generated_plane != target_plane
     accuracy = float((~mismatch).to(torch.float32).mean())
-    iou, recall = phase_scores(
+    iou, recall = score_phases(
         generated_plane,
         target_plane,
         num_phases=cfg.data.num_phases,
@@ -103,7 +102,7 @@ def _show(
     num_phases: int,
     accuracy: float,
 ) -> None:
-    slices = axis_slices(volume, axis)
+    slices = slice_axis(volume, axis)
     phase_cmap = "gray"
     difference_cmap = ListedColormap(("#f7f7f7", "#e63946"))
     figure, panels = plt.subplots(3, 3, figsize=(10, 9))
@@ -154,7 +153,7 @@ def _show(
         orthogonal_axes,
         strict=True,
     ):
-        section = axis_slices(volume, image_axis)[volume.shape[image_axis] // 2]
+        section = slice_axis(volume, image_axis)[volume.shape[image_axis] // 2]
         anchor_dimension = axis if axis < image_axis else axis - 1
         oriented = section if anchor_dimension == 0 else section.T
         panel.imshow(

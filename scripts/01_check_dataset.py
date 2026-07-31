@@ -8,8 +8,8 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data import AXES, LabelPatchDataset, load_axis_paths
-from src.train import load_train_config
+from src.data import AXES, SliceDataset, find_slices
+from src.train import load_config
 
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "train.yaml"
 
@@ -22,8 +22,8 @@ def main() -> None:
     if args.samples < 1:
         parser.error("--samples must be positive.")
 
-    cfg = load_train_config(args.config)
-    paths = load_axis_paths(cfg.data.folder)
+    cfg = load_config(args.config)
+    paths = find_slices(cfg.data.folder)
     figure, axes = plt.subplots(
         len(AXES),
         args.samples,
@@ -33,7 +33,7 @@ def main() -> None:
     for row, axis in enumerate(AXES):
         for column in range(args.samples):
             path = paths[axis][np.random.randint(len(paths[axis]))]
-            dataset = LabelPatchDataset(
+            dataset = SliceDataset(
                 (path,),
                 crop_size=cfg.data.crop_size,
                 patch_size=cfg.data.patch_size,

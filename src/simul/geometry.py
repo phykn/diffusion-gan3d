@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..misc import require_int, require_number
+from .config import GeometryConfig
 
 
 @dataclass(frozen=True)
@@ -45,52 +45,37 @@ class Geometry:
     report: PackingReport
 
 
-def make_geometry(
-    *,
-    size: int,
-    big_radius: int,
-    small_radius: int | None = None,
-    big_fraction: float,
-    small_fraction: float,
-    big_elongation: float = 1.0,
-) -> Geometry:
-    _validate(
-        size=size,
-        big_radius=big_radius,
-        small_radius=small_radius,
-        big_fraction=big_fraction,
-        small_fraction=small_fraction,
-        big_elongation=big_elongation,
-    )
-    small_r = float(big_radius) / 2.0 if small_radius is None else float(small_radius)
-    work = size * 3 // 2
+def pack(cfg: GeometryConfig) -> Geometry:
+    small_r = float(cfg.small_radius)
+    # Packing outside the retained field reduces boundary-biased particle fractions.
+    work = cfg.size * 3 // 2
     vol = np.zeros((work,) * 3, dtype=np.uint8)
     ids = np.full((work,) * 3, -1, dtype=np.int32)
     parts: list[Particle] = []
     target = {
-        1: round(float(small_fraction) * vol.size),
-        2: round(float(big_fraction) * vol.size),
+        1: round(cfg.small_fraction * vol.size),
+        2: round(cfg.big_fraction * vol.size),
     }
 
     for label in (2, 1):
-        _place_phase(
+        _place(
             vol=vol,
             ids=ids,
             parts=parts,
             label=label,
             target=target[label],
-            big_r=float(big_radius),
+            big_r=float(cfg.big_radius),
             small_r=small_r,
-            elong=float(big_elongation),
+            elong=cfg.big_elongation,
         )
 
-    vol, ids, parts = _crop(vol, ids, parts, size)
+    vol, ids, parts = _crop(vol, ids, parts, cfg.size)
     counts = np.bincount(vol.ravel(), minlength=3)
     got = tuple(float(value / vol.size) for value in counts)
     want = (
-        1.0 - float(small_fraction) - float(big_fraction),
-        float(small_fraction),
-        float(big_fraction),
+        1.0 - cfg.small_fraction - cfg.big_fraction,
+        cfg.small_fraction,
+        cfg.big_fraction,
     )
     report = PackingReport(
         requested_fractions=want,
@@ -99,8 +84,8 @@ def make_geometry(
             sum(part.label == 1 for part in parts),
             sum(part.label == 2 for part in parts),
         ),
-        phase_contact_counts=_phase_contact_counts(vol),
-        particle_contacts=_particle_contact_count(ids),
+        phase_contact_counts=_count_phase_contacts(vol),
+        particle_contacts=_count_particle_contacts(ids),
     )
     return Geometry(
         labels=vol,
@@ -110,7 +95,7 @@ def make_geometry(
     )
 
 
-def _place_phase(
+def _place(
     *,
     vol: np.ndarray,
     ids: np.ndarray,
@@ -121,7 +106,7 @@ def _place_phase(
     small_r: float,
     elong: float,
 ) -> None:
-    axes, offsets = _make_primitive(
+    axes, offsets = _make_particle(
         label=label,
         big_r=big_r,
         small_r=small_r,
@@ -131,7 +116,7 @@ def _place_phase(
     if count <= 0:
         return
 
-    valid = _available_centers(vol.shape[0], offsets)
+    valid = _find_centers(vol.shape[0], offsets)
     for part in parts:
         _invalidate_centers(
             valid,
@@ -203,7 +188,7 @@ def _crop(
     return vol, ids, kept
 
 
-def _make_primitive(
+def _make_particle(
     *,
     label: int,
     big_r: float,
@@ -217,10 +202,10 @@ def _make_primitive(
         short = radius / elong ** (1.0 / 3.0)
         long = radius * elong ** (2.0 / 3.0)
         axes = np.asarray((long, short, short), dtype=np.float64)
-    return axes, _primitive_offsets(axes)
+    return axes, _make_offsets(axes)
 
 
-def _primitive_offsets(axes: np.ndarray) -> np.ndarray:
+def _make_offsets(axes: np.ndarray) -> np.ndarray:
     bounds = np.ceil(axes).astype(np.int32)
     z, y, x = np.meshgrid(
         np.arange(-bounds[0], bounds[0] + 1, dtype=np.int32),
@@ -233,7 +218,7 @@ def _primitive_offsets(axes: np.ndarray) -> np.ndarray:
     return offsets[keep]
 
 
-def _available_centers(size: int, offsets: np.ndarray) -> np.ndarray:
+def _find_centers(size: int, offsets: np.ndarray) -> np.ndarray:
     valid = np.zeros((size,) * 3, dtype=bool)
     low = -offsets.min(axis=0)
     high = size - 1 - offsets.max(axis=0)
@@ -271,7 +256,7 @@ def _invalidate_centers(
     view[hit] = False
 
 
-def _phase_contact_counts(vol: np.ndarray) -> tuple[int, int, int]:
+def _count_phase_contacts(vol: np.ndarray) -> tuple[int, int, int]:
     pairs = ((0, 1), (0, 2), (1, 2))
     counts = [0, 0, 0]
     for axis in range(3):
@@ -290,7 +275,7 @@ def _phase_contact_counts(vol: np.ndarray) -> tuple[int, int, int]:
     return tuple(counts)
 
 
-def _particle_contact_count(ids: np.ndarray) -> int:
+def _count_particle_contacts(ids: np.ndarray) -> int:
     hits: set[tuple[int, int]] = set()
     for axis in range(3):
         first = [slice(None)] * 3
@@ -303,39 +288,3 @@ def _particle_contact_count(ids: np.ndarray) -> int:
         for left, right in zip(a[mask], b[mask], strict=True):
             hits.add(tuple(sorted((int(left), int(right)))))
     return len(hits)
-
-
-def _validate(
-    *,
-    size: int,
-    big_radius: int,
-    small_radius: int | None,
-    big_fraction: float,
-    small_fraction: float,
-    big_elongation: float,
-) -> None:
-    require_int("size", size)
-    require_int("big_radius", big_radius)
-    if size < 8:
-        raise ValueError("size must be at least 8.")
-    if big_radius <= 1 or big_radius >= size / 2:
-        raise ValueError("big_radius must satisfy 1 < big_radius < size / 2.")
-    if small_radius is not None:
-        require_int("small_radius", small_radius)
-        if small_radius <= 1 or small_radius >= big_radius:
-            raise ValueError("small_radius must satisfy 1 < small_radius < big_radius.")
-    for name, value in (
-        ("big_fraction", big_fraction),
-        ("small_fraction", small_fraction),
-    ):
-        require_number(name, value)
-        if not 0.0 <= float(value) < 1.0:
-            raise ValueError(f"{name} must be at least zero and less than one.")
-    if big_fraction + small_fraction <= 0.0:
-        raise ValueError("at least one phase fraction must be positive.")
-    if big_fraction + small_fraction >= 1.0:
-        raise ValueError("phase fractions must sum to less than one.")
-
-    require_number("big_elongation", big_elongation)
-    if not 1.0 <= float(big_elongation) <= 4.0:
-        raise ValueError("big_elongation must be between 1.0 and 4.0.")

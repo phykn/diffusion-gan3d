@@ -3,13 +3,11 @@ from dataclasses import dataclass
 
 import torch
 
-from .data import labels_to_clean
+from .data import encode_labels
 
 
 @dataclass(frozen=True)
 class PlaneAnchor:
-    """A categorical 2D plane placed inside a generated 3D volume."""
-
     labels: torch.Tensor
     axis: int
     index: int
@@ -17,14 +15,12 @@ class PlaneAnchor:
 
 @dataclass(frozen=True)
 class AnchorCondition:
-    """Dense model inputs assembled from one or more plane anchors."""
-
     image: torch.Tensor
     mask: torch.Tensor
     labels: torch.Tensor
 
 
-def assemble_anchors(
+def build_anchors(
     anchors: Sequence[PlaneAnchor],
     *,
     batch_size: int,
@@ -40,7 +36,11 @@ def assemble_anchors(
         return None
     if any(not isinstance(anchor, PlaneAnchor) for anchor in values):
         raise TypeError("anchors must contain only PlaneAnchor values.")
-    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+    if (
+        not isinstance(batch_size, int)
+        or isinstance(batch_size, bool)
+        or batch_size < 1
+    ):
         raise ValueError("batch_size must be a positive integer.")
     if not isinstance(num_phases, int) or num_phases < 2:
         raise ValueError("num_phases must be an integer of at least 2.")
@@ -68,7 +68,7 @@ def assemble_anchors(
     )
     occupied_planes: set[tuple[int, int]] = set()
     for anchor in values:
-        _validate_position(anchor, volume_size)
+        _check_position(anchor, volume_size)
         key = (anchor.axis, anchor.index)
         if key in occupied_planes:
             raise ValueError("anchor planes must have unique axis/index positions.")
@@ -89,12 +89,12 @@ def assemble_anchors(
         label_view.copy_(torch.where(mask_view, label_view, plane_labels))
         mask_view.fill_(True)
 
-    image = labels_to_clean(labels, num_phases).to(device=device, dtype=dtype)
+    image = encode_labels(labels, num_phases).to(device=device, dtype=dtype)
     image = image * mask.to(dtype=dtype)
     return AnchorCondition(image=image, mask=mask, labels=labels)
 
 
-def _validate_position(anchor: PlaneAnchor, volume_size: int) -> None:
+def _check_position(anchor: PlaneAnchor, volume_size: int) -> None:
     if (
         not isinstance(anchor.axis, int)
         or isinstance(anchor.axis, bool)
@@ -123,9 +123,7 @@ def _prepare_labels(
         raise ValueError("anchor.labels must have dtype torch.long.")
     if labels.ndim == 2:
         if labels.shape != (volume_size, volume_size):
-            raise ValueError(
-                "2D anchor.labels must match the generated plane size."
-            )
+            raise ValueError("2D anchor.labels must match the generated plane size.")
         labels = labels.unsqueeze(0).expand(batch_size, -1, -1)
     elif labels.ndim == 3:
         expected = (batch_size, volume_size, volume_size)
