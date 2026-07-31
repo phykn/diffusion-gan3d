@@ -58,9 +58,11 @@ During anchored training steps:
 
 During sampling, anchored voxels are projected into every reverse step. This keeps the constraint exact while allowing neighboring voxels to adapt throughout denoising.
 
-Scale-up takes each new block's shared planes from the accumulated global phase consensus, then combines overlapping per-phase probabilities with complementary distance weights. Final categorical labels are selected only after this feathered overlap has been assembled; phase label numbers are never averaged directly.
+## Scale-up
 
-Multi-axis scale-up should use weights trained with `anchor.max_planes: 3`; single-plane weights are accepted for inspection but produce a warning.
+Scale-up uses joint tiled diffusion rather than generating independent blocks. It starts from one global noise volume, predicts every overlapping tile at the same reverse transition with a shared latent vector, blends the clean predictions in global coordinates, and performs one global posterior update. The blocks therefore share the same evolving overlap state throughout denoising.
+
+Scale-up does not inject anchors or replace generated voxels. Categorical labels are selected once, after the global reverse process is complete.
 
 ## Training
 
@@ -83,3 +85,4 @@ Matching 2D distributions along three axes constrains a generated 3D microstruct
 
 - Johan Phan et al., “[Generating 3D images of material microstructures from a single 2D image: a denoising diffusion approach](https://www.nature.com/articles/s41598-024-56910-9),” *Scientific Reports* **14**, 6498 (2024).
 - Zhisheng Xiao, Karsten Kreis, and Arash Vahdat, “[Tackling the Generative Learning Trilemma with Denoising Diffusion GANs](https://openreview.net/forum?id=JprM0p-q0Co),” *International Conference on Learning Representations* (2022).
+- Omer Bar-Tal et al., “[MultiDiffusion: Fusing Diffusion Paths for Controlled Image Generation](https://arxiv.org/abs/2302.08113),” *International Conference on Machine Learning* (2023).

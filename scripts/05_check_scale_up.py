@@ -1,4 +1,4 @@
-"""Generate and inspect an overlap-anchored scaled volume."""
+"""Generate and inspect a jointly denoised tiled volume."""
 
 import argparse
 import sys
@@ -51,7 +51,7 @@ def main() -> None:
     )
     elapsed = perf_counter() - started
     shape_name = "x".join(str(length) for length in stats.shape)
-    output = weights.parent / f"scaled_{shape_name}.tif"
+    output = weights.parent / f"scaled_joint_{shape_name}.tif"
     tifffile.imwrite(output, labels.numpy())
     seam_quality = _measure_seams(
         labels,
@@ -77,11 +77,7 @@ def main() -> None:
     print(f"weights={weights.resolve()}")
     print(f"output={output.resolve()}")
     print(f"shape={tuple(labels.shape)}")
-    print(
-        f"block_grid={stats.block_grid} "
-        f"block_count={stats.block_count} "
-        f"anchor_planes={stats.anchor_planes}"
-    )
+    print(f"block_grid={stats.block_grid} block_count={stats.block_count}")
     print(f"phase_fractions={[round(float(value), 4) for value in fractions]}")
     print(f"seam_change_ratio={_format_scores(seam_quality.change_ratio)}")
     print(f"seam_transition_tv={_format_scores(seam_quality.transition_tv)}")
@@ -225,7 +221,7 @@ def _show_slices(
             panel.axvline(location - 0.5, color="#e63946", linewidth=0.6)
         panel.set_title(f"axis {axis}")
         panel.axis("off")
-    figure.suptitle("Overlap-anchored scale-up")
+    figure.suptitle("Joint tiled diffusion scale-up")
     figure.tight_layout()
     plt.show()
 

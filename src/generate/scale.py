@@ -2,12 +2,10 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import pairwise, product
-from warnings import warn
 
 import torch
 from tqdm import tqdm
 
-from ..anchor import PlaneAnchor
 from .sample import Sampler
 
 
@@ -18,8 +16,13 @@ class ScaleStats:
     block_size: int
     overlap: int
     block_count: int
-    anchor_planes: int
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
+
+
+@dataclass(frozen=True)
+class _Tile:
+    region: tuple[slice, slice, slice]
+    weight: torch.Tensor
 
 
 @torch.no_grad()
@@ -45,58 +48,91 @@ def generate_scaled(
     stride = block_size - overlap
     starts = tuple(tuple(index * stride for index in range(count)) for count in grid)
     shape = tuple(block_size + (count - 1) * stride for count in grid)
-    indices = tuple(product(*(range(count) for count in grid)))
-    if len(indices) > 1 and not sampler.anchor_enabled:
-        raise ValueError("scaled generation requires anchor-aware weights.")
-    required_planes = sum(count > 1 for count in grid)
-    if required_planes > sampler.max_anchor_planes:
-        warn(
-            "scale-up uses more simultaneous anchor axes than the weights "
-            f"were trained for ({required_planes} > {sampler.max_anchor_planes}).",
-            stacklevel=2,
-        )
-
-    scores = torch.zeros(
-        sampler.num_phases,
+    tiles = _make_tiles(
+        starts,
+        grid=grid,
+        block_size=block_size,
+        overlap=overlap,
+        device=sampler.device,
+    )
+    weight_sum = torch.zeros(
+        1,
+        1,
         *shape,
+        device=sampler.device,
         dtype=torch.float32,
     )
-    anchor_planes = 0
+    for tile in tiles:
+        key = (slice(None), slice(None), *tile.region)
+        weight_sum[key].add_(tile.weight)
+    if bool((weight_sum <= 0.0).any().item()):
+        raise RuntimeError("tile weights must cover the complete scaled volume.")
+    inverse_weight = weight_sum.reciprocal_()
+
+    current = torch.randn(
+        1,
+        sampler.num_phases,
+        *shape,
+        device=sampler.device,
+        dtype=torch.float32,
+    )
     bar = tqdm(
-        indices,
-        total=len(indices),
+        reversed(range(sampler.diffusion.timesteps)),
+        total=sampler.diffusion.timesteps,
         desc="Scale up",
         disable=not progress,
     )
-    for index in bar:
-        anchors = _make_anchors(
-            index,
-            starts=starts,
-            scores=scores,
-            block_size=block_size,
+    times = torch.empty(1, device=sampler.device, dtype=torch.long)
+    for transition in bar:
+        times.fill_(transition)
+        latent = torch.randn(
+            1,
+            sampler.latent_channels,
+            device=sampler.device,
+            dtype=current.dtype,
         )
-        probabilities = sampler.sample(
-            size=block_size,
-            anchors=anchors,
-        )
-        anchor_planes += len(anchors)
-        _blend(
-            scores,
-            probabilities,
-            index=index,
-            starts=starts,
-            grid=grid,
-            overlap=overlap,
+        clean_sum = torch.zeros_like(current)
+        for tile in tiles:
+            key = (slice(None), slice(None), *tile.region)
+            current_tile = current[key]
+            with torch.autocast(
+                device_type=sampler.device.type,
+                dtype=torch.float16,
+                enabled=sampler.use_amp,
+            ):
+                clean_tile = sampler.model(current_tile, times, latent)
+            if not isinstance(clean_tile, torch.Tensor):
+                raise TypeError("model must return a torch.Tensor.")
+            if clean_tile.shape != current_tile.shape:
+                raise ValueError("model output must match the input tile shape.")
+            if clean_tile.device != current_tile.device:
+                raise ValueError("model output must use the input tile device.")
+            if not clean_tile.is_floating_point():
+                raise ValueError("model output must be floating point.")
+            clean_sum[key].add_(clean_tile.float() * tile.weight)
+
+        clean = clean_sum * inverse_weight
+        posterior_noise = None if transition == 0 else torch.randn_like(current)
+        current = sampler.diffusion.sample_posterior(
+            current,
+            clean,
+            transition,
+            noise=posterior_noise,
         )
 
-    labels = scores.argmax(dim=0).to(torch.uint8)
+    probabilities = (current.float() + 1.0).mul_(0.5).clamp_(0.0, 1.0)
+    probabilities.div_(
+        probabilities.sum(dim=1, keepdim=True).clamp_min_(
+            torch.finfo(probabilities.dtype).eps
+        )
+    )
+    labels = probabilities.argmax(dim=1).squeeze(0).cpu().to(torch.uint8)
     stats = ScaleStats(
         shape=shape,
         block_grid=grid,
         block_size=block_size,
         overlap=overlap,
-        block_count=len(indices),
-        anchor_planes=anchor_planes,
+        block_count=len(tiles),
         seams=tuple(
             tuple(cell[1] for cell in _split_axis(values, block_size, length)[:-1])
             for values, length in zip(starts, shape, strict=True)
@@ -120,66 +156,37 @@ def _parse_grid(value: int | Sequence[int]) -> tuple[int, int, int]:
     return grid
 
 
-def _make_anchors(
-    index: tuple[int, int, int],
-    *,
+def _make_tiles(
     starts: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
-    scores: torch.Tensor,
+    *,
+    grid: tuple[int, int, int],
     block_size: int,
-) -> tuple[PlaneAnchor, ...]:
-    origin = tuple(starts[axis][index[axis]] for axis in range(3))
-    anchors = []
-    for axis in range(3):
-        if index[axis] == 0:
-            continue
-        previous_origin = starts[axis][index[axis] - 1]
-        current_origin = origin[axis]
-        actual_overlap = block_size - (current_origin - previous_origin)
-        seam = current_origin + actual_overlap // 2
-        target_index = seam - current_origin
+    overlap: int,
+    device: torch.device,
+) -> tuple[_Tile, ...]:
+    tiles = []
+    for index in product(*(range(count) for count in grid)):
         region = tuple(
-            seam
-            if source_axis == axis
-            else slice(origin[source_axis], origin[source_axis] + block_size)
-            for source_axis in range(3)
+            slice(
+                starts[axis][index[axis]],
+                starts[axis][index[axis]] + block_size,
+            )
+            for axis in range(3)
         )
-        source_scores = scores[(slice(None), *region)]
-        if bool((source_scores.sum(dim=0) <= 0.0).any().item()):
-            raise RuntimeError("scale-up anchor region has not been generated.")
-        # Global scores make overlapping anchor patches agree at shared coordinates.
-        source = source_scores.argmax(dim=0)
-        anchors.append(
-            PlaneAnchor(
-                labels=source.to(dtype=torch.long).clone(),
-                axis=axis,
-                index=target_index,
+        weight = _make_weight(
+            index,
+            grid=grid,
+            block_size=block_size,
+            overlap=overlap,
+            dtype=torch.float32,
+        ).to(device=device)
+        tiles.append(
+            _Tile(
+                region=region,
+                weight=weight.unsqueeze(0).unsqueeze(0),
             )
         )
-    return tuple(anchors)
-
-
-def _blend(
-    scores: torch.Tensor,
-    probabilities: torch.Tensor,
-    *,
-    index: tuple[int, int, int],
-    starts: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
-    grid: tuple[int, int, int],
-    overlap: int,
-) -> None:
-    block_size = probabilities.shape[1]
-    weight = _make_weight(
-        index,
-        grid=grid,
-        block_size=block_size,
-        overlap=overlap,
-        dtype=probabilities.dtype,
-    )
-    region = tuple(
-        slice(starts[axis][index[axis]], starts[axis][index[axis]] + block_size)
-        for axis in range(3)
-    )
-    scores[(slice(None), *region)].add_(probabilities * weight)
+    return tuple(tiles)
 
 
 def _make_weight(
