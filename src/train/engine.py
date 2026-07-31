@@ -99,7 +99,6 @@ class Trainer:
         *,
         steps: int,
         save_every: int,
-        critic_warmup_steps: int,
         run_dir: str | Path,
     ) -> Path:
         if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
@@ -110,13 +109,6 @@ class Trainer:
             or save_every < 1
         ):
             raise ValueError("save_every must be a positive integer.")
-        if (
-            not isinstance(critic_warmup_steps, int)
-            or isinstance(critic_warmup_steps, bool)
-            or critic_warmup_steps < 0
-        ):
-            raise ValueError("critic_warmup_steps must be a non-negative integer.")
-
         root = Path(run_dir)
         completed = 0
         weights = root / WEIGHTS_NAME
@@ -131,7 +123,6 @@ class Trainer:
             dynamic_ncols=True,
         )
         try:
-            self.warm_critics(critic_warmup_steps)
             for step in progress:
                 metrics = self.step(step)
                 completed = step + 1
@@ -166,48 +157,6 @@ class Trainer:
             progress.close()
             writer.close()
         return weights
-
-    def warm_critics(self, steps: int) -> None:
-        if not isinstance(steps, int) or isinstance(steps, bool) or steps < 0:
-            raise ValueError("steps must be a non-negative integer.")
-        if steps == 0:
-            return
-        self.denoiser.eval()
-        self.critics.train()
-        progress = tqdm(
-            range(steps),
-            total=steps,
-            desc="Critic warmup",
-            dynamic_ncols=True,
-        )
-        try:
-            for step in progress:
-                transition = int(
-                    torch.randint(
-                        self.diffusion.timesteps,
-                        (1,),
-                    ).item()
-                )
-                anchor = self._sample_anchor()
-                with torch.no_grad():
-                    previous, current, _ = self._generate_pair(transition, anchor)
-                    fake_pairs = {
-                        axis: sample_pairs(
-                            previous,
-                            current,
-                            axis=axis,
-                            count=self.slices_per_axis,
-                        )
-                        for axis in AXES
-                    }
-                values, _, _, _ = self._update_critics(
-                    transition,
-                    fake_pairs,
-                    step,
-                )
-                progress.set_postfix(D=f"{sum(values):.4g}", t=transition)
-        finally:
-            progress.close()
 
     def step(
         self,

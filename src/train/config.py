@@ -141,7 +141,6 @@ class LoopConfig:
     mixed_precision: bool
     ema_decay: float
     save_every_steps: int
-    critic_warmup_steps: int = 0
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
 
     def __post_init__(self) -> None:
@@ -149,11 +148,6 @@ class LoopConfig:
         require_int("train.volume_batch_size", self.volume_batch_size, minimum=1)
         require_int("train.slices_per_axis", self.slices_per_axis, minimum=1)
         require_int("train.save_every_steps", self.save_every_steps, minimum=1)
-        require_int(
-            "train.critic_warmup_steps",
-            self.critic_warmup_steps,
-            minimum=0,
-        )
         if not isinstance(self.mixed_precision, bool):
             raise TypeError("train.mixed_precision must be a boolean.")
         ema = require_number("train.ema_decay", self.ema_decay)

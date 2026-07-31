@@ -22,7 +22,13 @@ class ScaleStats:
 @dataclass(frozen=True)
 class _Tile:
     region: tuple[slice, slice, slice]
-    weight: torch.Tensor
+    roles: tuple[int, int, int]
+
+
+_SINGLE = 0
+_START = 1
+_MIDDLE = 2
+_END = 3
 
 
 @torch.no_grad()
@@ -52,22 +58,12 @@ def generate_scaled(
         starts,
         grid=grid,
         block_size=block_size,
-        overlap=overlap,
+    )
+    axis_weights = _make_axis_weights(
+        block_size,
+        overlap,
         device=sampler.device,
     )
-    weight_sum = torch.zeros(
-        1,
-        1,
-        *shape,
-        device=sampler.device,
-        dtype=torch.float32,
-    )
-    for tile in tiles:
-        key = (slice(None), slice(None), *tile.region)
-        weight_sum[key].add_(tile.weight)
-    if bool((weight_sum <= 0.0).any().item()):
-        raise RuntimeError("tile weights must cover the complete scaled volume.")
-    inverse_weight = weight_sum.reciprocal_()
 
     current = torch.randn(
         1,
@@ -83,6 +79,16 @@ def generate_scaled(
         disable=not progress,
     )
     times = torch.empty(1, device=sampler.device, dtype=torch.long)
+    clean_sum = torch.empty_like(current)
+    weighted = torch.empty(
+        1,
+        sampler.num_phases,
+        block_size,
+        block_size,
+        block_size,
+        device=sampler.device,
+        dtype=torch.float32,
+    )
     for transition in bar:
         times.fill_(transition)
         latent = torch.randn(
@@ -91,33 +97,23 @@ def generate_scaled(
             device=sampler.device,
             dtype=current.dtype,
         )
-        clean_sum = torch.zeros_like(current)
+        clean_sum.zero_()
         for tile in tiles:
-            key = (slice(None), slice(None), *tile.region)
-            current_tile = current[key]
-            with torch.autocast(
-                device_type=sampler.device.type,
-                dtype=torch.float16,
-                enabled=sampler.use_amp,
-            ):
-                clean_tile = sampler.model(current_tile, times, latent)
-            if not isinstance(clean_tile, torch.Tensor):
-                raise TypeError("model must return a torch.Tensor.")
-            if clean_tile.shape != current_tile.shape:
-                raise ValueError("model output must match the input tile shape.")
-            if clean_tile.device != current_tile.device:
-                raise ValueError("model output must use the input tile device.")
-            if not clean_tile.is_floating_point():
-                raise ValueError("model output must be floating point.")
-            clean_sum[key].add_(clean_tile.float() * tile.weight)
+            _accumulate_prediction(
+                sampler,
+                current=current,
+                clean_sum=clean_sum,
+                weighted=weighted,
+                tile=tile,
+                axis_weights=axis_weights,
+                times=times,
+                latent=latent,
+            )
 
-        clean = clean_sum * inverse_weight
-        posterior_noise = None if transition == 0 else torch.randn_like(current)
         current = sampler.diffusion.sample_posterior(
             current,
-            clean,
+            clean_sum,
             transition,
-            noise=posterior_noise,
         )
 
     probabilities = (current.float() + 1.0).mul_(0.5).clamp_(0.0, 1.0)
@@ -161,8 +157,6 @@ def _make_tiles(
     *,
     grid: tuple[int, int, int],
     block_size: int,
-    overlap: int,
-    device: torch.device,
 ) -> tuple[_Tile, ...]:
     tiles = []
     for index in product(*(range(count) for count in grid)):
@@ -173,43 +167,77 @@ def _make_tiles(
             )
             for axis in range(3)
         )
-        weight = _make_weight(
-            index,
-            grid=grid,
-            block_size=block_size,
-            overlap=overlap,
-            dtype=torch.float32,
-        ).to(device=device)
         tiles.append(
             _Tile(
                 region=region,
-                weight=weight.unsqueeze(0).unsqueeze(0),
+                roles=tuple(_get_role(index[axis], grid[axis]) for axis in range(3)),
             )
         )
     return tuple(tiles)
 
 
-def _make_weight(
-    index: tuple[int, int, int],
-    *,
-    grid: tuple[int, int, int],
+def _make_axis_weights(
     block_size: int,
     overlap: int,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    positions = torch.arange(overlap, dtype=dtype)
-    ramp = torch.sin((positions + 0.5) * math.pi / (2.0 * overlap)).square()
-    weight = torch.ones((block_size,) * 3, dtype=dtype)
-    for axis in range(3):
-        axis_weight = torch.ones(block_size, dtype=dtype)
-        if index[axis] > 0:
-            axis_weight[:overlap] = ramp
-        if index[axis] + 1 < grid[axis]:
-            axis_weight[-overlap:] = ramp.flip(0)
-        shape = [1, 1, 1]
-        shape[axis] = block_size
-        weight.mul_(axis_weight.reshape(shape))
-    return weight
+    *,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    positions = torch.arange(overlap, device=device, dtype=torch.float32)
+    rise = torch.sin((positions + 0.5) * math.pi / (2.0 * overlap)).square()
+    fall = 1.0 - rise
+    single = torch.ones(block_size, device=device, dtype=torch.float32)
+    start = single.clone()
+    start[-overlap:] = fall
+    middle = start.clone()
+    middle[:overlap] = rise
+    end = single.clone()
+    end[:overlap] = rise
+    return single, start, middle, end
+
+
+def _get_role(index: int, count: int) -> int:
+    if count == 1:
+        return _SINGLE
+    if index == 0:
+        return _START
+    if index + 1 == count:
+        return _END
+    return _MIDDLE
+
+
+def _accumulate_prediction(
+    sampler: Sampler,
+    *,
+    current: torch.Tensor,
+    clean_sum: torch.Tensor,
+    weighted: torch.Tensor,
+    tile: _Tile,
+    axis_weights: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    times: torch.Tensor,
+    latent: torch.Tensor,
+) -> None:
+    key = (slice(None), slice(None), *tile.region)
+    current_tile = current[key]
+    with torch.autocast(
+        device_type=sampler.device.type,
+        dtype=torch.float16,
+        enabled=sampler.use_amp,
+    ):
+        clean_tile = sampler.model(current_tile, times, latent)
+    if not isinstance(clean_tile, torch.Tensor):
+        raise TypeError("model must return a torch.Tensor.")
+    if clean_tile.shape != current_tile.shape:
+        raise ValueError("model output must match the input tile shape.")
+    if clean_tile.device != current_tile.device:
+        raise ValueError("model output must use the input tile device.")
+    if not clean_tile.is_floating_point():
+        raise ValueError("model output must be floating point.")
+
+    weighted.copy_(clean_tile)
+    weighted.mul_(axis_weights[tile.roles[0]].view(1, 1, -1, 1, 1))
+    weighted.mul_(axis_weights[tile.roles[1]].view(1, 1, 1, -1, 1))
+    weighted.mul_(axis_weights[tile.roles[2]].view(1, 1, 1, 1, -1))
+    clean_sum[key].add_(weighted)
 
 
 def _split_axis(

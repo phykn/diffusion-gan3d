@@ -41,7 +41,6 @@ def main() -> None:
     trainer.fit(
         steps=cfg.train.steps,
         save_every=cfg.train.save_every_steps,
-        critic_warmup_steps=cfg.train.critic_warmup_steps,
         run_dir=run_dir,
     )
 
