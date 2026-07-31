@@ -179,13 +179,8 @@ def build_sampler(
     model: Denoiser3D,
     *,
     device: torch.device,
-    mixed_precision: bool | None = None,
 ) -> Sampler:
-    if mixed_precision is not None and not isinstance(mixed_precision, bool):
-        raise TypeError("mixed_precision must be boolean or None.")
-    use_amp = (
-        cfg.train.mixed_precision if mixed_precision is None else mixed_precision
-    ) and device.type == "cuda"
+    use_amp = cfg.train.mixed_precision and device.type == "cuda"
     return Sampler(
         model,
         build_diffusion(cfg).to(device),
@@ -194,7 +189,6 @@ def build_sampler(
         num_phases=cfg.data.num_phases,
         latent_channels=cfg.model.latent_channels,
         anchor_enabled=cfg.anchor.enabled,
-        max_anchor_planes=cfg.anchor.max_planes,
         use_amp=use_amp,
     )
 
@@ -203,7 +197,6 @@ def load_sampler(
     weights: str | Path,
     *,
     device: torch.device,
-    mixed_precision: bool | None = None,
 ) -> Sampler:
     path = Path(weights).resolve()
     cfg = load_config(path.parent / "train.yaml")
@@ -220,7 +213,6 @@ def load_sampler(
         cfg,
         model,
         device=device,
-        mixed_precision=mixed_precision,
     )
 
 

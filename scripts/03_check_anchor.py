@@ -52,7 +52,6 @@ def main() -> None:
                 index=index,
             ),
         ),
-        enforce=False,
     )
     generated_slices = slice_axis(generated, AXIS)
     generated_plane = generated_slices[index]

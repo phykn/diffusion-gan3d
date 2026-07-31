@@ -224,14 +224,6 @@ def _accumulate_prediction(
         enabled=sampler.use_amp,
     ):
         clean_tile = sampler.model(current_tile, times, latent)
-    if not isinstance(clean_tile, torch.Tensor):
-        raise TypeError("model must return a torch.Tensor.")
-    if clean_tile.shape != current_tile.shape:
-        raise ValueError("model output must match the input tile shape.")
-    if clean_tile.device != current_tile.device:
-        raise ValueError("model output must use the input tile device.")
-    if not clean_tile.is_floating_point():
-        raise ValueError("model output must be floating point.")
 
     weighted.copy_(clean_tile)
     weighted.mul_(axis_weights[tile.roles[0]].view(1, 1, -1, 1, 1))

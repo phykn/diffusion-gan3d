@@ -28,7 +28,6 @@ class Sampler:
         num_phases: int,
         latent_channels: int,
         anchor_enabled: bool,
-        max_anchor_planes: int,
         use_amp: bool,
     ) -> None:
         self.model = model
@@ -38,32 +37,20 @@ class Sampler:
         self.num_phases = num_phases
         self.latent_channels = latent_channels
         self.anchor_enabled = anchor_enabled
-        self.max_anchor_planes = max_anchor_planes
         self.use_amp = use_amp
 
     @torch.no_grad()
     def sample(
         self,
         *,
-        size: int | None = None,
         anchors: Sequence[PlaneAnchor] = (),
-        enforce: bool = True,
     ) -> torch.Tensor:
-        if not isinstance(enforce, bool):
-            raise TypeError("enforce must be boolean.")
-        size = self.patch_size if size is None else size
-        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
-            raise ValueError("size must be a positive integer.")
-        if size % self.model.downsample_factor:
-            raise ValueError(
-                f"size must be divisible by {self.model.downsample_factor}."
-            )
         terminal = torch.randn(
             1,
             self.num_phases,
-            size,
-            size,
-            size,
+            self.patch_size,
+            self.patch_size,
+            self.patch_size,
             device=self.device,
             dtype=torch.float32,
         )
@@ -71,7 +58,7 @@ class Sampler:
             anchors,
             batch_size=1,
             num_phases=self.num_phases,
-            volume_size=size,
+            volume_size=self.patch_size,
             device=self.device,
             dtype=terminal.dtype,
         )
@@ -95,7 +82,6 @@ class Sampler:
                 terminal,
                 self.latent_channels,
                 model_kwargs=kwargs,
-                project=(None if anchor is None or not enforce else anchor.project),
             )
         probabilities = (clean.float() + 1.0).mul_(0.5).clamp_(0.0, 1.0)
         probabilities.div_(
@@ -109,13 +95,7 @@ class Sampler:
     def generate(
         self,
         *,
-        size: int | None = None,
         anchors: Sequence[PlaneAnchor] = (),
-        enforce: bool = True,
     ) -> torch.Tensor:
-        probabilities = self.sample(
-            size=size,
-            anchors=anchors,
-            enforce=enforce,
-        )
+        probabilities = self.sample(anchors=anchors)
         return probabilities.argmax(dim=0).to(torch.uint8)

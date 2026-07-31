@@ -1,43 +1,20 @@
 # Diffusion GAN3D
 
-Diffusion GAN3D generates categorical 3D microstructures from independent 2D slice datasets. It does not require paired slices or a ground-truth 3D volume.
-
-The model learns whether a generated volume is plausible by comparing its 2D slices with real images from each spatial direction.
+Diffusion GAN3D learns categorical 3D microstructures from independent 2D slice datasets along three spatial axes. The slices need not be paired or aligned, and no ground-truth 3D volume is required.
 
 ## Method
 
-The generator is a latent-conditioned 3D diffusion denoiser. Given a noisy volume `x_(t+1)`, a transition index `t`, and a latent vector `z`, it predicts a clean categorical volume `x_0`.
+The generator is a latent-conditioned 3D diffusion denoiser. Given `x_(t+1)`, transition `t`, and latent vector `z`, it predicts a clean categorical volume `x_0` that defines the reverse posterior step.
 
-The predicted clean volume is used in the diffusion posterior to sample the previous state:
+Three independent 2D critics evaluate slice pairs `(x_t, x_(t+1))`, one critic per axis. Real pairs come from forward-diffused training images; generated pairs come from the denoiser's reverse transition. Each critic combines a global head for whole-slice structure with a local head for phase boundaries.
 
-```text
-x_T → x_(T-1) → ... → x_1 → x_0
-```
+Training alternates logistic critic updates with lazy R1 regularization and denoiser updates against all three critics. An exponential moving average of the denoiser is used for generation.
 
-Training uses three independent 2D critics, one for each spatial axis. A critic receives a correlated slice pair `(x_t, x_(t+1))` and its transition index. Real pairs come from forward diffusion of training images; generated pairs come from one reverse transition of the 3D denoiser.
+## Data
 
-Each critic combines a deep global head for whole-slice structure with a shallow local head for fine phase boundaries. Their losses are averaged independently before the configured local weight is applied.
+Training images are integer phase-label maps from `0` to `num_phases - 1`. The `data.folder.0`, `data.folder.1`, and `data.folder.2` directories contain slices normal to each axis and need not be aligned.
 
-A training step therefore:
-
-1. selects a random diffusion transition;
-2. generates a 3D reverse-transition pair;
-3. samples 2D pairs along axes `0`, `1`, and `2`;
-4. updates each axis critic with logistic loss and lazy R1 regularization;
-5. updates the denoiser against all three critics; and
-6. updates an exponential moving average used for generation.
-
-## Data representation
-
-Each training image is a categorical label map:
-
-```text
-0, 1, ..., num_phases - 1
-```
-
-The folders configured as `data.folder.0`, `data.folder.1`, and `data.folder.2` contain slices normal to the corresponding spatial axis. Images from different folders do not need to be aligned.
-
-Labels are converted to one-hot phase channels and mapped from `[0, 1]` to `[-1, 1]` before diffusion. The denoiser normalizes one logit channel per phase with softmax, maps the result back to `[-1, 1]`, and selects final labels with `argmax`.
+Labels are one-hot encoded and mapped to `[-1, 1]` during diffusion. The denoiser predicts one logit per phase, and final labels are selected with `argmax`.
 
 The included simulator creates an example three-phase dataset:
 
@@ -45,26 +22,19 @@ The included simulator creates an example three-phase dataset:
 python gen_data.py
 ```
 
-## Plane anchors
+## Anchors
 
-An anchor provides a known categorical 2D plane at a selected axis and depth. It is encoded as one-hot phase channels plus a binary spatial mask and passed to the denoiser during every reverse transition.
+A plane anchor provides a known categorical slice at a selected axis and depth. During anchored training, one to three real slices condition every reverse step. Clean predictions are projected to the anchor labels, cross-entropy trains the anchored logits, and the adversarial objective still evaluates sampled slices from the generated volume.
 
-During anchored training steps:
-
-- one to three real training slices become orthogonal anchors;
-- their axes, depths, and precedence at independent-data intersections are selected randomly;
-- cross-entropy is applied to the predicted clean logits at all anchored voxels; and
-- the ordinary three-axis adversarial objective still evaluates the volume.
-
-During sampling, anchored voxels are projected into every reverse step. This keeps the constraint exact while allowing neighboring voxels to adapt throughout denoising.
+During sampling, anchors remain conditioning inputs throughout denoising; generated voxels are not overwritten.
 
 ## Scale-up
 
-Scale-up uses joint tiled diffusion rather than generating independent blocks. It starts from one global noise volume, predicts every overlapping tile at the same reverse transition with a shared latent vector, blends the clean predictions in global coordinates, and performs one global posterior update. The blocks therefore share the same evolving overlap state throughout denoising.
+Scale-up performs joint tiled diffusion from one global noise volume. At every reverse transition, overlapping tiles share a latent vector, their clean predictions are blended in global coordinates, and one global posterior update is applied. Overlaps therefore evolve jointly instead of stitching independently completed blocks.
 
-Scale-up does not inject anchors or replace generated voxels. Categorical labels are selected once, after the global reverse process is complete.
+Scale-up does not accept anchors or replace generated voxels. Categorical labels are selected after the global reverse process completes.
 
-## Training
+## Training and outputs
 
 Install the runtime dependencies and start training:
 
@@ -73,13 +43,11 @@ pip install -r requirements.txt
 python run_train.py
 ```
 
-## Outputs
+Each run writes the EMA denoiser as `model.pt`, the three critics as `critic_0.pt` through `critic_2.pt`, the resolved `train.yaml`, and TensorBoard metrics under `run/<timestamp>/`. The four checkpoint paths load these weights independently; `null` starts the corresponding model from scratch. Optimizers, training step, and AMP scaler are not restored.
 
-Each run stores the EMA denoiser as `model.pt`, the three critics as `critic_0.pt` through `critic_2.pt`, resolved training settings, and TensorBoard metrics under `run/<timestamp>/`. The four `train.checkpoint` paths initialize those models independently; a `null` entry starts that model from scratch. The step, optimizers, and AMP scaler always start fresh.
+## Limitations
 
-## Scope
-
-Matching 2D distributions along three axes constrains a generated 3D microstructure, but it does not identify a unique 3D ground truth. Exact anchor projection preserves supplied planes, while the surrounding 3D continuation remains generated rather than uniquely determined.
+Matching 2D distributions along three axes constrains the generated microstructure but does not identify a unique 3D ground truth. Anchors provide local conditioning; the surrounding 3D continuation remains generated.
 
 ## References
 

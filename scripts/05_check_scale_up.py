@@ -51,7 +51,7 @@ def main() -> None:
     )
     elapsed = perf_counter() - started
     shape_name = "x".join(str(length) for length in stats.shape)
-    output = weights.parent / f"scaled_joint_{shape_name}.tif"
+    output = weights.parent / f"scaled_joint_{shape_name}.tiff"
     tifffile.imwrite(output, labels.numpy())
     seam_quality = _measure_seams(
         labels,

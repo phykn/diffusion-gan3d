@@ -43,9 +43,6 @@ class Denoiser3D(nn.Module):
         multipliers = check_channels("channel_multipliers", channel_multipliers)
 
         channels = tuple(base_channels * multiplier for multiplier in multipliers)
-        self.num_phases = num_phases
-        self.latent_channels = latent_channels
-        self.downsample_factor = 2 ** (len(channels) - 1)
         self.gradient_checkpointing = gradient_checkpointing
 
         self.time_embedding = SinusoidalTimeEmbedding(embedding_channels)
@@ -143,13 +140,6 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self._check_inputs(
-            x_current,
-            time,
-            latent,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
-        )
         embedding = self._embed(x_current, time, latent)
         hidden = self.input(x_current)
         anchor_features = self._encode_anchor(
@@ -233,52 +223,3 @@ class Denoiser3D(nn.Module):
         probabilities = (clean + 1.0) * 0.5 * mask
         features = self.anchor_input(torch.cat((probabilities, mask), dim=1))
         return features * active.to(features.dtype)[:, None, None, None, None]
-
-    def _check_inputs(
-        self,
-        x_current: torch.Tensor,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        *,
-        anchor_image: torch.Tensor | None,
-        anchor_mask: torch.Tensor | None,
-    ) -> None:
-        if not isinstance(x_current, torch.Tensor) or x_current.ndim != 5:
-            raise ValueError("x_current must have shape [B, P, D, H, W].")
-        if not x_current.is_floating_point():
-            raise ValueError("x_current must be floating point.")
-        if x_current.shape[1] != self.num_phases:
-            raise ValueError("x_current has the wrong number of phase channels.")
-        if any(size % self.downsample_factor for size in x_current.shape[-3:]):
-            raise ValueError(
-                f"every spatial size must be divisible by {self.downsample_factor}."
-            )
-        if not isinstance(time, torch.Tensor) or time.shape != (x_current.shape[0],):
-            raise ValueError("time must have shape [B].")
-        if not isinstance(latent, torch.Tensor) or latent.shape != (
-            x_current.shape[0],
-            self.latent_channels,
-        ):
-            raise ValueError(f"latent must have shape [B, {self.latent_channels}].")
-        if not latent.is_floating_point():
-            raise ValueError("latent must be floating point.")
-        if (anchor_image is None) != (anchor_mask is None):
-            raise ValueError("anchor_image and anchor_mask must be provided together.")
-        if anchor_image is None or anchor_mask is None:
-            return
-        if anchor_image.shape != x_current.shape:
-            raise ValueError("anchor_image must have the same shape as x_current.")
-        expected_mask = (x_current.shape[0], 1, *x_current.shape[-3:])
-        if anchor_mask.shape != expected_mask:
-            raise ValueError(f"anchor_mask must have shape {expected_mask}.")
-        if not anchor_image.is_floating_point():
-            raise ValueError("anchor_image must be floating point.")
-        if not torch.isfinite(anchor_image).all():
-            raise ValueError("anchor_image must be finite.")
-        if anchor_mask.dtype != torch.bool:
-            if not anchor_mask.is_floating_point():
-                raise ValueError("anchor_mask must be boolean or floating point.")
-            if not torch.isfinite(anchor_mask).all():
-                raise ValueError("anchor_mask must be finite.")
-            if bool(((anchor_mask < 0.0) | (anchor_mask > 1.0)).any().item()):
-                raise ValueError("anchor_mask values must be between zero and one.")

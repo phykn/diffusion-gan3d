@@ -14,20 +14,14 @@ def load_volume(
 ) -> torch.Tensor:
     if not path.is_file():
         raise FileNotFoundError(f"anchor volume was not found: {path}")
-    with tifffile.TiffFile(path) as tif:
-        series = tif.series[0]
-        if series.axes != "ZYX":
-            raise ValueError(
-                f"anchor TIF axes must be ZYX, got {series.axes!r}: {path}"
-            )
-        if series.dtype != np.dtype(np.uint8):
-            raise ValueError(
-                f"anchor TIF must contain uint8 labels, got {series.dtype}: {path}"
-            )
-        volume = np.asarray(series.asarray())
+    volume = np.asarray(tifffile.imread(path))
 
     if volume.ndim != 3 or volume.size == 0:
         raise ValueError("anchor volume must be a non-empty 3D array.")
+    if volume.dtype != np.uint8:
+        raise ValueError(
+            f"anchor volume must contain uint8 labels, got {volume.dtype}: {path}"
+        )
     if int(volume.max()) >= num_phases:
         raise ValueError(
             f"anchor volume must contain labels from 0 to {num_phases - 1}."

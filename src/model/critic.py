@@ -40,8 +40,6 @@ class PairCritic2D(nn.Module):
         if len(hidden_channels) < 2:
             raise ValueError("channels must contain at least two levels.")
 
-        self.num_phases = num_phases
-        self.downsample_factor = 2 ** (len(hidden_channels) - 1)
         self.gradient_checkpointing = gradient_checkpointing
         self.time_embedding = SinusoidalTimeEmbedding(embedding_channels)
         self.time_mlp = nn.Sequential(
@@ -81,7 +79,6 @@ class PairCritic2D(nn.Module):
         x_current: torch.Tensor,
         time: torch.Tensor,
     ) -> CriticScores:
-        self._check_inputs(x_previous, x_current, time)
         embedding = self.time_mlp(
             self.time_embedding(time.to(device=x_previous.device)).to(
                 dtype=x_previous.dtype
@@ -119,26 +116,3 @@ class PairCritic2D(nn.Module):
                 use_reentrant=False,
             )
         return block(inputs, embedding)
-
-    def _check_inputs(
-        self,
-        x_previous: torch.Tensor,
-        x_current: torch.Tensor,
-        time: torch.Tensor,
-    ) -> None:
-        if not isinstance(x_previous, torch.Tensor) or x_previous.ndim != 4:
-            raise ValueError("x_previous must have shape [B, P, H, W].")
-        if not isinstance(x_current, torch.Tensor) or x_current.ndim != 4:
-            raise ValueError("x_current must have shape [B, P, H, W].")
-        if x_previous.shape != x_current.shape:
-            raise ValueError("x_previous and x_current must have the same shape.")
-        if not x_previous.is_floating_point() or not x_current.is_floating_point():
-            raise ValueError("slice pairs must be floating point.")
-        if x_previous.shape[1] != self.num_phases:
-            raise ValueError("slice pairs have the wrong number of phase channels.")
-        if any(size % self.downsample_factor for size in x_previous.shape[-2:]):
-            raise ValueError(
-                f"every spatial size must be divisible by {self.downsample_factor}."
-            )
-        if not isinstance(time, torch.Tensor) or time.shape != (x_previous.shape[0],):
-            raise ValueError("time must have shape [B].")

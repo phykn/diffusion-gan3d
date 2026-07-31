@@ -465,11 +465,6 @@ class Trainer:
                     non_blocking=True,
                 )
             )
-            if labels.ndim != 3 or labels.shape[-2:] != (
-                self.patch_size,
-                self.patch_size,
-            ):
-                raise ValueError(f"axis {axis} anchor batch must have shape [B, H, W].")
             indices = torch.randint(
                 labels.shape[0],
                 (self.volume_batch_size,),

@@ -54,7 +54,6 @@ def main() -> None:
     )
     generated = sampler.generate(
         anchors=anchors,
-        enforce=False,
     )
     generated_slices = slice_axis(generated, AXIS)
     slice_accuracy = (

@@ -10,37 +10,6 @@ class Particle:
     label: int
 
 
-@dataclass(frozen=True)
-class PackingReport:
-    requested_fractions: tuple[float, float, float]
-    achieved_fractions: tuple[float, float, float]
-    particle_counts: tuple[int, int]
-    phase_contact_counts: tuple[int, int, int]
-    particle_contacts: int
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "requested_fractions": list(self.requested_fractions),
-            "achieved_fractions": list(self.achieved_fractions),
-            "particle_counts": {
-                "small": self.particle_counts[0],
-                "big": self.particle_counts[1],
-            },
-            "face_contacts": {
-                "background_small": self.phase_contact_counts[0],
-                "background_big": self.phase_contact_counts[1],
-                "small_big": self.phase_contact_counts[2],
-                "particle_pairs": self.particle_contacts,
-            },
-        }
-
-
-@dataclass(frozen=True)
-class Geometry:
-    labels: np.ndarray
-    report: PackingReport
-
-
 def pack(
     *,
     size: int,
@@ -49,7 +18,7 @@ def pack(
     big_fraction: float,
     small_fraction: float,
     big_elongation: float,
-) -> Geometry:
+) -> np.ndarray:
     small_r = float(small_radius)
     # Packing outside the retained field reduces boundary-biased particle fractions.
     work = size * 3 // 2
@@ -73,28 +42,7 @@ def pack(
             elong=big_elongation,
         )
 
-    vol, ids, parts = _crop(vol, ids, parts, size)
-    counts = np.bincount(vol.ravel(), minlength=3)
-    got = tuple(float(value / vol.size) for value in counts)
-    want = (
-        1.0 - small_fraction - big_fraction,
-        small_fraction,
-        big_fraction,
-    )
-    report = PackingReport(
-        requested_fractions=want,
-        achieved_fractions=got,
-        particle_counts=(
-            sum(part.label == 1 for part in parts),
-            sum(part.label == 2 for part in parts),
-        ),
-        phase_contact_counts=_count_phase_contacts(vol),
-        particle_contacts=_count_particle_contacts(ids),
-    )
-    return Geometry(
-        labels=vol,
-        report=report,
-    )
+    return _crop(vol, size)
 
 
 def _place(
@@ -160,34 +108,12 @@ def _place(
 
 def _crop(
     vol: np.ndarray,
-    ids: np.ndarray,
-    parts: list[Particle],
     size: int,
-) -> tuple[np.ndarray, np.ndarray, list[Particle]]:
+) -> np.ndarray:
     low = (vol.shape[0] - size) // 2
     high = low + size
     key = (slice(low, high),) * 3
-    vol = vol[key].copy()
-    ids = ids[key].copy()
-
-    used = np.unique(ids[ids >= 0])
-    lookup = np.full(len(parts), -1, dtype=np.int32)
-    lookup[used] = np.arange(len(used), dtype=np.int32)
-    mask = ids >= 0
-    ids[mask] = lookup[ids[mask]]
-
-    shift = np.full(3, low)
-    kept = [
-        Particle(
-            center=tuple(
-                int(value) for value in np.asarray(parts[index].center) - shift
-            ),
-            axes=parts[index].axes,
-            label=parts[index].label,
-        )
-        for index in used
-    ]
-    return vol, ids, kept
+    return vol[key].copy()
 
 
 def _make_particle(
@@ -256,37 +182,3 @@ def _invalidate_centers(
         low[2] : high[2],
     ]
     view[hit] = False
-
-
-def _count_phase_contacts(vol: np.ndarray) -> tuple[int, int, int]:
-    pairs = ((0, 1), (0, 2), (1, 2))
-    counts = [0, 0, 0]
-    for axis in range(3):
-        first = [slice(None)] * 3
-        second = [slice(None)] * 3
-        first[axis] = slice(None, -1)
-        second[axis] = slice(1, None)
-        a = vol[tuple(first)]
-        b = vol[tuple(second)]
-        for index, (left, right) in enumerate(pairs):
-            counts[index] += int(
-                np.count_nonzero(
-                    ((a == left) & (b == right)) | ((a == right) & (b == left))
-                )
-            )
-    return tuple(counts)
-
-
-def _count_particle_contacts(ids: np.ndarray) -> int:
-    hits: set[tuple[int, int]] = set()
-    for axis in range(3):
-        first = [slice(None)] * 3
-        second = [slice(None)] * 3
-        first[axis] = slice(None, -1)
-        second[axis] = slice(1, None)
-        a = ids[tuple(first)]
-        b = ids[tuple(second)]
-        mask = (a >= 0) & (b >= 0) & (a != b)
-        for left, right in zip(a[mask], b[mask], strict=True):
-            hits.add(tuple(sorted((int(left), int(right)))))
-    return len(hits)

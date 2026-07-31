@@ -31,44 +31,18 @@ def update_ema(
     if not math.isfinite(decay) or not 0.0 <= decay < 1.0:
         raise ValueError("decay must be finite and in [0, 1).")
 
-    average_params = dict(average.named_parameters())
-    online_params = dict(online.named_parameters())
-    _require_matching_state("parameters", average_params, online_params)
-    for name, target in average_params.items():
-        source = online_params[name].detach()
-        _require_compatible_tensor(name, target, source)
+    for target, source in zip(
+        average.parameters(),
+        online.parameters(),
+        strict=True,
+    ):
         target.lerp_(source, 1.0 - decay)
 
-    average_buffers = dict(average.named_buffers())
-    online_buffers = dict(online.named_buffers())
-    _require_matching_state("buffers", average_buffers, online_buffers)
-    for name, target in average_buffers.items():
-        source = online_buffers[name].detach()
-        _require_compatible_tensor(name, target, source)
+    for target, source in zip(
+        average.buffers(),
+        online.buffers(),
+        strict=True,
+    ):
         target.copy_(source)
 
     average.eval()
-
-
-def _require_matching_state(
-    label: str,
-    average: dict[str, torch.Tensor],
-    online: dict[str, torch.Tensor],
-) -> None:
-    if average.keys() != online.keys():
-        raise ValueError(f"EMA {label} must match the online model exactly.")
-
-
-def _require_compatible_tensor(
-    name: str,
-    target: torch.Tensor,
-    source: torch.Tensor,
-) -> None:
-    if (
-        target.shape != source.shape
-        or target.dtype != source.dtype
-        or target.device != source.device
-    ):
-        raise ValueError(
-            f"EMA tensor {name} must match the online tensor shape, dtype, and device."
-        )
