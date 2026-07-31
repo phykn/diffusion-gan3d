@@ -1,3 +1,5 @@
+from collections.abc import Iterable
+
 import torch
 import torch.nn.functional as F
 
@@ -31,6 +33,37 @@ def sample_pairs(
     previous = previous.movedim(axis + 2, 2)
     current = current.movedim(axis + 2, 2)
     return previous[batch_idx, :, plane_idx], current[batch_idx, :, plane_idx]
+
+
+def phase_fractions(
+    label_batches: Iterable[torch.Tensor],
+    num_phases: int,
+) -> torch.Tensor:
+    if (
+        not isinstance(num_phases, int)
+        or isinstance(num_phases, bool)
+        or num_phases < 2
+    ):
+        raise ValueError("num_phases must be an integer of at least 2.")
+
+    counts = None
+    for labels in label_batches:
+        if not isinstance(labels, torch.Tensor):
+            raise TypeError("label batches must contain tensors.")
+        if labels.dtype != torch.long:
+            raise ValueError("label batches must have dtype torch.long.")
+        if labels.numel() == 0:
+            raise ValueError("label batches must not be empty.")
+        if int(labels.min()) < 0 or int(labels.max()) >= num_phases:
+            raise ValueError("label batches contain a phase outside num_phases.")
+        batch_counts = torch.bincount(labels.flatten(), minlength=num_phases)
+        counts = batch_counts if counts is None else counts + batch_counts
+
+    if counts is None:
+        raise ValueError("label_batches must not be empty.")
+    fractions = counts.to(torch.float32)
+    fractions.div_(counts.sum())
+    return fractions.unsqueeze(0)
 
 
 def encode_labels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:

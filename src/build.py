@@ -152,9 +152,11 @@ def build_trainer(
         r1_gamma=cfg.optim.r1_gamma,
         r1_interval=cfg.optim.r1_interval,
         critic_local_weight=cfg.optim.critic_local_weight,
-        anchor_probability=cfg.anchor.probability,
+        anchor_dropout=cfg.anchor.dropout,
         anchor_loss_weight=cfg.anchor.loss_weight,
         anchor_max_planes=cfg.anchor.max_planes,
+        fraction_loss_weight=cfg.fraction.loss_weight,
+        fraction_dropout=cfg.fraction.dropout,
         latent_channels=cfg.model.latent_channels,
         amp_enabled=use_amp,
     )

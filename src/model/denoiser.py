@@ -113,12 +113,22 @@ class Denoiser3D(nn.Module):
         self.output_norm = nn.GroupNorm(choose_groups(channels[0]), channels[0])
         self.output = nn.Conv3d(channels[0], num_phases, 3, padding=1)
 
+        fraction_output = nn.Linear(embedding_channels, embedding_channels)
+        self.fraction_mlp = nn.Sequential(
+            nn.Linear(num_phases, embedding_channels),
+            nn.SiLU(),
+            fraction_output,
+        )
+        nn.init.zeros_(fraction_output.weight)
+        nn.init.zeros_(fraction_output.bias)
+
     def forward(
         self,
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
         *,
+        fraction: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -126,6 +136,7 @@ class Denoiser3D(nn.Module):
             x_current,
             time,
             latent,
+            fraction=fraction,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
         )
@@ -137,10 +148,11 @@ class Denoiser3D(nn.Module):
         time: torch.Tensor,
         latent: torch.Tensor,
         *,
+        fraction: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        embedding = self._embed(x_current, time, latent)
+        embedding = self._embed(x_current, time, latent, fraction=fraction)
         hidden = self.input(x_current)
         anchor_features = self._encode_anchor(
             x_current,
@@ -184,12 +196,18 @@ class Denoiser3D(nn.Module):
         inputs: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
+        *,
+        fraction: torch.Tensor | None,
     ) -> torch.Tensor:
         time = time.to(device=inputs.device)
         latent = latent.to(device=inputs.device, dtype=inputs.dtype)
         time_embedding = self.time_mlp(self.time_embedding(time).to(dtype=inputs.dtype))
         latent_embedding = self.latent_mlp(latent)
-        return (time_embedding + latent_embedding) * _INV_SQRT_TWO
+        embedding = (time_embedding + latent_embedding) * _INV_SQRT_TWO
+        if fraction is not None:
+            fraction = fraction.to(device=inputs.device, dtype=inputs.dtype)
+            embedding = embedding + self.fraction_mlp(fraction)
+        return embedding
 
     def _run_block(
         self,

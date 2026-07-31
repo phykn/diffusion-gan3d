@@ -36,6 +36,7 @@ def generate_scaled(
     sampler: Sampler,
     *,
     blocks: int | Sequence[int],
+    fraction: Sequence[float] | None = None,
     overlap: int | None = None,
     progress: bool = True,
 ) -> tuple[torch.Tensor, ScaleStats]:
@@ -50,6 +51,7 @@ def generate_scaled(
         raise ValueError("overlap must be between 1 and half the block size.")
     if not isinstance(progress, bool):
         raise TypeError("progress must be a boolean.")
+    fraction_tensor = sampler.prepare_fraction(fraction)
 
     stride = block_size - overlap
     starts = tuple(tuple(index * stride for index in range(count)) for count in grid)
@@ -108,6 +110,7 @@ def generate_scaled(
                 axis_weights=axis_weights,
                 times=times,
                 latent=latent,
+                fraction=fraction_tensor,
             )
 
         current = sampler.diffusion.sample_posterior(
@@ -215,6 +218,7 @@ def _accumulate_prediction(
     axis_weights: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     times: torch.Tensor,
     latent: torch.Tensor,
+    fraction: torch.Tensor | None,
 ) -> None:
     key = (slice(None), slice(None), *tile.region)
     current_tile = current[key]
@@ -223,7 +227,15 @@ def _accumulate_prediction(
         dtype=torch.float16,
         enabled=sampler.use_amp,
     ):
-        clean_tile = sampler.model(current_tile, times, latent)
+        if fraction is None:
+            clean_tile = sampler.model(current_tile, times, latent)
+        else:
+            clean_tile = sampler.model(
+                current_tile,
+                times,
+                latent,
+                fraction=fraction,
+            )
 
     weighted.copy_(clean_tile)
     weighted.mul_(axis_weights[tile.roles[0]].view(1, 1, -1, 1, 1))

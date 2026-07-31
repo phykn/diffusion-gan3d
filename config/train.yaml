@@ -23,9 +23,13 @@ diffusion:
   beta_max: 20.0
 
 anchor:
-  probability: 0.75
+  dropout: 0.25
   loss_weight: 1.0
   max_planes: 3
+
+fraction:
+  loss_weight: 1.0
+  dropout: 0.1
 
 optim:
   generator_lr: 0.00016

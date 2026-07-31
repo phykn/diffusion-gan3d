@@ -39,12 +39,40 @@ class Sampler:
         self.anchor_enabled = anchor_enabled
         self.use_amp = use_amp
 
+    def prepare_fraction(
+        self,
+        fraction: Sequence[float] | None,
+    ) -> torch.Tensor | None:
+        if fraction is None:
+            return None
+        if len(fraction) != self.num_phases:
+            raise ValueError(
+                f"fraction must contain exactly {self.num_phases} phase values."
+            )
+
+        values = torch.as_tensor(
+            fraction,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        if values.ndim != 1:
+            raise ValueError("fraction must be a one-dimensional phase vector.")
+        if not bool(torch.isfinite(values).all()):
+            raise ValueError("fraction values must be finite.")
+        if bool((values < 0.0).any()):
+            raise ValueError("fraction values must be non-negative.")
+        if not bool(torch.isclose(values.sum(), values.new_tensor(1.0))):
+            raise ValueError("fraction values must sum to 1.")
+        return values.unsqueeze(0)
+
     @torch.no_grad()
     def sample(
         self,
         *,
         anchors: Sequence[PlaneAnchor] = (),
+        fraction: Sequence[float] | None = None,
     ) -> torch.Tensor:
+        fraction_tensor = self.prepare_fraction(fraction)
         terminal = torch.randn(
             1,
             self.num_phases,
@@ -64,14 +92,16 @@ class Sampler:
         )
         if anchor is not None and not self.anchor_enabled:
             raise ValueError("selected weights were trained with anchors disabled.")
-        kwargs = (
-            None
-            if anchor is None
-            else {
-                "anchor_image": anchor.image,
-                "anchor_mask": anchor.mask,
-            }
-        )
+        kwargs = {}
+        if anchor is not None:
+            kwargs.update(
+                {
+                    "anchor_image": anchor.image,
+                    "anchor_mask": anchor.mask,
+                }
+            )
+        if fraction_tensor is not None:
+            kwargs["fraction"] = fraction_tensor
         with torch.autocast(
             device_type=self.device.type,
             dtype=torch.float16,
@@ -81,7 +111,7 @@ class Sampler:
                 self.model,
                 terminal,
                 self.latent_channels,
-                model_kwargs=kwargs,
+                model_kwargs=kwargs or None,
             )
         probabilities = (clean.float() + 1.0).mul_(0.5).clamp_(0.0, 1.0)
         probabilities.div_(
@@ -96,6 +126,10 @@ class Sampler:
         self,
         *,
         anchors: Sequence[PlaneAnchor] = (),
+        fraction: Sequence[float] | None = None,
     ) -> torch.Tensor:
-        probabilities = self.sample(anchors=anchors)
+        probabilities = self.sample(
+            anchors=anchors,
+            fraction=fraction,
+        )
         return probabilities.argmax(dim=0).to(torch.uint8)

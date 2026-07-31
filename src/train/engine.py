@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
 from ..data.dataset import AXES, BatchStream
-from ..data.slices import encode_labels, sample_pairs
+from ..data.slices import encode_labels, phase_fractions, sample_pairs
 from ..diffusion import Diffusion
 from ..model.denoiser import Denoiser3D
 from .ema import update_ema
@@ -38,6 +38,13 @@ class Metrics:
     generator_local: float = 0.0
     critic_global: float = 0.0
     critic_local: float = 0.0
+    fraction_loss: float = 0.0
+    fraction_active: bool = False
+    target_fractions: tuple[float, ...] = ()
+    target_fraction_stds: tuple[float, ...] = ()
+    soft_fractions: tuple[float, ...] = ()
+    hard_fractions: tuple[float, ...] = ()
+    hard_fraction_mae: float = 0.0
 
 
 class Trainer:
@@ -61,9 +68,11 @@ class Trainer:
         r1_gamma: float,
         r1_interval: int,
         critic_local_weight: float,
-        anchor_probability: float,
+        anchor_dropout: float,
         anchor_loss_weight: float,
         anchor_max_planes: int,
+        fraction_loss_weight: float,
+        fraction_dropout: float,
         latent_channels: int,
         amp_enabled: bool,
     ) -> None:
@@ -88,11 +97,16 @@ class Trainer:
         self.r1_gamma = r1_gamma
         self.r1_interval = r1_interval
         self.critic_local_weight = critic_local_weight
-        self.anchor_probability = anchor_probability
+        self.anchor_dropout = anchor_dropout
         self.anchor_loss_weight = anchor_loss_weight
         self.anchor_max_planes = anchor_max_planes
+        self.fraction_loss_weight = fraction_loss_weight
+        self.fraction_dropout = fraction_dropout
         self.latent_channels = latent_channels
         self.amp_enabled = amp_enabled
+        self._target_count = 0
+        self._target_mean = torch.zeros(num_phases, dtype=torch.float64)
+        self._target_m2 = torch.zeros(num_phases, dtype=torch.float64)
 
     def fit(
         self,
@@ -181,10 +195,22 @@ class Trainer:
             or not 0 <= transition < self.diffusion.timesteps
         ):
             raise ValueError("transition is outside the diffusion schedule.")
-        anchor = self._sample_anchor()
-        previous_volume, current_volume, clean_logits = self._generate_pair(
+        real_batches = self._next_real_batches()
+        target_fraction = phase_fractions(
+            real_batches.values(),
+            self.num_phases,
+        ).expand(self.volume_batch_size, -1)
+        fraction = self._apply_fraction_dropout(target_fraction)
+        anchor = self._sample_anchor(real_batches)
+        (
+            previous_volume,
+            current_volume,
+            clean_logits,
+            clean_probability,
+        ) = self._generate_pair(
             transition,
             anchor,
+            fraction,
         )
         fake_pairs = {
             axis: sample_pairs(
@@ -204,6 +230,7 @@ class Trainer:
         ) = self._update_critics(
             transition,
             fake_pairs,
+            real_batches,
             step,
         )
         (
@@ -213,12 +240,23 @@ class Trainer:
             generator_local,
             anchor_loss,
             anchor_accuracy,
+            fraction_loss,
         ) = self._update_denoiser(
             transition,
             fake_pairs,
             clean_logits,
+            clean_probability,
             anchor,
+            target_fraction,
+            fraction_active=fraction is not None,
         )
+        target_values, soft_values, hard_values, hard_mae = (
+            self._summarize_fractions(
+                clean_probability,
+                target_fraction,
+            )
+        )
+        target_stds = self._update_target_statistics(target_values)
         update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
         return Metrics(
             generator=generator_value,
@@ -235,6 +273,13 @@ class Trainer:
             generator_local=generator_local,
             critic_global=critic_global,
             critic_local=critic_local,
+            fraction_loss=fraction_loss,
+            fraction_active=fraction is not None,
+            target_fractions=target_values,
+            target_fraction_stds=target_stds,
+            soft_fractions=soft_values,
+            hard_fractions=hard_values,
+            hard_fraction_mae=hard_mae,
         )
 
     @staticmethod
@@ -251,8 +296,19 @@ class Trainer:
         writer.add_scalar("loss/critic_global", metrics.critic_global, step)
         writer.add_scalar("loss/critic_local_raw", metrics.critic_local, step)
         writer.add_scalar("loss/r1_raw", metrics.r1, step)
+        writer.add_scalar("loss/fraction", metrics.fraction_loss, step)
         writer.add_scalar("train/transition", metrics.transition, step)
         writer.add_scalar("conditioning/anchor_planes", metrics.anchor_planes, step)
+        writer.add_scalar(
+            "conditioning/fraction_active",
+            float(metrics.fraction_active),
+            step,
+        )
+        writer.add_scalar(
+            "conditioning/fraction_hard_mae",
+            metrics.hard_fraction_mae,
+            step,
+        )
         if metrics.anchor_planes:
             writer.add_scalar("loss/anchor", metrics.anchor_loss, step)
             writer.add_scalar(
@@ -277,12 +333,43 @@ class Trainer:
             )
         for axis, value in zip(AXES, metrics.critic_axes, strict=True):
             writer.add_scalar(f"loss/critic_axis_{axis}", value, step)
+        for phase, values in enumerate(
+            zip(
+                metrics.target_fractions,
+                metrics.target_fraction_stds,
+                metrics.soft_fractions,
+                metrics.hard_fractions,
+                strict=True,
+            )
+        ):
+            target, target_std, soft, hard = values
+            writer.add_scalar(
+                f"conditioning/fraction_target_{phase}",
+                target,
+                step,
+            )
+            writer.add_scalar(
+                f"conditioning/fraction_target_std_{phase}",
+                target_std,
+                step,
+            )
+            writer.add_scalar(
+                f"conditioning/fraction_soft_{phase}",
+                soft,
+                step,
+            )
+            writer.add_scalar(
+                f"conditioning/fraction_hard_{phase}",
+                hard,
+                step,
+            )
 
     def _generate_pair(
         self,
         transition: int,
         anchor: AnchorCondition | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        fraction: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         shape = (
             self.volume_batch_size,
             self.num_phases,
@@ -295,7 +382,13 @@ class Trainer:
             for index in reversed(range(transition + 1, self.diffusion.timesteps)):
                 times = self._make_times(index, current.shape[0])
                 latent = self._sample_latent(current.shape[0], dtype=current.dtype)
-                clean = self._denoise(current, times, latent, anchor)
+                clean = self._denoise(
+                    current,
+                    times,
+                    latent,
+                    anchor,
+                    fraction,
+                )
                 if anchor is not None:
                     clean = anchor.project(clean)
                 current = self.diffusion.sample_posterior(
@@ -313,6 +406,7 @@ class Trainer:
                 times,
                 latent,
                 anchor,
+                fraction,
             )
             clean = self.denoiser.decode(clean_logits)
             if anchor is not None:
@@ -322,12 +416,14 @@ class Trainer:
                 clean,
                 transition,
             )
-        return previous, current, clean_logits
+        clean_probability = (clean + 1.0) * 0.5
+        return previous, current, clean_logits, clean_probability
 
     def _update_critics(
         self,
         transition: int,
         fake_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        real_batches: dict[int, torch.Tensor],
         step: int,
     ) -> tuple[list[float], float, float, float]:
         apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
@@ -341,14 +437,7 @@ class Trainer:
             optimizer = self.critic_optimizers[str(axis)]
             optimizer.zero_grad(set_to_none=True)
 
-            labels = (
-                self.streams[axis]
-                .next()
-                .to(
-                    self.device,
-                    non_blocking=True,
-                )
-            )
+            labels = real_batches[axis]
             real_clean = encode_labels(labels, self.num_phases)
             real_times = self._make_times(transition, real_clean.shape[0])
             real_previous, real_current = self.diffusion.sample_pair(
@@ -388,8 +477,12 @@ class Trainer:
         transition: int,
         fake_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]],
         clean_logits: torch.Tensor,
+        clean_probability: torch.Tensor,
         anchor: AnchorCondition | None,
-    ) -> tuple[float, float, float, float, float, float]:
+        target_fraction: torch.Tensor,
+        *,
+        fraction_active: bool,
+    ) -> tuple[float, float, float, float, float, float, float]:
         self.denoiser_optimizer.zero_grad(set_to_none=True)
         for critic in self.critics.values():
             critic.requires_grad_(False)
@@ -417,15 +510,28 @@ class Trainer:
                 anchor_accuracy = adversarial.new_zeros(())
                 if anchor is not None:
                     selected = anchor.mask[:, 0]
-                    target = anchor.labels[selected]
+                    anchor_target = anchor.labels[selected]
                     selected_logits = clean_logits.movedim(1, -1)[selected]
-                    anchor_loss = F.cross_entropy(selected_logits, target)
+                    anchor_loss = F.cross_entropy(selected_logits, anchor_target)
                     anchor_accuracy = (
-                        (selected_logits.argmax(dim=1) == target)
+                        (selected_logits.argmax(dim=1) == anchor_target)
                         .to(torch.float32)
                         .mean()
                     )
-                total = adversarial + self.anchor_loss_weight * anchor_loss
+                fraction_loss = adversarial.new_zeros(())
+                if fraction_active:
+                    predicted_fraction = clean_probability.mean(dim=(2, 3, 4))
+                    fraction_loss = (
+                        (predicted_fraction - target_fraction)
+                        .abs()
+                        .sum(dim=1)
+                        .mean()
+                    )
+                total = (
+                    adversarial
+                    + self.anchor_loss_weight * anchor_loss
+                    + self.fraction_loss_weight * fraction_loss
+                )
             self.scaler.scale(total).backward()
             self.scaler.step(self.denoiser_optimizer)
             self.scaler.update()
@@ -439,12 +545,16 @@ class Trainer:
             float(local_loss.detach()),
             float(anchor_loss.detach()),
             float(anchor_accuracy.detach()),
+            float(fraction_loss.detach()),
         )
 
-    def _sample_anchor(self) -> AnchorCondition | None:
-        if self.anchor_probability <= 0.0:
+    def _sample_anchor(
+        self,
+        real_batches: dict[int, torch.Tensor],
+    ) -> AnchorCondition | None:
+        if self.anchor_dropout >= 1.0:
             return None
-        if not bool(torch.rand(()) < self.anchor_probability):
+        if not bool(torch.rand(()) < 1.0 - self.anchor_dropout):
             return None
         count = int(
             torch.randint(
@@ -457,14 +567,7 @@ class Trainer:
         axes = torch.randperm(len(AXES))[:count].tolist()
         planes = []
         for axis in axes:
-            labels = (
-                self.streams[axis]
-                .next()
-                .to(
-                    self.device,
-                    non_blocking=True,
-                )
-            )
+            labels = real_batches[axis]
             indices = torch.randint(
                 labels.shape[0],
                 (self.volume_batch_size,),
@@ -500,16 +603,17 @@ class Trainer:
         times: torch.Tensor,
         latent: torch.Tensor,
         anchor: AnchorCondition | None,
+        fraction: torch.Tensor | None,
     ) -> torch.Tensor:
-        if anchor is None:
+        if anchor is None and fraction is None:
             return self.denoiser(current, times, latent)
-        return self.denoiser(
-            current,
-            times,
-            latent,
-            anchor_image=anchor.image,
-            anchor_mask=anchor.mask,
-        )
+        kwargs = {}
+        if anchor is not None:
+            kwargs["anchor_image"] = anchor.image
+            kwargs["anchor_mask"] = anchor.mask
+        if fraction is not None:
+            kwargs["fraction"] = fraction
+        return self.denoiser(current, times, latent, **kwargs)
 
     def _predict_logits(
         self,
@@ -517,15 +621,79 @@ class Trainer:
         times: torch.Tensor,
         latent: torch.Tensor,
         anchor: AnchorCondition | None,
+        fraction: torch.Tensor | None,
     ) -> torch.Tensor:
-        if anchor is None:
+        if anchor is None and fraction is None:
             return self.denoiser.predict_logits(current, times, latent)
-        return self.denoiser.predict_logits(
-            current,
-            times,
-            latent,
-            anchor_image=anchor.image,
-            anchor_mask=anchor.mask,
+        kwargs = {}
+        if anchor is not None:
+            kwargs["anchor_image"] = anchor.image
+            kwargs["anchor_mask"] = anchor.mask
+        if fraction is not None:
+            kwargs["fraction"] = fraction
+        return self.denoiser.predict_logits(current, times, latent, **kwargs)
+
+    def _next_real_batches(self) -> dict[int, torch.Tensor]:
+        return {
+            axis: self.streams[axis]
+            .next()
+            .to(
+                self.device,
+                non_blocking=True,
+            )
+            for axis in AXES
+        }
+
+    def _apply_fraction_dropout(
+        self,
+        target: torch.Tensor,
+    ) -> torch.Tensor | None:
+        dropout = self.fraction_dropout
+        if dropout <= 0.0:
+            return target
+        if dropout >= 1.0 or bool(torch.rand(()) < dropout):
+            return None
+        return target
+
+    def _update_target_statistics(
+        self,
+        target: tuple[float, ...],
+    ) -> tuple[float, ...]:
+        values = torch.tensor(target, dtype=torch.float64)
+        self._target_count += 1
+        delta = values - self._target_mean
+        self._target_mean.add_(delta / self._target_count)
+        self._target_m2.add_(delta * (values - self._target_mean))
+        if self._target_count < 2:
+            return tuple(0.0 for _ in target)
+        std = (self._target_m2 / (self._target_count - 1)).sqrt()
+        return tuple(float(value) for value in std)
+
+    @staticmethod
+    def _summarize_fractions(
+        probability: torch.Tensor,
+        target: torch.Tensor,
+    ) -> tuple[
+        tuple[float, ...],
+        tuple[float, ...],
+        tuple[float, ...],
+        float,
+    ]:
+        values = probability.detach().to(torch.float32)
+        target_values = target.detach().to(torch.float32).mean(dim=0)
+        soft_values = values.mean(dim=(0, 2, 3, 4))
+        hard_labels = values.argmax(dim=1)
+        hard_values = torch.bincount(
+            hard_labels.flatten(),
+            minlength=values.shape[1],
+        ).to(torch.float32)
+        hard_values.div_(hard_labels.numel())
+        hard_mae = (hard_values - target_values).abs().mean()
+        return (
+            tuple(float(value) for value in target_values),
+            tuple(float(value) for value in soft_values),
+            tuple(float(value) for value in hard_values),
+            float(hard_mae),
         )
 
     def _make_times(self, transition: int, batch: int) -> torch.Tensor:

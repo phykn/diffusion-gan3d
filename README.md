@@ -27,12 +27,28 @@ python gen_data.py
 A plane anchor provides a known categorical slice at a selected axis and depth. During anchored training, one to three real slices condition every reverse step. Clean predictions are projected to the anchor labels, cross-entropy trains the anchored logits, and the adversarial objective still evaluates sampled slices from the generated volume.
 
 During sampling, anchors remain conditioning inputs throughout denoising; generated voxels are not overwritten.
+`anchor.dropout` is the probability that an otherwise available anchor condition is omitted for a training step.
+
+## Volume fractions
+
+Each training step computes one phase-fraction target from all pixels in the three real slice batches. The same target conditions every reverse transition, and an L1 loss compares it with the phase probabilities averaged over the complete generated 3D volume. Step-level condition dropout preserves an explicit unconditional generation path; the critics remain unconditional.
+`fraction.dropout` controls that step-level omission probability.
+
+Generation accepts either that unconditional path or a manual phase vector:
+
+```python
+sampler.generate(fraction=None)
+sampler.generate(fraction=(0.5, 0.1, 0.4))
+```
+
+Manual values must match `num_phases`, be finite and non-negative, and sum to one. Anchors and manual fractions can be used together.
 
 ## Scale-up
 
 Scale-up performs joint tiled diffusion from one global noise volume. At every reverse transition, overlapping tiles share a latent vector, their clean predictions are blended in global coordinates, and one global posterior update is applied. Overlaps therefore evolve jointly instead of stitching independently completed blocks.
 
 Scale-up does not accept anchors or replace generated voxels. Categorical labels are selected after the global reverse process completes.
+It accepts the same optional `fraction` argument as regular generation and reuses one condition across every tile and reverse transition.
 
 ## Training and outputs
 

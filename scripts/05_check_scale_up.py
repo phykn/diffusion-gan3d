@@ -19,6 +19,7 @@ from src.generate.scale import generate_scaled
 
 BLOCKS = (4, 4, 4)
 OVERLAP = 32
+FRACTION = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ def main() -> None:
         sampler,
         blocks=BLOCKS,
         overlap=OVERLAP,
+        fraction=FRACTION,
     )
     elapsed = perf_counter() - started
     shape_name = "x".join(str(length) for length in stats.shape)

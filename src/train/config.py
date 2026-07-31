@@ -65,14 +65,14 @@ class DiffusionConfig:
 
 @dataclass(frozen=True)
 class AnchorConfig:
-    probability: float = 0.0
+    dropout: float = 1.0
     loss_weight: float = 0.0
     max_planes: int = 1
 
     def __post_init__(self) -> None:
-        probability = require_number(
-            "anchor.probability",
-            self.probability,
+        dropout = require_number(
+            "anchor.dropout",
+            self.dropout,
             minimum=0.0,
             maximum=1.0,
         )
@@ -84,15 +84,34 @@ class AnchorConfig:
         require_int("anchor.max_planes", self.max_planes, minimum=1)
         if self.max_planes > 3:
             raise ValueError("anchor.max_planes must not exceed 3.")
-        if (probability > 0.0) != (weight > 0.0):
+        if (dropout < 1.0) != (weight > 0.0):
             raise ValueError(
-                "anchor.probability and anchor.loss_weight must both be "
-                "positive or both be zero."
+                "anchor.loss_weight must be positive exactly when "
+                "anchor.dropout is less than 1."
             )
 
     @property
     def enabled(self) -> bool:
-        return self.probability > 0.0
+        return self.dropout < 1.0
+
+
+@dataclass(frozen=True)
+class FractionConfig:
+    loss_weight: float
+    dropout: float
+
+    def __post_init__(self) -> None:
+        require_number(
+            "fraction.loss_weight",
+            self.loss_weight,
+            minimum=0.0,
+        )
+        require_number(
+            "fraction.dropout",
+            self.dropout,
+            minimum=0.0,
+            maximum=1.0,
+        )
 
 
 @dataclass(frozen=True)
@@ -163,6 +182,7 @@ class TrainConfig:
     model: ModelConfig
     diffusion: DiffusionConfig
     anchor: AnchorConfig
+    fraction: FractionConfig
     optim: OptimConfig
     train: LoopConfig
 
@@ -186,6 +206,7 @@ _SECTIONS = {
     "model": ModelConfig,
     "diffusion": DiffusionConfig,
     "anchor": AnchorConfig,
+    "fraction": FractionConfig,
     "optim": OptimConfig,
     "train": LoopConfig,
 }
@@ -217,6 +238,11 @@ def load_config(path: str | Path) -> TrainConfig:
             "diffusion",
         ),
         anchor=_build_section(AnchorConfig, values["anchor"], "anchor"),
+        fraction=_build_section(
+            FractionConfig,
+            values["fraction"],
+            "fraction",
+        ),
         optim=_build_section(OptimConfig, values["optim"], "optim"),
         train=train,
     )

@@ -11,6 +11,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.build import load_sampler
 from src.generate.sample import find_weights
 
+FRACTION = None
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -24,7 +26,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = find_weights(PROJECT_ROOT / "run")
     sampler = load_sampler(weights, device=device)
-    labels = sampler.generate()
+    labels = sampler.generate(fraction=FRACTION)
     if args.napari:
         _show_napari(labels)
     else:
