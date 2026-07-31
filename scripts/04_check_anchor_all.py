@@ -17,14 +17,11 @@ from scripts._anchor_check import (
     score_phases,
     slice_axis,
 )
-from src.generate import (
-    PlaneAnchor,
-    Sampler,
-    find_weights,
-    load_model,
-)
+from src.anchor import PlaneAnchor
+from src.build import load_sampler
+from src.generate.sample import find_weights
 
-VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tif"
+VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tiff"
 AXIS = 0
 
 
@@ -37,15 +34,14 @@ def main() -> None:
     weights = (
         find_weights(PROJECT_ROOT / "run") if args.weights is None else args.weights
     )
-    model, cfg = load_model(weights, device=device)
-    if not cfg.anchor.enabled:
+    sampler = load_sampler(weights, device=device)
+    if not sampler.anchor_enabled:
         raise ValueError("selected weights were trained with anchors disabled.")
 
-    target, starts = load_volume(
+    target = load_volume(
         VOLUME_PATH,
-        crop_size=cfg.data.crop_size,
-        output_size=cfg.data.patch_size,
-        num_phases=cfg.data.num_phases,
+        patch_size=sampler.patch_size,
+        num_phases=sampler.num_phases,
     )
     target_slices = slice_axis(target, AXIS)
     anchors = tuple(
@@ -56,12 +52,9 @@ def main() -> None:
         )
         for index in range(target_slices.shape[0])
     )
-    generated = Sampler(
-        model,
-        cfg,
-        device=device,
-    ).generate(
+    generated = sampler.generate(
         anchors=anchors,
+        enforce=False,
     )
     generated_slices = slice_axis(generated, AXIS)
     slice_accuracy = (
@@ -73,7 +66,7 @@ def main() -> None:
     iou, recall = score_phases(
         generated,
         target,
-        num_phases=cfg.data.num_phases,
+        num_phases=sampler.num_phases,
     )
 
     _show(
@@ -83,11 +76,10 @@ def main() -> None:
         slice_accuracy,
         worst_index=worst_index,
         overall_accuracy=overall_accuracy,
-        num_phases=cfg.data.num_phases,
+        num_phases=sampler.num_phases,
     )
     print(f"weights={Path(weights).resolve()}")
     print(f"volume={VOLUME_PATH.resolve()}")
-    print(f"crop_start={starts}")
     print(f"prepared_shape={tuple(target.shape)}")
     print(f"anchor_axis={AXIS} anchor_count={len(anchors)}")
     print(f"accuracy={overall_accuracy:.4f}")

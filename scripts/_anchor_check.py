@@ -9,10 +9,9 @@ import torch.nn.functional as F
 def load_volume(
     path: Path,
     *,
-    crop_size: int,
-    output_size: int,
+    patch_size: int,
     num_phases: int,
-) -> tuple[torch.Tensor, tuple[int, int, int]]:
+) -> torch.Tensor:
     if not path.is_file():
         raise FileNotFoundError(f"anchor volume was not found: {path}")
     with tifffile.TiffFile(path) as tif:
@@ -27,27 +26,21 @@ def load_volume(
             )
         volume = np.asarray(series.asarray())
 
-    if volume.ndim != 3 or any(size < crop_size for size in volume.shape):
-        raise ValueError(
-            f"anchor volume must be 3D and at least {crop_size} voxels per axis."
-        )
-    if volume.size == 0 or int(volume.min()) < 0:
-        raise ValueError("anchor volume must not be empty or negative.")
+    if volume.ndim != 3 or volume.size == 0:
+        raise ValueError("anchor volume must be a non-empty 3D array.")
     if int(volume.max()) >= num_phases:
         raise ValueError(
             f"anchor volume must contain labels from 0 to {num_phases - 1}."
         )
 
-    starts = tuple((size - crop_size) // 2 for size in volume.shape)
-    selection = tuple(slice(start, start + crop_size) for start in starts)
-    labels = torch.from_numpy(np.array(volume[selection], copy=True)).long()
-    if crop_size != output_size:
+    labels = torch.from_numpy(np.array(volume, copy=True)).long()
+    if volume.shape != (patch_size, patch_size, patch_size):
         labels = F.interpolate(
             labels[None, None].to(torch.float32),
-            size=(output_size, output_size, output_size),
+            size=(patch_size, patch_size, patch_size),
             mode="nearest",
         )[0, 0].to(torch.long)
-    return labels, starts
+    return labels
 
 
 def slice_axis(volume: torch.Tensor, axis: int) -> torch.Tensor:

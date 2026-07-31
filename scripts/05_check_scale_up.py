@@ -13,14 +13,12 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.generate import (
-    find_weights,
-    generate_scaled,
-    load_model,
-)
+from src.build import load_sampler
+from src.generate.sample import find_weights
+from src.generate.scale import generate_scaled
 
-BLOCKS = (8, 2, 2)
-OVERLAP = 8
+BLOCKS = (4, 4, 4)
+OVERLAP = 32
 
 
 @dataclass(frozen=True)
@@ -41,15 +39,13 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = find_weights(PROJECT_ROOT / "run")
-    model, cfg = load_model(weights, device=device)
+    sampler = load_sampler(weights, device=device)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
     started = perf_counter()
     labels, stats = generate_scaled(
-        model,
-        cfg,
-        device=device,
+        sampler,
         blocks=BLOCKS,
         overlap=OVERLAP,
     )
@@ -60,7 +56,8 @@ def main() -> None:
     seam_quality = _measure_seams(
         labels,
         stats.seams,
-        cfg.data.num_phases,
+        stats.overlap,
+        sampler.num_phases,
     )
 
     if args.napari:
@@ -68,13 +65,13 @@ def main() -> None:
     else:
         _show_slices(
             labels,
-            cfg.data.num_phases,
+            sampler.num_phases,
             stats.seams,
         )
 
     fractions = torch.bincount(
         labels.to(torch.long).flatten(),
-        minlength=cfg.data.num_phases,
+        minlength=sampler.num_phases,
     ).to(torch.float64)
     fractions = fractions / fractions.sum()
     print(f"weights={weights.resolve()}")
@@ -84,11 +81,6 @@ def main() -> None:
         f"block_grid={stats.block_grid} "
         f"block_count={stats.block_count} "
         f"anchor_planes={stats.anchor_planes}"
-    )
-    print(f"anchor_accuracy={_format_accuracy(stats.anchor_accuracy)}")
-    print(
-        "anchor_accuracy_by_count="
-        f"{[(count, round(value, 4)) for count, value in stats.anchor_accuracy_by_count]}"
     )
     print(f"phase_fractions={[round(float(value), 4) for value in fractions]}")
     print(f"seam_change_ratio={_format_scores(seam_quality.change_ratio)}")
@@ -103,6 +95,7 @@ def main() -> None:
 def _measure_seams(
     labels: torch.Tensor,
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
+    overlap: int,
     num_phases: int,
 ) -> SeamQuality:
     change_ratios = []
@@ -119,14 +112,24 @@ def _measure_seams(
         changed = (previous != following).to(torch.float32)
         dimensions = tuple(value for value in range(3) if value != axis)
         rates = changed.mean(dim=dimensions)
-        seam_indices = torch.tensor(
+        band_indices = torch.tensor(
             sorted(
-                {index for location in locations for index in (location - 1, location)}
+                {
+                    index
+                    for location in locations
+                    for index in range(
+                        max(0, location - overlap // 2 - 1),
+                        min(
+                            rates.shape[0],
+                            location - overlap // 2 + overlap,
+                        ),
+                    )
+                }
             ),
             dtype=torch.long,
         )
         keep = torch.ones(rates.shape[0], dtype=torch.bool)
-        keep[seam_indices] = False
+        keep[band_indices] = False
         interior_indices = torch.where(keep)[0]
         if interior_indices.numel() == 0:
             change_ratios.append(None)
@@ -135,7 +138,7 @@ def _measure_seams(
             continue
         interior_rate = float(rates[keep].median())
         if interior_rate > 0.0:
-            ratios = rates.index_select(0, seam_indices) / interior_rate
+            ratios = rates.index_select(0, band_indices) / interior_rate
             worst = int((ratios - 1.0).abs().argmax())
             change_ratios.append(float(ratios[worst]))
         else:
@@ -150,8 +153,8 @@ def _measure_seams(
         interior_continuation = _calc_continuation(interior_counts)
         axis_tvs = []
         axis_continuation_deltas = []
-        for seam_index in seam_indices:
-            selected = seam_index.reshape(1)
+        for band_index in band_indices:
+            selected = band_index.reshape(1)
             seam_counts = _count_transitions(
                 previous.index_select(axis, selected),
                 following.index_select(axis, selected),
@@ -234,10 +237,6 @@ def _show_napari(labels: torch.Tensor) -> None:
     viewer.add_labels(labels.numpy(), name="scaled phases")
     viewer.dims.ndisplay = 3
     napari.run()
-
-
-def _format_accuracy(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.4f}"
 
 
 def _format_scores(

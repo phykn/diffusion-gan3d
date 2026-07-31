@@ -1,13 +1,13 @@
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import pairwise, product
+from warnings import warn
 
 import torch
 from tqdm import tqdm
 
 from ..anchor import PlaneAnchor
-from ..model import Denoiser3D
-from ..train import TrainConfig
 from .sample import Sampler
 
 
@@ -19,31 +19,26 @@ class ScaleStats:
     overlap: int
     block_count: int
     anchor_planes: int
-    anchor_accuracy: float | None
-    anchor_accuracy_by_count: tuple[tuple[int, float], ...]
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
 
 
 @torch.no_grad()
 def generate_scaled(
-    model: Denoiser3D,
-    cfg: TrainConfig,
+    sampler: Sampler,
     *,
-    device: torch.device,
     blocks: int | Sequence[int],
     overlap: int | None = None,
-    mixed_precision: bool | None = None,
     progress: bool = True,
 ) -> tuple[torch.Tensor, ScaleStats]:
     grid = _parse_grid(blocks)
-    block_size = cfg.data.patch_size
+    block_size = sampler.patch_size
     overlap = block_size // 2 if overlap is None else overlap
     if (
         not isinstance(overlap, int)
         or isinstance(overlap, bool)
-        or not 1 <= overlap < block_size
+        or not 1 <= overlap <= block_size // 2
     ):
-        raise ValueError("overlap must be an integer between 1 and block_size - 1.")
+        raise ValueError("overlap must be between 1 and half the block size.")
     if not isinstance(progress, bool):
         raise TypeError("progress must be a boolean.")
 
@@ -51,18 +46,21 @@ def generate_scaled(
     starts = tuple(tuple(index * stride for index in range(count)) for count in grid)
     shape = tuple(block_size + (count - 1) * stride for count in grid)
     indices = tuple(product(*(range(count) for count in grid)))
-    if len(indices) > 1 and not cfg.anchor.enabled:
+    if len(indices) > 1 and not sampler.anchor_enabled:
         raise ValueError("scaled generation requires anchor-aware weights.")
+    required_planes = sum(count > 1 for count in grid)
+    if required_planes > sampler.max_anchor_planes:
+        warn(
+            "scale-up uses more simultaneous anchor axes than the weights "
+            f"were trained for ({required_planes} > {sampler.max_anchor_planes}).",
+            stacklevel=2,
+        )
 
-    sampler = Sampler(
-        model,
-        cfg,
-        device=device,
-        mixed_precision=mixed_precision,
+    scores = torch.zeros(
+        sampler.num_phases,
+        *shape,
+        dtype=torch.float32,
     )
-    tiles: dict[tuple[int, int, int], torch.Tensor] = {}
-    correct: dict[int, int] = {}
-    compared: dict[int, int] = {}
     anchor_planes = 0
     bar = tqdm(
         indices,
@@ -74,46 +72,31 @@ def generate_scaled(
         anchors = _make_anchors(
             index,
             starts=starts,
-            blocks=tiles,
+            scores=scores,
             block_size=block_size,
         )
-        labels = sampler.generate(
+        probabilities = sampler.sample(
             size=block_size,
             anchors=anchors,
         )
-        if anchors:
-            matched = sum(
-                int((labels.select(anchor.axis, anchor.index) == anchor.labels).sum())
-                for anchor in anchors
-            )
-            total = len(anchors) * block_size * block_size
-            count = len(anchors)
-            correct[count] = correct.get(count, 0) + matched
-            compared[count] = compared.get(count, 0) + total
-            anchor_planes += count
-            # Exact cached intersections prevent later multi-plane conflicts.
-            _project_anchors(labels, anchors)
-        tiles[index] = labels
+        anchor_planes += len(anchors)
+        _blend(
+            scores,
+            probabilities,
+            index=index,
+            starts=starts,
+            grid=grid,
+            overlap=overlap,
+        )
 
-    labels = _assemble(
-        tiles,
-        starts=starts,
-        shape=shape,
-        block_size=block_size,
-    )
-    total_correct = sum(correct.values())
-    total_compared = sum(compared.values())
+    labels = scores.argmax(dim=0).to(torch.uint8)
     stats = ScaleStats(
         shape=shape,
         block_grid=grid,
         block_size=block_size,
         overlap=overlap,
-        block_count=len(tiles),
+        block_count=len(indices),
         anchor_planes=anchor_planes,
-        anchor_accuracy=None if total_compared == 0 else total_correct / total_compared,
-        anchor_accuracy_by_count=tuple(
-            (count, correct[count] / compared[count]) for count in sorted(correct)
-        ),
         seams=tuple(
             tuple(cell[1] for cell in _split_axis(values, block_size, length)[:-1])
             for values, length in zip(starts, shape, strict=True)
@@ -141,7 +124,7 @@ def _make_anchors(
     index: tuple[int, int, int],
     *,
     starts: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
-    blocks: dict[tuple[int, int, int], torch.Tensor],
+    scores: torch.Tensor,
     block_size: int,
 ) -> tuple[PlaneAnchor, ...]:
     origin = tuple(starts[axis][index[axis]] for axis in range(3))
@@ -149,16 +132,22 @@ def _make_anchors(
     for axis in range(3):
         if index[axis] == 0:
             continue
-        previous = list(index)
-        previous[axis] -= 1
-        previous_index = tuple(previous)
-        previous_origin = starts[axis][previous_index[axis]]
+        previous_origin = starts[axis][index[axis] - 1]
         current_origin = origin[axis]
         actual_overlap = block_size - (current_origin - previous_origin)
         seam = current_origin + actual_overlap // 2
-        source_index = seam - previous_origin
         target_index = seam - current_origin
-        source = blocks[previous_index].select(axis, source_index)
+        region = tuple(
+            seam
+            if source_axis == axis
+            else slice(origin[source_axis], origin[source_axis] + block_size)
+            for source_axis in range(3)
+        )
+        source_scores = scores[(slice(None), *region)]
+        if bool((source_scores.sum(dim=0) <= 0.0).any().item()):
+            raise RuntimeError("scale-up anchor region has not been generated.")
+        # Global scores make overlapping anchor patches agree at shared coordinates.
+        source = source_scores.argmax(dim=0)
         anchors.append(
             PlaneAnchor(
                 labels=source.to(dtype=torch.long).clone(),
@@ -169,14 +158,51 @@ def _make_anchors(
     return tuple(anchors)
 
 
-def _project_anchors(
-    labels: torch.Tensor,
-    anchors: Sequence[PlaneAnchor],
+def _blend(
+    scores: torch.Tensor,
+    probabilities: torch.Tensor,
+    *,
+    index: tuple[int, int, int],
+    starts: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
+    grid: tuple[int, int, int],
+    overlap: int,
 ) -> None:
-    for anchor in anchors:
-        labels.select(anchor.axis, anchor.index).copy_(
-            anchor.labels.to(dtype=labels.dtype)
-        )
+    block_size = probabilities.shape[1]
+    weight = _make_weight(
+        index,
+        grid=grid,
+        block_size=block_size,
+        overlap=overlap,
+        dtype=probabilities.dtype,
+    )
+    region = tuple(
+        slice(starts[axis][index[axis]], starts[axis][index[axis]] + block_size)
+        for axis in range(3)
+    )
+    scores[(slice(None), *region)].add_(probabilities * weight)
+
+
+def _make_weight(
+    index: tuple[int, int, int],
+    *,
+    grid: tuple[int, int, int],
+    block_size: int,
+    overlap: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    positions = torch.arange(overlap, dtype=dtype)
+    ramp = torch.sin((positions + 0.5) * math.pi / (2.0 * overlap)).square()
+    weight = torch.ones((block_size,) * 3, dtype=dtype)
+    for axis in range(3):
+        axis_weight = torch.ones(block_size, dtype=dtype)
+        if index[axis] > 0:
+            axis_weight[:overlap] = ramp
+        if index[axis] + 1 < grid[axis]:
+            axis_weight[-overlap:] = ramp.flip(0)
+        shape = [1, 1, 1]
+        shape[axis] = block_size
+        weight.mul_(axis_weight.reshape(shape))
+    return weight
 
 
 def _split_axis(
@@ -187,27 +213,3 @@ def _split_axis(
     seams = tuple((left + right + block_size) // 2 for left, right in pairwise(starts))
     boundaries = (0, *seams, size)
     return tuple(pairwise(boundaries))
-
-
-def _assemble(
-    blocks: dict[tuple[int, int, int], torch.Tensor],
-    *,
-    starts: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
-    shape: tuple[int, int, int],
-    block_size: int,
-) -> torch.Tensor:
-    cells = tuple(
-        _split_axis(values, block_size, length)
-        for values, length in zip(starts, shape, strict=True)
-    )
-    output = torch.empty(shape, dtype=torch.uint8)
-    for index, block in blocks.items():
-        global_slices = []
-        local_slices = []
-        for axis in range(3):
-            start, stop = cells[axis][index[axis]]
-            global_slices.append(slice(start, stop))
-            local_start = start - starts[axis][index[axis]]
-            local_slices.append(slice(local_start, local_start + stop - start))
-        output[tuple(global_slices)] = block[tuple(local_slices)]
-    return output

@@ -2,8 +2,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .config import GeometryConfig
-
 
 @dataclass(frozen=True)
 class Particle:
@@ -40,21 +38,27 @@ class PackingReport:
 @dataclass(frozen=True)
 class Geometry:
     labels: np.ndarray
-    instances: np.ndarray
-    particles: tuple[Particle, ...]
     report: PackingReport
 
 
-def pack(cfg: GeometryConfig) -> Geometry:
-    small_r = float(cfg.small_radius)
+def pack(
+    *,
+    size: int,
+    big_radius: int,
+    small_radius: int,
+    big_fraction: float,
+    small_fraction: float,
+    big_elongation: float,
+) -> Geometry:
+    small_r = float(small_radius)
     # Packing outside the retained field reduces boundary-biased particle fractions.
-    work = cfg.size * 3 // 2
+    work = size * 3 // 2
     vol = np.zeros((work,) * 3, dtype=np.uint8)
     ids = np.full((work,) * 3, -1, dtype=np.int32)
     parts: list[Particle] = []
     target = {
-        1: round(cfg.small_fraction * vol.size),
-        2: round(cfg.big_fraction * vol.size),
+        1: round(small_fraction * vol.size),
+        2: round(big_fraction * vol.size),
     }
 
     for label in (2, 1):
@@ -64,18 +68,18 @@ def pack(cfg: GeometryConfig) -> Geometry:
             parts=parts,
             label=label,
             target=target[label],
-            big_r=float(cfg.big_radius),
+            big_r=float(big_radius),
             small_r=small_r,
-            elong=cfg.big_elongation,
+            elong=big_elongation,
         )
 
-    vol, ids, parts = _crop(vol, ids, parts, cfg.size)
+    vol, ids, parts = _crop(vol, ids, parts, size)
     counts = np.bincount(vol.ravel(), minlength=3)
     got = tuple(float(value / vol.size) for value in counts)
     want = (
-        1.0 - cfg.small_fraction - cfg.big_fraction,
-        cfg.small_fraction,
-        cfg.big_fraction,
+        1.0 - small_fraction - big_fraction,
+        small_fraction,
+        big_fraction,
     )
     report = PackingReport(
         requested_fractions=want,
@@ -89,8 +93,6 @@ def pack(cfg: GeometryConfig) -> Geometry:
     )
     return Geometry(
         labels=vol,
-        instances=ids,
-        particles=tuple(parts),
         report=report,
     )
 

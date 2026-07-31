@@ -1,18 +1,45 @@
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 
+from ..model.critic import CriticScores
+
+
+@dataclass(frozen=True)
+class HeadLoss:
+    global_loss: torch.Tensor
+    local_loss: torch.Tensor
+
+    def total(self, local_weight: float) -> torch.Tensor:
+        return self.global_loss + local_weight * self.local_loss
+
 
 def critic_logistic_loss(
-    real_logits: torch.Tensor,
-    fake_logits: torch.Tensor,
+    real_scores: CriticScores,
+    fake_scores: CriticScores,
+) -> HeadLoss:
+    return HeadLoss(
+        global_loss=F.softplus(-real_scores.global_logits).mean()
+        + F.softplus(fake_scores.global_logits).mean(),
+        local_loss=F.softplus(-real_scores.local_logits).mean()
+        + F.softplus(fake_scores.local_logits).mean(),
+    )
+
+
+def generator_logistic_loss(fake_scores: CriticScores) -> HeadLoss:
+    return HeadLoss(
+        global_loss=F.softplus(-fake_scores.global_logits).mean(),
+        local_loss=F.softplus(-fake_scores.local_logits).mean(),
+    )
+
+
+def aggregate_r1_scores(
+    scores: CriticScores,
+    local_weight: float,
 ) -> torch.Tensor:
-    return F.softplus(-real_logits).mean() + F.softplus(fake_logits).mean()
-
-
-def generator_logistic_loss(fake_logits: torch.Tensor) -> torch.Tensor:
-    return F.softplus(-fake_logits).mean()
+    return scores.global_logits + local_weight * scores.local_logits.mean(dim=(-2, -1))
 
 
 def r1_penalty(

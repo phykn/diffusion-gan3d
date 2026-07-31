@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -11,6 +12,12 @@ from .blocks import (
     check_channels,
     choose_groups,
 )
+
+
+@dataclass(frozen=True)
+class CriticScores:
+    global_logits: torch.Tensor
+    local_logits: torch.Tensor
 
 
 class PairCritic2D(nn.Module):
@@ -30,6 +37,8 @@ class PairCritic2D(nn.Module):
         if not isinstance(gradient_checkpointing, bool):
             raise TypeError("gradient_checkpointing must be a boolean.")
         hidden_channels = check_channels("channels", channels, minimum=2)
+        if len(hidden_channels) < 2:
+            raise ValueError("channels must contain at least two levels.")
 
         self.num_phases = num_phases
         self.downsample_factor = 2 ** (len(hidden_channels) - 1)
@@ -55,6 +64,11 @@ class PairCritic2D(nn.Module):
             )
             for index in range(len(hidden_channels) - 1)
         )
+        self.local_norm = nn.GroupNorm(
+            choose_groups(hidden_channels[1]),
+            hidden_channels[1],
+        )
+        self.local_output = nn.Conv2d(hidden_channels[1], 1, 1)
         self.output_norm = nn.GroupNorm(
             choose_groups(hidden_channels[-1]),
             hidden_channels[-1],
@@ -66,7 +80,7 @@ class PairCritic2D(nn.Module):
         x_previous: torch.Tensor,
         x_current: torch.Tensor,
         time: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> CriticScores:
         self._check_inputs(x_previous, x_current, time)
         embedding = self.time_mlp(
             self.time_embedding(time.to(device=x_previous.device)).to(
@@ -74,12 +88,22 @@ class PairCritic2D(nn.Module):
             )
         )
         hidden = self.input(torch.cat((x_previous, x_current), dim=1))
+        local_logits = None
         for index, block in enumerate(self.blocks):
             hidden = self._run_block(block, hidden, embedding)
+            if index == 1:
+                local_hidden = F.silu(self.local_norm(hidden))
+                local_logits = self.local_output(local_hidden).squeeze(1)
             if index < len(self.downsample):
                 hidden = self.downsample[index](hidden)
+        if local_logits is None:
+            raise RuntimeError("local critic head did not receive its feature level.")
         hidden = F.silu(self.output_norm(hidden)).mean(dim=(-2, -1))
-        return self.output(hidden).squeeze(1)
+        global_logits = self.output(hidden).squeeze(1)
+        return CriticScores(
+            global_logits=global_logits,
+            local_logits=local_logits,
+        )
 
     def _run_block(
         self,

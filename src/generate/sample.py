@@ -4,9 +4,8 @@ from pathlib import Path
 import torch
 
 from ..anchor import PlaneAnchor, build_anchors
-from ..build import build_denoiser, build_diffusion
-from ..model import Denoiser3D
-from ..train import TrainConfig, load_config
+from ..diffusion import Diffusion
+from ..model.denoiser import Denoiser3D
 from ..train.weights import WEIGHTS_NAME
 
 
@@ -18,57 +17,41 @@ def find_weights(run_root: str | Path) -> Path:
     return max(paths, key=lambda path: path.stat().st_mtime_ns)
 
 
-def load_model(
-    weights: str | Path,
-    *,
-    device: torch.device,
-) -> tuple[Denoiser3D, TrainConfig]:
-    path = Path(weights).resolve()
-    cfg = load_config(path.parent / "train.yaml")
-    model = build_denoiser(cfg.data, cfg.model, checkpointing=False).to(device)
-    try:
-        state = torch.load(
-            path,
-            map_location="cpu",
-            weights_only=True,
-        )
-        model.load_state_dict(state, strict=True)
-    except (TypeError, RuntimeError, ValueError) as exc:
-        raise ValueError(
-            f"weights file is not compatible with the configured denoiser: {path}"
-        ) from exc
-    model.eval()
-    return model, cfg
-
-
 class Sampler:
     def __init__(
         self,
         model: Denoiser3D,
-        cfg: TrainConfig,
+        diffusion: Diffusion,
         *,
         device: torch.device,
-        mixed_precision: bool | None = None,
+        patch_size: int,
+        num_phases: int,
+        latent_channels: int,
+        anchor_enabled: bool,
+        max_anchor_planes: int,
+        use_amp: bool,
     ) -> None:
-        if mixed_precision is not None and not isinstance(mixed_precision, bool):
-            raise TypeError("mixed_precision must be boolean or None.")
         self.model = model
-        self.cfg = cfg
+        self.diffusion = diffusion
         self.device = device
-        self.use_amp = bool(
-            (cfg.train.mixed_precision if mixed_precision is None else mixed_precision)
-            and device.type == "cuda"
-        )
-        self.diffusion = build_diffusion(cfg.diffusion).to(device)
+        self.patch_size = patch_size
+        self.num_phases = num_phases
+        self.latent_channels = latent_channels
+        self.anchor_enabled = anchor_enabled
+        self.max_anchor_planes = max_anchor_planes
+        self.use_amp = use_amp
 
     @torch.no_grad()
-    def generate(
+    def sample(
         self,
         *,
         size: int | None = None,
         anchors: Sequence[PlaneAnchor] = (),
+        enforce: bool = True,
     ) -> torch.Tensor:
-        size = self.cfg.data.patch_size if size is None else size
+        if not isinstance(enforce, bool):
+            raise TypeError("enforce must be boolean.")
+        size = self.patch_size if size is None else size
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
             raise ValueError("size must be a positive integer.")
         if size % self.model.downsample_factor:
@@ -77,7 +60,7 @@ class Sampler:
             )
         terminal = torch.randn(
             1,
-            self.cfg.data.num_phases,
+            self.num_phases,
             size,
             size,
             size,
@@ -87,12 +70,12 @@ class Sampler:
         anchor = build_anchors(
             anchors,
             batch_size=1,
-            num_phases=self.cfg.data.num_phases,
+            num_phases=self.num_phases,
             volume_size=size,
             device=self.device,
             dtype=terminal.dtype,
         )
-        if anchor is not None and not self.cfg.anchor.enabled:
+        if anchor is not None and not self.anchor_enabled:
             raise ValueError("selected weights were trained with anchors disabled.")
         kwargs = (
             None
@@ -110,7 +93,29 @@ class Sampler:
             clean = self.diffusion.sample(
                 self.model,
                 terminal,
-                self.cfg.model.latent_channels,
+                self.latent_channels,
                 model_kwargs=kwargs,
+                project=(None if anchor is None or not enforce else anchor.project),
             )
-        return clean.argmax(dim=1).squeeze(0).to(torch.uint8).cpu()
+        probabilities = (clean.float() + 1.0).mul_(0.5).clamp_(0.0, 1.0)
+        probabilities.div_(
+            probabilities.sum(dim=1, keepdim=True).clamp_min_(
+                torch.finfo(probabilities.dtype).eps
+            )
+        )
+        return probabilities.squeeze(0).cpu()
+
+    @torch.no_grad()
+    def generate(
+        self,
+        *,
+        size: int | None = None,
+        anchors: Sequence[PlaneAnchor] = (),
+        enforce: bool = True,
+    ) -> torch.Tensor:
+        probabilities = self.sample(
+            size=size,
+            anchors=anchors,
+            enforce=enforce,
+        )
+        return probabilities.argmax(dim=0).to(torch.uint8)

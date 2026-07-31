@@ -2,7 +2,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TypeVar
 
-from ..config import load_yaml, require_int, require_number
+from ..utils import load_yaml, require_int, require_number
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,8 @@ class ModelConfig:
             raise TypeError("model.gradient_checkpointing must be a boolean.")
         _require_ints("model.channel_multipliers", self.channel_multipliers)
         _require_ints("model.critic_channels", self.critic_channels, minimum=2)
+        if len(self.critic_channels) < 2:
+            raise ValueError("model.critic_channels must contain at least two levels.")
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ class DiffusionConfig:
 class AnchorConfig:
     probability: float = 0.0
     loss_weight: float = 0.0
+    max_planes: int = 1
 
     def __post_init__(self) -> None:
         probability = require_number(
@@ -78,6 +81,9 @@ class AnchorConfig:
             self.loss_weight,
             minimum=0.0,
         )
+        require_int("anchor.max_planes", self.max_planes, minimum=1)
+        if self.max_planes > 3:
+            raise ValueError("anchor.max_planes must not exceed 3.")
         if (probability > 0.0) != (weight > 0.0):
             raise ValueError(
                 "anchor.probability and anchor.loss_weight must both be "
@@ -97,6 +103,7 @@ class OptimConfig:
     beta2: float
     r1_gamma: float
     r1_interval: int
+    critic_local_weight: float = 0.5
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -111,6 +118,11 @@ class OptimConfig:
             raise ValueError("optim betas must satisfy 0 <= beta1 < beta2 < 1.")
         require_number("optim.r1_gamma", self.r1_gamma, minimum=0.0)
         require_int("optim.r1_interval", self.r1_interval, minimum=1)
+        require_number(
+            "optim.critic_local_weight",
+            self.critic_local_weight,
+            minimum=0.0,
+        )
 
 
 @dataclass(frozen=True)

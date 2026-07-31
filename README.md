@@ -16,6 +16,8 @@ x_T → x_(T-1) → ... → x_1 → x_0
 
 Training uses three independent 2D critics, one for each spatial axis. A critic receives a correlated slice pair `(x_t, x_(t+1))` and its transition index. Real pairs come from forward diffusion of training images; generated pairs come from one reverse transition of the 3D denoiser.
 
+Each critic combines a deep global head for whole-slice structure with a shallow local head for fine phase boundaries. Their losses are averaged independently before the configured local weight is applied.
+
 A training step therefore:
 
 1. selects a random diffusion transition;
@@ -43,18 +45,22 @@ The included simulator creates an example three-phase dataset:
 python gen_data.py
 ```
 
-## Soft plane anchors
+## Plane anchors
 
 An anchor provides a known categorical 2D plane at a selected axis and depth. It is encoded as one-hot phase channels plus a binary spatial mask and passed to the denoiser during every reverse transition.
 
 During anchored training steps:
 
-- a real training slice becomes the anchor;
-- its axis and depth are selected randomly;
-- cross-entropy is applied to the predicted clean logits on that plane; and
+- one to three real training slices become orthogonal anchors;
+- their axes, depths, and precedence at independent-data intersections are selected randomly;
+- cross-entropy is applied to the predicted clean logits at all anchored voxels; and
 - the ordinary three-axis adversarial objective still evaluates the volume.
 
-In ordinary generation the anchor is a learned condition, not a hard constraint, so its labels are not copied into the final output. Overlap scale-up hard-projects shared planes only into its cached blocks so later multi-plane anchors cannot conflict.
+During sampling, anchored voxels are projected into every reverse step. This keeps the constraint exact while allowing neighboring voxels to adapt throughout denoising.
+
+Scale-up takes each new block's shared planes from the accumulated global phase consensus, then combines overlapping per-phase probabilities with complementary distance weights. Final categorical labels are selected only after this feathered overlap has been assembled; phase label numbers are never averaged directly.
+
+Multi-axis scale-up should use weights trained with `anchor.max_planes: 3`; single-plane weights are accepted for inspection but produce a warning.
 
 ## Training
 
@@ -71,7 +77,7 @@ Each run stores the EMA denoiser as `model.pt`, resolved training settings, and 
 
 ## Scope
 
-Matching 2D distributions along three axes constrains a generated 3D microstructure, but it does not identify a unique 3D ground truth. Likewise, a soft anchor encourages consistency with a supplied plane but does not guarantee exact reproduction.
+Matching 2D distributions along three axes constrains a generated 3D microstructure, but it does not identify a unique 3D ground truth. Exact anchor projection preserves supplied planes, while the surrounding 3D continuation remains generated rather than uniquely determined.
 
 ## References
 

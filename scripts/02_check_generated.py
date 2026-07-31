@@ -8,11 +8,8 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.generate import (
-    Sampler,
-    find_weights,
-    load_model,
-)
+from src.build import load_sampler
+from src.generate.sample import find_weights
 
 
 def main() -> None:
@@ -26,16 +23,12 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = find_weights(PROJECT_ROOT / "run")
-    model, cfg = load_model(weights, device=device)
-    labels = Sampler(
-        model,
-        cfg,
-        device=device,
-    ).generate()
+    sampler = load_sampler(weights, device=device)
+    labels = sampler.generate()
     if args.napari:
         _show_napari(labels)
     else:
-        _show_slices(labels, cfg.data.num_phases)
+        _show_slices(labels, sampler.num_phases)
     print(f"weights={Path(weights).resolve()}")
     print(f"shape={tuple(labels.shape)}")
 

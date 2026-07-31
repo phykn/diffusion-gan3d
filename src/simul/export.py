@@ -6,8 +6,7 @@ import numpy as np
 import tifffile
 from PIL import Image
 
-from ..data import AXES
-from .config import SimulationConfig
+from ..data.dataset import AXES
 from .geometry import pack
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253
@@ -19,28 +18,45 @@ class Export:
     slices: dict[int, tuple[Path, ...]]
 
 
-def generate(cfg: SimulationConfig) -> Export:
-    root = Path(cfg.output.data_dir)
+def generate(
+    *,
+    data_dir: str | Path,
+    count: int,
+    size: int,
+    big_radius: int,
+    small_radius: int,
+    big_fraction: float,
+    small_fraction: float,
+    big_elongation: float,
+) -> Export:
+    root = Path(data_dir)
     volume_dir, slice_dirs = _make_dirs(root)
     volumes: list[Path] = []
     slices: dict[int, list[Path]] = {axis: [] for axis in AXES}
 
-    for index in range(cfg.output.count):
-        geo = pack(cfg.geometry)
+    for index in range(count):
+        geo = pack(
+            size=size,
+            big_radius=big_radius,
+            small_radius=small_radius,
+            big_fraction=big_fraction,
+            small_fraction=small_fraction,
+            big_elongation=big_elongation,
+        )
         vol = geo.labels
-        _check_volume(vol, cfg.geometry.size)
+        _check_volume(vol, size)
         stem = f"volume_{index:03d}"
         meta = {
             "generator": "packing",
             "index": index,
             **geo.report.as_dict(),
         }
-        path = volume_dir / f"{stem}.tif"
+        path = volume_dir / f"{stem}.tiff"
         _write_volume(
             path,
             vol,
             meta=meta,
-            labels=_name_phases(cfg.geometry.big_elongation),
+            labels=_name_phases(big_elongation),
         )
         volumes.append(path)
 

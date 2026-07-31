@@ -8,8 +8,9 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data import AXES, SliceDataset, find_slices
-from src.train import load_config
+from src.build import build_datasets
+from src.data.dataset import AXES
+from src.train.config import load_config
 
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "train.yaml"
 
@@ -22,8 +23,7 @@ def main() -> None:
     if args.samples < 1:
         parser.error("--samples must be positive.")
 
-    cfg = load_config(args.config)
-    paths = find_slices(cfg.data.folder)
+    datasets = build_datasets(load_config(args.config))
     figure, axes = plt.subplots(
         len(AXES),
         args.samples,
@@ -31,20 +31,14 @@ def main() -> None:
         figsize=(3 * args.samples, 8),
     )
     for row, axis in enumerate(AXES):
+        dataset = datasets[axis]
         for column in range(args.samples):
-            path = paths[axis][np.random.randint(len(paths[axis]))]
-            dataset = SliceDataset(
-                (path,),
-                crop_size=cfg.data.crop_size,
-                patch_size=cfg.data.patch_size,
-                num_phases=cfg.data.num_phases,
-            )
-            labels = dataset[0].numpy()
+            labels = dataset[np.random.randint(len(dataset))].numpy()
             axes[row, column].imshow(
                 labels,
                 cmap="gray",
                 vmin=-0.5,
-                vmax=cfg.data.num_phases - 0.5,
+                vmax=dataset.num_phases - 0.5,
                 interpolation="nearest",
             )
             axes[row, column].set_title(f"axis {axis}")

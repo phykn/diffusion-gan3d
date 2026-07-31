@@ -16,14 +16,11 @@ from scripts._anchor_check import (
     score_phases,
     slice_axis,
 )
-from src.generate import (
-    PlaneAnchor,
-    Sampler,
-    find_weights,
-    load_model,
-)
+from src.anchor import PlaneAnchor
+from src.build import load_sampler
+from src.generate.sample import find_weights
 
-VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tif"
+VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tiff"
 AXIS = 0
 
 
@@ -36,23 +33,18 @@ def main() -> None:
     weights = (
         find_weights(PROJECT_ROOT / "run") if args.weights is None else args.weights
     )
-    model, cfg = load_model(weights, device=device)
-    if not cfg.anchor.enabled:
+    sampler = load_sampler(weights, device=device)
+    if not sampler.anchor_enabled:
         raise ValueError("selected weights were trained with anchors disabled.")
 
-    target, starts = load_volume(
+    target = load_volume(
         VOLUME_PATH,
-        crop_size=cfg.data.crop_size,
-        output_size=cfg.data.patch_size,
-        num_phases=cfg.data.num_phases,
+        patch_size=sampler.patch_size,
+        num_phases=sampler.num_phases,
     )
-    index = cfg.data.patch_size // 2
+    index = sampler.patch_size // 2
     target_plane = slice_axis(target, AXIS)[index]
-    generated = Sampler(
-        model,
-        cfg,
-        device=device,
-    ).generate(
+    generated = sampler.generate(
         anchors=(
             PlaneAnchor(
                 labels=target_plane,
@@ -60,6 +52,7 @@ def main() -> None:
                 index=index,
             ),
         ),
+        enforce=False,
     )
     generated_slices = slice_axis(generated, AXIS)
     generated_plane = generated_slices[index]
@@ -68,7 +61,7 @@ def main() -> None:
     iou, recall = score_phases(
         generated_plane,
         target_plane,
-        num_phases=cfg.data.num_phases,
+        num_phases=sampler.num_phases,
     )
 
     _show(
@@ -78,12 +71,11 @@ def main() -> None:
         mismatch,
         axis=AXIS,
         index=index,
-        num_phases=cfg.data.num_phases,
+        num_phases=sampler.num_phases,
         accuracy=accuracy,
     )
     print(f"weights={Path(weights).resolve()}")
     print(f"volume={VOLUME_PATH.resolve()}")
-    print(f"crop_start={starts}")
     print(f"prepared_shape={tuple(target.shape)}")
     print(f"anchor_axis={AXIS} anchor_index={index}")
     print(f"accuracy={accuracy:.4f}")

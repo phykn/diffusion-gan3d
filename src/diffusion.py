@@ -1,5 +1,5 @@
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from numbers import Integral
 
 import torch
@@ -232,6 +232,7 @@ class Diffusion(nn.Module):
         latent_channels: int,
         *,
         model_kwargs: Mapping[str, object] | None = None,
+        project: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Run ``x_T -> ... -> x_0`` using a fresh latent at every step.
 
@@ -245,6 +246,8 @@ class Diffusion(nn.Module):
             or latent_channels < 1
         ):
             raise ValueError("latent_channels must be a positive integer.")
+        if project is not None and not callable(project):
+            raise TypeError("project must be callable or None.")
         current = terminal
         kwargs = {} if model_kwargs is None else dict(model_kwargs)
 
@@ -265,6 +268,9 @@ class Diffusion(nn.Module):
             if not isinstance(clean, torch.Tensor):
                 raise TypeError("model must return a torch.Tensor.")
             self._validate_matching("model output", clean, current)
+            if project is not None:
+                clean = project(clean)
+                self._validate_matching("projected model output", clean, current)
             current = self.sample_posterior(current, clean, times)
         return current
 

@@ -2,7 +2,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TypeVar
 
-from ..config import (
+from ..utils import (
     load_yaml,
     require_int,
     require_number,

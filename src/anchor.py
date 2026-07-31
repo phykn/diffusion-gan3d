@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .data import encode_labels
+from .data.slices import encode_labels
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,20 @@ class AnchorCondition:
     image: torch.Tensor
     mask: torch.Tensor
     labels: torch.Tensor
+    planes: int
+    conflicts: int
+    source_voxels: int
+
+    @property
+    def conflict_rate(self) -> float:
+        return self.conflicts / self.source_voxels
+
+    def project(self, values: torch.Tensor) -> torch.Tensor:
+        if values.shape != self.image.shape:
+            raise ValueError("values must match the anchor volume shape.")
+        image = self.image.to(device=values.device, dtype=values.dtype)
+        mask = self.mask.to(device=values.device)
+        return torch.where(mask, image, values)
 
 
 def build_anchors(
@@ -28,6 +42,7 @@ def build_anchors(
     volume_size: int,
     device: torch.device,
     dtype: torch.dtype,
+    reconcile: bool = False,
 ) -> AnchorCondition | None:
     if isinstance(anchors, (str, bytes)) or not isinstance(anchors, Sequence):
         raise TypeError("anchors must be a sequence of PlaneAnchor values.")
@@ -48,6 +63,8 @@ def build_anchors(
         raise ValueError("volume_size must be a positive integer.")
     if not dtype.is_floating_point:
         raise ValueError("dtype must be floating point.")
+    if not isinstance(reconcile, bool):
+        raise TypeError("reconcile must be boolean.")
 
     labels = torch.zeros(
         batch_size,
@@ -67,6 +84,7 @@ def build_anchors(
         device=device,
     )
     occupied_planes: set[tuple[int, int]] = set()
+    conflicts = 0
     for anchor in values:
         _check_position(anchor, volume_size)
         key = (anchor.axis, anchor.index)
@@ -84,14 +102,24 @@ def build_anchors(
         label_view = labels.select(anchor.axis + 1, anchor.index)
         mask_view = mask.select(anchor.axis + 2, anchor.index).squeeze(1)
         conflict = mask_view & (label_view != plane_labels)
-        if bool(conflict.any().item()):
+        if bool(conflict.any().item()) and not reconcile:
             raise ValueError("anchor planes contain conflicting intersections.")
+        conflicts += int(conflict.sum().item())
+        # Independent axis datasets cannot define shared lines, so earlier
+        # planes own intersections when training reconciles them.
         label_view.copy_(torch.where(mask_view, label_view, plane_labels))
         mask_view.fill_(True)
 
     image = encode_labels(labels, num_phases).to(device=device, dtype=dtype)
     image = image * mask.to(dtype=dtype)
-    return AnchorCondition(image=image, mask=mask, labels=labels)
+    return AnchorCondition(
+        image=image,
+        mask=mask,
+        labels=labels,
+        planes=len(values),
+        conflicts=conflicts,
+        source_voxels=len(values) * batch_size * volume_size * volume_size,
+    )
 
 
 def _check_position(anchor: PlaneAnchor, volume_size: int) -> None:

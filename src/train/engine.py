@@ -1,22 +1,26 @@
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
-from ..data import (
-    AXES,
-    BatchStream,
-    encode_labels,
-    sample_pairs,
-)
+from ..data.dataset import AXES, BatchStream
+from ..data.slices import encode_labels, sample_pairs
 from ..diffusion import Diffusion
-from ..model import Denoiser3D
-from .config import TrainConfig
+from ..model.denoiser import Denoiser3D
 from .ema import update_ema
-from .loss import critic_logistic_loss, generator_logistic_loss, r1_penalty
+from .loss import (
+    aggregate_r1_scores,
+    critic_logistic_loss,
+    generator_logistic_loss,
+    r1_penalty,
+)
+from .weights import save_weights
 
 
 @dataclass(frozen=True)
@@ -27,9 +31,14 @@ class Metrics:
     r1: float
     transition: int
     critic_axes: tuple[float, float, float]
-    anchor_used: bool
+    anchor_planes: int
+    anchor_conflict_rate: float
     anchor_loss: float
     anchor_accuracy: float
+    generator_global: float = 0.0
+    generator_local: float = 0.0
+    critic_global: float = 0.0
+    critic_local: float = 0.0
 
 
 class Trainer:
@@ -44,8 +53,20 @@ class Trainer:
         denoiser_optimizer: torch.optim.Optimizer,
         critic_optimizers: dict[str, torch.optim.Optimizer],
         scaler: torch.amp.GradScaler,
-        cfg: TrainConfig,
         device: torch.device,
+        volume_batch_size: int,
+        num_phases: int,
+        patch_size: int,
+        slices_per_axis: int,
+        ema_decay: float,
+        r1_gamma: float,
+        r1_interval: int,
+        critic_local_weight: float,
+        anchor_probability: float,
+        anchor_loss_weight: float,
+        anchor_max_planes: int,
+        latent_channels: int,
+        amp_enabled: bool,
     ) -> None:
         if set(streams) != set(AXES):
             raise ValueError("streams must contain axes 0, 1, and 2.")
@@ -59,9 +80,72 @@ class Trainer:
         self.denoiser_optimizer = denoiser_optimizer
         self.critic_optimizers = critic_optimizers
         self.scaler = scaler
-        self.cfg = cfg
-        self.amp_enabled = cfg.train.mixed_precision and device.type == "cuda"
         self.device = device
+        self.volume_batch_size = volume_batch_size
+        self.num_phases = num_phases
+        self.patch_size = patch_size
+        self.slices_per_axis = slices_per_axis
+        self.ema_decay = ema_decay
+        self.r1_gamma = r1_gamma
+        self.r1_interval = r1_interval
+        self.critic_local_weight = critic_local_weight
+        self.anchor_probability = anchor_probability
+        self.anchor_loss_weight = anchor_loss_weight
+        self.anchor_max_planes = anchor_max_planes
+        self.latent_channels = latent_channels
+        self.amp_enabled = amp_enabled
+
+    def fit(
+        self,
+        *,
+        steps: int,
+        save_every: int,
+        run_dir: str | Path,
+    ) -> Path:
+        if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
+            raise ValueError("steps must be a positive integer.")
+        if (
+            not isinstance(save_every, int)
+            or isinstance(save_every, bool)
+            or save_every < 1
+        ):
+            raise ValueError("save_every must be a positive integer.")
+
+        root = Path(run_dir)
+        completed = 0
+        weights = root / "model.pt"
+        print(
+            f"Training Diffusion GAN3D steps=0->{steps} device={self.device} run={root}"
+        )
+        writer = SummaryWriter(root / "tensorboard")
+        progress = tqdm(
+            range(steps),
+            total=steps,
+            desc="Diffusion GAN3D",
+            dynamic_ncols=True,
+        )
+        try:
+            for step in progress:
+                metrics = self.step(step)
+                completed = step + 1
+                self._write_metrics(writer, completed, metrics)
+                progress.set_postfix(
+                    G=f"{metrics.generator:.4g}",
+                    D=f"{metrics.critic:.4g}",
+                    t=metrics.transition,
+                    A=metrics.anchor_planes,
+                )
+                if completed % save_every == 0:
+                    weights = save_weights(root, self.ema_denoiser)
+            if completed % save_every:
+                weights = save_weights(root, self.ema_denoiser)
+        except KeyboardInterrupt:
+            weights = save_weights(root, self.ema_denoiser)
+            print(f"Training interrupted after step {completed}; weights={weights}")
+        finally:
+            progress.close()
+            writer.close()
+        return weights
 
     def step(
         self,
@@ -97,12 +181,17 @@ class Trainer:
                 previous_volume,
                 current_volume,
                 axis=axis,
-                count=self.cfg.train.slices_per_axis,
+                count=self.slices_per_axis,
             )
             for axis in AXES
         }
 
-        critic_values, r1_value = self._update_critics(
+        (
+            critic_values,
+            r1_value,
+            critic_global,
+            critic_local,
+        ) = self._update_critics(
             transition,
             fake_pairs,
             step,
@@ -110,6 +199,8 @@ class Trainer:
         (
             generator_value,
             generator_total,
+            generator_global,
+            generator_local,
             anchor_loss,
             anchor_accuracy,
         ) = self._update_denoiser(
@@ -118,7 +209,7 @@ class Trainer:
             clean_logits,
             anchor,
         )
-        update_ema(self.ema_denoiser, self.denoiser, self.cfg.train.ema_decay)
+        update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
         return Metrics(
             generator=generator_value,
             generator_total=generator_total,
@@ -126,10 +217,56 @@ class Trainer:
             r1=r1_value,
             transition=transition,
             critic_axes=tuple(critic_values),
-            anchor_used=anchor is not None,
+            anchor_planes=0 if anchor is None else anchor.planes,
+            anchor_conflict_rate=0.0 if anchor is None else anchor.conflict_rate,
             anchor_loss=anchor_loss,
             anchor_accuracy=anchor_accuracy,
+            generator_global=generator_global,
+            generator_local=generator_local,
+            critic_global=critic_global,
+            critic_local=critic_local,
         )
+
+    @staticmethod
+    def _write_metrics(
+        writer: SummaryWriter,
+        step: int,
+        metrics: Metrics,
+    ) -> None:
+        writer.add_scalar("loss/generator", metrics.generator, step)
+        writer.add_scalar("loss/generator_total", metrics.generator_total, step)
+        writer.add_scalar("loss/generator_global", metrics.generator_global, step)
+        writer.add_scalar("loss/generator_local_raw", metrics.generator_local, step)
+        writer.add_scalar("loss/critic_total", metrics.critic, step)
+        writer.add_scalar("loss/critic_global", metrics.critic_global, step)
+        writer.add_scalar("loss/critic_local_raw", metrics.critic_local, step)
+        writer.add_scalar("loss/r1_raw", metrics.r1, step)
+        writer.add_scalar("train/transition", metrics.transition, step)
+        writer.add_scalar("conditioning/anchor_planes", metrics.anchor_planes, step)
+        if metrics.anchor_planes:
+            writer.add_scalar("loss/anchor", metrics.anchor_loss, step)
+            writer.add_scalar(
+                "conditioning/anchor_accuracy",
+                metrics.anchor_accuracy,
+                step,
+            )
+            writer.add_scalar(
+                "conditioning/anchor_conflict_rate",
+                metrics.anchor_conflict_rate,
+                step,
+            )
+            writer.add_scalar(
+                f"loss/anchor_{metrics.anchor_planes}_planes",
+                metrics.anchor_loss,
+                step,
+            )
+            writer.add_scalar(
+                f"conditioning/anchor_accuracy_{metrics.anchor_planes}_planes",
+                metrics.anchor_accuracy,
+                step,
+            )
+        for axis, value in zip(AXES, metrics.critic_axes, strict=True):
+            writer.add_scalar(f"loss/critic_axis_{axis}", value, step)
 
     def _generate_pair(
         self,
@@ -137,11 +274,11 @@ class Trainer:
         anchor: AnchorCondition | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         shape = (
-            self.cfg.train.volume_batch_size,
-            self.cfg.data.num_phases,
-            self.cfg.data.patch_size,
-            self.cfg.data.patch_size,
-            self.cfg.data.patch_size,
+            self.volume_batch_size,
+            self.num_phases,
+            self.patch_size,
+            self.patch_size,
+            self.patch_size,
         )
         current = torch.randn(shape, device=self.device, dtype=torch.float32)
         with torch.no_grad(), self._autocast():
@@ -149,6 +286,8 @@ class Trainer:
                 times = self._make_times(index, current.shape[0])
                 latent = self._sample_latent(current.shape[0], dtype=current.dtype)
                 clean = self._denoise(current, times, latent, anchor)
+                if anchor is not None:
+                    clean = anchor.project(clean)
                 current = self.diffusion.sample_posterior(
                     current,
                     clean,
@@ -166,6 +305,8 @@ class Trainer:
                 anchor,
             )
             clean = self.denoiser.decode(clean_logits)
+            if anchor is not None:
+                clean = anchor.project(clean)
             previous = self.diffusion.sample_posterior(
                 current,
                 clean,
@@ -178,13 +319,13 @@ class Trainer:
         transition: int,
         fake_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]],
         step: int,
-    ) -> tuple[list[float], float]:
-        apply_r1 = (
-            self.cfg.optim.r1_gamma > 0.0
-            and (step + 1) % self.cfg.optim.r1_interval == 0
-        )
+    ) -> tuple[list[float], float, float, float]:
+        apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
         critic_values = []
         total_r1 = 0.0
+        total_global = 0.0
+        total_local = 0.0
+        local_weight = self.critic_local_weight
         for axis in AXES:
             critic = self.critics[str(axis)]
             optimizer = self.critic_optimizers[str(axis)]
@@ -198,7 +339,7 @@ class Trainer:
                     non_blocking=True,
                 )
             )
-            real_clean = encode_labels(labels, self.cfg.data.num_phases)
+            real_clean = encode_labels(labels, self.num_phases)
             real_times = self._make_times(transition, real_clean.shape[0])
             real_previous, real_current = self.diffusion.sample_pair(
                 real_clean,
@@ -212,27 +353,24 @@ class Trainer:
 
             autocast = self._autocast(enabled=self.amp_enabled and not apply_r1)
             with autocast:
-                real_logits = critic(real_previous, real_current, real_times)
-                fake_logits = critic(fake_previous, fake_current, fake_times)
-                loss = critic_logistic_loss(real_logits, fake_logits)
+                real_scores = critic(real_previous, real_current, real_times)
+                fake_scores = critic(fake_previous, fake_current, fake_times)
+                head_loss = critic_logistic_loss(real_scores, fake_scores)
+                loss = head_loss.total(local_weight)
+            total_global += float(head_loss.global_loss.detach())
+            total_local += float(head_loss.local_loss.detach())
             if apply_r1:
                 penalty = r1_penalty(
-                    real_logits,
+                    aggregate_r1_scores(real_scores, local_weight),
                     (real_previous,),
                 )
                 total_r1 += float(penalty.detach())
-                loss = (
-                    loss
-                    + 0.5
-                    * self.cfg.optim.r1_gamma
-                    * self.cfg.optim.r1_interval
-                    * penalty
-                )
+                loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
             self.scaler.scale(loss).backward()
             self.scaler.step(optimizer)
             critic_values.append(float(loss.detach()))
         self.scaler.update()
-        return critic_values, total_r1
+        return critic_values, total_r1, total_global, total_local
 
     def _update_denoiser(
         self,
@@ -240,23 +378,30 @@ class Trainer:
         fake_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]],
         clean_logits: torch.Tensor,
         anchor: AnchorCondition | None,
-    ) -> tuple[float, float, float, float]:
+    ) -> tuple[float, float, float, float, float, float]:
         self.denoiser_optimizer.zero_grad(set_to_none=True)
         for critic in self.critics.values():
             critic.requires_grad_(False)
         try:
-            losses = []
+            head_losses = []
+            local_weight = self.critic_local_weight
             with self._autocast():
                 for axis in AXES:
                     fake_previous, fake_current = fake_pairs[axis]
                     times = self._make_times(transition, fake_previous.shape[0])
-                    logits = self.critics[str(axis)](
+                    scores = self.critics[str(axis)](
                         fake_previous,
                         fake_current,
                         times,
                     )
-                    losses.append(generator_logistic_loss(logits))
-                adversarial = torch.stack(losses).sum()
+                    head_losses.append(generator_logistic_loss(scores))
+                global_loss = torch.stack(
+                    [loss.global_loss for loss in head_losses]
+                ).sum()
+                local_loss = torch.stack(
+                    [loss.local_loss for loss in head_losses]
+                ).sum()
+                adversarial = global_loss + local_weight * local_loss
                 anchor_loss = adversarial.new_zeros(())
                 anchor_accuracy = adversarial.new_zeros(())
                 if anchor is not None:
@@ -269,7 +414,7 @@ class Trainer:
                         .to(torch.float32)
                         .mean()
                     )
-                total = adversarial + self.cfg.anchor.loss_weight * anchor_loss
+                total = adversarial + self.anchor_loss_weight * anchor_loss
             self.scaler.scale(total).backward()
             self.scaler.step(self.denoiser_optimizer)
             self.scaler.update()
@@ -279,55 +424,70 @@ class Trainer:
         return (
             float(adversarial.detach()),
             float(total.detach()),
+            float(global_loss.detach()),
+            float(local_loss.detach()),
             float(anchor_loss.detach()),
             float(anchor_accuracy.detach()),
         )
 
     def _sample_anchor(self) -> AnchorCondition | None:
-        if not self.cfg.anchor.enabled:
+        if self.anchor_probability <= 0.0:
             return None
-        if not bool(torch.rand((), device=self.device) < self.cfg.anchor.probability):
+        if not bool(torch.rand((), device=self.device) < self.anchor_probability):
             return None
-        axis = int(torch.randint(len(AXES), (), device=self.device).item())
-        labels = (
-            self.streams[axis]
-            .next()
-            .to(
-                self.device,
-                non_blocking=True,
-            )
-        )
-        if labels.ndim != 3 or labels.shape[-2:] != (
-            self.cfg.data.patch_size,
-            self.cfg.data.patch_size,
-        ):
-            raise ValueError(f"axis {axis} anchor batch must have shape [B, H, W].")
-        indices = torch.randint(
-            labels.shape[0],
-            (self.cfg.train.volume_batch_size,),
-            device=self.device,
-        )
-        selected = labels.index_select(0, indices)
-        plane_index = int(
+        count = int(
             torch.randint(
-                self.cfg.data.patch_size,
+                1,
+                self.anchor_max_planes + 1,
                 (),
                 device=self.device,
             ).item()
         )
-        return build_anchors(
-            (
+        # Random precedence prevents one axis from owning every reconciled line.
+        axes = torch.randperm(len(AXES), device=self.device)[:count].tolist()
+        planes = []
+        for axis in axes:
+            labels = (
+                self.streams[axis]
+                .next()
+                .to(
+                    self.device,
+                    non_blocking=True,
+                )
+            )
+            if labels.ndim != 3 or labels.shape[-2:] != (
+                self.patch_size,
+                self.patch_size,
+            ):
+                raise ValueError(f"axis {axis} anchor batch must have shape [B, H, W].")
+            indices = torch.randint(
+                labels.shape[0],
+                (self.volume_batch_size,),
+                device=self.device,
+            )
+            selected = labels.index_select(0, indices)
+            plane_index = int(
+                torch.randint(
+                    self.patch_size,
+                    (),
+                    device=self.device,
+                ).item()
+            )
+            planes.append(
                 PlaneAnchor(
                     labels=selected,
                     axis=axis,
                     index=plane_index,
-                ),
-            ),
-            batch_size=self.cfg.train.volume_batch_size,
-            num_phases=self.cfg.data.num_phases,
-            volume_size=self.cfg.data.patch_size,
+                )
+            )
+        return build_anchors(
+            planes,
+            batch_size=self.volume_batch_size,
+            num_phases=self.num_phases,
+            volume_size=self.patch_size,
             device=self.device,
             dtype=torch.float32,
+            reconcile=True,
         )
 
     def _denoise(
@@ -375,7 +535,7 @@ class Trainer:
     def _sample_latent(self, batch: int, *, dtype: torch.dtype) -> torch.Tensor:
         return torch.randn(
             batch,
-            self.cfg.model.latent_channels,
+            self.latent_channels,
             device=self.device,
             dtype=dtype,
         )
