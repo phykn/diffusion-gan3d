@@ -15,9 +15,5 @@ htmlcov/
 
 *.bat
 
-/pytest.ini
-/requirements-dev.txt
-/tests/
-
 .DS_Store
 Thumbs.db

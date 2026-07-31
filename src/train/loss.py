@@ -35,11 +35,17 @@ def generator_logistic_loss(fake_scores: CriticScores) -> HeadLoss:
     )
 
 
-def aggregate_r1_scores(
+def critic_r1_penalty(
     scores: CriticScores,
-    local_weight: float,
-) -> torch.Tensor:
-    return scores.global_logits + local_weight * scores.local_logits.mean(dim=(-2, -1))
+    real_inputs: Sequence[torch.Tensor],
+) -> HeadLoss:
+    return HeadLoss(
+        global_loss=r1_penalty(scores.global_logits, real_inputs),
+        local_loss=r1_penalty(
+            scores.local_logits.mean(dim=(-2, -1)),
+            real_inputs,
+        ),
+    )
 
 
 def r1_penalty(

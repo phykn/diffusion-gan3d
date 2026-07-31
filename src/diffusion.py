@@ -11,28 +11,6 @@ def _extract(
     timesteps: torch.Tensor,
     reference: torch.Tensor,
 ) -> torch.Tensor:
-    if values.ndim != 1:
-        raise ValueError("values must be one-dimensional.")
-    if timesteps.ndim != 1:
-        raise ValueError("timesteps must be one-dimensional.")
-    if timesteps.dtype not in {
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-        torch.uint8,
-    }:
-        raise ValueError("timesteps must use an integer dtype.")
-    if reference.ndim < 2:
-        raise ValueError("reference must have batch and channel dimensions.")
-    if timesteps.shape[0] != reference.shape[0]:
-        raise ValueError("timesteps and reference must have the same batch size.")
-    if timesteps.numel() and (
-        int(timesteps.min().item()) < 0
-        or int(timesteps.max().item()) >= values.shape[0]
-    ):
-        raise ValueError("timesteps contain an out-of-range index.")
-
     selected = values.to(
         device=reference.device,
         dtype=reference.dtype,
@@ -99,12 +77,20 @@ class Diffusion(nn.Module):
     ) -> torch.Tensor:
         """Sample ``q(x_state | x_0)`` from a clean 2D or 3D batch."""
         self._validate_batch("clean", clean)
-        states = self._batch_timesteps(
+        states, _ = self._batch_timesteps(
             state,
             clean,
             maximum=self.timesteps,
             label="state",
         )
+        return self._add_noise(clean, states, noise)
+
+    def _add_noise(
+        self,
+        clean: torch.Tensor,
+        states: torch.Tensor,
+        noise: torch.Tensor | None,
+    ) -> torch.Tensor:
         if noise is None:
             noise = torch.randn_like(clean)
         else:
@@ -128,17 +114,13 @@ class Diffusion(nn.Module):
         ``x_t``; the two outputs are therefore not independent noisy views.
         """
         self._validate_batch("clean", clean)
-        transitions = self._batch_timesteps(
+        transitions, _ = self._batch_timesteps(
             transition,
             clean,
             maximum=self.timesteps - 1,
             label="transition",
         )
-        previous = self.add_noise(
-            clean,
-            transitions,
-            noise=previous_noise,
-        )
+        previous = self._add_noise(clean, transitions, previous_noise)
         if step_noise is None:
             step_noise = torch.randn_like(clean)
         else:
@@ -159,12 +141,20 @@ class Diffusion(nn.Module):
         """Return parameters of ``q(x_t | x_{t+1}, x0_prediction)``."""
         self._validate_batch("current", current)
         self._validate_matching("clean_prediction", clean_prediction, current)
-        transitions = self._batch_timesteps(
+        transitions, _ = self._batch_timesteps(
             transition,
             current,
             maximum=self.timesteps - 1,
             label="transition",
         )
+        return self._get_posterior(current, clean_prediction, transitions)
+
+    def _get_posterior(
+        self,
+        current: torch.Tensor,
+        clean_prediction: torch.Tensor,
+        transitions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         current_states = transitions + 1
 
         alpha_bar_previous = _extract(self.alpha_bars, transitions, current)
@@ -194,19 +184,21 @@ class Diffusion(nn.Module):
         Transition ``t=0`` is deterministic and returns the posterior mean,
         with an explicit exact return of ``clean_prediction``.
         """
-        mean, variance = self.get_posterior(
-            current,
-            clean_prediction,
-            transition,
-        )
-        transitions = self._batch_timesteps(
+        self._validate_batch("current", current)
+        self._validate_matching("clean_prediction", clean_prediction, current)
+        transitions, maximum_transition = self._batch_timesteps(
             transition,
             current,
             maximum=self.timesteps - 1,
             label="transition",
         )
+        mean, variance = self._get_posterior(
+            current,
+            clean_prediction,
+            transitions,
+        )
         stochastic = transitions != 0
-        if not bool(stochastic.any().item()):
+        if maximum_transition == 0:
             return clean_prediction
         if noise is None:
             noise = torch.randn_like(current)
@@ -271,7 +263,7 @@ class Diffusion(nn.Module):
             if project is not None:
                 clean = project(clean)
                 self._validate_matching("projected model output", clean, current)
-            current = self.sample_posterior(current, clean, times)
+            current = self.sample_posterior(current, clean, transition)
         return current
 
     @staticmethod
@@ -307,11 +299,14 @@ class Diffusion(nn.Module):
         *,
         maximum: int,
         label: str,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, int]:
         if isinstance(value, Integral) and not isinstance(value, bool):
+            highest = int(value)
+            if highest < 0 or highest > maximum:
+                raise ValueError(f"{label} must be between 0 and {maximum}.")
             result = torch.full(
                 (reference.shape[0],),
-                int(value),
+                highest,
                 device=reference.device,
                 dtype=torch.long,
             )
@@ -324,19 +319,23 @@ class Diffusion(nn.Module):
                 torch.uint8,
             }:
                 raise ValueError(f"{label} must use an integer dtype.")
+            if value.ndim != 0 and not (
+                value.ndim == 1 and value.shape[0] == reference.shape[0]
+            ):
+                raise ValueError(
+                    f"{label} must be scalar or have one value per batch item."
+                )
+            lower, upper = torch.stack(torch.aminmax(value)).tolist()
+            if lower < 0 or upper > maximum:
+                raise ValueError(f"{label} must be between 0 and {maximum}.")
+            highest = int(upper)
             if value.ndim == 0:
                 result = value.to(reference.device, dtype=torch.long).expand(
                     reference.shape[0]
                 )
-            elif value.ndim == 1 and value.shape[0] == reference.shape[0]:
-                result = value.to(reference.device, dtype=torch.long)
             else:
-                raise ValueError(
-                    f"{label} must be scalar or have one value per batch item."
-                )
+                result = value.to(reference.device, dtype=torch.long)
         else:
             raise TypeError(f"{label} must be an integer or torch.Tensor.")
 
-        if int(result.min().item()) < 0 or int(result.max().item()) > maximum:
-            raise ValueError(f"{label} must be between 0 and {maximum}.")
-        return result
+        return result, highest

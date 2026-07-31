@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TypeVar
 
@@ -126,6 +126,14 @@ class OptimConfig:
 
 
 @dataclass(frozen=True)
+class CheckpointConfig:
+    model: Path | None = None
+    critic_0: Path | None = None
+    critic_1: Path | None = None
+    critic_2: Path | None = None
+
+
+@dataclass(frozen=True)
 class LoopConfig:
     steps: int
     volume_batch_size: int
@@ -133,17 +141,26 @@ class LoopConfig:
     mixed_precision: bool
     ema_decay: float
     save_every_steps: int
+    critic_warmup_steps: int = 0
+    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
 
     def __post_init__(self) -> None:
         require_int("train.steps", self.steps, minimum=1)
         require_int("train.volume_batch_size", self.volume_batch_size, minimum=1)
         require_int("train.slices_per_axis", self.slices_per_axis, minimum=1)
         require_int("train.save_every_steps", self.save_every_steps, minimum=1)
+        require_int(
+            "train.critic_warmup_steps",
+            self.critic_warmup_steps,
+            minimum=0,
+        )
         if not isinstance(self.mixed_precision, bool):
             raise TypeError("train.mixed_precision must be a boolean.")
         ema = require_number("train.ema_decay", self.ema_decay)
         if not 0.0 < ema < 1.0:
             raise ValueError("train.ema_decay must be in (0, 1).")
+        if not isinstance(self.checkpoint, CheckpointConfig):
+            raise TypeError("train.checkpoint must contain checkpoint paths.")
 
 
 @dataclass(frozen=True)
@@ -196,7 +213,7 @@ def load_config(path: str | Path) -> TrainConfig:
     data = _build_section(DataConfig, values["data"], "data")
     data = replace(data, folder=_resolve_folders(data.folder, config_path.parent))
     model = _build_model_config(values["model"])
-    train = _build_section(LoopConfig, values["train"], "train")
+    train = _build_loop_config(values["train"], config_path.parent)
     return TrainConfig(
         data=data,
         model=model,
@@ -230,6 +247,37 @@ def _build_model_config(value: object) -> ModelConfig:
             raise TypeError(f"model.{name} must be a list.")
         values[name] = tuple(item)
     return _build_section(ModelConfig, values, "model")
+
+
+def _build_loop_config(value: object, root: Path) -> LoopConfig:
+    if not isinstance(value, dict):
+        raise TypeError("training config section train must be a mapping.")
+    values = dict(value)
+    checkpoint = values.get("checkpoint")
+    if checkpoint is None:
+        values["checkpoint"] = CheckpointConfig()
+    elif isinstance(checkpoint, dict):
+        expected = {"model", "critic_0", "critic_1", "critic_2"}
+        if set(checkpoint) != expected:
+            raise ValueError(
+                "train.checkpoint must contain model, critic_0, critic_1, and critic_2."
+            )
+        paths = {
+            name: (
+                None
+                if path is None
+                else _resolve_path(path, root, f"train.checkpoint.{name}")
+            )
+            for name, path in checkpoint.items()
+        }
+        values["checkpoint"] = _build_section(
+            CheckpointConfig,
+            paths,
+            "train.checkpoint",
+        )
+    else:
+        raise TypeError("train.checkpoint must be a mapping or null.")
+    return _build_section(LoopConfig, values, "train")
 
 
 def _resolve_folders(value: object, root: Path) -> dict[int, Path]:

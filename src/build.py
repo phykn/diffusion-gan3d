@@ -13,6 +13,7 @@ from .simul.export import Export, generate
 from .train.config import TrainConfig, load_config
 from .train.ema import build_ema
 from .train.engine import Trainer
+from .train.weights import load_weights
 
 
 def build_streams(
@@ -123,6 +124,7 @@ def build_trainer(
     device: torch.device,
 ) -> Trainer:
     denoiser, critics = build_models(cfg)
+    _load_checkpoints(cfg, denoiser, critics)
     denoiser = denoiser.to(device)
     critics = critics.to(device)
     ema_denoiser = build_ema(denoiser)
@@ -156,6 +158,20 @@ def build_trainer(
         latent_channels=cfg.model.latent_channels,
         amp_enabled=use_amp,
     )
+
+
+def _load_checkpoints(
+    cfg: TrainConfig,
+    denoiser: nn.Module,
+    critics: nn.ModuleDict,
+) -> None:
+    checkpoint = cfg.train.checkpoint
+    if checkpoint.model is not None:
+        load_weights(checkpoint.model, denoiser)
+    for axis in (0, 1, 2):
+        path = getattr(checkpoint, f"critic_{axis}")
+        if path is not None:
+            load_weights(path, critics[str(axis)])
 
 
 def build_sampler(

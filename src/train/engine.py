@@ -15,12 +15,11 @@ from ..diffusion import Diffusion
 from ..model.denoiser import Denoiser3D
 from .ema import update_ema
 from .loss import (
-    aggregate_r1_scores,
     critic_logistic_loss,
+    critic_r1_penalty,
     generator_logistic_loss,
-    r1_penalty,
 )
-from .weights import save_weights
+from .weights import WEIGHTS_NAME, save_training_weights
 
 
 @dataclass(frozen=True)
@@ -100,6 +99,7 @@ class Trainer:
         *,
         steps: int,
         save_every: int,
+        critic_warmup_steps: int,
         run_dir: str | Path,
     ) -> Path:
         if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
@@ -110,10 +110,16 @@ class Trainer:
             or save_every < 1
         ):
             raise ValueError("save_every must be a positive integer.")
+        if (
+            not isinstance(critic_warmup_steps, int)
+            or isinstance(critic_warmup_steps, bool)
+            or critic_warmup_steps < 0
+        ):
+            raise ValueError("critic_warmup_steps must be a non-negative integer.")
 
         root = Path(run_dir)
         completed = 0
-        weights = root / "model.pt"
+        weights = root / WEIGHTS_NAME
         print(
             f"Training Diffusion GAN3D steps=0->{steps} device={self.device} run={root}"
         )
@@ -125,6 +131,7 @@ class Trainer:
             dynamic_ncols=True,
         )
         try:
+            self.warm_critics(critic_warmup_steps)
             for step in progress:
                 metrics = self.step(step)
                 completed = step + 1
@@ -136,16 +143,71 @@ class Trainer:
                     A=metrics.anchor_planes,
                 )
                 if completed % save_every == 0:
-                    weights = save_weights(root, self.ema_denoiser)
+                    weights = save_training_weights(
+                        root,
+                        self.ema_denoiser,
+                        self.critics,
+                    )
             if completed % save_every:
-                weights = save_weights(root, self.ema_denoiser)
+                weights = save_training_weights(
+                    root,
+                    self.ema_denoiser,
+                    self.critics,
+                )
         except KeyboardInterrupt:
-            weights = save_weights(root, self.ema_denoiser)
+            weights = save_training_weights(
+                root,
+                self.ema_denoiser,
+                self.critics,
+            )
             print(f"Training interrupted after step {completed}; weights={weights}")
+            raise
         finally:
             progress.close()
             writer.close()
         return weights
+
+    def warm_critics(self, steps: int) -> None:
+        if not isinstance(steps, int) or isinstance(steps, bool) or steps < 0:
+            raise ValueError("steps must be a non-negative integer.")
+        if steps == 0:
+            return
+        self.denoiser.eval()
+        self.critics.train()
+        progress = tqdm(
+            range(steps),
+            total=steps,
+            desc="Critic warmup",
+            dynamic_ncols=True,
+        )
+        try:
+            for step in progress:
+                transition = int(
+                    torch.randint(
+                        self.diffusion.timesteps,
+                        (1,),
+                    ).item()
+                )
+                anchor = self._sample_anchor()
+                with torch.no_grad():
+                    previous, current, _ = self._generate_pair(transition, anchor)
+                    fake_pairs = {
+                        axis: sample_pairs(
+                            previous,
+                            current,
+                            axis=axis,
+                            count=self.slices_per_axis,
+                        )
+                        for axis in AXES
+                    }
+                values, _, _, _ = self._update_critics(
+                    transition,
+                    fake_pairs,
+                    step,
+                )
+                progress.set_postfix(D=f"{sum(values):.4g}", t=transition)
+        finally:
+            progress.close()
 
     def step(
         self,
@@ -162,7 +224,6 @@ class Trainer:
                 torch.randint(
                     self.diffusion.timesteps,
                     (1,),
-                    device=self.device,
                 ).item()
             )
         elif (
@@ -291,7 +352,7 @@ class Trainer:
                 current = self.diffusion.sample_posterior(
                     current,
                     clean,
-                    times,
+                    index,
                 )
 
         current = current.detach()
@@ -310,7 +371,7 @@ class Trainer:
             previous = self.diffusion.sample_posterior(
                 current,
                 clean,
-                times,
+                transition,
             )
         return previous, current, clean_logits
 
@@ -343,7 +404,7 @@ class Trainer:
             real_times = self._make_times(transition, real_clean.shape[0])
             real_previous, real_current = self.diffusion.sample_pair(
                 real_clean,
-                real_times,
+                transition,
             )
             real_previous.requires_grad_(apply_r1)
             fake_previous, fake_current = fake_pairs[axis]
@@ -360,10 +421,11 @@ class Trainer:
             total_global += float(head_loss.global_loss.detach())
             total_local += float(head_loss.local_loss.detach())
             if apply_r1:
-                penalty = r1_penalty(
-                    aggregate_r1_scores(real_scores, local_weight),
+                r1 = critic_r1_penalty(
+                    real_scores,
                     (real_previous,),
                 )
+                penalty = r1.total(local_weight)
                 total_r1 += float(penalty.detach())
                 loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
             self.scaler.scale(loss).backward()
@@ -433,18 +495,17 @@ class Trainer:
     def _sample_anchor(self) -> AnchorCondition | None:
         if self.anchor_probability <= 0.0:
             return None
-        if not bool(torch.rand((), device=self.device) < self.anchor_probability):
+        if not bool(torch.rand(()) < self.anchor_probability):
             return None
         count = int(
             torch.randint(
                 1,
                 self.anchor_max_planes + 1,
                 (),
-                device=self.device,
             ).item()
         )
         # Random precedence prevents one axis from owning every reconciled line.
-        axes = torch.randperm(len(AXES), device=self.device)[:count].tolist()
+        axes = torch.randperm(len(AXES))[:count].tolist()
         planes = []
         for axis in axes:
             labels = (
@@ -470,7 +531,6 @@ class Trainer:
                 torch.randint(
                     self.patch_size,
                     (),
-                    device=self.device,
                 ).item()
             )
             planes.append(

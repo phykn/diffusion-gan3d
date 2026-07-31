@@ -73,7 +73,7 @@ python run_train.py
 
 ## Outputs
 
-Each run stores the EMA denoiser as `model.pt`, resolved training settings, and TensorBoard metrics under `run/<timestamp>/`. Critic and optimizer states are not saved, so training cannot be resumed.
+Each run stores the EMA denoiser as `model.pt`, the three critics as `critic_0.pt` through `critic_2.pt`, resolved training settings, and TensorBoard metrics under `run/<timestamp>/`. The four `train.checkpoint` paths initialize those models independently; a `null` entry starts that model from scratch. The step, optimizers, and AMP scaler always start fresh.
 
 ## Scope
 

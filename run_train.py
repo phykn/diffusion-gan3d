@@ -30,13 +30,18 @@ def main() -> None:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available.")
 
+    checkpoint = cfg.train.checkpoint
+    for name in ("model", "critic_0", "critic_1", "critic_2"):
+        path = getattr(checkpoint, name)
+        if path is not None:
+            print(f"Loading {name} checkpoint: {path}")
+    trainer = build_trainer(cfg, device=device)
     run_dir = _make_run_dir(RUN_ROOT)
     save_yaml(run_dir / "train.yaml", cfg.as_dict())
-
-    trainer = build_trainer(cfg, device=device)
     trainer.fit(
         steps=cfg.train.steps,
         save_every=cfg.train.save_every_steps,
+        critic_warmup_steps=cfg.train.critic_warmup_steps,
         run_dir=run_dir,
     )
 
