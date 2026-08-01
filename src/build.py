@@ -53,6 +53,7 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         critic_local_weight=optim.get("critic_local_weight", 0.5),
         anchor_dropout=anchor["dropout"],
         anchor_loss_weight=anchor["loss_weight"],
+        anchor_seam_weight=anchor["seam_weight"],
         anchor_max_planes=anchor.get("max_planes", 1),
         vf_loss_weight=vf["loss_weight"],
         vf_dropout=vf["dropout"],

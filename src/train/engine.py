@@ -36,6 +36,8 @@ class Metrics:
     anchor_conflict_rate: float
     anchor_loss: float
     anchor_accuracy: float
+    generator_seam: float
+    critic_seam: float
     generator_global: float = 0.0
     generator_local: float = 0.0
     critic_global: float = 0.0
@@ -72,6 +74,7 @@ class Trainer:
         critic_local_weight: float,
         anchor_dropout: float,
         anchor_loss_weight: float,
+        anchor_seam_weight: float,
         anchor_max_planes: int,
         vf_loss_weight: float,
         vf_dropout: float,
@@ -109,6 +112,7 @@ class Trainer:
         self.critic_local_weight = critic_local_weight
         self.anchor_dropout = anchor_dropout
         self.anchor_loss_weight = anchor_loss_weight
+        self.anchor_seam_weight = anchor_seam_weight
         self.anchor_max_planes = anchor_max_planes
         self.vf_loss_weight = vf_loss_weight
         self.vf_dropout = vf_dropout
@@ -193,14 +197,7 @@ class Trainer:
             raise ValueError("step must be a non-negative integer.")
         self.denoiser.train()
         self.critics.train()
-        if transition is None:
-            transition = int(
-                torch.randint(
-                    self.diffusion.timesteps,
-                    (1,),
-                ).item()
-            )
-        elif (
+        if transition is not None and (
             not isinstance(transition, int)
             or isinstance(transition, bool)
             or not 0 <= transition < self.diffusion.timesteps
@@ -215,17 +212,20 @@ class Trainer:
         target_vf = self.get_vf(batches.values()).expand(self.volume_batch_size, -1)
         vf = self.apply_vf_dropout(target_vf)
         anchor = self.sample_anchor(batches, volume_size)
+        if transition is None:
+            transition = self.sample_transition(anchor is not None)
         (
             previous,
             current,
             logits,
-            clean_probs,
+            prediction,
         ) = self.generate_pair(
             transition,
             anchor,
             vf,
             volume_size,
         )
+        clean_probs = (prediction + 1.0) * 0.5
         fake = {
             axis: self.sample_pairs(
                 previous,
@@ -235,15 +235,18 @@ class Trainer:
             )
             for axis in AXES
         }
+        seam_pairs = self.make_seam_pairs(prediction, anchor)
 
         (
             critic_vals,
             r1,
             critic_global,
             critic_local,
+            critic_seam,
         ) = self.update_critics(
             transition,
             fake,
+            seam_pairs,
             real,
             step,
         )
@@ -252,12 +255,14 @@ class Trainer:
             generator_total,
             generator_global,
             generator_local,
+            generator_seam,
             anchor_loss,
             anchor_accuracy,
             vf_loss,
         ) = self.update_denoiser(
             transition,
             fake,
+            seam_pairs,
             logits,
             clean_probs,
             anchor,
@@ -282,6 +287,8 @@ class Trainer:
             anchor_conflict_rate=0.0 if anchor is None else anchor.conflict_rate,
             anchor_loss=anchor_loss,
             anchor_accuracy=anchor_accuracy,
+            generator_seam=generator_seam,
+            critic_seam=critic_seam,
             generator_global=generator_global,
             generator_local=generator_local,
             critic_global=critic_global,
@@ -294,6 +301,15 @@ class Trainer:
             hard_vfs=hard_values,
             hard_vf_mae=hard_mae,
         )
+
+    def sample_transition(self, anchored: bool) -> int:
+        if not isinstance(anchored, bool):
+            raise TypeError("anchored must be a boolean.")
+        if not anchored:
+            return int(torch.randint(self.diffusion.timesteps, ()).item())
+        if self.diffusion.timesteps == 1 or bool(torch.rand(()) < 0.25):
+            return 0
+        return int(torch.randint(1, self.diffusion.timesteps, ()).item())
 
     def sample_volume_size(self) -> int:
         index = int(torch.randint(len(self.volume_sizes), ()).item())
@@ -497,8 +513,32 @@ class Trainer:
                 prediction,
                 transition,
             )
-        clean_probs = (prediction + 1.0) * 0.5
-        return previous, current, logits, clean_probs
+        return previous, current, logits, prediction
+
+    def make_seam_pairs(
+        self,
+        prediction: torch.Tensor,
+        anchor: AnchorCondition | None,
+    ) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+        if anchor is None or self.anchor_seam_weight <= 0.0:
+            return {}
+        previous, current = self.diffusion.sample_pair(prediction, 0)
+        active = anchor.axis_masks.flatten(2).any(dim=(0, 2)).tolist()
+        axes = tuple(
+            axis
+            for axis in AXES
+            if any(active[normal] for normal in AXES if normal != axis)
+        )
+        return {
+            axis: self.sample_pairs(
+                previous,
+                current,
+                axis,
+                anchor.axis_masks,
+                focus_all=True,
+            )
+            for axis in axes
+        }
 
     def sample_pairs(
         self,
@@ -506,6 +546,7 @@ class Trainer:
         current: torch.Tensor,
         axis: int,
         axis_masks: torch.Tensor | None = None,
+        focus_all: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if previous.shape != current.shape:
             raise ValueError("previous and current volumes must have the same shape.")
@@ -513,6 +554,10 @@ class Trainer:
             raise ValueError("volumes must have shape [B, C, D, H, W].")
         if axis not in AXES:
             raise ValueError("axis must be 0, 1, or 2.")
+        if not isinstance(focus_all, bool):
+            raise TypeError("focus_all must be a boolean.")
+        if focus_all and axis_masks is None:
+            raise ValueError("focus_all requires anchor axis masks.")
         if axis_masks is not None and (
             axis_masks.shape != (previous.shape[0], 3, *previous.shape[2:])
             or axis_masks.device != previous.device
@@ -540,7 +585,7 @@ class Trainer:
             focus = focus.movedim(axis + 2, 2)[:, 0]
             points = focus.nonzero()
             if points.numel():
-                focused = min(count, max(1, count // 2))
+                focused = count if focus_all else min(count, max(1, count // 2))
                 selected = points.index_select(
                     0,
                     torch.randint(points.shape[0], (focused,), device=points.device),
@@ -550,6 +595,8 @@ class Trainer:
                 centers = [
                     (int(row), int(col)) for row, col in selected[:, 2:].tolist()
                 ]
+            elif focus_all:
+                raise ValueError("focus_all requires an anchor crossing this axis.")
 
         previous = previous.movedim(axis + 2, 2)
         current = current.movedim(axis + 2, 2)
@@ -567,14 +614,16 @@ class Trainer:
         self,
         transition: int,
         fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        seam_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]],
         batches: dict[int, torch.Tensor],
         step: int,
-    ) -> tuple[list[float], float, float, float]:
+    ) -> tuple[list[float], float, float, float, float]:
         apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
         critic_losses = []
         r1_sum = 0.0
         global_sum = 0.0
         local_sum = 0.0
+        seam_sum = 0.0
         local_weight = self.critic_local_weight
         for axis in AXES:
             critic = self.critics[str(axis)]
@@ -606,6 +655,25 @@ class Trainer:
                 fake_score = critic(fake_prev, fake_curr, fake_time)
                 losses = get_critic_loss(real_score, fake_score)
                 loss = losses.combine(local_weight)
+                if axis in seam_pairs:
+                    real_seam_prev, real_seam_curr = self.diffusion.sample_pair(real, 0)
+                    fake_seam_prev, fake_seam_curr = seam_pairs[axis]
+                    real_seam_score = critic(
+                        real_seam_prev,
+                        real_seam_curr,
+                        self.make_time(0, real_seam_prev.shape[0]),
+                    )
+                    fake_seam_score = critic(
+                        fake_seam_prev.detach().float(),
+                        fake_seam_curr.detach().float(),
+                        self.make_time(0, fake_seam_prev.shape[0]),
+                    )
+                    seam_loss = get_critic_loss(
+                        real_seam_score,
+                        fake_seam_score,
+                    ).combine(local_weight)
+                    seam_sum += float(seam_loss.detach())
+                    loss = loss + self.anchor_seam_weight * seam_loss
             global_sum += float(losses.global_loss.detach())
             local_sum += float(losses.local_loss.detach())
             if apply_r1:
@@ -620,18 +688,19 @@ class Trainer:
             self.scaler.step(optimizer)
             critic_losses.append(float(loss.detach()))
         self.scaler.update()
-        return critic_losses, r1_sum, global_sum, local_sum
+        return critic_losses, r1_sum, global_sum, local_sum, seam_sum
 
     def update_denoiser(
         self,
         transition: int,
         fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        seam_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]],
         logits: torch.Tensor,
         clean_probs: torch.Tensor,
         anchor: AnchorCondition | None,
         target_vf: torch.Tensor,
         vf_active: bool,
-    ) -> tuple[float, float, float, float, float, float, float]:
+    ) -> tuple[float, float, float, float, float, float, float, float]:
         self.denoiser_optim.zero_grad(set_to_none=True)
         for critic in self.critics.values():
             critic.requires_grad_(False)
@@ -651,6 +720,23 @@ class Trainer:
                 global_loss = torch.stack([loss.global_loss for loss in heads]).sum()
                 local_loss = torch.stack([loss.local_loss for loss in heads]).sum()
                 adversarial_loss = global_loss + local_weight * local_loss
+                seam_loss = adversarial_loss.new_zeros(())
+                if seam_pairs:
+                    seam_heads = []
+                    for axis, (fake_prev, fake_curr) in seam_pairs.items():
+                        scores = self.critics[str(axis)](
+                            fake_prev,
+                            fake_curr,
+                            self.make_time(0, fake_prev.shape[0]),
+                        )
+                        seam_heads.append(get_generator_loss(scores))
+                    seam_global = torch.stack(
+                        [loss.global_loss for loss in seam_heads]
+                    ).sum()
+                    seam_local = torch.stack(
+                        [loss.local_loss for loss in seam_heads]
+                    ).sum()
+                    seam_loss = seam_global + local_weight * seam_local
                 anchor_loss = adversarial_loss.new_zeros(())
                 anchor_accuracy = adversarial_loss.new_zeros(())
                 if anchor is not None:
@@ -669,6 +755,7 @@ class Trainer:
                     vf_loss = (pred_vf - target_vf).abs().sum(dim=1).mean()
                 total = (
                     adversarial_loss
+                    + self.anchor_seam_weight * seam_loss
                     + self.anchor_loss_weight * anchor_loss
                     + self.vf_loss_weight * vf_loss
                 )
@@ -683,6 +770,7 @@ class Trainer:
             float(total.detach()),
             float(global_loss.detach()),
             float(local_loss.detach()),
+            float(seam_loss.detach()),
             float(anchor_loss.detach()),
             float(anchor_accuracy.detach()),
             float(vf_loss.detach()),
@@ -742,6 +830,8 @@ class Trainer:
         writer.add_scalar("loss/critic_total", metrics.critic, step)
         writer.add_scalar("loss/critic_global", metrics.critic_global, step)
         writer.add_scalar("loss/critic_local_raw", metrics.critic_local, step)
+        writer.add_scalar("loss/generator_seam", metrics.generator_seam, step)
+        writer.add_scalar("loss/critic_seam", metrics.critic_seam, step)
         writer.add_scalar("loss/r1_raw", metrics.r1, step)
         writer.add_scalar("loss/vf", metrics.vf_loss, step)
         writer.add_scalar("train/transition", metrics.transition, step)

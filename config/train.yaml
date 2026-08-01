@@ -25,6 +25,7 @@ diffusion:
 anchor:
   dropout: 0.2
   loss_weight: 1.0
+  seam_weight: 0.25
   max_planes: 4
 
 vf:
@@ -48,4 +49,8 @@ train:
   mixed_precision: true
   ema_decay: 0.99
   save_every_steps: 100
-  checkpoint: null
+  checkpoint:
+    model: run/20260802-024241-073021/model.pt
+    critic_0: run/20260802-024241-073021/critic_0.pt
+    critic_1: run/20260802-024241-073021/critic_1.pt
+    critic_2: run/20260802-024241-073021/critic_2.pt
