@@ -34,11 +34,11 @@ class SliceDataset(Dataset[torch.Tensor]):
     def load(self, path: Path) -> np.ndarray:
         with Image.open(path) as img:
             data = np.asarray(img)
-        self._check_image(data)
+        self.check_image(data)
         return np.array(data, copy=True)
 
     def crop(self, img: np.ndarray) -> np.ndarray:
-        self._check_image(img)
+        self.check_image(img)
         h, w = img.shape
         if self.crop_size > min(h, w):
             raise ValueError("crop size must fit inside the image.")
@@ -47,12 +47,11 @@ class SliceDataset(Dataset[torch.Tensor]):
         return img[top : top + self.crop_size, left : left + self.crop_size]
 
     def resize(self, img: np.ndarray) -> np.ndarray:
-        self._check_image(img)
+        self.check_image(img)
         if img.shape == (self.patch_size, self.patch_size):
             return img
-        pil = Image.fromarray(img, mode="L")
         return np.asarray(
-            pil.resize(
+            Image.fromarray(img).resize(
                 (self.patch_size, self.patch_size),
                 resample=Image.Resampling.NEAREST,
             ),
@@ -60,7 +59,7 @@ class SliceDataset(Dataset[torch.Tensor]):
         )
 
     @staticmethod
-    def _check_image(img: np.ndarray) -> None:
+    def check_image(img: np.ndarray) -> None:
         if img.ndim != 2:
             raise ValueError("image must be two-dimensional.")
         if img.dtype != np.uint8:
@@ -70,11 +69,11 @@ class SliceDataset(Dataset[torch.Tensor]):
 class BatchStream:
     def __init__(self, loader: DataLoader[torch.Tensor]) -> None:
         self.loader = loader
-        self._iterator: Iterator[torch.Tensor] = iter(loader)
+        self.iterator: Iterator[torch.Tensor] = iter(loader)
 
     def next(self) -> torch.Tensor:
         try:
-            return next(self._iterator)
+            return next(self.iterator)
         except StopIteration:
-            self._iterator = iter(self.loader)
-            return next(self._iterator)
+            self.iterator = iter(self.loader)
+            return next(self.iterator)

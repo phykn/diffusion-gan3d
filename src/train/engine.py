@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,11 +16,11 @@ from ..diffusion import Diffusion
 from ..model.denoiser import Denoiser3D
 from .ema import update_ema
 from .loss import (
-    critic_logistic_loss,
-    critic_r1_penalty,
-    generator_logistic_loss,
+    get_critic_loss,
+    get_critic_r1,
+    get_generator_loss,
 )
-from .weights import WEIGHTS_NAME, save_training_weights
+from .weights import MODEL_FILE, save_all_weights
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,7 @@ class Metrics:
     critic: float
     r1: float
     transition: int
+    volume_size: int
     critic_axes: tuple[float, float, float]
     anchor_planes: int
     anchor_conflict_rate: float
@@ -51,7 +52,6 @@ class Metrics:
 class Trainer:
     def __init__(
         self,
-        *,
         denoiser: Denoiser3D,
         ema_denoiser: Denoiser3D,
         critics: nn.ModuleDict,
@@ -62,6 +62,7 @@ class Trainer:
         scaler: torch.amp.GradScaler,
         device: torch.device,
         volume_batch_size: int,
+        volume_sizes: Sequence[int],
         num_phases: int,
         patch_size: int,
         slices_per_axis: int,
@@ -81,7 +82,9 @@ class Trainer:
             raise ValueError("streams must contain axes 0, 1, and 2.")
         if set(critic_optims) != {str(axis) for axis in AXES}:
             raise ValueError("critic optimizers must contain axes 0, 1, and 2.")
-        max_positions = len(AXES) * ((patch_size + 1) // 2)
+        if not volume_sizes:
+            raise ValueError("volume_sizes must not be empty.")
+        max_positions = len(AXES) * ((min(volume_sizes) + 1) // 2)
         if anchor_max_planes > max_positions:
             raise ValueError(
                 "anchor_max_planes exceeds the available separated positions."
@@ -96,6 +99,7 @@ class Trainer:
         self.scaler = scaler
         self.device = device
         self.volume_batch_size = volume_batch_size
+        self.volume_sizes = tuple(volume_sizes)
         self.num_phases = num_phases
         self.patch_size = patch_size
         self.slices_per_axis = slices_per_axis
@@ -110,13 +114,12 @@ class Trainer:
         self.vf_dropout = vf_dropout
         self.latent_channels = latent_channels
         self.amp_enabled = amp_enabled
-        self._target_count = 0
-        self._target_mean = torch.zeros(num_phases, dtype=torch.float64)
-        self._target_m2 = torch.zeros(num_phases, dtype=torch.float64)
+        self.target_count = 0
+        self.target_mean = torch.zeros(num_phases, dtype=torch.float64)
+        self.target_m2 = torch.zeros(num_phases, dtype=torch.float64)
 
     def fit(
         self,
-        *,
         steps: int,
         save_every: int,
         run_dir: str | Path,
@@ -131,10 +134,12 @@ class Trainer:
             raise ValueError("save_every must be a positive integer.")
         root = Path(run_dir)
         done = 0
-        weights = root / WEIGHTS_NAME
-        print(
-            f"Training Diffusion GAN3D steps=0->{steps} device={self.device} run={root}"
-        )
+        weights = root / MODEL_FILE
+        print("\nTraining")
+        print("--------")
+        print(f"Steps  : {steps}")
+        print(f"Device : {self.device}")
+        print(f"Run    : {root}")
         writer = SummaryWriter(root / "tensorboard")
         bar = tqdm(
             range(steps),
@@ -146,27 +151,28 @@ class Trainer:
             for step in bar:
                 metrics = self.step(step)
                 done = step + 1
-                self._write_metrics(writer, done, metrics)
+                self.write_metrics(writer, done, metrics)
                 bar.set_postfix(
                     G=f"{metrics.generator:.4g}",
                     D=f"{metrics.critic:.4g}",
                     t=metrics.transition,
+                    S=metrics.volume_size,
                     A=metrics.anchor_planes,
                 )
                 if done % save_every == 0:
-                    weights = save_training_weights(
+                    weights = save_all_weights(
                         root,
                         self.ema_denoiser,
                         self.critics,
                     )
             if done % save_every:
-                weights = save_training_weights(
+                weights = save_all_weights(
                     root,
                     self.ema_denoiser,
                     self.critics,
                 )
         except KeyboardInterrupt:
-            weights = save_training_weights(
+            weights = save_all_weights(
                 root,
                 self.ema_denoiser,
                 self.critics,
@@ -181,7 +187,6 @@ class Trainer:
     def step(
         self,
         step: int,
-        *,
         transition: int | None = None,
     ) -> Metrics:
         if not isinstance(step, int) or isinstance(step, bool) or step < 0:
@@ -201,29 +206,32 @@ class Trainer:
             or not 0 <= transition < self.diffusion.timesteps
         ):
             raise ValueError("transition is outside the diffusion schedule.")
-        batches = self._next_real_batches()
-        target_vf = _get_vf(
-            batches.values(),
-            self.num_phases,
-        ).expand(self.volume_batch_size, -1)
-        vf = self._apply_vf_dropout(target_vf)
-        anchor = self._sample_anchor(batches)
+        volume_size = self.sample_volume_size()
+        batches = self.get_batches()
+        real = {
+            axis: self.crop_images(images, self.patch_size)
+            for axis, images in batches.items()
+        }
+        target_vf = self.get_vf(batches.values()).expand(self.volume_batch_size, -1)
+        vf = self.apply_vf_dropout(target_vf)
+        anchor = self.sample_anchor(batches, volume_size)
         (
-            prev,
+            previous,
             current,
             logits,
             clean_probs,
-        ) = self._generate_pair(
+        ) = self.generate_pair(
             transition,
             anchor,
             vf,
+            volume_size,
         )
         fake = {
-            axis: _sample_pairs(
-                prev,
+            axis: self.sample_pairs(
+                previous,
                 current,
-                axis=axis,
-                count=self.slices_per_axis,
+                axis,
+                focus=None if anchor is None else anchor.mask,
             )
             for axis in AXES
         }
@@ -233,21 +241,21 @@ class Trainer:
             r1,
             critic_global,
             critic_local,
-        ) = self._update_critics(
+        ) = self.update_critics(
             transition,
             fake,
-            batches,
+            real,
             step,
         )
         (
-            g_loss,
+            generator_loss,
             generator_total,
             generator_global,
             generator_local,
             anchor_loss,
             anchor_accuracy,
             vf_loss,
-        ) = self._update_denoiser(
+        ) = self.update_denoiser(
             transition,
             fake,
             logits,
@@ -256,18 +264,19 @@ class Trainer:
             target_vf,
             vf_active=vf is not None,
         )
-        target_vals, soft_vals, hard_vals, hard_mae = self._summarize_vfs(
+        target_values, soft_values, hard_values, hard_mae = self.summarize_vfs(
             clean_probs,
             target_vf,
         )
-        target_stds = self._update_target_statistics(target_vals)
+        target_stds = self.update_target_stats(target_values)
         update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
         return Metrics(
-            generator=g_loss,
+            generator=generator_loss,
             generator_total=generator_total,
             critic=sum(critic_vals),
             r1=r1,
             transition=transition,
+            volume_size=volume_size,
             critic_axes=tuple(critic_vals),
             anchor_planes=0 if anchor is None else anchor.planes,
             anchor_conflict_rate=0.0 if anchor is None else anchor.conflict_rate,
@@ -279,15 +288,445 @@ class Trainer:
             critic_local=critic_local,
             vf_loss=vf_loss,
             vf_active=vf is not None,
-            target_vfs=target_vals,
+            target_vfs=target_values,
             target_vf_stds=target_stds,
-            soft_vfs=soft_vals,
-            hard_vfs=hard_vals,
+            soft_vfs=soft_values,
+            hard_vfs=hard_values,
             hard_vf_mae=hard_mae,
         )
 
+    def sample_volume_size(self) -> int:
+        index = int(torch.randint(len(self.volume_sizes), ()).item())
+        return self.volume_sizes[index]
+
+    def get_batches(self) -> dict[int, torch.Tensor]:
+        return {
+            axis: self.streams[axis]
+            .next()
+            .to(
+                self.device,
+                non_blocking=True,
+            )
+            for axis in AXES
+        }
+
     @staticmethod
-    def _write_metrics(
+    def crop_images(
+        images: torch.Tensor,
+        size: int,
+        centers: list[tuple[int, int]] | None = None,
+    ) -> torch.Tensor:
+        if images.ndim not in (3, 4):
+            raise ValueError("images must have shape [B, H, W] or [B, C, H, W].")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+            raise ValueError("crop size must be a positive integer.")
+        height, width = images.shape[-2:]
+        if size > min(height, width):
+            raise ValueError("crop size must fit inside the images.")
+        if (height, width) == (size, size):
+            return images
+
+        top = torch.randint(height - size + 1, (images.shape[0],)).tolist()
+        left = torch.randint(width - size + 1, (images.shape[0],)).tolist()
+        if centers is not None:
+            if len(centers) > images.shape[0]:
+                raise ValueError("centers must not outnumber images.")
+            for index, (row, col) in enumerate(centers):
+                top[index] = min(max(row - size // 2, 0), height - size)
+                left[index] = min(max(col - size // 2, 0), width - size)
+        return torch.stack(
+            [
+                image[..., row : row + size, col : col + size]
+                for image, row, col in zip(images, top, left, strict=True)
+            ]
+        )
+
+    def get_vf(self, batches: Iterable[torch.Tensor]) -> torch.Tensor:
+        counts = torch.stack(
+            [
+                torch.bincount(images.flatten(), minlength=self.num_phases)
+                for images in batches
+            ]
+        ).sum(dim=0)
+        vf = counts.to(torch.float32)
+        vf.div_(counts.sum())
+        return vf.unsqueeze(0)
+
+    def apply_vf_dropout(
+        self,
+        target: torch.Tensor,
+    ) -> torch.Tensor | None:
+        dropout = self.vf_dropout
+        if dropout <= 0.0:
+            return target
+        if dropout >= 1.0 or bool(torch.rand(()) < dropout):
+            return None
+        return target
+
+    def sample_anchor(
+        self,
+        batches: dict[int, torch.Tensor],
+        volume_size: int,
+    ) -> AnchorCondition | None:
+        if self.anchor_dropout >= 1.0:
+            return None
+        if not bool(torch.rand(()) < 1.0 - self.anchor_dropout):
+            return None
+        count = int(
+            torch.randint(
+                1,
+                self.anchor_max_planes + 1,
+                (),
+            ).item()
+        )
+        positions = self.sample_anchor_positions(
+            count,
+            volume_size=volume_size,
+        )
+        planes = []
+        for axis, plane_index in positions:
+            images = batches[axis]
+            batch_indices = torch.randint(
+                images.shape[0],
+                (self.volume_batch_size,),
+                device=self.device,
+            )
+            selected = images.index_select(0, batch_indices)
+            size = min(volume_size, *selected.shape[-2:])
+            selected = self.crop_images(selected, size)
+            position = tuple(
+                int(torch.randint(volume_size - size + 1, ()).item()) for _ in range(2)
+            )
+            planes.append(
+                PlaneAnchor(
+                    image=selected,
+                    axis=axis,
+                    index=plane_index,
+                    position=position,
+                )
+            )
+        return build_anchors(
+            planes,
+            batch_size=self.volume_batch_size,
+            num_phases=self.num_phases,
+            volume_size=volume_size,
+            device=self.device,
+            dtype=torch.float32,
+            reconcile=True,
+        )
+
+    @staticmethod
+    def sample_anchor_positions(
+        count: int,
+        volume_size: int,
+    ) -> tuple[tuple[int, int], ...]:
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise ValueError("count must be a positive integer.")
+        if not isinstance(volume_size, int) or volume_size < 1:
+            raise ValueError("volume_size must be a positive integer.")
+        available = len(AXES) * volume_size
+        separated = len(AXES) * ((volume_size + 1) // 2)
+        if count > separated:
+            raise ValueError("count exceeds the available separated positions.")
+
+        gap = max(2, volume_size // (2 * count))
+        selected: list[tuple[int, int]] = []
+        for flat_index in torch.randperm(available).tolist():
+            axis, plane_index = divmod(flat_index, volume_size)
+            if any(
+                axis == previous_axis and abs(plane_index - previous_index) < gap
+                for previous_axis, previous_index in selected
+            ):
+                continue
+            selected.append((axis, plane_index))
+            if len(selected) == count:
+                return tuple(selected)
+        raise RuntimeError("could not sample sufficiently separated anchor positions.")
+
+    def generate_pair(
+        self,
+        transition: int,
+        anchor: AnchorCondition | None,
+        vf: torch.Tensor | None,
+        volume_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        shape = (
+            self.volume_batch_size,
+            self.num_phases,
+            volume_size,
+            volume_size,
+            volume_size,
+        )
+        current = torch.randn(shape, device=self.device, dtype=torch.float32)
+        conditions = {}
+        if anchor is not None:
+            conditions["anchor_image"] = anchor.image
+            conditions["anchor_mask"] = anchor.mask
+        if vf is not None:
+            conditions["vf"] = vf
+
+        with torch.no_grad(), self.autocast():
+            for index in reversed(range(transition + 1, self.diffusion.timesteps)):
+                time = self.make_time(index, current.shape[0])
+                latent = self.sample_latent(current.shape[0], current.dtype)
+                prediction = self.denoiser(
+                    current,
+                    time,
+                    latent,
+                    **conditions,
+                )
+                current = self.diffusion.sample_posterior(
+                    current,
+                    prediction,
+                    index,
+                )
+
+        current = current.detach()
+        time = self.make_time(transition, current.shape[0])
+        latent = self.sample_latent(current.shape[0], current.dtype)
+        with self.autocast():
+            logits = self.denoiser.predict_logits(
+                current,
+                time,
+                latent,
+                **conditions,
+            )
+            prediction = self.denoiser.decode(logits)
+            previous = self.diffusion.sample_posterior(
+                current,
+                prediction,
+                transition,
+            )
+        clean_probs = (prediction + 1.0) * 0.5
+        return previous, current, logits, clean_probs
+
+    def sample_pairs(
+        self,
+        previous: torch.Tensor,
+        current: torch.Tensor,
+        axis: int,
+        focus: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if previous.shape != current.shape:
+            raise ValueError("previous and current volumes must have the same shape.")
+        if previous.ndim != 5:
+            raise ValueError("volumes must have shape [B, C, D, H, W].")
+        if axis not in AXES:
+            raise ValueError("axis must be 0, 1, or 2.")
+        if focus is not None and (
+            focus.shape != (previous.shape[0], 1, *previous.shape[2:])
+            or focus.device != previous.device
+        ):
+            raise ValueError("focus must match the volume batch and spatial shape.")
+
+        count = self.slices_per_axis
+        batch_indices = torch.randint(
+            previous.shape[0],
+            (count,),
+            device=previous.device,
+        )
+        plane_indices = torch.randint(
+            previous.shape[axis + 2],
+            (count,),
+            device=previous.device,
+        )
+        focused = 0
+        centers: list[tuple[int, int]] = []
+        if focus is not None:
+            focus = focus.movedim(axis + 2, 2)[:, 0]
+            points = focus.nonzero()
+            if points.numel():
+                focused = min(count, max(1, count // 2))
+                selected = points.index_select(
+                    0,
+                    torch.randint(points.shape[0], (focused,), device=points.device),
+                )
+                batch_indices[:focused] = selected[:, 0]
+                plane_indices[:focused] = selected[:, 1]
+                centers = [
+                    (int(row), int(col)) for row, col in selected[:, 2:].tolist()
+                ]
+
+        previous = previous.movedim(axis + 2, 2)
+        current = current.movedim(axis + 2, 2)
+        previous = previous[batch_indices, :, plane_indices]
+        current = current[batch_indices, :, plane_indices]
+        channels = previous.shape[1]
+        pairs = self.crop_images(
+            torch.cat((previous, current), dim=1),
+            self.patch_size,
+            centers,
+        )
+        return pairs[:, :channels], pairs[:, channels:]
+
+    def update_critics(
+        self,
+        transition: int,
+        fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        batches: dict[int, torch.Tensor],
+        step: int,
+    ) -> tuple[list[float], float, float, float]:
+        apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
+        critic_losses = []
+        r1_sum = 0.0
+        global_sum = 0.0
+        local_sum = 0.0
+        local_weight = self.critic_local_weight
+        for axis in AXES:
+            critic = self.critics[str(axis)]
+            optimizer = self.critic_optims[str(axis)]
+            optimizer.zero_grad(set_to_none=True)
+
+            images = batches[axis]
+            real = (
+                F.one_hot(images, num_classes=self.num_phases)
+                .movedim(-1, 1)
+                .to(torch.float32)
+                .mul_(2.0)
+                .sub_(1.0)
+            )
+            real_time = self.make_time(transition, real.shape[0])
+            real_prev, real_curr = self.diffusion.sample_pair(
+                real,
+                transition,
+            )
+            real_prev.requires_grad_(apply_r1)
+            fake_prev, fake_curr = fake[axis]
+            fake_prev = fake_prev.detach().float()
+            fake_curr = fake_curr.detach().float()
+            fake_time = self.make_time(transition, fake_prev.shape[0])
+
+            autocast = self.autocast(self.amp_enabled and not apply_r1)
+            with autocast:
+                real_score = critic(real_prev, real_curr, real_time)
+                fake_score = critic(fake_prev, fake_curr, fake_time)
+                losses = get_critic_loss(real_score, fake_score)
+                loss = losses.combine(local_weight)
+            global_sum += float(losses.global_loss.detach())
+            local_sum += float(losses.local_loss.detach())
+            if apply_r1:
+                r1 = get_critic_r1(
+                    real_score,
+                    (real_prev,),
+                )
+                penalty = r1.combine(local_weight)
+                r1_sum += float(penalty.detach())
+                loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
+            self.scaler.scale(loss).backward()
+            self.scaler.step(optimizer)
+            critic_losses.append(float(loss.detach()))
+        self.scaler.update()
+        return critic_losses, r1_sum, global_sum, local_sum
+
+    def update_denoiser(
+        self,
+        transition: int,
+        fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        logits: torch.Tensor,
+        clean_probs: torch.Tensor,
+        anchor: AnchorCondition | None,
+        target_vf: torch.Tensor,
+        vf_active: bool,
+    ) -> tuple[float, float, float, float, float, float, float]:
+        self.denoiser_optim.zero_grad(set_to_none=True)
+        for critic in self.critics.values():
+            critic.requires_grad_(False)
+        try:
+            heads = []
+            local_weight = self.critic_local_weight
+            with self.autocast():
+                for axis in AXES:
+                    fake_prev, fake_curr = fake[axis]
+                    time = self.make_time(transition, fake_prev.shape[0])
+                    scores = self.critics[str(axis)](
+                        fake_prev,
+                        fake_curr,
+                        time,
+                    )
+                    heads.append(get_generator_loss(scores))
+                global_loss = torch.stack([loss.global_loss for loss in heads]).sum()
+                local_loss = torch.stack([loss.local_loss for loss in heads]).sum()
+                adversarial_loss = global_loss + local_weight * local_loss
+                anchor_loss = adversarial_loss.new_zeros(())
+                anchor_accuracy = adversarial_loss.new_zeros(())
+                if anchor is not None:
+                    selected = anchor.mask[:, 0]
+                    anchor_target = anchor.target[selected]
+                    anchor_logits = logits.movedim(1, -1)[selected]
+                    anchor_loss = F.cross_entropy(anchor_logits, anchor_target)
+                    anchor_accuracy = (
+                        (anchor_logits.argmax(dim=1) == anchor_target)
+                        .to(torch.float32)
+                        .mean()
+                    )
+                vf_loss = adversarial_loss.new_zeros(())
+                if vf_active:
+                    pred_vf = clean_probs.mean(dim=(2, 3, 4))
+                    vf_loss = (pred_vf - target_vf).abs().sum(dim=1).mean()
+                total = (
+                    adversarial_loss
+                    + self.anchor_loss_weight * anchor_loss
+                    + self.vf_loss_weight * vf_loss
+                )
+            self.scaler.scale(total).backward()
+            self.scaler.step(self.denoiser_optim)
+            self.scaler.update()
+        finally:
+            for critic in self.critics.values():
+                critic.requires_grad_(True)
+        return (
+            float(adversarial_loss.detach()),
+            float(total.detach()),
+            float(global_loss.detach()),
+            float(local_loss.detach()),
+            float(anchor_loss.detach()),
+            float(anchor_accuracy.detach()),
+            float(vf_loss.detach()),
+        )
+
+    @staticmethod
+    def summarize_vfs(
+        probs: torch.Tensor,
+        target: torch.Tensor,
+    ) -> tuple[
+        tuple[float, ...],
+        tuple[float, ...],
+        tuple[float, ...],
+        float,
+    ]:
+        values = probs.detach().to(torch.float32)
+        target_values = target.detach().to(torch.float32).mean(dim=0)
+        soft_values = values.mean(dim=(0, 2, 3, 4))
+        phases = values.argmax(dim=1)
+        hard_values = torch.bincount(
+            phases.flatten(),
+            minlength=values.shape[1],
+        ).to(torch.float32)
+        hard_values.div_(phases.numel())
+        hard_mae = (hard_values - target_values).abs().mean()
+        return (
+            tuple(float(value) for value in target_values),
+            tuple(float(value) for value in soft_values),
+            tuple(float(value) for value in hard_values),
+            float(hard_mae),
+        )
+
+    def update_target_stats(
+        self,
+        target: tuple[float, ...],
+    ) -> tuple[float, ...]:
+        values = torch.tensor(target, dtype=torch.float64)
+        self.target_count += 1
+        delta = values - self.target_mean
+        self.target_mean.add_(delta / self.target_count)
+        self.target_m2.add_(delta * (values - self.target_mean))
+        if self.target_count < 2:
+            return tuple(0.0 for _ in target)
+        std = (self.target_m2 / (self.target_count - 1)).sqrt()
+        return tuple(float(value) for value in std)
+
+    @staticmethod
+    def write_metrics(
         writer: SummaryWriter,
         step: int,
         metrics: Metrics,
@@ -302,6 +741,7 @@ class Trainer:
         writer.add_scalar("loss/r1_raw", metrics.r1, step)
         writer.add_scalar("loss/vf", metrics.vf_loss, step)
         writer.add_scalar("train/transition", metrics.transition, step)
+        writer.add_scalar("train/volume_size", metrics.volume_size, step)
         writer.add_scalar("conditioning/anchor_planes", metrics.anchor_planes, step)
         writer.add_scalar(
             "conditioning/vf_active",
@@ -368,328 +808,7 @@ class Trainer:
                 step,
             )
 
-    def _generate_pair(
-        self,
-        transition: int,
-        anchor: AnchorCondition | None,
-        vf: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        shape = (
-            self.volume_batch_size,
-            self.num_phases,
-            self.patch_size,
-            self.patch_size,
-            self.patch_size,
-        )
-        current = torch.randn(shape, device=self.device, dtype=torch.float32)
-        with torch.no_grad(), self._autocast():
-            for index in reversed(range(transition + 1, self.diffusion.timesteps)):
-                time = self._make_times(index, current.shape[0])
-                latent = self._sample_latent(current.shape[0], dtype=current.dtype)
-                pred = self._denoise(
-                    current,
-                    time,
-                    latent,
-                    anchor,
-                    vf,
-                )
-                current = self.diffusion.sample_posterior(
-                    current,
-                    pred,
-                    index,
-                )
-
-        current = current.detach()
-        time = self._make_times(transition, current.shape[0])
-        latent = self._sample_latent(current.shape[0], dtype=current.dtype)
-        with self._autocast():
-            logits = self._predict_logits(
-                current,
-                time,
-                latent,
-                anchor,
-                vf,
-            )
-            pred = self.denoiser.decode(logits)
-            previous = self.diffusion.sample_posterior(
-                current,
-                pred,
-                transition,
-            )
-        clean_probs = (pred + 1.0) * 0.5
-        return previous, current, logits, clean_probs
-
-    def _update_critics(
-        self,
-        transition: int,
-        fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
-        batches: dict[int, torch.Tensor],
-        step: int,
-    ) -> tuple[list[float], float, float, float]:
-        apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
-        critic_vals = []
-        r1_sum = 0.0
-        global_sum = 0.0
-        local_sum = 0.0
-        local_w = self.critic_local_weight
-        for axis in AXES:
-            critic = self.critics[str(axis)]
-            optim = self.critic_optims[str(axis)]
-            optim.zero_grad(set_to_none=True)
-
-            imgs = batches[axis]
-            real = (
-                F.one_hot(imgs, num_classes=self.num_phases)
-                .movedim(-1, 1)
-                .to(torch.float32)
-                .mul_(2.0)
-                .sub_(1.0)
-            )
-            real_time = self._make_times(transition, real.shape[0])
-            real_prev, real_curr = self.diffusion.sample_pair(
-                real,
-                transition,
-            )
-            real_prev.requires_grad_(apply_r1)
-            fake_prev, fake_curr = fake[axis]
-            fake_prev = fake_prev.detach().float()
-            fake_curr = fake_curr.detach().float()
-            fake_time = self._make_times(transition, fake_prev.shape[0])
-
-            autocast = self._autocast(enabled=self.amp_enabled and not apply_r1)
-            with autocast:
-                real_score = critic(real_prev, real_curr, real_time)
-                fake_score = critic(fake_prev, fake_curr, fake_time)
-                head = critic_logistic_loss(real_score, fake_score)
-                loss = head.total(local_w)
-            global_sum += float(head.global_loss.detach())
-            local_sum += float(head.local_loss.detach())
-            if apply_r1:
-                r1 = critic_r1_penalty(
-                    real_score,
-                    (real_prev,),
-                )
-                penalty = r1.total(local_w)
-                r1_sum += float(penalty.detach())
-                loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
-            self.scaler.scale(loss).backward()
-            self.scaler.step(optim)
-            critic_vals.append(float(loss.detach()))
-        self.scaler.update()
-        return critic_vals, r1_sum, global_sum, local_sum
-
-    def _update_denoiser(
-        self,
-        transition: int,
-        fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
-        logits: torch.Tensor,
-        clean_probs: torch.Tensor,
-        anchor: AnchorCondition | None,
-        target_vf: torch.Tensor,
-        *,
-        vf_active: bool,
-    ) -> tuple[float, float, float, float, float, float, float]:
-        self.denoiser_optim.zero_grad(set_to_none=True)
-        for critic in self.critics.values():
-            critic.requires_grad_(False)
-        try:
-            heads = []
-            local_w = self.critic_local_weight
-            with self._autocast():
-                for axis in AXES:
-                    fake_prev, fake_curr = fake[axis]
-                    time = self._make_times(transition, fake_prev.shape[0])
-                    scores = self.critics[str(axis)](
-                        fake_prev,
-                        fake_curr,
-                        time,
-                    )
-                    heads.append(generator_logistic_loss(scores))
-                global_loss = torch.stack([loss.global_loss for loss in heads]).sum()
-                local_loss = torch.stack([loss.local_loss for loss in heads]).sum()
-                adv = global_loss + local_w * local_loss
-                anchor_loss = adv.new_zeros(())
-                anchor_accuracy = adv.new_zeros(())
-                if anchor is not None:
-                    selected = anchor.mask[:, 0]
-                    anchor_target = anchor.target[selected]
-                    anchor_logits = logits.movedim(1, -1)[selected]
-                    anchor_loss = F.cross_entropy(anchor_logits, anchor_target)
-                    anchor_accuracy = (
-                        (anchor_logits.argmax(dim=1) == anchor_target)
-                        .to(torch.float32)
-                        .mean()
-                    )
-                vf_loss = adv.new_zeros(())
-                if vf_active:
-                    pred_vf = clean_probs.mean(dim=(2, 3, 4))
-                    vf_loss = (pred_vf - target_vf).abs().sum(dim=1).mean()
-                total = (
-                    adv
-                    + self.anchor_loss_weight * anchor_loss
-                    + self.vf_loss_weight * vf_loss
-                )
-            self.scaler.scale(total).backward()
-            self.scaler.step(self.denoiser_optim)
-            self.scaler.update()
-        finally:
-            for critic in self.critics.values():
-                critic.requires_grad_(True)
-        return (
-            float(adv.detach()),
-            float(total.detach()),
-            float(global_loss.detach()),
-            float(local_loss.detach()),
-            float(anchor_loss.detach()),
-            float(anchor_accuracy.detach()),
-            float(vf_loss.detach()),
-        )
-
-    def _sample_anchor(
-        self,
-        batches: dict[int, torch.Tensor],
-    ) -> AnchorCondition | None:
-        if self.anchor_dropout >= 1.0:
-            return None
-        if not bool(torch.rand(()) < 1.0 - self.anchor_dropout):
-            return None
-        count = int(
-            torch.randint(
-                1,
-                self.anchor_max_planes + 1,
-                (),
-            ).item()
-        )
-        positions = _sample_anchor_positions(
-            count,
-            volume_size=self.patch_size,
-        )
-        planes = []
-        for axis, plane_idx in positions:
-            imgs = batches[axis]
-            batch_idx = torch.randint(
-                imgs.shape[0],
-                (self.volume_batch_size,),
-                device=self.device,
-            )
-            selected = imgs.index_select(0, batch_idx)
-            planes.append(
-                PlaneAnchor(
-                    image=selected,
-                    axis=axis,
-                    index=plane_idx,
-                )
-            )
-        return build_anchors(
-            planes,
-            batch_size=self.volume_batch_size,
-            num_phases=self.num_phases,
-            volume_size=self.patch_size,
-            device=self.device,
-            dtype=torch.float32,
-            reconcile=True,
-        )
-
-    def _denoise(
-        self,
-        current: torch.Tensor,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        anchor: AnchorCondition | None,
-        vf: torch.Tensor | None,
-    ) -> torch.Tensor:
-        if anchor is None and vf is None:
-            return self.denoiser(current, time, latent)
-        cond = {}
-        if anchor is not None:
-            cond["anchor_image"] = anchor.image
-            cond["anchor_mask"] = anchor.mask
-        if vf is not None:
-            cond["vf"] = vf
-        return self.denoiser(current, time, latent, **cond)
-
-    def _predict_logits(
-        self,
-        current: torch.Tensor,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        anchor: AnchorCondition | None,
-        vf: torch.Tensor | None,
-    ) -> torch.Tensor:
-        if anchor is None and vf is None:
-            return self.denoiser.predict_logits(current, time, latent)
-        cond = {}
-        if anchor is not None:
-            cond["anchor_image"] = anchor.image
-            cond["anchor_mask"] = anchor.mask
-        if vf is not None:
-            cond["vf"] = vf
-        return self.denoiser.predict_logits(current, time, latent, **cond)
-
-    def _next_real_batches(self) -> dict[int, torch.Tensor]:
-        return {
-            axis: self.streams[axis]
-            .next()
-            .to(
-                self.device,
-                non_blocking=True,
-            )
-            for axis in AXES
-        }
-
-    def _apply_vf_dropout(
-        self,
-        target: torch.Tensor,
-    ) -> torch.Tensor | None:
-        dropout = self.vf_dropout
-        if dropout <= 0.0:
-            return target
-        if dropout >= 1.0 or bool(torch.rand(()) < dropout):
-            return None
-        return target
-
-    def _update_target_statistics(
-        self,
-        target: tuple[float, ...],
-    ) -> tuple[float, ...]:
-        vals = torch.tensor(target, dtype=torch.float64)
-        self._target_count += 1
-        delta = vals - self._target_mean
-        self._target_mean.add_(delta / self._target_count)
-        self._target_m2.add_(delta * (vals - self._target_mean))
-        if self._target_count < 2:
-            return tuple(0.0 for _ in target)
-        std = (self._target_m2 / (self._target_count - 1)).sqrt()
-        return tuple(float(value) for value in std)
-
-    @staticmethod
-    def _summarize_vfs(
-        probs: torch.Tensor,
-        target: torch.Tensor,
-    ) -> tuple[
-        tuple[float, ...],
-        tuple[float, ...],
-        tuple[float, ...],
-        float,
-    ]:
-        vals = probs.detach().to(torch.float32)
-        target_vals = target.detach().to(torch.float32).mean(dim=0)
-        soft_vals = vals.mean(dim=(0, 2, 3, 4))
-        phases = vals.argmax(dim=1)
-        hard_vals = torch.bincount(
-            phases.flatten(),
-            minlength=vals.shape[1],
-        ).to(torch.float32)
-        hard_vals.div_(phases.numel())
-        hard_mae = (hard_vals - target_vals).abs().mean()
-        return (
-            tuple(float(value) for value in target_vals),
-            tuple(float(value) for value in soft_vals),
-            tuple(float(value) for value in hard_vals),
-            float(hard_mae),
-        )
-
-    def _make_times(self, transition: int, batch: int) -> torch.Tensor:
+    def make_time(self, transition: int, batch: int) -> torch.Tensor:
         return torch.full(
             (batch,),
             transition,
@@ -697,7 +816,7 @@ class Trainer:
             dtype=torch.long,
         )
 
-    def _sample_latent(self, batch: int, *, dtype: torch.dtype) -> torch.Tensor:
+    def sample_latent(self, batch: int, dtype: torch.dtype) -> torch.Tensor:
         return torch.randn(
             batch,
             self.latent_channels,
@@ -705,9 +824,8 @@ class Trainer:
             dtype=dtype,
         )
 
-    def _autocast(
+    def autocast(
         self,
-        *,
         enabled: bool | None = None,
     ) -> AbstractContextManager:
         if enabled is None:
@@ -717,75 +835,3 @@ class Trainer:
             dtype=torch.float16,
             enabled=enabled,
         )
-
-
-def _get_vf(
-    batches: Iterable[torch.Tensor],
-    num_phases: int,
-) -> torch.Tensor:
-    counts = torch.stack(
-        [torch.bincount(imgs.flatten(), minlength=num_phases) for imgs in batches]
-    ).sum(dim=0)
-    vf = counts.to(torch.float32)
-    vf.div_(counts.sum())
-    return vf.unsqueeze(0)
-
-
-def _sample_pairs(
-    previous: torch.Tensor,
-    current: torch.Tensor,
-    *,
-    axis: int,
-    count: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if previous.shape != current.shape:
-        raise ValueError("previous and current volumes must have the same shape.")
-    if previous.ndim != 5:
-        raise ValueError("volumes must have shape [B, C, D, H, W].")
-    if axis not in AXES:
-        raise ValueError("axis must be 0, 1, or 2.")
-    if count <= 0:
-        raise ValueError("count must be positive.")
-
-    batch_idx = torch.randint(
-        previous.shape[0],
-        (count,),
-        device=previous.device,
-    )
-    plane_idx = torch.randint(
-        previous.shape[axis + 2],
-        (count,),
-        device=previous.device,
-    )
-    previous = previous.movedim(axis + 2, 2)
-    current = current.movedim(axis + 2, 2)
-    return previous[batch_idx, :, plane_idx], current[batch_idx, :, plane_idx]
-
-
-def _sample_anchor_positions(
-    count: int,
-    *,
-    volume_size: int,
-) -> tuple[tuple[int, int], ...]:
-    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
-        raise ValueError("count must be a positive integer.")
-    if not isinstance(volume_size, int) or volume_size < 1:
-        raise ValueError("volume_size must be a positive integer.")
-    available = len(AXES) * volume_size
-    separated = len(AXES) * ((volume_size + 1) // 2)
-    if count > separated:
-        raise ValueError("count exceeds the available separated positions.")
-
-    gap = max(2, volume_size // (2 * count))
-    selected: list[tuple[int, int]] = []
-    for flat_idx in torch.randperm(available).tolist():
-        axis, plane_idx = divmod(flat_idx, volume_size)
-        if any(
-            axis == prev_axis and abs(plane_idx - prev_idx) < gap
-            for prev_axis, prev_idx in selected
-        ):
-            continue
-        selected.append((axis, plane_idx))
-        if len(selected) == count:
-            return tuple(selected)
-    raise RuntimeError("could not sample sufficiently separated anchor positions.")

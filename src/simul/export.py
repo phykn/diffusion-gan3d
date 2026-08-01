@@ -17,30 +17,22 @@ class Export:
     slices: dict[int, tuple[Path, ...]]
 
 
-def generate(
-    *,
-    data_dir: str | Path,
-    count: int,
-    size: int,
-    big_radius: int,
-    small_radius: int,
-    big_vf: float,
-    small_vf: float,
-    big_elongation: float,
-) -> Export:
-    root = Path(data_dir)
-    vol_dir, slice_dirs = _make_dirs(root)
+def generate(cfg: dict) -> Export:
+    output = cfg["output"]
+    geometry = cfg["geometry"]
+    root = Path(output["data_dir"])
+    vol_dir, slice_dirs = make_dirs(root)
     volumes: list[Path] = []
     slices: dict[int, list[Path]] = {axis: [] for axis in AXES}
 
-    for idx in range(count):
+    for idx in range(output["count"]):
         vol = pack(
-            size=size,
-            big_radius=big_radius,
-            small_radius=small_radius,
-            big_vf=big_vf,
-            small_vf=small_vf,
-            big_elongation=big_elongation,
+            size=geometry["size"],
+            big_radius=geometry["big_radius"],
+            small_radius=geometry["small_radius"],
+            big_vf=geometry["big_vf"],
+            small_vf=geometry["small_vf"],
+            big_elongation=geometry.get("big_elongation", 1.0),
         )
         stem = f"volume_{idx:03d}"
         path = vol_dir / f"{stem}.tiff"
@@ -48,7 +40,7 @@ def generate(
         volumes.append(path)
 
         for axis in AXES:
-            paths = _save_slices(
+            paths = save_slices(
                 vol,
                 slice_dirs[axis],
                 axis=axis,
@@ -62,7 +54,7 @@ def generate(
     )
 
 
-def _make_dirs(root: Path) -> tuple[Path, dict[int, Path]]:
+def make_dirs(root: Path) -> tuple[Path, dict[int, Path]]:
     vol_dir = root / "volumes"
     slice_dirs = {axis: root / "slices" / str(axis) for axis in AXES}
     paths = (vol_dir, *slice_dirs.values())
@@ -74,10 +66,9 @@ def _make_dirs(root: Path) -> tuple[Path, dict[int, Path]]:
     return vol_dir, slice_dirs
 
 
-def _save_slices(
+def save_slices(
     vol: np.ndarray,
     dst: Path,
-    *,
     axis: int,
     stem: str,
 ) -> list[Path]:
@@ -85,12 +76,12 @@ def _save_slices(
     paths = []
     for idx in range(stack.shape[0]):
         path = dst / f"{stem}_{axis}_{idx:03d}.png"
-        _write_image(path, stack[idx])
+        write_image(path, stack[idx])
         paths.append(path)
     return paths
 
 
-def _write_image(path: Path, data: np.ndarray) -> None:
+def write_image(path: Path, data: np.ndarray) -> None:
     img = Image.fromarray(data)
     img.putpalette(PALETTE)
     img.save(path)

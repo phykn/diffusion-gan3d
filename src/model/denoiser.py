@@ -1,4 +1,3 @@
-import math
 from collections.abc import Sequence
 
 import torch
@@ -7,13 +6,12 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .blocks import (
+    INV_SQRT_TWO,
     AdaptiveResBlock3D,
+    ChannelNorm3D,
     SinusoidalTimeEmbedding,
     Upsample3D,
-    choose_groups,
 )
-
-_INV_SQRT_TWO = 1.0 / math.sqrt(2.0)
 
 
 class Denoiser3D(nn.Module):
@@ -30,6 +28,8 @@ class Denoiser3D(nn.Module):
         multipliers = tuple(channel_multipliers)
 
         channels = tuple(base_channels * scale for scale in multipliers)
+        levels = len(channels)
+        self.downsample_factor = 2 ** (levels - 1)
         self.gradient_checkpointing = gradient_checkpointing
 
         self.time_emb = SinusoidalTimeEmbedding(embedding_channels)
@@ -49,10 +49,10 @@ class Denoiser3D(nn.Module):
             channels[0],
             3,
             padding=1,
+            bias=False,
         )
         # Zero initialization preserves unconditioned behavior at training start.
         nn.init.zeros_(self.anchor_input.weight)
-        nn.init.zeros_(self.anchor_input.bias)
 
         self.encoder = nn.ModuleList()
         self.downsample = nn.ModuleList()
@@ -95,7 +95,7 @@ class Denoiser3D(nn.Module):
             )
             ch = skip_ch
 
-        self.output_norm = nn.GroupNorm(choose_groups(channels[0]), channels[0])
+        self.output_norm = ChannelNorm3D(channels[0])
         self.output = nn.Conv3d(channels[0], num_phases, 3, padding=1)
 
         vf_out = nn.Linear(embedding_channels, embedding_channels)
@@ -135,9 +135,9 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        emb = self._embed(x_current, time, latent, vf=vf)
+        emb = self.embed(x_current, time, latent, vf)
         x = self.input(x_current)
-        anchor_feat = self._encode_anchor(
+        anchor_feat = self.encode_anchor(
             x_current,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
@@ -146,13 +146,13 @@ class Denoiser3D(nn.Module):
             x = x + anchor_feat
         skips = []
         for idx, block in enumerate(self.encoder):
-            x = self._run_block(block, x, emb)
+            x = self.run_block(block, x, emb)
             if idx < len(self.downsample):
                 skips.append(x)
                 x = self.downsample[idx](x)
 
         for block in self.middle:
-            x = self._run_block(block, x, emb)
+            x = self.run_block(block, x, emb)
 
         for upsample, block, skip in zip(
             self.upsample,
@@ -162,10 +162,10 @@ class Denoiser3D(nn.Module):
         ):
             x = upsample(x, size=skip.shape[-3:])
             x = torch.cat(
-                (x * _INV_SQRT_TWO, skip * _INV_SQRT_TWO),
+                (x * INV_SQRT_TWO, skip * INV_SQRT_TWO),
                 dim=1,
             )
-            x = self._run_block(block, x, emb)
+            x = self.run_block(block, x, emb)
 
         logits = self.output(F.silu(self.output_norm(x)))
         return logits
@@ -174,7 +174,7 @@ class Denoiser3D(nn.Module):
     def decode(logits: torch.Tensor) -> torch.Tensor:
         return 2.0 * logits.softmax(dim=1) - 1.0
 
-    def _embed(
+    def embed(
         self,
         inputs: torch.Tensor,
         time: torch.Tensor,
@@ -185,13 +185,13 @@ class Denoiser3D(nn.Module):
         latent = latent.to(device=inputs.device, dtype=inputs.dtype)
         time_emb = self.time_mlp(self.time_emb(time).to(dtype=inputs.dtype))
         latent_emb = self.latent_mlp(latent)
-        emb = (time_emb + latent_emb) * _INV_SQRT_TWO
+        emb = (time_emb + latent_emb) * INV_SQRT_TWO
         if vf is not None:
             vf = vf.to(device=inputs.device, dtype=inputs.dtype)
             emb = emb + self.vf_mlp(vf)
         return emb
 
-    def _run_block(
+    def run_block(
         self,
         block: nn.Module,
         inputs: torch.Tensor,
@@ -206,7 +206,7 @@ class Denoiser3D(nn.Module):
             )
         return block(inputs, emb)
 
-    def _encode_anchor(
+    def encode_anchor(
         self,
         inputs: torch.Tensor,
         anchor_image: torch.Tensor | None,
@@ -215,10 +215,6 @@ class Denoiser3D(nn.Module):
         if anchor_image is None or anchor_mask is None:
             return None
         mask = anchor_mask.to(device=inputs.device, dtype=inputs.dtype)
-        active = mask.flatten(start_dim=1).any(dim=1)
-        if not bool(active.any().item()):
-            return None
         clean = anchor_image.to(device=inputs.device, dtype=inputs.dtype)
         probs = (clean + 1.0) * 0.5 * mask
-        feat = self.anchor_input(torch.cat((probs, mask), dim=1))
-        return feat * active.to(feat.dtype)[:, None, None, None, None]
+        return self.anchor_input(torch.cat((probs, mask), dim=1))

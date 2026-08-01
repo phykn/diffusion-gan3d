@@ -15,7 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.anchor import PlaneAnchor
-from src.build import find_weights, load_generator
+from src.build import load_generator
+from src.train.weights import find_weights
 
 VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tiff"
 AXIS = 0

@@ -18,8 +18,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.anchor import PlaneAnchor
-from src.build import find_weights, load_generator
-from src.generate import ScaledGenerator
+from src.build import load_generator
+from src.generate import ScaledGenerator, ScalePlan
+from src.train.weights import find_weights
 
 VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tiff"
 AXIS = 0
@@ -40,12 +41,13 @@ def main() -> None:
         type=positive_int,
         default=(2, 2, 2),
         metavar=("D", "H", "W"),
-        help="number of blocks along each axis (default: 2 2 2)",
+        help="number of output blocks along each axis (default: 2 2 2)",
     )
     parser.add_argument(
         "--overlap",
         type=positive_int,
-        help="overlap between adjacent blocks (default: half the block size)",
+        default=16,
+        help="context added to each side of a block (default: 16)",
     )
     parser.add_argument(
         "--count",
@@ -68,19 +70,14 @@ def main() -> None:
     print(f"Weights    : {weights.resolve()}", flush=True)
 
     generator = load_generator(weights, device=device)
+    shape = tuple(generator.patch_size * count for count in args.blocks)
     if args.count is not None and args.count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
     if args.count and not generator.anchor_enabled:
         raise ValueError("selected weights were trained with anchors disabled.")
-
-    overlap = generator.patch_size // 2 if args.overlap is None else args.overlap
-    stride = generator.patch_size - overlap
-    shape = tuple(generator.patch_size + (count - 1) * stride for count in args.blocks)
-    print(f"Block grid : {' × '.join(map(str, args.blocks))}")
-    print(f"Block size : {generator.patch_size}")
-    print(f"Overlap    : {overlap}")
-    print(f"Shape      : {' × '.join(map(str, shape))}")
-    print(f"Device     : {device}")
+    scaled = ScaledGenerator(generator)
+    plan = scaled.plan(shape, args.overlap)
+    print_plan(plan, device)
     base = None
     target = None
     indices = ()
@@ -114,20 +111,16 @@ def main() -> None:
         torch.cuda.reset_peak_memory_stats(device)
 
     start = perf_counter()
-    scaled = ScaledGenerator(generator)
     vol = scaled.generate(
-        blocks=args.blocks,
+        shape=plan.shape,
+        overlap=args.overlap,
         base=base,
-        overlap=overlap,
         vf=None,
     )
     stats = scaled.stats
     assert stats is not None
     elapsed = perf_counter() - start
     print("Status     : complete", flush=True)
-    shape_id = "x".join(str(length) for length in vol.shape)
-    output = weights.parent / f"scaled_{shape_id}.tiff"
-    tifffile.imwrite(output, vol.numpy())
     quality = measure_seams(
         vol,
         stats.seams,
@@ -135,13 +128,10 @@ def main() -> None:
         generator.num_phases,
     )
 
-    vfs = torch.bincount(
-        vol.to(torch.long).flatten(),
-        minlength=generator.num_phases,
-    ).to(torch.float64)
-    vfs = vfs / vfs.sum()
+    vfs = get_vf(vol, generator.num_phases)
     scaled_acc = None
     base_retained = None
+    base_core_retained = None
     base_quality = None
     center = None
     if base is not None:
@@ -149,21 +139,32 @@ def main() -> None:
         region = tuple(slice(idx, idx + generator.patch_size) for idx in start)
         center = vol[region]
         base_retained = float((center == base).to(torch.float32).mean())
+        shell = min(max(stats.overlap // 2, 1), (generator.patch_size - 1) // 2)
+        core = tuple(
+            slice(shell, -shell)
+            if vol.shape[axis] > generator.patch_size and shell
+            else slice(None)
+            for axis in range(3)
+        )
+        base_core_retained = float(
+            (center[core] == base[core]).to(torch.float32).mean()
+        )
         if target is not None:
             scaled_acc = get_accuracy(center, target, indices, AXIS)
         boundaries = tuple(
-            () if count == 1 else (start[axis], region[axis].stop)
-            for axis, count in enumerate(args.blocks)
+            tuple(
+                idx
+                for idx in (start[axis], region[axis].stop)
+                if 0 < idx < vol.shape[axis]
+            )
+            for axis in range(3)
         )
         base_quality = measure_seams(
             vol,
             boundaries,
-            overlap,
+            stats.overlap,
             generator.num_phases,
         )
-    print(f"Output     : {output.resolve()}")
-    print(f"Blocks     : {stats.block_count}")
-
     print("\nQuality")
     print("-------")
     print(f"Phase VF    : {format_phases(vfs)}")
@@ -173,8 +174,9 @@ def main() -> None:
     if base is not None:
         print("\nBase")
         print("----")
+        print(f"Core retained       : {format_score(base_core_retained)}")
         if target is None:
-            print(f"Base retained       : {format_score(base_retained)}")
+            print(f"Whole base retained : {format_score(base_retained)}")
         else:
             print(f"Anchor match before : {format_score(base_acc)}")
             print(f"Anchor match after  : {format_score(scaled_acc)}")
@@ -219,6 +221,47 @@ def positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be positive")
     return parsed
+
+
+def print_plan(plan: ScalePlan, device: torch.device) -> None:
+    print(f"Output shape : {' × '.join(map(str, plan.shape))}")
+    print(f"Blocks       : {' × '.join(map(str, plan.grid))}")
+    print(f"Block count  : {plan.tile_count}")
+    print(f"Block size   : {plan.core_size}")
+    print(f"Overlap      : {plan.overlap} per side")
+    print(f"Input size   : {plan.tile_size}")
+    print("Boundaries   : " + " × ".join(str(len(axis)) for axis in plan.seams))
+    print(f"State memory : {format_bytes(plan.states_bytes)}")
+    print(f"Input memory : {format_bytes(plan.tile_bytes)}")
+    print(f"Workspace    : {format_bytes(plan.workspace_bytes)}")
+    print(f"CUDA total   : {format_bytes(plan.cuda_bytes)}")
+    print(f"CPU total    : {format_bytes(plan.cpu_bytes)}")
+    print(f"Output size  : {format_bytes(plan.output_bytes)}")
+    print(f"Device       : {device}")
+
+
+def format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    raise RuntimeError("unreachable")
+
+
+def get_vf(vol: torch.Tensor, num_phases: int) -> torch.Tensor:
+    counts = torch.zeros(num_phases, dtype=torch.long)
+    plane_voxels = int(np.prod(vol.shape[1:]))
+    chunk_size = max(1, 16_000_000 // plane_voxels)
+    for chunk in vol.split(chunk_size):
+        counts.add_(
+            torch.bincount(
+                chunk.to(torch.long).flatten(),
+                minlength=num_phases,
+            )
+        )
+    vf = counts.to(torch.float64)
+    return vf / vf.sum()
 
 
 def load_volume(path: Path, patch_size: int, num_phases: int) -> torch.Tensor:
@@ -274,7 +317,7 @@ def get_accuracy(
 def measure_seams(
     vol: torch.Tensor,
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
-    overlap: int,
+    band_size: int,
     num_phases: int,
 ) -> SeamQuality:
     changes = []
@@ -286,59 +329,66 @@ def measure_seams(
             tvs.append(None)
             deltas.append(None)
             continue
-        prev = vol.narrow(axis, 0, vol.shape[axis] - 1)
-        curr = vol.narrow(axis, 1, vol.shape[axis] - 1)
-        changed = (prev != curr).to(torch.float32)
-        dims = tuple(value for value in range(3) if value != axis)
-        rates = changed.mean(dim=dims)
-        band_idx = torch.tensor(
-            sorted(
-                {
-                    idx
-                    for pos in positions
-                    for idx in range(
-                        max(0, pos - overlap // 2 - 1),
-                        min(
-                            rates.shape[0],
-                            pos - overlap // 2 + overlap,
-                        ),
-                    )
-                }
-            ),
-            dtype=torch.long,
+        pair_count = vol.shape[axis] - 1
+        width = max(1, min(band_size, 4))
+        band_idx = sorted(
+            {
+                idx
+                for pos in positions
+                for idx in range(
+                    max(0, pos - width),
+                    min(pair_count, pos + width),
+                )
+            }
         )
-        keep = torch.ones(rates.shape[0], dtype=torch.bool)
-        keep[band_idx] = False
-        inner_idx = torch.where(keep)[0]
-        if inner_idx.numel() == 0:
+        band_set = set(band_idx)
+        inner_idx = [idx for idx in range(pair_count) if idx not in band_set]
+        if len(inner_idx) > 64:
+            selected = np.linspace(0, len(inner_idx) - 1, num=64, dtype=int)
+            inner_idx = [inner_idx[idx] for idx in selected]
+        selected_idx = sorted(band_set | set(inner_idx))
+        inner_set = set(inner_idx)
+        inner_rates = []
+        band_rates = {}
+        inner_counts = torch.zeros(
+            num_phases,
+            num_phases,
+            dtype=torch.float64,
+        )
+        band_counts = {}
+        for idx in selected_idx:
+            prev = vol.select(axis, idx)
+            curr = vol.select(axis, idx + 1)
+            stride = max(1, int(np.ceil(max(prev.shape) / 512)))
+            prev = prev[::stride, ::stride]
+            curr = curr[::stride, ::stride]
+            rate = float((prev != curr).to(torch.float32).mean())
+            counts = count_transitions(prev, curr, num_phases)
+            if idx in band_set:
+                band_rates[idx] = rate
+                band_counts[idx] = counts
+            elif idx in inner_set:
+                inner_rates.append(rate)
+                inner_counts.add_(counts)
+
+        if not inner_rates or not band_idx:
             changes.append(None)
             tvs.append(None)
             deltas.append(None)
             continue
-        inner_rate = float(rates[keep].median())
+        inner_rate = float(torch.tensor(inner_rates).median())
         if inner_rate > 0.0:
-            ratios = rates.index_select(0, band_idx) / inner_rate
-            worst = int((ratios - 1.0).abs().argmax())
-            changes.append(float(ratios[worst]))
+            ratios = torch.tensor([band_rates[idx] for idx in band_idx]) / inner_rate
+            changes.append(float(ratios[(ratios - 1.0).abs().argmax()]))
         else:
             changes.append(None)
 
-        inner_counts = count_transitions(
-            prev.index_select(axis, inner_idx),
-            curr.index_select(axis, inner_idx),
-            num_phases,
-        )
         inner_dist = inner_counts / inner_counts.sum()
         inner_cont = get_continuation(inner_counts)
         axis_tv = []
         axis_delta = []
         for idx in band_idx:
-            pair_idx = idx.reshape(1)
-            seam_counts = count_transitions(
-                prev.index_select(axis, pair_idx),
-                curr.index_select(axis, pair_idx),
-                num_phases,
-            )
+            seam_counts = band_counts[idx]
             seam_dist = seam_counts / seam_counts.sum()
             axis_tv.append(float(0.5 * (seam_dist - inner_dist).abs().sum()))
             seam_cont = get_continuation(seam_counts)

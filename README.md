@@ -16,6 +16,8 @@ Training images are integer phase-label maps from `0` to `num_phases - 1`. The `
 
 Labels are one-hot encoded and mapped to `[-1, 1]` during diffusion. The denoiser predicts one logit per phase, and final labels are selected with `argmax`.
 
+`data.crop_size` is the size read from each independent 2D source image, `data.patch_size` is the 2D area seen by each critic, and `train.volume_sizes` lists the generated 3D training sizes. The source crop and generated volume sizes are independent. When an anchor image is smaller than a generated plane, it conditions only a partial plane without interpolation.
+
 The included simulator creates an example three-phase dataset:
 
 ```bash
@@ -46,10 +48,11 @@ Manual values must match `num_phases` and have a nonzero sum; `prepare_vf()` nor
 
 ## Scale-up
 
-Scale-up performs joint tiled diffusion from one global noise volume. At every reverse transition, overlapping tiles share a latent vector, their clean predictions are blended in global coordinates, and one global posterior update is applied. Overlaps therefore evolve jointly instead of stitching independently completed blocks.
+Scale-up performs joint tiled diffusion from one global noise volume. `data.patch_size` is the retained core size and `overlap` is the one-side context selected for scale-up, so each model input is `patch_size + 2 * overlap`. At every reverse transition, every tile reads the same unchanged state and shares one latent vector, while only its central core is retained for the next state.
 
-Scale-up does not accept anchors or replace generated voxels. Categorical labels are selected after the global reverse process completes.
-It accepts the same optional `vf` argument as regular generation and reuses one condition across every tile and reverse transition.
+The two half-precision diffusion states remain on the GPU when they fit; otherwise they remain in CPU RAM and only the active tile is sent to the GPU. Generation returns one CPU `uint8` tensor and does not create output or temporary files. It accepts the same optional `vf` argument as regular generation and reuses one condition across every tile and reverse transition.
+
+A supplied base keeps an inner region exact and regenerates a surrounding shell so the continuation can meet it naturally. The shell width follows the selected overlap.
 
 ## Training and outputs
 

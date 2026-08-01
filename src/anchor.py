@@ -2,7 +2,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
 
 
 @dataclass(frozen=True)
@@ -10,6 +9,7 @@ class PlaneAnchor:
     image: torch.Tensor
     axis: int
     index: int
+    position: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,6 @@ class AnchorCondition:
 
 def build_anchors(
     anchors: Sequence[PlaneAnchor],
-    *,
     batch_size: int,
     num_phases: int,
     volume_size: int,
@@ -63,6 +62,7 @@ def build_anchors(
     )
     occupied: set[tuple[int, int]] = set()
     conflicts = 0
+    source_voxels = 0
     for anchor in anchors:
         if (
             not isinstance(anchor.axis, int)
@@ -86,43 +86,72 @@ def build_anchors(
         if not isinstance(img, torch.Tensor):
             raise TypeError("anchor.image must be a torch.Tensor.")
         if img.ndim == 2:
-            if img.shape != (volume_size, volume_size):
-                raise ValueError("anchor.image must match the generated plane size.")
             img = img.unsqueeze(0).expand(batch_size, -1, -1)
         elif img.ndim == 3:
-            shape = (batch_size, volume_size, volume_size)
-            if img.shape != shape:
-                raise ValueError(f"anchor.image must have shape {shape}.")
+            if img.shape[0] != batch_size:
+                raise ValueError(f"anchor.image batch size must be {batch_size}.")
         else:
             raise ValueError("anchor.image must have shape [H, W] or [B, H, W].")
+        height, width = img.shape[-2:]
+        if height < 1 or width < 1:
+            raise ValueError("anchor.image must not be empty.")
+        if height > volume_size or width > volume_size:
+            raise ValueError("anchor.image must fit inside the generated plane.")
+
+        position = anchor.position
+        if position is None:
+            row = (volume_size - height) // 2
+            col = (volume_size - width) // 2
+        else:
+            if (
+                not isinstance(position, tuple)
+                or len(position) != 2
+                or any(
+                    not isinstance(value, int) or isinstance(value, bool)
+                    for value in position
+                )
+            ):
+                raise ValueError("anchor.position must be a pair of integers.")
+            row, col = position
+            if (
+                row < 0
+                or col < 0
+                or row + height > volume_size
+                or col + width > volume_size
+            ):
+                raise ValueError("anchor.position places the image outside the plane.")
         img = img.to(device=device, dtype=torch.long)
         if int(img.min()) < 0 or int(img.max()) >= num_phases:
             raise ValueError("anchor.image contains a phase outside num_phases.")
 
         target_plane = target.select(anchor.axis + 1, anchor.index)
         mask_plane = mask.select(anchor.axis + 2, anchor.index).squeeze(1)
-        conflict = mask_plane & (target_plane != img)
+        region = (slice(row, row + height), slice(col, col + width))
+        target_patch = target_plane[(slice(None), *region)]
+        mask_patch = mask_plane[(slice(None), *region)]
+        conflict = mask_patch & (target_patch != img)
         if bool(conflict.any().item()) and not reconcile:
             raise ValueError("anchor planes contain conflicting intersections.")
         conflicts += int(conflict.sum().item())
+        source_voxels += batch_size * height * width
         # Independent axis datasets cannot define shared lines, so earlier
         # planes own intersections when training reconciles them.
-        target_plane.copy_(torch.where(mask_plane, target_plane, img))
-        mask_plane.fill_(True)
+        target_patch.copy_(torch.where(mask_patch, target_patch, img))
+        mask_patch.fill_(True)
 
-    img = (
-        F.one_hot(target, num_classes=num_phases)
-        .movedim(-1, 1)
-        .to(device=device, dtype=dtype)
-        .mul_(2.0)
-        .sub_(1.0)
+    img = torch.full(
+        (batch_size, num_phases, volume_size, volume_size, volume_size),
+        -1.0,
+        device=device,
+        dtype=dtype,
     )
-    img = img * mask.to(dtype=dtype)
+    img.scatter_(1, target.unsqueeze(1), 1.0)
+    img.mul_(mask)
     return AnchorCondition(
         image=img,
         mask=mask,
         target=target,
         planes=len(anchors),
         conflicts=conflicts,
-        source_voxels=len(anchors) * batch_size * volume_size * volume_size,
+        source_voxels=source_voxels,
     )

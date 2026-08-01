@@ -1,5 +1,5 @@
 output:
-  data_dir: ../data/generated
+  data_dir: data/generated
   count: 25
 
 geometry:

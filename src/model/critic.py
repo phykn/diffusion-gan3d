@@ -77,7 +77,7 @@ class PairCritic2D(nn.Module):
         )
         x = self.input(torch.cat((x_previous, x_current), dim=1))
         for idx, block in enumerate(self.blocks):
-            x = self._run_block(block, x, emb)
+            x = self.run_block(block, x, emb)
             if idx == 1:
                 local = F.silu(self.local_norm(x))
                 logits_local = self.local_output(local).squeeze(1)
@@ -90,7 +90,7 @@ class PairCritic2D(nn.Module):
             logits_local=logits_local,
         )
 
-    def _run_block(
+    def run_block(
         self,
         block: nn.Module,
         inputs: torch.Tensor,

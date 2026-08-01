@@ -12,7 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src import AXES
 from src.build import build_datasets
-from src.train.config import load_config
+from src.utils import load_yaml
 
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "train.yaml"
 
@@ -25,7 +25,7 @@ def main() -> None:
     if args.samples < 1:
         parser.error("--samples must be positive.")
 
-    cfg = load_config(args.config)
+    cfg = load_yaml(args.config)
     datasets = build_datasets(cfg)
     fig, panels = plt.subplots(
         len(AXES),
@@ -41,7 +41,7 @@ def main() -> None:
                 img,
                 cmap="gray",
                 vmin=-0.5,
-                vmax=cfg.data.num_phases - 0.5,
+                vmax=cfg["data"]["num_phases"] - 0.5,
                 interpolation="nearest",
             )
             panels[row, col].set_title(f"axis {axis}")
