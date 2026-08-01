@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -20,6 +21,15 @@ from src.train.weights import find_weights
 
 VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tiff"
 AXIS = 0
+
+
+@dataclass(frozen=True)
+class BoundaryQuality:
+    anchor_change: float | None
+    ordinary_change: float | None
+    change_ratio: float | None
+    transition_tv: float | None
+    continuation_delta: float | None
 
 
 def main() -> None:
@@ -99,12 +109,19 @@ def main() -> None:
         score_ref,
         num_phases=generator.num_phases,
     )
+    boundary = measure_boundaries(
+        gen,
+        indices,
+        AXIS,
+        generator.num_phases,
+    )
 
     print_quality(
         anchor_acc=anchor_acc,
         vol_acc=vol_acc,
         iou=iou,
         recall=recall,
+        boundary=boundary,
     )
     if args.napari:
         show_napari(gen)
@@ -159,6 +176,7 @@ def print_quality(
     vol_acc: float,
     iou: list[float],
     recall: list[float],
+    boundary: BoundaryQuality,
 ) -> None:
     print("\nQuality")
     print("-------")
@@ -167,12 +185,97 @@ def print_quality(
     print(f"Complete volume : {vol_acc:7.2%}")
     print(f"Phase IoU       : {format_scores(iou)}")
     print(f"Phase recall    : {format_scores(recall)}")
+    print("\nAnchor boundary")
+    print("---------------")
+    print(f"Anchor sides       : {format_score(boundary.anchor_change)}")
+    print(f"Ordinary planes    : {format_score(boundary.ordinary_change)}")
+    print(f"Change ratio       : {format_value(boundary.change_ratio)}")
+    print(f"Transition TV      : {format_value(boundary.transition_tv)}")
+    print(f"Continuation delta : {format_value(boundary.continuation_delta)}")
 
 
 def format_scores(values: list[float]) -> str:
     return "  ".join(
         f"phase {phase}: {value:.2%}" for phase, value in enumerate(values)
     )
+
+
+def format_score(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2%}"
+
+
+def format_value(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.4f}"
+
+
+def measure_boundaries(
+    vol: torch.Tensor,
+    indices: tuple[int, ...],
+    axis: int,
+    num_phases: int,
+) -> BoundaryQuality:
+    slices = get_slices(vol, axis)
+    pair_count = slices.shape[0] - 1
+    boundary_indices = sorted(
+        {
+            pair
+            for index in indices
+            for pair in (index - 1, index)
+            if 0 <= pair < pair_count
+        }
+    )
+    boundary_set = set(boundary_indices)
+    ordinary_indices = [pair for pair in range(pair_count) if pair not in boundary_set]
+    if not boundary_indices or not ordinary_indices:
+        return BoundaryQuality(None, None, None, None, None)
+
+    boundary_counts = count_transitions(slices, boundary_indices, num_phases)
+    ordinary_counts = count_transitions(slices, ordinary_indices, num_phases)
+    boundary_change = get_change_rate(boundary_counts)
+    ordinary_change = get_change_rate(ordinary_counts)
+    ratio = None if ordinary_change == 0.0 else boundary_change / ordinary_change
+    boundary_dist = boundary_counts / boundary_counts.sum()
+    ordinary_dist = ordinary_counts / ordinary_counts.sum()
+    transition_tv = float(0.5 * (boundary_dist - ordinary_dist).abs().sum())
+    continuation_delta = float(
+        (get_continuation(boundary_counts) - get_continuation(ordinary_counts))
+        .abs()
+        .max()
+    )
+    return BoundaryQuality(
+        boundary_change,
+        ordinary_change,
+        ratio,
+        transition_tv,
+        continuation_delta,
+    )
+
+
+def count_transitions(
+    slices: torch.Tensor,
+    indices: list[int],
+    num_phases: int,
+) -> torch.Tensor:
+    prev = slices[indices].to(torch.long)
+    curr = slices[[index + 1 for index in indices]].to(torch.long)
+    pairs = prev * num_phases + curr
+    return (
+        torch.bincount(
+            pairs.flatten(),
+            minlength=num_phases * num_phases,
+        )
+        .to(torch.float64)
+        .reshape(num_phases, num_phases)
+    )
+
+
+def get_change_rate(counts: torch.Tensor) -> float:
+    unchanged = counts.diagonal().sum()
+    return float((counts.sum() - unchanged) / counts.sum())
+
+
+def get_continuation(counts: torch.Tensor) -> torch.Tensor:
+    return counts.diagonal() / counts.sum(dim=1).clamp_min(1.0)
 
 
 def show_result(

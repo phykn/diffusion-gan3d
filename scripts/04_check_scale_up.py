@@ -45,7 +45,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--overlap",
-        type=positive_int,
+        type=non_negative_int,
         default=16,
         help="context added to each side of a block (default: 16)",
     )
@@ -132,14 +132,14 @@ def main() -> None:
     scaled_acc = None
     base_retained = None
     base_core_retained = None
-    base_quality = None
+    core_quality = None
     center = None
     if base is not None:
         start = tuple((size - generator.patch_size) // 2 for size in vol.shape)
         region = tuple(slice(idx, idx + generator.patch_size) for idx in start)
         center = vol[region]
         base_retained = float((center == base).to(torch.float32).mean())
-        shell = min(max(stats.overlap // 2, 1), (generator.patch_size - 1) // 2)
+        shell = stats.base_shell
         core = tuple(
             slice(shell, -shell)
             if vol.shape[axis] > generator.patch_size and shell
@@ -152,14 +152,21 @@ def main() -> None:
         if target is not None:
             scaled_acc = get_accuracy(center, target, indices, AXIS)
         boundaries = tuple(
-            tuple(
-                idx
-                for idx in (start[axis], region[axis].stop)
-                if 0 < idx < vol.shape[axis]
+            (
+                tuple(
+                    idx
+                    for idx in (
+                        start[axis] + shell,
+                        region[axis].stop - shell,
+                    )
+                    if 0 < idx < vol.shape[axis]
+                )
+                if vol.shape[axis] > generator.patch_size
+                else ()
             )
             for axis in range(3)
         )
-        base_quality = measure_seams(
+        core_quality = measure_seams(
             vol,
             boundaries,
             stats.overlap,
@@ -180,10 +187,10 @@ def main() -> None:
         else:
             print(f"Anchor match before : {format_score(base_acc)}")
             print(f"Anchor match after  : {format_score(scaled_acc)}")
-        assert base_quality is not None
-        print(f"Boundary change     : {format_axes(base_quality.change_ratio)}")
-        print(f"Boundary TV         : {format_axes(base_quality.transition_tv)}")
-        print(f"Boundary continuity : {format_axes(base_quality.continuation_delta)}")
+        assert core_quality is not None
+        print(f"Core boundary change : {format_axes(core_quality.change_ratio)}")
+        print(f"Core boundary TV     : {format_axes(core_quality.transition_tv)}")
+        print(f"Core continuity      : {format_axes(core_quality.continuation_delta)}")
 
     print("\nPerformance")
     print("-----------")
@@ -223,6 +230,13 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
 def print_plan(plan: ScalePlan, device: torch.device) -> None:
     print(f"Output shape : {' × '.join(map(str, plan.shape))}")
     print(f"Blocks       : {' × '.join(map(str, plan.grid))}")
@@ -232,6 +246,7 @@ def print_plan(plan: ScalePlan, device: torch.device) -> None:
     print(f"Input size   : {plan.tile_size}")
     print("Boundaries   : " + " × ".join(str(len(axis)) for axis in plan.seams))
     print(f"State memory : {format_bytes(plan.states_bytes)}")
+    print(f"Fusion memory: {format_bytes(plan.fusion_bytes)}")
     print(f"Input memory : {format_bytes(plan.tile_bytes)}")
     print(f"Workspace    : {format_bytes(plan.workspace_bytes)}")
     print(f"CUDA total   : {format_bytes(plan.cuda_bytes)}")

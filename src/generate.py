@@ -23,6 +23,7 @@ class ScalePlan:
     grid: tuple[int, int, int]
     tile_count: int
     states_bytes: int
+    fusion_bytes: int
     tile_bytes: int
     workspace_bytes: int
     cuda_bytes: int
@@ -30,12 +31,16 @@ class ScalePlan:
     cpu_bytes: int
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
 
+    @property
+    def base_shell(self) -> int:
+        return min(self.overlap // 2, (self.core_size - 1) // 2)
+
 
 @dataclass(frozen=True)
 class Tile:
     source: tuple[slice, slice, slice]
     target: tuple[slice, slice, slice]
-    core: tuple[slice, slice, slice]
+    valid: tuple[slice, slice, slice]
     padding: tuple[int, int, int, int, int, int]
 
 
@@ -44,7 +49,15 @@ class Base:
     clean: torch.Tensor
     noise: torch.Tensor
     region: tuple[slice, slice, slice]
-    mask: torch.Tensor
+    core: torch.Tensor
+    weight: torch.Tensor
+
+
+@dataclass(frozen=True)
+class Fusion:
+    window: torch.Tensor
+    weight_sum: torch.Tensor
+    pred_sum: torch.Tensor
 
 
 class VolumeState:
@@ -284,6 +297,7 @@ class ScaledGenerator:
         tile_bytes = self.generator.num_phases * tile_voxels * 4
         workspace_bytes = max(16 * tile_bytes, 4 * 1024**3)
         states_bytes = 2 * self.generator.num_phases * voxels * 2
+        fusion_bytes = (self.generator.num_phases + 1) * voxels * 4
         output_bytes = voxels
         seams = tuple(tuple(range(core_size, size, core_size)) for size in shape)
         return ScalePlan(
@@ -294,11 +308,14 @@ class ScaledGenerator:
             grid=grid,
             tile_count=math.prod(grid),
             states_bytes=states_bytes,
+            fusion_bytes=fusion_bytes,
             tile_bytes=tile_bytes,
             workspace_bytes=workspace_bytes,
-            cuda_bytes=states_bytes + workspace_bytes,
+            cuda_bytes=states_bytes + fusion_bytes + workspace_bytes,
             output_bytes=output_bytes,
-            cpu_bytes=states_bytes + output_bytes + 3 * tile_bytes // 2,
+            cpu_bytes=(
+                states_bytes + fusion_bytes + output_bytes + 3 * tile_bytes // 2
+            ),
             seams=seams,
         )
 
@@ -414,7 +431,6 @@ class ScaledGenerator:
         for idx in product(*(range(count) for count in plan.grid)):
             source = []
             target = []
-            core = []
             pads = []
             for axis, tile_idx in enumerate(idx):
                 target_start = tile_idx * plan.core_size
@@ -425,18 +441,14 @@ class ScaledGenerator:
                 source_stop = min(input_stop, plan.shape[axis])
                 source.append(slice(source_start, source_stop))
                 target.append(slice(target_start, target_stop))
-                core.append(
-                    slice(
-                        plan.overlap,
-                        plan.overlap + target_stop - target_start,
-                    )
-                )
                 pads.append((source_start - input_start, input_stop - source_stop))
             tiles.append(
                 Tile(
                     source=tuple(source),
                     target=tuple(target),
-                    core=tuple(core),
+                    valid=tuple(
+                        slice(left, plan.tile_size - right) for left, right in pads
+                    ),
                     padding=tuple(value for pair in reversed(pads) for value in pair),
                 )
             )
@@ -471,28 +483,51 @@ class ScaledGenerator:
         )
         clean = clean.movedim(-1, 0).unsqueeze(0).to(torch.float32).mul_(2.0).sub_(1.0)
 
-        shell = min(max(plan.overlap // 2, 1), (generator.patch_size - 1) // 2)
-        axes = []
+        core_axes = []
+        weight_axes = []
         for axis in range(3):
-            active = torch.ones(
+            core_axis = torch.ones(
                 generator.patch_size,
                 device=generator.device,
                 dtype=torch.bool,
             )
-            if plan.shape[axis] > generator.patch_size and shell:
-                active[:shell] = False
-                active[-shell:] = False
-            axes.append(active)
-        mask = (
-            axes[0].view(1, 1, -1, 1, 1)
-            & axes[1].view(1, 1, 1, -1, 1)
-            & axes[2].view(1, 1, 1, 1, -1)
+            weight_axis = torch.ones(
+                generator.patch_size,
+                device=generator.device,
+                dtype=torch.float32,
+            )
+            if plan.shape[axis] > generator.patch_size and plan.base_shell:
+                core_axis[: plan.base_shell] = False
+                core_axis[-plan.base_shell :] = False
+                positions = torch.arange(
+                    1,
+                    plan.base_shell + 1,
+                    device=generator.device,
+                    dtype=torch.float32,
+                )
+                ramp = (
+                    positions.div(plan.base_shell + 1).mul(math.pi / 2).sin().square()
+                )
+                weight_axis[: plan.base_shell] = ramp
+                weight_axis[-plan.base_shell :] = ramp.flip(0)
+            core_axes.append(core_axis)
+            weight_axes.append(weight_axis)
+        core = (
+            core_axes[0].view(1, 1, -1, 1, 1)
+            & core_axes[1].view(1, 1, 1, -1, 1)
+            & core_axes[2].view(1, 1, 1, 1, -1)
+        )
+        weight = (
+            weight_axes[0].view(1, 1, -1, 1, 1)
+            * weight_axes[1].view(1, 1, 1, -1, 1)
+            * weight_axes[2].view(1, 1, 1, 1, -1)
         )
         return Base(
             clean=clean,
             noise=torch.randn_like(clean),
             region=region,
-            mask=mask,
+            core=core,
+            weight=weight,
         )
 
     def select_storage(
@@ -527,7 +562,9 @@ class ScaledGenerator:
 
         cpu_bytes = output_bytes
         if selected == "cpu":
-            cpu_bytes += plan.states_bytes + 3 * plan.tile_bytes // 2
+            cpu_bytes += (
+                plan.states_bytes + plan.fusion_bytes + 3 * plan.tile_bytes // 2
+            )
         self.check_cpu_memory(cpu_bytes)
         return selected
 
@@ -607,6 +644,61 @@ class ScaledGenerator:
             )
             state.write(tile.target, noise)
 
+    def make_fusion(
+        self,
+        plan: ScalePlan,
+        tiles: tuple[Tile, ...],
+        device: torch.device,
+    ) -> Fusion:
+        window = self.make_window(
+            plan.tile_size,
+            plan.overlap,
+            self.generator.device,
+        )
+        weight_sum = torch.zeros(
+            (1, 1, *plan.shape),
+            device=device,
+            dtype=torch.float32,
+        )
+        for tile in tiles:
+            global_region = (slice(None), slice(None), *tile.source)
+            tile_region = (slice(None), slice(None), *tile.valid)
+            weight_sum[global_region].add_(window[tile_region].to(device))
+        if not bool((weight_sum > 0).all().item()):
+            raise RuntimeError("blend weights must cover the complete output volume.")
+        pred_sum = torch.zeros(
+            (1, self.generator.num_phases, *plan.shape),
+            device=device,
+            dtype=torch.float32,
+        )
+        return Fusion(
+            window=window,
+            weight_sum=weight_sum,
+            pred_sum=pred_sum,
+        )
+
+    @staticmethod
+    def make_window(
+        tile_size: int,
+        overlap: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        axis = torch.ones(tile_size, device=device, dtype=torch.float32)
+        if overlap:
+            positions = torch.arange(
+                overlap,
+                device=device,
+                dtype=torch.float32,
+            )
+            ramp = torch.sin(positions.mul(math.pi / (2 * overlap))).square()
+            axis[:overlap] = ramp
+            axis[-overlap:] = ramp.flip(0)
+        return (
+            axis.view(1, 1, -1, 1, 1)
+            * axis.view(1, 1, 1, -1, 1)
+            * axis.view(1, 1, 1, 1, -1)
+        )
+
     def run(
         self,
         current: VolumeState,
@@ -624,6 +716,7 @@ class ScaledGenerator:
             plan.tile_size,
             current.values.device.type == "cpu" and generator.device.type == "cuda",
         )
+        fusion = self.make_fusion(plan, tiles, current.values.device)
         bar = tqdm(
             total=generator.diffusion.timesteps,
             desc="Scale up",
@@ -659,8 +752,9 @@ class ScaledGenerator:
                     latent,
                     vf,
                     transition,
-                    plan.tile_size,
+                    plan,
                     final_labels,
+                    fusion,
                     tile_buffer,
                 )
                 if final_labels is None:
@@ -668,7 +762,7 @@ class ScaledGenerator:
                 bar.update()
             if base is not None:
                 if labels is None:
-                    self.condition_base(current, base, base.clean)
+                    self.restore_base(current, base)
                 else:
                     self.write_base(labels, base)
         finally:
@@ -684,17 +778,26 @@ class ScaledGenerator:
         latent: torch.Tensor,
         vf: torch.Tensor | None,
         transition: int,
-        tile_size: int,
+        plan: ScalePlan,
         labels: torch.Tensor | None,
+        fusion: Fusion,
         tile_buffer: TileBuffer | None = None,
     ) -> None:
         generator = self.generator
         if tile_buffer is None:
             tile_buffer = TileBuffer(
                 generator.num_phases,
-                tile_size,
+                plan.tile_size,
                 current.values.device.type == "cpu" and generator.device.type == "cuda",
             )
+        fusion.pred_sum.zero_()
+        expected = (
+            1,
+            generator.num_phases,
+            plan.tile_size,
+            plan.tile_size,
+            plan.tile_size,
+        )
         for tile in tiles:
             values = tile_buffer.read(current, tile.source, generator.device)
             if any(tile.padding):
@@ -708,16 +811,49 @@ class ScaledGenerator:
                     pred = generator.model(values, time, latent)
                 else:
                     pred = generator.model(values, time, latent, vf=vf)
-            expected = (1, generator.num_phases, tile_size, tile_size, tile_size)
             if pred.shape != expected:
                 raise ValueError(f"model prediction must have shape {expected}.")
+            self.add_prediction(fusion, tile, pred)
 
-            key = (slice(None), slice(None), *tile.core)
-            clean = pred[key].float()
+        self.update_state(
+            current,
+            next_state,
+            tiles,
+            fusion,
+            transition,
+            labels,
+            tile_buffer,
+        )
+
+    @staticmethod
+    def add_prediction(
+        fusion: Fusion,
+        tile: Tile,
+        pred: torch.Tensor,
+    ) -> None:
+        global_region = (slice(None), slice(None), *tile.source)
+        tile_region = (slice(None), slice(None), *tile.valid)
+        weighted = pred[tile_region].float() * fusion.window[tile_region]
+        fusion.pred_sum[global_region].add_(weighted.to(fusion.pred_sum.device))
+
+    def update_state(
+        self,
+        current: VolumeState,
+        next_state: VolumeState,
+        tiles: tuple[Tile, ...],
+        fusion: Fusion,
+        transition: int,
+        labels: torch.Tensor | None,
+        tile_buffer: TileBuffer,
+    ) -> None:
+        generator = self.generator
+        for tile in tiles:
+            region = (slice(None), slice(None), *tile.target)
+            clean = fusion.pred_sum[region] / fusion.weight_sum[region]
             if labels is not None:
                 self.write_output(labels, tile.target, clean)
                 continue
-            previous = values[key]
+            previous = current.read(tile.target).float()
             updated = generator.diffusion.sample_posterior(
                 previous,
                 clean,
@@ -735,15 +871,24 @@ class ScaledGenerator:
             device=base.clean.device,
             dtype=torch.float32,
         )
-        current.copy_(torch.where(base.mask, values, current))
+        current.lerp_(values, base.weight)
+        state.write(base.region, current)
+
+    @staticmethod
+    def restore_base(state: VolumeState, base: Base) -> None:
+        current = state.read(base.region).to(
+            device=base.clean.device,
+            dtype=torch.float32,
+        )
+        current.copy_(torch.where(base.core, base.clean, current))
         state.write(base.region, current)
 
     @staticmethod
     def write_base(labels: torch.Tensor, base: Base) -> None:
         values = base.clean.argmax(dim=1).squeeze(0).to(device="cpu", dtype=torch.uint8)
-        mask = base.mask[0, 0].to(device="cpu")
+        core = base.core[0, 0].to(device="cpu")
         region = labels[base.region]
-        region[mask] = values[mask]
+        region[core] = values[core]
 
     @staticmethod
     def write_output(

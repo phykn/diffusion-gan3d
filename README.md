@@ -26,7 +26,7 @@ python gen_data.py
 
 ## Anchors
 
-A plane anchor provides a known categorical slice at a selected axis and depth. During anchored training, one to `anchor.max_planes` real slices are placed at random axis/index positions and condition every reverse step. Axes may repeat, while parallel planes are kept apart by a count-dependent minimum gap. Anchor planes condition the prediction, cross-entropy trains the anchored logits, and the adversarial objective evaluates sampled slices from the generated volume.
+A plane anchor provides a known categorical slice at a selected axis and depth. During anchored training, one to `anchor.max_planes` real slices are placed at random axis/index positions and condition every reverse step. Axes may repeat, while parallel planes are kept apart by a count-dependent minimum gap. Anchor planes condition the prediction, cross-entropy trains the anchored logits, and focused critic samples cross an anchor plane instead of running parallel to it.
 
 During sampling, anchors remain conditioning inputs throughout denoising; generated voxels are not overwritten.
 All planes are merged into one condition, the model returns one global clean prediction, and one global posterior update follows. This uses the same global reverse-process lifecycle as scale-up; scale-up alone needs multiple tile predictions because its output is larger than the model input.
@@ -48,11 +48,11 @@ Manual values must match `num_phases` and have a nonzero sum; `prepare_vf()` nor
 
 ## Scale-up
 
-Scale-up performs joint tiled diffusion from one global noise volume. `data.patch_size` is the retained core size and `overlap` is the one-side context selected for scale-up, so each model input is `patch_size + 2 * overlap`. At every reverse transition, every tile reads the same unchanged state and shares one latent vector, while only its central core is retained for the next state.
+Scale-up performs joint tiled diffusion from one global noise volume. `data.patch_size` is the distance between adjacent tile starts and `overlap` is the one-side context, so each model input is `patch_size + 2 * overlap`. At every reverse transition, all tiles read the same unchanged state and share one latent vector. Their valid clean predictions are combined in global coordinates with cosine weights before each voxel receives one posterior update.
 
 The two half-precision diffusion states remain on the GPU when they fit; otherwise they remain in CPU RAM and only the active tile is sent to the GPU. Generation returns one CPU `uint8` tensor and does not create output or temporary files. It accepts the same optional `vf` argument as regular generation and reuses one condition across every tile and reverse transition.
 
-A supplied base keeps an inner region exact and regenerates a surrounding shell so the continuation can meet it naturally. The shell width follows the selected overlap.
+A supplied base keeps an inner region exact and uses a cosine transition across half of the selected overlap before meeting the generated surroundings. With zero overlap, the complete base remains exact.
 
 ## Training and outputs
 

@@ -16,6 +16,7 @@ class PlaneAnchor:
 class AnchorCondition:
     image: torch.Tensor
     mask: torch.Tensor
+    axis_masks: torch.Tensor
     target: torch.Tensor
     planes: int
     conflicts: int
@@ -54,6 +55,15 @@ def build_anchors(
     mask = torch.zeros(
         batch_size,
         1,
+        volume_size,
+        volume_size,
+        volume_size,
+        dtype=torch.bool,
+        device=device,
+    )
+    axis_masks = torch.zeros(
+        batch_size,
+        3,
         volume_size,
         volume_size,
         volume_size,
@@ -126,9 +136,11 @@ def build_anchors(
 
         target_plane = target.select(anchor.axis + 1, anchor.index)
         mask_plane = mask.select(anchor.axis + 2, anchor.index).squeeze(1)
+        axis_plane = axis_masks[:, anchor.axis].select(anchor.axis + 1, anchor.index)
         region = (slice(row, row + height), slice(col, col + width))
         target_patch = target_plane[(slice(None), *region)]
         mask_patch = mask_plane[(slice(None), *region)]
+        axis_patch = axis_plane[(slice(None), *region)]
         conflict = mask_patch & (target_patch != img)
         if bool(conflict.any().item()) and not reconcile:
             raise ValueError("anchor planes contain conflicting intersections.")
@@ -138,6 +150,7 @@ def build_anchors(
         # planes own intersections when training reconciles them.
         target_patch.copy_(torch.where(mask_patch, target_patch, img))
         mask_patch.fill_(True)
+        axis_patch.fill_(True)
 
     img = torch.full(
         (batch_size, num_phases, volume_size, volume_size, volume_size),
@@ -150,6 +163,7 @@ def build_anchors(
     return AnchorCondition(
         image=img,
         mask=mask,
+        axis_masks=axis_masks,
         target=target,
         planes=len(anchors),
         conflicts=conflicts,

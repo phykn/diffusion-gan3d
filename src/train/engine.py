@@ -231,7 +231,7 @@ class Trainer:
                 previous,
                 current,
                 axis,
-                focus=None if anchor is None else anchor.mask,
+                axis_masks=None if anchor is None else anchor.axis_masks,
             )
             for axis in AXES
         }
@@ -505,7 +505,7 @@ class Trainer:
         previous: torch.Tensor,
         current: torch.Tensor,
         axis: int,
-        focus: torch.Tensor | None = None,
+        axis_masks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if previous.shape != current.shape:
             raise ValueError("previous and current volumes must have the same shape.")
@@ -513,11 +513,13 @@ class Trainer:
             raise ValueError("volumes must have shape [B, C, D, H, W].")
         if axis not in AXES:
             raise ValueError("axis must be 0, 1, or 2.")
-        if focus is not None and (
-            focus.shape != (previous.shape[0], 1, *previous.shape[2:])
-            or focus.device != previous.device
+        if axis_masks is not None and (
+            axis_masks.shape != (previous.shape[0], 3, *previous.shape[2:])
+            or axis_masks.device != previous.device
         ):
-            raise ValueError("focus must match the volume batch and spatial shape.")
+            raise ValueError(
+                "axis_masks must match the volume batch and spatial shape."
+            )
 
         count = self.slices_per_axis
         batch_indices = torch.randint(
@@ -532,7 +534,9 @@ class Trainer:
         )
         focused = 0
         centers: list[tuple[int, int]] = []
-        if focus is not None:
+        if axis_masks is not None:
+            normals = tuple(normal for normal in AXES if normal != axis)
+            focus = axis_masks[:, normals].any(dim=1, keepdim=True)
             focus = focus.movedim(axis + 2, 2)[:, 0]
             points = focus.nonzero()
             if points.numel():
