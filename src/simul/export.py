@@ -5,7 +5,7 @@ import numpy as np
 import tifffile
 from PIL import Image
 
-from ..data.dataset import AXES
+from .. import AXES
 from .geometry import pack
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253
@@ -24,26 +24,26 @@ def generate(
     size: int,
     big_radius: int,
     small_radius: int,
-    big_fraction: float,
-    small_fraction: float,
+    big_vf: float,
+    small_vf: float,
     big_elongation: float,
 ) -> Export:
     root = Path(data_dir)
-    volume_dir, slice_dirs = _make_dirs(root)
+    vol_dir, slice_dirs = _make_dirs(root)
     volumes: list[Path] = []
     slices: dict[int, list[Path]] = {axis: [] for axis in AXES}
 
-    for index in range(count):
+    for idx in range(count):
         vol = pack(
             size=size,
             big_radius=big_radius,
             small_radius=small_radius,
-            big_fraction=big_fraction,
-            small_fraction=small_fraction,
+            big_vf=big_vf,
+            small_vf=small_vf,
             big_elongation=big_elongation,
         )
-        stem = f"volume_{index:03d}"
-        path = volume_dir / f"{stem}.tiff"
+        stem = f"volume_{idx:03d}"
+        path = vol_dir / f"{stem}.tiff"
         tifffile.imwrite(path, vol)
         volumes.append(path)
 
@@ -63,15 +63,15 @@ def generate(
 
 
 def _make_dirs(root: Path) -> tuple[Path, dict[int, Path]]:
-    volume_dir = root / "volumes"
+    vol_dir = root / "volumes"
     slice_dirs = {axis: root / "slices" / str(axis) for axis in AXES}
-    paths = (volume_dir, *slice_dirs.values())
+    paths = (vol_dir, *slice_dirs.values())
     for path in paths:
         if path.exists() and (not path.is_dir() or any(path.iterdir())):
             raise FileExistsError(f"output directory is not empty: {path}")
     for path in paths:
         path.mkdir(parents=True, exist_ok=True)
-    return volume_dir, slice_dirs
+    return vol_dir, slice_dirs
 
 
 def _save_slices(
@@ -83,14 +83,14 @@ def _save_slices(
 ) -> list[Path]:
     stack = np.moveaxis(vol, axis, 0)
     paths = []
-    for index in range(stack.shape[0]):
-        path = dst / f"{stem}_{axis}_{index:03d}.png"
-        _write_image(path, stack[index])
+    for idx in range(stack.shape[0]):
+        path = dst / f"{stem}_{axis}_{idx:03d}.png"
+        _write_image(path, stack[idx])
         paths.append(path)
     return paths
 
 
 def _write_image(path: Path, data: np.ndarray) -> None:
-    image = Image.fromarray(data)
-    image.putpalette(PALETTE)
-    image.save(path)
+    img = Image.fromarray(data)
+    img.putpalette(PALETTE)
+    img.save(path)

@@ -8,10 +8,8 @@ from torch.utils.checkpoint import checkpoint
 
 from .blocks import (
     AdaptiveResBlock3D,
-    Downsample3D,
     SinusoidalTimeEmbedding,
     Upsample3D,
-    check_channels,
     choose_groups,
 )
 
@@ -21,7 +19,6 @@ _INV_SQRT_TWO = 1.0 / math.sqrt(2.0)
 class Denoiser3D(nn.Module):
     def __init__(
         self,
-        *,
         num_phases: int,
         base_channels: int,
         channel_multipliers: Sequence[int],
@@ -30,22 +27,12 @@ class Denoiser3D(nn.Module):
         gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
-        if not isinstance(num_phases, int) or num_phases < 2:
-            raise ValueError("num_phases must be an integer of at least 2.")
-        if not isinstance(base_channels, int) or base_channels <= 0:
-            raise ValueError("base_channels must be a positive integer.")
-        if not isinstance(embedding_channels, int) or embedding_channels < 4:
-            raise ValueError("embedding_channels must be an integer of at least 4.")
-        if not isinstance(latent_channels, int) or latent_channels <= 0:
-            raise ValueError("latent_channels must be a positive integer.")
-        if not isinstance(gradient_checkpointing, bool):
-            raise TypeError("gradient_checkpointing must be a boolean.")
-        multipliers = check_channels("channel_multipliers", channel_multipliers)
+        multipliers = tuple(channel_multipliers)
 
-        channels = tuple(base_channels * multiplier for multiplier in multipliers)
+        channels = tuple(base_channels * scale for scale in multipliers)
         self.gradient_checkpointing = gradient_checkpointing
 
-        self.time_embedding = SinusoidalTimeEmbedding(embedding_channels)
+        self.time_emb = SinusoidalTimeEmbedding(embedding_channels)
         self.time_mlp = nn.Sequential(
             nn.Linear(embedding_channels, embedding_channels),
             nn.SiLU(),
@@ -69,15 +56,13 @@ class Denoiser3D(nn.Module):
 
         self.encoder = nn.ModuleList()
         self.downsample = nn.ModuleList()
-        for index, channel in enumerate(channels):
-            self.encoder.append(
-                AdaptiveResBlock3D(channel, channel, embedding_channels)
-            )
-            if index + 1 < len(channels):
+        for idx, ch in enumerate(channels):
+            self.encoder.append(AdaptiveResBlock3D(ch, ch, embedding_channels))
+            if idx + 1 < len(channels):
                 self.downsample.append(
                     nn.Sequential(
-                        Downsample3D(channel),
-                        nn.Conv3d(channel, channels[index + 1], 1),
+                        nn.Conv3d(ch, ch, 3, stride=2, padding=1),
+                        nn.Conv3d(ch, channels[idx + 1], 1),
                     )
                 )
 
@@ -98,37 +83,36 @@ class Denoiser3D(nn.Module):
 
         self.upsample = nn.ModuleList()
         self.decoder = nn.ModuleList()
-        current = channels[-1]
-        for skip_channels in reversed(channels[:-1]):
-            self.upsample.append(Upsample3D(current, skip_channels))
+        ch = channels[-1]
+        for skip_ch in reversed(channels[:-1]):
+            self.upsample.append(Upsample3D(ch, skip_ch))
             self.decoder.append(
                 AdaptiveResBlock3D(
-                    2 * skip_channels,
-                    skip_channels,
+                    2 * skip_ch,
+                    skip_ch,
                     embedding_channels,
                 )
             )
-            current = skip_channels
+            ch = skip_ch
 
         self.output_norm = nn.GroupNorm(choose_groups(channels[0]), channels[0])
         self.output = nn.Conv3d(channels[0], num_phases, 3, padding=1)
 
-        fraction_output = nn.Linear(embedding_channels, embedding_channels)
-        self.fraction_mlp = nn.Sequential(
+        vf_out = nn.Linear(embedding_channels, embedding_channels)
+        self.vf_mlp = nn.Sequential(
             nn.Linear(num_phases, embedding_channels),
             nn.SiLU(),
-            fraction_output,
+            vf_out,
         )
-        nn.init.zeros_(fraction_output.weight)
-        nn.init.zeros_(fraction_output.bias)
+        nn.init.zeros_(vf_out.weight)
+        nn.init.zeros_(vf_out.bias)
 
     def forward(
         self,
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
-        *,
-        fraction: torch.Tensor | None = None,
+        vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -136,7 +120,7 @@ class Denoiser3D(nn.Module):
             x_current,
             time,
             latent,
-            fraction=fraction,
+            vf=vf,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
         )
@@ -147,29 +131,28 @@ class Denoiser3D(nn.Module):
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
-        *,
-        fraction: torch.Tensor | None = None,
+        vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        embedding = self._embed(x_current, time, latent, fraction=fraction)
-        hidden = self.input(x_current)
-        anchor_features = self._encode_anchor(
+        emb = self._embed(x_current, time, latent, vf=vf)
+        x = self.input(x_current)
+        anchor_feat = self._encode_anchor(
             x_current,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
         )
-        if anchor_features is not None:
-            hidden = hidden + anchor_features
+        if anchor_feat is not None:
+            x = x + anchor_feat
         skips = []
-        for index, block in enumerate(self.encoder):
-            hidden = self._run_block(block, hidden, embedding)
-            if index < len(self.downsample):
-                skips.append(hidden)
-                hidden = self.downsample[index](hidden)
+        for idx, block in enumerate(self.encoder):
+            x = self._run_block(block, x, emb)
+            if idx < len(self.downsample):
+                skips.append(x)
+                x = self.downsample[idx](x)
 
         for block in self.middle:
-            hidden = self._run_block(block, hidden, embedding)
+            x = self._run_block(block, x, emb)
 
         for upsample, block, skip in zip(
             self.upsample,
@@ -177,14 +160,14 @@ class Denoiser3D(nn.Module):
             reversed(skips),
             strict=True,
         ):
-            hidden = upsample(hidden, size=skip.shape[-3:])
-            hidden = torch.cat(
-                (hidden * _INV_SQRT_TWO, skip * _INV_SQRT_TWO),
+            x = upsample(x, size=skip.shape[-3:])
+            x = torch.cat(
+                (x * _INV_SQRT_TWO, skip * _INV_SQRT_TWO),
                 dim=1,
             )
-            hidden = self._run_block(block, hidden, embedding)
+            x = self._run_block(block, x, emb)
 
-        logits = self.output(F.silu(self.output_norm(hidden)))
+        logits = self.output(F.silu(self.output_norm(x)))
         return logits
 
     @staticmethod
@@ -196,38 +179,36 @@ class Denoiser3D(nn.Module):
         inputs: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
-        *,
-        fraction: torch.Tensor | None,
+        vf: torch.Tensor | None,
     ) -> torch.Tensor:
         time = time.to(device=inputs.device)
         latent = latent.to(device=inputs.device, dtype=inputs.dtype)
-        time_embedding = self.time_mlp(self.time_embedding(time).to(dtype=inputs.dtype))
-        latent_embedding = self.latent_mlp(latent)
-        embedding = (time_embedding + latent_embedding) * _INV_SQRT_TWO
-        if fraction is not None:
-            fraction = fraction.to(device=inputs.device, dtype=inputs.dtype)
-            embedding = embedding + self.fraction_mlp(fraction)
-        return embedding
+        time_emb = self.time_mlp(self.time_emb(time).to(dtype=inputs.dtype))
+        latent_emb = self.latent_mlp(latent)
+        emb = (time_emb + latent_emb) * _INV_SQRT_TWO
+        if vf is not None:
+            vf = vf.to(device=inputs.device, dtype=inputs.dtype)
+            emb = emb + self.vf_mlp(vf)
+        return emb
 
     def _run_block(
         self,
         block: nn.Module,
         inputs: torch.Tensor,
-        embedding: torch.Tensor,
+        emb: torch.Tensor,
     ) -> torch.Tensor:
         if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
             return checkpoint(
                 block,
                 inputs,
-                embedding,
+                emb,
                 use_reentrant=False,
             )
-        return block(inputs, embedding)
+        return block(inputs, emb)
 
     def _encode_anchor(
         self,
         inputs: torch.Tensor,
-        *,
         anchor_image: torch.Tensor | None,
         anchor_mask: torch.Tensor | None,
     ) -> torch.Tensor | None:
@@ -238,6 +219,6 @@ class Denoiser3D(nn.Module):
         if not bool(active.any().item()):
             return None
         clean = anchor_image.to(device=inputs.device, dtype=inputs.dtype)
-        probabilities = (clean + 1.0) * 0.5 * mask
-        features = self.anchor_input(torch.cat((probabilities, mask), dim=1))
-        return features * active.to(features.dtype)[:, None, None, None, None]
+        probs = (clean + 1.0) * 0.5 * mask
+        feat = self.anchor_input(torch.cat((probs, mask), dim=1))
+        return feat * active.to(feat.dtype)[:, None, None, None, None]

@@ -1,5 +1,4 @@
 import math
-from collections.abc import Sequence
 
 import torch
 import torch.nn.functional as F
@@ -8,60 +7,32 @@ from torch import nn
 _INV_SQRT_TWO = 1.0 / math.sqrt(2.0)
 
 
-def choose_groups(channels: int, *, maximum: int = 32) -> int:
-    if not isinstance(channels, int) or isinstance(channels, bool) or channels <= 0:
-        raise ValueError("channels must be a positive integer.")
+def choose_groups(channels: int, maximum: int = 32) -> int:
     limit = min(maximum, max(channels // 2, 1))
     for groups in range(limit, 0, -1):
         if channels % groups == 0:
             return groups
 
 
-def check_channels(
-    name: str,
-    values: Sequence[int],
-    *,
-    minimum: int = 1,
-) -> tuple[int, ...]:
-    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-        raise TypeError(f"{name} must be a non-empty sequence.")
-    channels = tuple(values)
-    if not channels:
-        raise ValueError(f"{name} must be a non-empty sequence.")
-    if any(
-        not isinstance(value, int) or isinstance(value, bool) or value < minimum
-        for value in channels
-    ):
-        raise ValueError(f"{name} must contain integers of at least {minimum}.")
-    return channels
-
-
 class SinusoidalTimeEmbedding(nn.Module):
-    def __init__(self, channels: int, *, max_period: float = 10_000.0) -> None:
+    def __init__(self, channels: int, max_period: float = 10_000.0) -> None:
         super().__init__()
-        if not isinstance(channels, int) or isinstance(channels, bool) or channels < 2:
-            raise ValueError("channels must be an integer of at least 2.")
-        if not math.isfinite(max_period) or max_period <= 1.0:
-            raise ValueError("max_period must be finite and greater than 1.")
-
         half = channels // 2
-        denominator = max(half - 1, 1)
-        frequencies = torch.exp(
-            -math.log(max_period)
-            * torch.arange(half, dtype=torch.float32)
-            / denominator
+        denom = max(half - 1, 1)
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(half, dtype=torch.float32) / denom
         )
         self.channels = channels
-        self.register_buffer("frequencies", frequencies, persistent=False)
+        self.register_buffer("freqs", freqs, persistent=False)
 
     def forward(self, time: torch.Tensor) -> torch.Tensor:
         if not isinstance(time, torch.Tensor) or time.ndim != 1:
             raise ValueError("time must have shape [B].")
-        angles = time.to(dtype=torch.float32)[:, None] * self.frequencies[None]
-        embedding = torch.cat((angles.cos(), angles.sin()), dim=1)
-        if embedding.shape[1] < self.channels:
-            embedding = F.pad(embedding, (0, 1))
-        return embedding
+        angles = time.to(dtype=torch.float32)[:, None] * self.freqs[None]
+        emb = torch.cat((angles.cos(), angles.sin()), dim=1)
+        if emb.shape[1] < self.channels:
+            emb = F.pad(emb, (0, 1))
+        return emb
 
 
 class AdaptiveGroupNorm(nn.Module):
@@ -76,16 +47,14 @@ class AdaptiveGroupNorm(nn.Module):
 
     def forward(
         self,
-        inputs: torch.Tensor,
-        embedding: torch.Tensor,
+        x: torch.Tensor,
+        emb: torch.Tensor,
     ) -> torch.Tensor:
-        if embedding.ndim != 2 or embedding.shape[0] != inputs.shape[0]:
-            raise ValueError("embedding must have shape [B, E].")
-        scale, shift = self.affine(F.silu(embedding)).chunk(2, dim=1)
-        trailing = (1,) * (inputs.ndim - 2)
-        scale = scale.reshape(scale.shape + trailing)
-        shift = shift.reshape(shift.shape + trailing)
-        return self.norm(inputs) * (1.0 + scale) + shift
+        scale, shift = self.affine(F.silu(emb)).chunk(2, dim=1)
+        dims = (1,) * (x.ndim - 2)
+        scale = scale.reshape(scale.shape + dims)
+        shift = shift.reshape(shift.shape + dims)
+        return self.norm(x) * (1.0 + scale) + shift
 
 
 class AdaptiveResBlock3D(nn.Module):
@@ -108,12 +77,12 @@ class AdaptiveResBlock3D(nn.Module):
 
     def forward(
         self,
-        inputs: torch.Tensor,
-        embedding: torch.Tensor,
+        x: torch.Tensor,
+        emb: torch.Tensor,
     ) -> torch.Tensor:
-        hidden = self.conv1(F.silu(self.norm1(inputs, embedding)))
-        hidden = self.conv2(F.silu(self.norm2(hidden, embedding)))
-        return (self.skip(inputs) + hidden) * _INV_SQRT_TWO
+        h = self.conv1(F.silu(self.norm1(x, emb)))
+        h = self.conv2(F.silu(self.norm2(h, emb)))
+        return (self.skip(x) + h) * _INV_SQRT_TWO
 
 
 class AdaptiveResBlock2D(nn.Module):
@@ -136,21 +105,12 @@ class AdaptiveResBlock2D(nn.Module):
 
     def forward(
         self,
-        inputs: torch.Tensor,
-        embedding: torch.Tensor,
+        x: torch.Tensor,
+        emb: torch.Tensor,
     ) -> torch.Tensor:
-        hidden = self.conv1(F.silu(self.norm1(inputs, embedding)))
-        hidden = self.conv2(F.silu(self.norm2(hidden, embedding)))
-        return (self.skip(inputs) + hidden) * _INV_SQRT_TWO
-
-
-class Downsample3D(nn.Module):
-    def __init__(self, channels: int) -> None:
-        super().__init__()
-        self.conv = nn.Conv3d(channels, channels, 3, stride=2, padding=1)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.conv(inputs)
+        h = self.conv1(F.silu(self.norm1(x, emb)))
+        h = self.conv2(F.silu(self.norm2(h, emb)))
+        return (self.skip(x) + h) * _INV_SQRT_TWO
 
 
 class Upsample3D(nn.Module):
@@ -160,9 +120,8 @@ class Upsample3D(nn.Module):
 
     def forward(
         self,
-        inputs: torch.Tensor,
-        *,
+        x: torch.Tensor,
         size: tuple[int, int, int],
     ) -> torch.Tensor:
-        hidden = F.interpolate(inputs, size=size, mode="nearest")
-        return self.conv(hidden)
+        h = F.interpolate(x, size=size, mode="nearest")
+        return self.conv(h)

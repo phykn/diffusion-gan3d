@@ -2,10 +2,12 @@ from pathlib import Path
 
 import torch
 from torch import nn
+from torch.utils.data import DataLoader, RandomSampler
 
-from .data.dataset import AXES, BatchStream, SliceDataset, build_stream, find_slices
+from . import AXES
+from .dataset import BatchStream, SliceDataset
 from .diffusion import Diffusion
-from .generate.sample import Sampler
+from .generate import Generator
 from .model.critic import PairCritic2D
 from .model.denoiser import Denoiser3D
 from .simul.config import SimulationConfig
@@ -13,7 +15,55 @@ from .simul.export import Export, generate
 from .train.config import TrainConfig, load_config
 from .train.ema import build_ema
 from .train.engine import Trainer
-from .train.weights import load_weights
+from .train.weights import WEIGHTS_NAME, load_weights
+
+_EXTENSIONS = {".png", ".tif", ".tiff"}
+
+
+def find_slices(folders: dict[int, Path]) -> dict[int, tuple[Path, ...]]:
+    if set(folders) != set(AXES):
+        raise ValueError("axis folders must contain exactly axes 0, 1, and 2.")
+
+    grouped = {}
+    for axis in AXES:
+        folder = Path(folders[axis])
+        if not folder.is_dir():
+            raise FileNotFoundError(f"axis {axis} folder does not exist: {folder}")
+        paths = tuple(
+            sorted(
+                path
+                for path in folder.iterdir()
+                if path.is_file() and path.suffix.lower() in _EXTENSIONS
+            )
+        )
+        if not paths:
+            raise ValueError(f"axis {axis} folder contains no images: {folder}")
+        grouped[axis] = paths
+    return grouped
+
+
+def build_stream(
+    dataset: SliceDataset,
+    *,
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+) -> BatchStream:
+    sampler = RandomSampler(
+        dataset,
+        replacement=True,
+        num_samples=max(1024, batch_size),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=True,
+        persistent_workers=num_workers > 0,
+    )
+    return BatchStream(loader)
 
 
 def build_streams(
@@ -42,7 +92,6 @@ def build_datasets(cfg: TrainConfig) -> dict[int, SliceDataset]:
             grouped[axis],
             crop_size=data.crop_size,
             patch_size=data.patch_size,
-            num_phases=data.num_phases,
         )
         for axis in AXES
     }
@@ -73,7 +122,7 @@ def build_denoiser(
 ) -> Denoiser3D:
     data = cfg.data
     model = cfg.model
-    use_checkpointing = (
+    checkpointing = (
         model.gradient_checkpointing if checkpointing is None else checkpointing
     )
     return Denoiser3D(
@@ -82,7 +131,7 @@ def build_denoiser(
         channel_multipliers=model.channel_multipliers,
         embedding_channels=model.embedding_channels,
         latent_channels=model.latent_channels,
-        gradient_checkpointing=use_checkpointing,
+        gradient_checkpointing=checkpointing,
     )
 
 
@@ -102,12 +151,12 @@ def build_optimizers(
 ) -> tuple[torch.optim.Optimizer, dict[str, torch.optim.Optimizer]]:
     optim = cfg.optim
     betas = (optim.beta1, optim.beta2)
-    denoiser_optimizer = torch.optim.Adam(
+    denoiser_optim = torch.optim.Adam(
         denoiser.parameters(),
         lr=optim.generator_lr,
         betas=betas,
     )
-    critic_optimizers = {
+    critic_optims = {
         str(axis): torch.optim.Adam(
             critics[str(axis)].parameters(),
             lr=optim.critic_lr,
@@ -115,7 +164,7 @@ def build_optimizers(
         )
         for axis in AXES
     }
-    return denoiser_optimizer, critic_optimizers
+    return denoiser_optim, critic_optims
 
 
 def build_trainer(
@@ -127,8 +176,8 @@ def build_trainer(
     _load_checkpoints(cfg, denoiser, critics)
     denoiser = denoiser.to(device)
     critics = critics.to(device)
-    ema_denoiser = build_ema(denoiser)
-    denoiser_optimizer, critic_optimizers = build_optimizers(
+    ema = build_ema(denoiser)
+    denoiser_optim, critic_optims = build_optimizers(
         denoiser,
         critics,
         cfg,
@@ -136,12 +185,12 @@ def build_trainer(
     use_amp = cfg.train.mixed_precision and device.type == "cuda"
     return Trainer(
         denoiser=denoiser,
-        ema_denoiser=ema_denoiser,
+        ema_denoiser=ema,
         critics=critics,
         streams=build_streams(cfg, device=device),
         diffusion=build_diffusion(cfg).to(device),
-        denoiser_optimizer=denoiser_optimizer,
-        critic_optimizers=critic_optimizers,
+        denoiser_optim=denoiser_optim,
+        critic_optims=critic_optims,
         scaler=torch.amp.GradScaler("cuda", enabled=use_amp),
         device=device,
         volume_batch_size=cfg.train.volume_batch_size,
@@ -155,8 +204,8 @@ def build_trainer(
         anchor_dropout=cfg.anchor.dropout,
         anchor_loss_weight=cfg.anchor.loss_weight,
         anchor_max_planes=cfg.anchor.max_planes,
-        fraction_loss_weight=cfg.fraction.loss_weight,
-        fraction_dropout=cfg.fraction.dropout,
+        vf_loss_weight=cfg.vf.loss_weight,
+        vf_dropout=cfg.vf.dropout,
         latent_channels=cfg.model.latent_channels,
         amp_enabled=use_amp,
     )
@@ -167,23 +216,23 @@ def _load_checkpoints(
     denoiser: nn.Module,
     critics: nn.ModuleDict,
 ) -> None:
-    checkpoint = cfg.train.checkpoint
-    if checkpoint.model is not None:
-        load_weights(checkpoint.model, denoiser)
+    ckpt = cfg.train.checkpoint
+    if ckpt.model is not None:
+        load_weights(ckpt.model, denoiser)
     for axis in (0, 1, 2):
-        path = getattr(checkpoint, f"critic_{axis}")
+        path = getattr(ckpt, f"critic_{axis}")
         if path is not None:
             load_weights(path, critics[str(axis)])
 
 
-def build_sampler(
+def build_generator(
     cfg: TrainConfig,
     model: Denoiser3D,
     *,
     device: torch.device,
-) -> Sampler:
+) -> Generator:
     use_amp = cfg.train.mixed_precision and device.type == "cuda"
-    return Sampler(
+    return Generator(
         model,
         build_diffusion(cfg).to(device),
         device=device,
@@ -195,11 +244,19 @@ def build_sampler(
     )
 
 
-def load_sampler(
+def find_weights(run_root: str | Path) -> Path:
+    root = Path(run_root)
+    paths = tuple(root.glob(f"*/{WEIGHTS_NAME}"))
+    if not paths:
+        raise FileNotFoundError(f"no {WEIGHTS_NAME} file was found under {root}.")
+    return max(paths, key=lambda path: path.stat().st_mtime_ns)
+
+
+def load_generator(
     weights: str | Path,
     *,
     device: torch.device,
-) -> Sampler:
+) -> Generator:
     path = Path(weights).resolve()
     cfg = load_config(path.parent / "train.yaml")
     model = build_denoiser(cfg, checkpointing=False).to(device)
@@ -211,7 +268,7 @@ def load_sampler(
             f"weights file is not compatible with the configured denoiser: {path}"
         ) from exc
     model.eval()
-    return build_sampler(
+    return build_generator(
         cfg,
         model,
         device=device,
@@ -227,7 +284,7 @@ def generate_data(cfg: SimulationConfig) -> Export:
         size=geometry.size,
         big_radius=geometry.big_radius,
         small_radius=geometry.small_radius,
-        big_fraction=geometry.big_fraction,
-        small_fraction=geometry.small_fraction,
+        big_vf=geometry.big_vf,
+        small_vf=geometry.small_vf,
         big_elongation=geometry.big_elongation,
     )

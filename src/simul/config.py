@@ -23,8 +23,8 @@ class GeometryConfig:
     size: int
     big_radius: int
     small_radius: int
-    big_fraction: float
-    small_fraction: float
+    big_vf: float
+    small_vf: float
     big_elongation: float = 1.0
 
     def __post_init__(self) -> None:
@@ -32,8 +32,8 @@ class GeometryConfig:
         require_int("geometry.big_radius", self.big_radius)
         require_int("geometry.small_radius", self.small_radius)
         for name, value in (
-            ("geometry.big_fraction", self.big_fraction),
-            ("geometry.small_fraction", self.small_fraction),
+            ("geometry.big_vf", self.big_vf),
+            ("geometry.small_vf", self.small_vf),
             ("geometry.big_elongation", self.big_elongation),
         ):
             require_number(name, value)
@@ -43,17 +43,15 @@ class GeometryConfig:
             raise ValueError(
                 "geometry radii must satisfy 1 < small_radius < big_radius < size / 2."
             )
-        total = float(self.big_fraction) + float(self.small_fraction)
-        if self.big_fraction <= 0.0 or self.small_fraction <= 0.0:
-            raise ValueError("geometry phase fractions must each be positive.")
+        total = float(self.big_vf) + float(self.small_vf)
+        if self.big_vf <= 0.0 or self.small_vf <= 0.0:
+            raise ValueError("geometry VF values must each be positive.")
         if not 0.0 < total < 1.0:
-            raise ValueError(
-                "geometry phase fractions must sum to between zero and one."
-            )
+            raise ValueError("geometry VF values must sum to between zero and one.")
         if not 1.0 <= float(self.big_elongation) <= 4.0:
             raise ValueError("geometry.big_elongation must be between 1.0 and 4.0.")
-        object.__setattr__(self, "big_fraction", float(self.big_fraction))
-        object.__setattr__(self, "small_fraction", float(self.small_fraction))
+        object.__setattr__(self, "big_vf", float(self.big_vf))
+        object.__setattr__(self, "small_vf", float(self.small_vf))
         object.__setattr__(
             self,
             "big_elongation",

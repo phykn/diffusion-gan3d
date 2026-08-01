@@ -82,8 +82,6 @@ class AnchorConfig:
             minimum=0.0,
         )
         require_int("anchor.max_planes", self.max_planes, minimum=1)
-        if self.max_planes > 3:
-            raise ValueError("anchor.max_planes must not exceed 3.")
         if (dropout < 1.0) != (weight > 0.0):
             raise ValueError(
                 "anchor.loss_weight must be positive exactly when "
@@ -96,18 +94,18 @@ class AnchorConfig:
 
 
 @dataclass(frozen=True)
-class FractionConfig:
+class VfConfig:
     loss_weight: float
     dropout: float
 
     def __post_init__(self) -> None:
         require_number(
-            "fraction.loss_weight",
+            "vf.loss_weight",
             self.loss_weight,
             minimum=0.0,
         )
         require_number(
-            "fraction.dropout",
+            "vf.dropout",
             self.dropout,
             minimum=0.0,
             maximum=1.0,
@@ -182,18 +180,18 @@ class TrainConfig:
     model: ModelConfig
     diffusion: DiffusionConfig
     anchor: AnchorConfig
-    fraction: FractionConfig
+    vf: VfConfig
     optim: OptimConfig
     train: LoopConfig
 
     def __post_init__(self) -> None:
-        generator_factor = 2 ** (len(self.model.channel_multipliers) - 1)
+        gen_factor = 2 ** (len(self.model.channel_multipliers) - 1)
         critic_factor = 2 ** (len(self.model.critic_channels) - 1)
-        required_factor = max(generator_factor, critic_factor)
-        if self.data.patch_size % required_factor:
+        factor = max(gen_factor, critic_factor)
+        if self.data.patch_size % factor:
             raise ValueError(
                 "data.patch_size must be divisible by the model downsample "
-                f"factor ({required_factor})."
+                f"factor ({factor})."
             )
 
     def as_dict(self) -> dict[str, object]:
@@ -206,29 +204,29 @@ _SECTIONS = {
     "model": ModelConfig,
     "diffusion": DiffusionConfig,
     "anchor": AnchorConfig,
-    "fraction": FractionConfig,
+    "vf": VfConfig,
     "optim": OptimConfig,
     "train": LoopConfig,
 }
 
 
 def load_config(path: str | Path) -> TrainConfig:
-    config_path = Path(path).resolve()
-    values = load_yaml(config_path, label="training config")
+    path = Path(path).resolve()
+    values = load_yaml(path, label="training config")
     if set(values) != set(_SECTIONS):
         missing = sorted(set(_SECTIONS) - set(values))
         extra = sorted(set(values) - set(_SECTIONS))
-        details = []
+        errors = []
         if missing:
-            details.append(f"missing sections: {', '.join(missing)}")
+            errors.append(f"missing sections: {', '.join(missing)}")
         if extra:
-            details.append(f"unknown sections: {', '.join(extra)}")
-        raise ValueError(f"training config has {'; '.join(details)}.")
+            errors.append(f"unknown sections: {', '.join(extra)}")
+        raise ValueError(f"training config has {'; '.join(errors)}.")
 
     data = _build_section(DataConfig, values["data"], "data")
-    data = replace(data, folder=_resolve_folders(data.folder, config_path.parent))
+    data = replace(data, folder=_resolve_folders(data.folder, path.parent))
     model = _build_model_config(values["model"])
-    train = _build_loop_config(values["train"], config_path.parent)
+    train = _build_loop_config(values["train"], path.parent)
     return TrainConfig(
         data=data,
         model=model,
@@ -238,10 +236,10 @@ def load_config(path: str | Path) -> TrainConfig:
             "diffusion",
         ),
         anchor=_build_section(AnchorConfig, values["anchor"], "anchor"),
-        fraction=_build_section(
-            FractionConfig,
-            values["fraction"],
-            "fraction",
+        vf=_build_section(
+            VfConfig,
+            values["vf"],
+            "vf",
         ),
         optim=_build_section(OptimConfig, values["optim"], "optim"),
         train=train,

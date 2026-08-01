@@ -15,19 +15,19 @@ def pack(
     size: int,
     big_radius: int,
     small_radius: int,
-    big_fraction: float,
-    small_fraction: float,
+    big_vf: float,
+    small_vf: float,
     big_elongation: float,
 ) -> np.ndarray:
     small_r = float(small_radius)
-    # Packing outside the retained field reduces boundary-biased particle fractions.
+    # Packing outside the retained field reduces boundary-biased particle VF values.
     work = size * 3 // 2
     vol = np.zeros((work,) * 3, dtype=np.uint8)
     ids = np.full((work,) * 3, -1, dtype=np.int32)
     parts: list[Particle] = []
     target = {
-        1: round(small_fraction * vol.size),
-        2: round(big_fraction * vol.size),
+        1: round(small_vf * vol.size),
+        2: round(big_vf * vol.size),
     }
 
     for label in (2, 1):
@@ -86,8 +86,8 @@ def _place(
             np.unravel_index(flat, valid.shape),
             dtype=np.int32,
         )
-        positions = offsets + center
-        key = tuple(positions.T)
+        pos = offsets + center
+        key = tuple(pos.T)
         if np.any(ids[key] >= 0):
             valid.flat[flat] = False
             continue

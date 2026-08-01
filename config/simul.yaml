@@ -7,7 +7,7 @@ geometry:
 
   big_elongation: 3.0
   big_radius: 14
-  big_fraction: 0.4
+  big_vf: 0.4
 
   small_radius: 7
-  small_fraction: 0.2
+  small_vf: 0.2

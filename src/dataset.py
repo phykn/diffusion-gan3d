@@ -1,0 +1,80 @@
+from collections.abc import Iterator, Sequence
+from pathlib import Path
+
+import numpy as np
+import torch
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+
+
+class SliceDataset(Dataset[torch.Tensor]):
+    def __init__(
+        self,
+        paths: Sequence[str | Path],
+        crop_size: int = 64,
+        patch_size: int = 64,
+    ) -> None:
+        self.paths = tuple(Path(path) for path in paths)
+        if not self.paths:
+            raise ValueError("paths must not be empty.")
+        if crop_size <= 0 or patch_size <= 0:
+            raise ValueError("crop and patch sizes must be positive.")
+        self.crop_size = int(crop_size)
+        self.patch_size = int(patch_size)
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        img = self.load(self.paths[idx])
+        img = self.crop(img)
+        img = self.resize(img)
+        return torch.from_numpy(img.copy()).to(torch.long)
+
+    def load(self, path: Path) -> np.ndarray:
+        with Image.open(path) as img:
+            data = np.asarray(img)
+        self._check_image(data)
+        return np.array(data, copy=True)
+
+    def crop(self, img: np.ndarray) -> np.ndarray:
+        self._check_image(img)
+        h, w = img.shape
+        if self.crop_size > min(h, w):
+            raise ValueError("crop size must fit inside the image.")
+        top = int(np.random.randint(0, h - self.crop_size + 1))
+        left = int(np.random.randint(0, w - self.crop_size + 1))
+        return img[top : top + self.crop_size, left : left + self.crop_size]
+
+    def resize(self, img: np.ndarray) -> np.ndarray:
+        self._check_image(img)
+        if img.shape == (self.patch_size, self.patch_size):
+            return img
+        pil = Image.fromarray(img, mode="L")
+        return np.asarray(
+            pil.resize(
+                (self.patch_size, self.patch_size),
+                resample=Image.Resampling.NEAREST,
+            ),
+            dtype=np.uint8,
+        )
+
+    @staticmethod
+    def _check_image(img: np.ndarray) -> None:
+        if img.ndim != 2:
+            raise ValueError("image must be two-dimensional.")
+        if img.dtype != np.uint8:
+            raise ValueError("image must use uint8.")
+
+
+class BatchStream:
+    def __init__(self, loader: DataLoader[torch.Tensor]) -> None:
+        self.loader = loader
+        self._iterator: Iterator[torch.Tensor] = iter(loader)
+
+    def next(self) -> torch.Tensor:
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            self._iterator = iter(self.loader)
+            return next(self._iterator)

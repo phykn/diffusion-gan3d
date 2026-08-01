@@ -42,14 +42,14 @@ def require_number(
 ) -> float:
     if not isinstance(value, Real) or isinstance(value, bool):
         raise TypeError(f"{name} must be a real scalar.")
-    result = float(value)
-    if not math.isfinite(result):
+    number = float(value)
+    if not math.isfinite(number):
         raise ValueError(f"{name} must be finite.")
-    if minimum is not None and result < minimum:
+    if minimum is not None and number < minimum:
         raise ValueError(f"{name} must be at least {minimum}.")
-    if maximum is not None and result > maximum:
+    if maximum is not None and number > maximum:
         raise ValueError(f"{name} must be at most {maximum}.")
-    return result
+    return number
 
 
 def _encode(value: object) -> object:

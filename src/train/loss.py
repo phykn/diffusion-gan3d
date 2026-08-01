@@ -21,17 +21,17 @@ def critic_logistic_loss(
     fake_scores: CriticScores,
 ) -> HeadLoss:
     return HeadLoss(
-        global_loss=F.softplus(-real_scores.global_logits).mean()
-        + F.softplus(fake_scores.global_logits).mean(),
-        local_loss=F.softplus(-real_scores.local_logits).mean()
-        + F.softplus(fake_scores.local_logits).mean(),
+        global_loss=F.softplus(-real_scores.logits_global).mean()
+        + F.softplus(fake_scores.logits_global).mean(),
+        local_loss=F.softplus(-real_scores.logits_local).mean()
+        + F.softplus(fake_scores.logits_local).mean(),
     )
 
 
 def generator_logistic_loss(fake_scores: CriticScores) -> HeadLoss:
     return HeadLoss(
-        global_loss=F.softplus(-fake_scores.global_logits).mean(),
-        local_loss=F.softplus(-fake_scores.local_logits).mean(),
+        global_loss=F.softplus(-fake_scores.logits_global).mean(),
+        local_loss=F.softplus(-fake_scores.logits_local).mean(),
     )
 
 
@@ -40,9 +40,9 @@ def critic_r1_penalty(
     real_inputs: Sequence[torch.Tensor],
 ) -> HeadLoss:
     return HeadLoss(
-        global_loss=r1_penalty(scores.global_logits, real_inputs),
+        global_loss=r1_penalty(scores.logits_global, real_inputs),
         local_loss=r1_penalty(
-            scores.local_logits.mean(dim=(-2, -1)),
+            scores.logits_local.mean(dim=(-2, -1)),
             real_inputs,
         ),
     )
@@ -52,14 +52,14 @@ def r1_penalty(
     real_logits: torch.Tensor,
     real_inputs: Sequence[torch.Tensor],
 ) -> torch.Tensor:
-    gradients = torch.autograd.grad(
+    grads = torch.autograd.grad(
         outputs=real_logits.sum(),
         inputs=tuple(real_inputs),
         create_graph=True,
         only_inputs=True,
     )
     batch = real_logits.shape[0]
-    squared_norm = torch.zeros(batch, device=real_logits.device)
-    for gradient in gradients:
-        squared_norm = squared_norm + gradient.square().reshape(batch, -1).sum(1)
-    return squared_norm.mean()
+    norm = torch.zeros(batch, device=real_logits.device)
+    for grad in grads:
+        norm = norm + grad.square().reshape(batch, -1).sum(1)
+    return norm.mean()

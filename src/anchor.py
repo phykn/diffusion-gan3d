@@ -2,13 +2,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-
-from .data.slices import encode_labels
+import torch.nn.functional as F
 
 
 @dataclass(frozen=True)
 class PlaneAnchor:
-    labels: torch.Tensor
+    image: torch.Tensor
     axis: int
     index: int
 
@@ -17,7 +16,7 @@ class PlaneAnchor:
 class AnchorCondition:
     image: torch.Tensor
     mask: torch.Tensor
-    labels: torch.Tensor
+    target: torch.Tensor
     planes: int
     conflicts: int
     source_voxels: int
@@ -25,13 +24,6 @@ class AnchorCondition:
     @property
     def conflict_rate(self) -> float:
         return self.conflicts / self.source_voxels
-
-    def project(self, values: torch.Tensor) -> torch.Tensor:
-        if values.shape != self.image.shape:
-            raise ValueError("values must match the anchor volume shape.")
-        image = self.image.to(device=values.device, dtype=values.dtype)
-        mask = self.mask.to(device=values.device)
-        return torch.where(mask, image, values)
 
 
 def build_anchors(
@@ -46,27 +38,13 @@ def build_anchors(
 ) -> AnchorCondition | None:
     if isinstance(anchors, (str, bytes)) or not isinstance(anchors, Sequence):
         raise TypeError("anchors must be a sequence of PlaneAnchor values.")
-    values = tuple(anchors)
-    if not values:
+    anchors = tuple(anchors)
+    if not anchors:
         return None
-    if any(not isinstance(anchor, PlaneAnchor) for anchor in values):
+    if any(not isinstance(anchor, PlaneAnchor) for anchor in anchors):
         raise TypeError("anchors must contain only PlaneAnchor values.")
-    if (
-        not isinstance(batch_size, int)
-        or isinstance(batch_size, bool)
-        or batch_size < 1
-    ):
-        raise ValueError("batch_size must be a positive integer.")
-    if not isinstance(num_phases, int) or num_phases < 2:
-        raise ValueError("num_phases must be an integer of at least 2.")
-    if not isinstance(volume_size, int) or volume_size < 1:
-        raise ValueError("volume_size must be a positive integer.")
-    if not dtype.is_floating_point:
-        raise ValueError("dtype must be floating point.")
-    if not isinstance(reconcile, bool):
-        raise TypeError("reconcile must be boolean.")
 
-    labels = torch.zeros(
+    target = torch.zeros(
         batch_size,
         volume_size,
         volume_size,
@@ -83,85 +61,68 @@ def build_anchors(
         dtype=torch.bool,
         device=device,
     )
-    occupied_planes: set[tuple[int, int]] = set()
+    occupied: set[tuple[int, int]] = set()
     conflicts = 0
-    for anchor in values:
-        _check_position(anchor, volume_size)
-        key = (anchor.axis, anchor.index)
-        if key in occupied_planes:
-            raise ValueError("anchor planes must have unique axis/index positions.")
-        occupied_planes.add(key)
+    for anchor in anchors:
+        if (
+            not isinstance(anchor.axis, int)
+            or isinstance(anchor.axis, bool)
+            or anchor.axis not in (0, 1, 2)
+        ):
+            raise ValueError("anchor.axis must be one of 0, 1, or 2.")
+        if (
+            not isinstance(anchor.index, int)
+            or isinstance(anchor.index, bool)
+            or not 0 <= anchor.index < volume_size
+        ):
+            raise ValueError("anchor.index is outside the generated volume.")
 
-        plane_labels = _prepare_labels(
-            anchor.labels,
-            batch_size=batch_size,
-            num_phases=num_phases,
-            volume_size=volume_size,
-            device=device,
-        )
-        label_view = labels.select(anchor.axis + 1, anchor.index)
-        mask_view = mask.select(anchor.axis + 2, anchor.index).squeeze(1)
-        conflict = mask_view & (label_view != plane_labels)
+        key = (anchor.axis, anchor.index)
+        if key in occupied:
+            raise ValueError("anchor planes must have unique axis/index positions.")
+        occupied.add(key)
+
+        img = anchor.image
+        if not isinstance(img, torch.Tensor):
+            raise TypeError("anchor.image must be a torch.Tensor.")
+        if img.ndim == 2:
+            if img.shape != (volume_size, volume_size):
+                raise ValueError("anchor.image must match the generated plane size.")
+            img = img.unsqueeze(0).expand(batch_size, -1, -1)
+        elif img.ndim == 3:
+            shape = (batch_size, volume_size, volume_size)
+            if img.shape != shape:
+                raise ValueError(f"anchor.image must have shape {shape}.")
+        else:
+            raise ValueError("anchor.image must have shape [H, W] or [B, H, W].")
+        img = img.to(device=device, dtype=torch.long)
+        if int(img.min()) < 0 or int(img.max()) >= num_phases:
+            raise ValueError("anchor.image contains a phase outside num_phases.")
+
+        target_plane = target.select(anchor.axis + 1, anchor.index)
+        mask_plane = mask.select(anchor.axis + 2, anchor.index).squeeze(1)
+        conflict = mask_plane & (target_plane != img)
         if bool(conflict.any().item()) and not reconcile:
             raise ValueError("anchor planes contain conflicting intersections.")
         conflicts += int(conflict.sum().item())
         # Independent axis datasets cannot define shared lines, so earlier
         # planes own intersections when training reconciles them.
-        label_view.copy_(torch.where(mask_view, label_view, plane_labels))
-        mask_view.fill_(True)
+        target_plane.copy_(torch.where(mask_plane, target_plane, img))
+        mask_plane.fill_(True)
 
-    image = encode_labels(labels, num_phases).to(device=device, dtype=dtype)
-    image = image * mask.to(dtype=dtype)
-    return AnchorCondition(
-        image=image,
-        mask=mask,
-        labels=labels,
-        planes=len(values),
-        conflicts=conflicts,
-        source_voxels=len(values) * batch_size * volume_size * volume_size,
+    img = (
+        F.one_hot(target, num_classes=num_phases)
+        .movedim(-1, 1)
+        .to(device=device, dtype=dtype)
+        .mul_(2.0)
+        .sub_(1.0)
     )
-
-
-def _check_position(anchor: PlaneAnchor, volume_size: int) -> None:
-    if (
-        not isinstance(anchor.axis, int)
-        or isinstance(anchor.axis, bool)
-        or anchor.axis not in (0, 1, 2)
-    ):
-        raise ValueError("anchor.axis must be one of 0, 1, or 2.")
-    if (
-        not isinstance(anchor.index, int)
-        or isinstance(anchor.index, bool)
-        or not 0 <= anchor.index < volume_size
-    ):
-        raise ValueError("anchor.index is outside the generated volume.")
-
-
-def _prepare_labels(
-    labels: torch.Tensor,
-    *,
-    batch_size: int,
-    num_phases: int,
-    volume_size: int,
-    device: torch.device,
-) -> torch.Tensor:
-    if not isinstance(labels, torch.Tensor):
-        raise TypeError("anchor.labels must be a torch.Tensor.")
-    if labels.dtype != torch.long:
-        raise ValueError("anchor.labels must have dtype torch.long.")
-    if labels.ndim == 2:
-        if labels.shape != (volume_size, volume_size):
-            raise ValueError("2D anchor.labels must match the generated plane size.")
-        labels = labels.unsqueeze(0).expand(batch_size, -1, -1)
-    elif labels.ndim == 3:
-        expected = (batch_size, volume_size, volume_size)
-        if labels.shape != expected:
-            raise ValueError(f"batched anchor.labels must have shape {expected}.")
-    else:
-        raise ValueError("anchor.labels must have shape [H, W] or [B, H, W].")
-    labels = labels.to(device=device)
-    if labels.numel() == 0 or int(labels.min()) < 0:
-        raise ValueError("anchor.labels must not be empty or negative.")
-    if int(labels.max()) >= num_phases:
-        raise ValueError("anchor.labels contain a phase outside num_phases.")
-    return labels
+    img = img * mask.to(dtype=dtype)
+    return AnchorCondition(
+        image=img,
+        mask=mask,
+        target=target,
+        planes=len(anchors),
+        conflicts=conflicts,
+        source_voxels=len(anchors) * batch_size * volume_size * volume_size,
+    )
