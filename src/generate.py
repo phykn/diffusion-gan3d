@@ -135,6 +135,62 @@ class TileBuffer:
             non_blocking=True,
         )
 
+    def read_periodic(
+        self,
+        state: VolumeState,
+        start: tuple[int, int, int],
+        tile_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        shape = (1, state.values.shape[1], tile_size, tile_size, tile_size)
+        numel = math.prod(shape)
+        if state.values.device != device and self.upload is not None:
+            values = self.upload[:numel].view(shape)
+        else:
+            values = torch.empty(
+                shape,
+                device=state.values.device,
+                dtype=torch.float32,
+            )
+
+        segments = tuple(
+            self.periodic_segments(offset, tile_size, size)
+            for offset, size in zip(start, state.values.shape[-3:], strict=True)
+        )
+        for blocks in product(*segments):
+            target = tuple(block[0] for block in blocks)
+            source = tuple(block[1] for block in blocks)
+            values[(slice(None), slice(None), *target)].copy_(state.read(source))
+
+        if values.device == device:
+            return values
+        return values.to(
+            device=device,
+            dtype=torch.float32,
+            non_blocking=self.upload is not None,
+        )
+
+    @staticmethod
+    def periodic_segments(
+        start: int,
+        length: int,
+        size: int,
+    ) -> tuple[tuple[slice, slice], ...]:
+        segments = []
+        target_start = 0
+        source_start = start % size
+        while target_start < length:
+            count = min(size - source_start, length - target_start)
+            segments.append(
+                (
+                    slice(target_start, target_start + count),
+                    slice(source_start, source_start + count),
+                )
+            )
+            target_start += count
+            source_start = 0
+        return tuple(segments)
+
     def write(
         self,
         state: VolumeState,
@@ -379,17 +435,27 @@ class ScaledGenerator:
     @torch.no_grad()
     def generate(
         self,
-        shape: int | Sequence[int],
-        overlap: int,
+        blocks: int | Sequence[int] | None = None,
+        overlap: int = 0,
         base: torch.Tensor | None = None,
         vf: Sequence[float] | None = None,
         storage: str = "auto",
         progress: bool = True,
+        *,
+        shape: int | Sequence[int] | None = None,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
             raise TypeError("progress must be a boolean.")
-        plan = self.plan(shape, overlap)
+        if blocks is None:
+            if shape is None:
+                raise TypeError("blocks must be provided.")
+            output_shape = self.parse_shape(shape)
+        else:
+            if shape is not None:
+                raise ValueError("blocks and shape cannot be provided together.")
+            output_shape = self.shape_from_blocks(blocks)
+        plan = self.plan(output_shape, overlap)
         selected = self.select_storage(plan, storage)
         tiles = self.make_tiles(plan)
         vf = self.prepare_vf(vf)
@@ -409,6 +475,13 @@ class ScaledGenerator:
         )
         self.stats = plan
         return labels
+
+    def shape_from_blocks(
+        self,
+        blocks: int | Sequence[int],
+    ) -> tuple[int, int, int]:
+        counts = self.parse_shape(blocks)
+        return tuple(self.generator.patch_size * count for count in counts)
 
     @staticmethod
     def parse_shape(value: int | Sequence[int]) -> tuple[int, int, int]:
@@ -814,9 +887,13 @@ class ScaledGenerator:
             plan.tile_size,
         )
         for tile in tiles:
-            values = tile_buffer.read(current, tile.source, generator.device)
-            if any(tile.padding):
-                values = F.pad(values, tile.padding)
+            start = tuple(region.start - plan.overlap for region in tile.target)
+            values = tile_buffer.read_periodic(
+                current,
+                start,
+                plan.tile_size,
+                generator.device,
+            )
             with torch.autocast(
                 device_type=generator.device.type,
                 dtype=torch.float16,

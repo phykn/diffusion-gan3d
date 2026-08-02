@@ -16,6 +16,9 @@ htmlcov/
 
 /data/generated/
 /run/
+/scripts/paper/
+/scripts/gt.tiff
+/temp/
 
 *.bat
 

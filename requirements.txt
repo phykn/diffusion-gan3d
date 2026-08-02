@@ -5,5 +5,8 @@ Pillow
 PyYAML
 tensorboard
 torch
+torch-fidelity
+torchmetrics
+taufactor
 tifffile
 tqdm

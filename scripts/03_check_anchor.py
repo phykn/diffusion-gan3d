@@ -19,7 +19,7 @@ from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.train.weights import find_weights
 
-VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tiff"
+VOLUME_PATH = PROJECT_ROOT / "scripts" / "gt.tiff"
 AXIS = 0
 
 
@@ -46,9 +46,16 @@ def main() -> None:
         action="store_true",
         help="show the complete generated phase volume in Napari",
     )
+    parser.add_argument(
+        "--figure",
+        type=Path,
+        help="save the diagnostic figure instead of showing it",
+    )
     args = parser.parse_args()
     if args.count < 0:
         parser.error("--count must be non-negative.")
+    if args.napari and args.figure is not None:
+        parser.error("--napari and --figure cannot be used together.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = (
@@ -136,6 +143,7 @@ def main() -> None:
             index=index,
             num_phases=generator.num_phases,
             accuracy=slice_acc,
+            output=args.figure,
         )
 
 
@@ -288,6 +296,7 @@ def show_result(
     index: int,
     num_phases: int,
     accuracy: float,
+    output: Path | None = None,
 ) -> None:
     slices = get_slices(vol, axis)
     cmap = "gray"
@@ -375,7 +384,13 @@ def show_result(
         f"{len(indices)} planes · axis {axis} · slice {index}"
     )
     fig.tight_layout(rect=(0, 0, 1, 0.93))
-    plt.show()
+    if output is None:
+        plt.show()
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Figure   : {output.resolve()}")
 
 
 def load_volume(

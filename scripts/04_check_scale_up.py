@@ -22,7 +22,7 @@ from src.build import load_generator
 from src.generate import ScaledGenerator, ScalePlan
 from src.train.weights import find_weights
 
-VOLUME_PATH = PROJECT_ROOT / "data" / "generated" / "volumes" / "volume_000.tiff"
+VOLUME_PATH = PROJECT_ROOT / "scripts" / "gt.tiff"
 AXIS = 0
 
 
@@ -59,9 +59,16 @@ def main() -> None:
         action="store_true",
         help="show the complete scaled phase volume in Napari",
     )
+    parser.add_argument(
+        "--figure",
+        type=Path,
+        help="save the diagnostic figure instead of showing it",
+    )
     args = parser.parse_args()
     if args.count is not None and args.count < 0:
         parser.error("--count must be non-negative.")
+    if args.napari and args.figure is not None:
+        parser.error("--napari and --figure cannot be used together.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = find_weights(PROJECT_ROOT / "run")
@@ -112,7 +119,7 @@ def main() -> None:
 
     start = perf_counter()
     vol = scaled.generate(
-        shape=plan.shape,
+        blocks=tuple(args.blocks),
         overlap=args.overlap,
         base=base,
         vf=None,
@@ -208,6 +215,7 @@ def main() -> None:
                 base,
                 center,
                 generator.num_phases,
+                args.figure,
             )
         else:
             show_base_result(
@@ -218,9 +226,10 @@ def main() -> None:
                 indices,
                 AXIS,
                 generator.num_phases,
+                args.figure,
             )
     else:
-        show_slices(vol, generator.num_phases)
+        show_slices(vol, generator.num_phases, args.figure)
 
 
 def positive_int(value: str) -> int:
@@ -441,6 +450,7 @@ def get_continuation(counts: torch.Tensor) -> torch.Tensor:
 def show_slices(
     vol: torch.Tensor,
     num_phases: int,
+    output: Path | None = None,
 ) -> None:
     mid = tuple(size // 2 for size in vol.shape)
     imgs = (
@@ -461,7 +471,7 @@ def show_slices(
         panel.axis("off")
     fig.suptitle("Joint tiled diffusion scale-up")
     fig.tight_layout()
-    plt.show()
+    save_or_show(fig, output)
 
 
 def show_unanchored_base_result(
@@ -469,6 +479,7 @@ def show_unanchored_base_result(
     base: torch.Tensor,
     center: torch.Tensor,
     num_phases: int,
+    output: Path | None = None,
 ) -> None:
     idx = base.shape[0] // 2
     base_plane = base[idx]
@@ -540,7 +551,7 @@ def show_unanchored_base_result(
         f"cyan box: base {base.shape[0]}×{base.shape[1]}×{base.shape[2]} area"
     )
     fig.tight_layout(rect=(0, 0, 1, 0.93))
-    plt.show()
+    save_or_show(fig, output)
 
 
 def show_base_result(
@@ -551,6 +562,7 @@ def show_base_result(
     indices: tuple[int, ...],
     axis: int,
     num_phases: int,
+    output: Path | None = None,
 ) -> None:
     idx = select_display_index(base.shape[axis], indices)
     target_plane = target.movedim(axis, 0)[idx]
@@ -662,7 +674,17 @@ def show_base_result(
         f"full slice: {full_height}×{full_width}"
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    plt.show()
+    save_or_show(fig, output)
+
+
+def save_or_show(fig: plt.Figure, output: Path | None) -> None:
+    if output is None:
+        plt.show()
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Figure      : {output.resolve()}")
 
 
 def show_napari(vol: torch.Tensor) -> None:

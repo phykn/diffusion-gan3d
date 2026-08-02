@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import tifffile
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +22,19 @@ def main() -> None:
         action="store_true",
         help="show the complete 3D phase volume in Napari",
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="save the generated phase volume as a TIFF stack",
+    )
+    parser.add_argument(
+        "--figure",
+        type=Path,
+        help="save the orthogonal slice figure instead of showing it",
+    )
     args = parser.parse_args()
+    if args.napari and args.figure is not None:
+        parser.error("--napari and --figure cannot be used together.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = find_weights(PROJECT_ROOT / "run")
@@ -37,13 +50,25 @@ def main() -> None:
 
     vol = generator.generate(vf=None)
     print("Status  : complete", flush=True)
+    if args.output is not None:
+        save_volume(vol, args.output)
+        print(f"Output  : {args.output.resolve()}")
     if args.napari:
         show_napari(vol)
     else:
-        show_slices(vol, generator.num_phases)
+        show_slices(vol, generator.num_phases, args.figure)
 
 
-def show_slices(vol: torch.Tensor, num_phases: int) -> None:
+def save_volume(vol: torch.Tensor, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tifffile.imwrite(path, vol.to(dtype=torch.uint8).cpu().numpy())
+
+
+def show_slices(
+    vol: torch.Tensor,
+    num_phases: int,
+    output: Path | None = None,
+) -> None:
     mid = tuple(size // 2 for size in vol.shape)
     slices = (
         vol[mid[0], :, :],
@@ -64,7 +89,13 @@ def show_slices(vol: torch.Tensor, num_phases: int) -> None:
         panels[axis].axis("off")
     fig.suptitle("EMA model")
     fig.tight_layout()
-    plt.show()
+    if output is None:
+        plt.show()
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Figure  : {output.resolve()}")
 
 
 def show_napari(vol: torch.Tensor) -> None:
