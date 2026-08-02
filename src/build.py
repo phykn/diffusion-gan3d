@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -18,141 +19,39 @@ from .utils import load_yaml
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
 
 
-def build_trainer(cfg: dict, device: torch.device) -> Trainer:
-    denoiser, critics = build_models(cfg)
-    load_checkpoints(cfg, denoiser, critics)
-    denoiser = denoiser.to(device)
-    critics = critics.to(device)
-    ema = build_ema(denoiser)
-    denoiser_optim, critic_optims = build_optimizers(denoiser, critics, cfg)
-    data = cfg["data"]
-    model = cfg["model"]
-    anchor = cfg["anchor"]
-    vf = cfg["vf"]
-    optim = cfg["optim"]
-    train = cfg["train"]
-    use_amp = train["mixed_precision"] and device.type == "cuda"
-    return Trainer(
-        denoiser=denoiser,
-        ema_denoiser=ema,
-        critics=critics,
-        streams=build_streams(cfg, device),
-        diffusion=build_diffusion(cfg).to(device),
-        denoiser_optim=denoiser_optim,
-        critic_optims=critic_optims,
-        scaler=torch.amp.GradScaler("cuda", enabled=use_amp),
-        device=device,
-        volume_batch_size=train["volume_batch_size"],
-        volume_sizes=train["volume_sizes"],
-        num_phases=data["num_phases"],
-        patch_size=data["patch_size"],
-        slices_per_axis=train["slices_per_axis"],
-        ema_decay=train["ema_decay"],
-        r1_gamma=optim["r1_gamma"],
-        r1_interval=optim["r1_interval"],
-        critic_local_weight=optim.get("critic_local_weight", 0.5),
-        anchor_dropout=anchor["dropout"],
-        anchor_loss_weight=anchor["loss_weight"],
-        anchor_seam_weight=anchor["seam_weight"],
-        anchor_max_planes=anchor.get("max_planes", 1),
-        vf_loss_weight=vf["loss_weight"],
-        vf_dropout=vf["dropout"],
-        latent_channels=model["latent_channels"],
-        amp_enabled=use_amp,
-    )
+def find_slices(
+    folders: dict[int, Sequence[str | Path]],
+) -> dict[int, tuple[Path, ...]]:
+    if set(folders) != set(AXES):
+        raise ValueError("axis folders must contain exactly axes 0, 1, and 2.")
 
-
-def build_models(cfg: dict) -> tuple[Denoiser3D, nn.ModuleDict]:
-    data = cfg["data"]
-    model = cfg["model"]
-    denoiser = build_denoiser(cfg)
-    critics = nn.ModuleDict(
-        {
-            str(axis): PairCritic2D(
-                num_phases=data["num_phases"],
-                channels=model["critic_channels"],
-                embedding_channels=model["embedding_channels"],
-                gradient_checkpointing=model.get("gradient_checkpointing", True),
-            )
-            for axis in AXES
-        }
-    )
-    return denoiser, critics
-
-
-def build_denoiser(
-    cfg: dict,
-    checkpointing: bool | None = None,
-) -> Denoiser3D:
-    data = cfg["data"]
-    model = cfg["model"]
-    checkpointing = (
-        model.get("gradient_checkpointing", True)
-        if checkpointing is None
-        else checkpointing
-    )
-    return Denoiser3D(
-        num_phases=data["num_phases"],
-        base_channels=model["base_channels"],
-        channel_multipliers=model["channel_multipliers"],
-        embedding_channels=model["embedding_channels"],
-        latent_channels=model["latent_channels"],
-        gradient_checkpointing=checkpointing,
-    )
-
-
-def build_optimizers(
-    denoiser: nn.Module,
-    critics: nn.ModuleDict,
-    cfg: dict,
-) -> tuple[torch.optim.Optimizer, dict[str, torch.optim.Optimizer]]:
-    optim = cfg["optim"]
-    betas = (optim["beta1"], optim["beta2"])
-    denoiser_optim = torch.optim.Adam(
-        denoiser.parameters(),
-        lr=optim["generator_lr"],
-        betas=betas,
-    )
-    critic_optims = {
-        str(axis): torch.optim.Adam(
-            critics[str(axis)].parameters(),
-            lr=optim["critic_lr"],
-            betas=betas,
-        )
-        for axis in AXES
-    }
-    return denoiser_optim, critic_optims
-
-
-def load_checkpoints(
-    cfg: dict,
-    denoiser: nn.Module,
-    critics: nn.ModuleDict,
-) -> None:
-    checkpoints = cfg["train"].get("checkpoint") or {}
-    if checkpoints.get("model") is not None:
-        load_weights(checkpoints["model"], denoiser)
+    grouped = {}
     for axis in AXES:
-        path = checkpoints.get(f"critic_{axis}")
-        if path is not None:
-            load_weights(path, critics[str(axis)])
+        values = folders[axis]
+        if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+            raise TypeError(f"axis {axis} folders must be a sequence of paths.")
+        if not values:
+            raise ValueError(f"axis {axis} folders must not be empty.")
+        axis_folders = tuple(Path(value) for value in values)
+        if len({folder.resolve() for folder in axis_folders}) != len(axis_folders):
+            raise ValueError(f"axis {axis} folders must not contain duplicates.")
 
-
-def build_streams(
-    cfg: dict,
-    device: torch.device,
-) -> dict[int, BatchStream]:
-    datasets = build_datasets(cfg)
-    data = cfg["data"]
-    return {
-        axis: build_stream(
-            datasets[axis],
-            data["batch_size"],
-            data.get("num_workers", 0),
-            device.type == "cuda",
-        )
-        for axis in AXES
-    }
+        paths = []
+        for folder in axis_folders:
+            if not folder.is_dir():
+                raise FileNotFoundError(
+                    f"axis {axis} folder does not exist: {folder}"
+                )
+            found = sorted(
+                path
+                for path in folder.iterdir()
+                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            if not found:
+                raise ValueError(f"axis {axis} folder contains no images: {folder}")
+            paths.extend(found)
+        grouped[axis] = tuple(paths)
+    return grouped
 
 
 def build_datasets(cfg: dict) -> dict[int, SliceDataset]:
@@ -163,33 +62,10 @@ def build_datasets(cfg: dict) -> dict[int, SliceDataset]:
             grouped[axis],
             crop_size=data["crop_size"],
             patch_size=data["patch_size"],
+            augment=data["augment"],
         )
         for axis in AXES
     }
-
-
-def find_slices(
-    folders: dict[int, str | Path],
-) -> dict[int, tuple[Path, ...]]:
-    if set(folders) != set(AXES):
-        raise ValueError("axis folders must contain exactly axes 0, 1, and 2.")
-
-    grouped = {}
-    for axis in AXES:
-        folder = Path(folders[axis])
-        if not folder.is_dir():
-            raise FileNotFoundError(f"axis {axis} folder does not exist: {folder}")
-        paths = tuple(
-            sorted(
-                path
-                for path in folder.iterdir()
-                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-            )
-        )
-        if not paths:
-            raise ValueError(f"axis {axis} folder contains no images: {folder}")
-        grouped[axis] = paths
-    return grouped
 
 
 def build_stream(
@@ -215,6 +91,68 @@ def build_stream(
     return BatchStream(loader)
 
 
+def build_denoiser(
+    cfg: dict,
+    checkpointing: bool | None = None,
+) -> Denoiser3D:
+    data = cfg["data"]
+    model = cfg["model"]
+    checkpointing = (
+        model.get("gradient_checkpointing", True)
+        if checkpointing is None
+        else checkpointing
+    )
+    return Denoiser3D(
+        num_phases=data["num_phases"],
+        base_channels=model["base_channels"],
+        channel_multipliers=model["channel_multipliers"],
+        embedding_channels=model["embedding_channels"],
+        latent_channels=model["latent_channels"],
+        gradient_checkpointing=checkpointing,
+    )
+
+
+def build_models(cfg: dict) -> tuple[Denoiser3D, nn.ModuleDict]:
+    data = cfg["data"]
+    model = cfg["model"]
+    denoiser = build_denoiser(cfg)
+    critics = nn.ModuleDict(
+        {
+            str(axis): PairCritic2D(
+                num_phases=data["num_phases"],
+                channels=model["critic_channels"],
+                embedding_channels=model["embedding_channels"],
+                gradient_checkpointing=model.get("gradient_checkpointing", True),
+            )
+            for axis in AXES
+        }
+    )
+    return denoiser, critics
+
+
+def build_optimizers(
+    denoiser: nn.Module,
+    critics: nn.ModuleDict,
+    cfg: dict,
+) -> tuple[torch.optim.Optimizer, dict[str, torch.optim.Optimizer]]:
+    optim = cfg["optim"]
+    betas = (optim["beta1"], optim["beta2"])
+    denoiser_optim = torch.optim.Adam(
+        denoiser.parameters(),
+        lr=optim["generator_lr"],
+        betas=betas,
+    )
+    critic_optims = {
+        str(axis): torch.optim.Adam(
+            critics[str(axis)].parameters(),
+            lr=optim["critic_lr"],
+            betas=betas,
+        )
+        for axis in AXES
+    }
+    return denoiser_optim, critic_optims
+
+
 def build_diffusion(cfg: dict) -> Diffusion:
     diffusion = cfg["diffusion"]
     return Diffusion(
@@ -238,14 +176,6 @@ def load_generator(
             f"weights file is not compatible with the configured denoiser: {path}"
         ) from exc
     denoiser.eval()
-    return build_generator(cfg, denoiser, device)
-
-
-def build_generator(
-    cfg: dict,
-    denoiser: Denoiser3D,
-    device: torch.device,
-) -> Generator:
     data = cfg["data"]
     model = cfg["model"]
     anchor = cfg["anchor"]
@@ -259,4 +189,66 @@ def build_generator(
         latent_channels=model["latent_channels"],
         anchor_enabled=anchor["dropout"] < 1.0,
         use_amp=use_amp,
+    )
+
+
+def build_trainer(cfg: dict, device: torch.device) -> Trainer:
+    denoiser, critics = build_models(cfg)
+    checkpoints = cfg["train"].get("checkpoint") or {}
+    if checkpoints.get("model") is not None:
+        load_weights(checkpoints["model"], denoiser)
+    for axis in AXES:
+        path = checkpoints.get(f"critic_{axis}")
+        if path is not None:
+            load_weights(path, critics[str(axis)])
+
+    denoiser = denoiser.to(device)
+    critics = critics.to(device)
+    ema = build_ema(denoiser)
+    denoiser_optim, critic_optims = build_optimizers(denoiser, critics, cfg)
+    data = cfg["data"]
+    model = cfg["model"]
+    anchor = cfg["anchor"]
+    vf = cfg["vf"]
+    optim = cfg["optim"]
+    train = cfg["train"]
+    use_amp = train["mixed_precision"] and device.type == "cuda"
+    datasets = build_datasets(cfg)
+    streams = {
+        axis: build_stream(
+            datasets[axis],
+            batch_size=data["batch_size"],
+            num_workers=data.get("num_workers", 0),
+            pin_memory=device.type == "cuda",
+        )
+        for axis in AXES
+    }
+
+    return Trainer(
+        denoiser=denoiser,
+        ema_denoiser=ema,
+        critics=critics,
+        streams=streams,
+        diffusion=build_diffusion(cfg).to(device),
+        denoiser_optim=denoiser_optim,
+        critic_optims=critic_optims,
+        scaler=torch.amp.GradScaler("cuda", enabled=use_amp),
+        device=device,
+        volume_batch_size=train["volume_batch_size"],
+        volume_sizes=train["volume_sizes"],
+        num_phases=data["num_phases"],
+        patch_size=data["patch_size"],
+        slices_per_axis=train["slices_per_axis"],
+        ema_decay=train["ema_decay"],
+        r1_gamma=optim["r1_gamma"],
+        r1_interval=optim["r1_interval"],
+        critic_local_weight=optim.get("critic_local_weight", 0.5),
+        anchor_dropout=anchor["dropout"],
+        anchor_loss_weight=anchor["loss_weight"],
+        anchor_seam_weight=anchor["seam_weight"],
+        anchor_max_planes=anchor.get("max_planes", 1),
+        vf_loss_weight=vf["loss_weight"],
+        vf_dropout=vf["dropout"],
+        latent_channels=model["latent_channels"],
+        amp_enabled=use_amp,
     )

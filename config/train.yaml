@@ -1,11 +1,12 @@
 data:
   folder:
-    0: data/generated/slices/0
-    1: data/generated/slices/1
-    2: data/generated/slices/2
+    0: [data]
+    1: [data]
+    2: [data]
   crop_size: 128
   patch_size: 64
-  num_phases: 3
+  augment: true
+  num_phases: 2
   batch_size: 8
   num_workers: 0
 
@@ -18,7 +19,7 @@ model:
   gradient_checkpointing: true
 
 diffusion:
-  timesteps: 11
+  timesteps: 10
   beta_min: 0.1
   beta_max: 20.0
 
@@ -47,6 +48,6 @@ train:
   volume_sizes: [64, 96]
   slices_per_axis: 16
   mixed_precision: true
-  ema_decay: 0.99
+  ema_decay: 0.999
   save_every_steps: 100
   checkpoint: null

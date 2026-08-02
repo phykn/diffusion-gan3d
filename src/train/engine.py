@@ -1,3 +1,4 @@
+import math
 from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -85,9 +86,64 @@ class Trainer:
             raise ValueError("streams must contain axes 0, 1, and 2.")
         if set(critic_optims) != {str(axis) for axis in AXES}:
             raise ValueError("critic optimizers must contain axes 0, 1, and 2.")
+        volume_sizes = tuple(volume_sizes)
         if not volume_sizes:
             raise ValueError("volume_sizes must not be empty.")
-        max_positions = len(AXES) * ((min(volume_sizes) + 1) // 2)
+        for name, value in (
+            ("volume_batch_size", volume_batch_size),
+            ("num_phases", num_phases),
+            ("patch_size", patch_size),
+            ("slices_per_axis", slices_per_axis),
+            ("r1_interval", r1_interval),
+            ("anchor_max_planes", anchor_max_planes),
+            ("latent_channels", latent_channels),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{name} must be a positive integer.")
+        if any(
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < patch_size
+            for size in volume_sizes
+        ):
+            raise ValueError(
+                "volume_sizes must contain integers at least as large as patch_size."
+            )
+        for name, value in (
+            ("anchor_dropout", anchor_dropout),
+            ("vf_dropout", vf_dropout),
+        ):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or not 0.0 <= value <= 1.0
+            ):
+                raise ValueError(f"{name} must be between zero and one.")
+        if (
+            not isinstance(ema_decay, (int, float))
+            or isinstance(ema_decay, bool)
+            or not math.isfinite(ema_decay)
+            or not 0.0 <= ema_decay < 1.0
+        ):
+            raise ValueError("ema_decay must be between zero and one, excluding one.")
+        for name, value in (
+            ("r1_gamma", r1_gamma),
+            ("critic_local_weight", critic_local_weight),
+            ("anchor_loss_weight", anchor_loss_weight),
+            ("anchor_seam_weight", anchor_seam_weight),
+            ("vf_loss_weight", vf_loss_weight),
+        ):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0.0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative.")
+        if not isinstance(amp_enabled, bool):
+            raise TypeError("amp_enabled must be a boolean.")
+        max_positions = (min(volume_sizes) + 1) // 2
         if anchor_max_planes > max_positions:
             raise ValueError(
                 "anchor_max_planes exceeds the available separated positions."
@@ -102,7 +158,7 @@ class Trainer:
         self.scaler = scaler
         self.device = device
         self.volume_batch_size = volume_batch_size
-        self.volume_sizes = tuple(volume_sizes)
+        self.volume_sizes = volume_sizes
         self.num_phases = num_phases
         self.patch_size = patch_size
         self.slices_per_axis = slices_per_axis
@@ -358,12 +414,13 @@ class Trainer:
         )
 
     def get_vf(self, batches: Iterable[torch.Tensor]) -> torch.Tensor:
-        counts = torch.stack(
-            [
-                torch.bincount(images.flatten(), minlength=self.num_phases)
-                for images in batches
-            ]
-        ).sum(dim=0)
+        values = []
+        for images in batches:
+            counts = torch.bincount(images.flatten(), minlength=self.num_phases)
+            if counts.numel() != self.num_phases:
+                raise ValueError("training images contain a phase outside num_phases.")
+            values.append(counts)
+        counts = torch.stack(values).sum(dim=0)
         vf = counts.to(torch.float32)
         vf.div_(counts.sum())
         return vf.unsqueeze(0)
@@ -399,14 +456,30 @@ class Trainer:
             count,
             volume_size=volume_size,
         )
+        selections = {}
+        for axis in AXES:
+            axis_count = sum(normal == axis for normal, _ in positions)
+            if axis_count == 0:
+                continue
+            batch_size = batches[axis].shape[0]
+            if axis_count > batch_size:
+                raise ValueError(
+                    "anchor planes per axis must not exceed the image batch size."
+                )
+            selections[axis] = iter(
+                torch.stack(
+                    [
+                        torch.randperm(batch_size, device=self.device)[:axis_count]
+                        for _ in range(self.volume_batch_size)
+                    ],
+                    dim=1,
+                ).unbind()
+            )
+
         planes = []
         for axis, plane_index in positions:
             images = batches[axis]
-            batch_indices = torch.randint(
-                images.shape[0],
-                (self.volume_batch_size,),
-                device=self.device,
-            )
+            batch_indices = next(selections[axis])
             selected = images.index_select(0, batch_indices)
             size = min(volume_size, *selected.shape[-2:])
             selected = self.crop_images(selected, size)
@@ -438,26 +511,22 @@ class Trainer:
     ) -> tuple[tuple[int, int], ...]:
         if not isinstance(count, int) or isinstance(count, bool) or count < 1:
             raise ValueError("count must be a positive integer.")
-        if not isinstance(volume_size, int) or volume_size < 1:
+        if (
+            not isinstance(volume_size, int)
+            or isinstance(volume_size, bool)
+            or volume_size < 1
+        ):
             raise ValueError("volume_size must be a positive integer.")
-        available = len(AXES) * volume_size
-        separated = len(AXES) * ((volume_size + 1) // 2)
+        separated = (volume_size + 1) // 2
         if count > separated:
             raise ValueError("count exceeds the available separated positions.")
 
         gap = max(2, volume_size // (2 * count))
-        selected: list[tuple[int, int]] = []
-        for flat_index in torch.randperm(available).tolist():
-            axis, plane_index = divmod(flat_index, volume_size)
-            if any(
-                axis == previous_axis and abs(plane_index - previous_index) < gap
-                for previous_axis, previous_index in selected
-            ):
-                continue
-            selected.append((axis, plane_index))
-            if len(selected) == count:
-                return tuple(selected)
-        raise RuntimeError("could not sample sufficiently separated anchor positions.")
+        available = volume_size - (gap - 1) * (count - 1)
+        indices = torch.randperm(available)[:count].sort().values
+        indices += torch.arange(count) * (gap - 1)
+        axis = int(torch.randint(len(AXES), ()).item())
+        return tuple((axis, int(index)) for index in indices)
 
     def generate_pair(
         self,

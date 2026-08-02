@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -17,6 +18,14 @@ def pack(
     small_vf: float,
     big_elongation: float,
 ) -> np.ndarray:
+    check_geometry(
+        size,
+        big_radius,
+        small_radius,
+        big_vf,
+        small_vf,
+        big_elongation,
+    )
     # Packing outside the retained field reduces boundary-biased particle VF values.
     work_size = size * 3 // 2
     volume = np.zeros((work_size,) * 3, dtype=np.uint8)
@@ -40,6 +49,41 @@ def pack(
         )
 
     return crop(volume, size)
+
+
+def check_geometry(
+    size: int,
+    big_radius: int,
+    small_radius: int,
+    big_vf: float,
+    small_vf: float,
+    big_elongation: float,
+) -> None:
+    if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+        raise ValueError("size must be a positive integer.")
+    for name, radius in (
+        ("big_radius", big_radius),
+        ("small_radius", small_radius),
+    ):
+        if not isinstance(radius, int) or isinstance(radius, bool) or radius < 1:
+            raise ValueError(f"{name} must be a positive integer.")
+    for name, vf in (("big_vf", big_vf), ("small_vf", small_vf)):
+        if (
+            not isinstance(vf, (int, float))
+            or isinstance(vf, bool)
+            or not math.isfinite(vf)
+            or not 0.0 <= vf <= 1.0
+        ):
+            raise ValueError(f"{name} must be between zero and one.")
+    if big_vf + small_vf > 1.0:
+        raise ValueError("big_vf and small_vf must sum to at most one.")
+    if (
+        not isinstance(big_elongation, (int, float))
+        or isinstance(big_elongation, bool)
+        or not math.isfinite(big_elongation)
+        or big_elongation <= 0.0
+    ):
+        raise ValueError("big_elongation must be finite and positive.")
 
 
 def place(

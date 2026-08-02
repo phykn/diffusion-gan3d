@@ -187,6 +187,10 @@ class Generator:
         )
         if vf.shape != (self.num_phases,):
             raise ValueError(f"vf must have shape [{self.num_phases}].")
+        if not bool(torch.isfinite(vf).all()):
+            raise ValueError("vf values must be finite.")
+        if bool((vf < 0).any()):
+            raise ValueError("vf values must be non-negative.")
         vf_sum = vf.sum()
         if vf_sum == 0:
             raise ValueError("vf sum must not be zero.")
@@ -295,10 +299,15 @@ class ScaledGenerator:
         voxels = math.prod(shape)
         tile_voxels = tile_size**3
         tile_bytes = self.generator.num_phases * tile_voxels * 4
-        workspace_bytes = max(16 * tile_bytes, 4 * 1024**3)
+        input_layer = getattr(self.generator.model, "input", None)
+        width = getattr(input_layer, "out_channels", self.generator.num_phases)
+        if not isinstance(width, int) or isinstance(width, bool) or width < 1:
+            width = self.generator.num_phases
+        workspace_bytes = 12 * width * tile_voxels * 4
         states_bytes = 2 * self.generator.num_phases * voxels * 2
         fusion_bytes = (self.generator.num_phases + 1) * voxels * 4
         output_bytes = voxels
+        cpu_workspace = workspace_bytes if self.generator.device.type == "cpu" else 0
         seams = tuple(tuple(range(core_size, size, core_size)) for size in shape)
         return ScalePlan(
             shape=shape,
@@ -314,7 +323,11 @@ class ScaledGenerator:
             cuda_bytes=states_bytes + fusion_bytes + workspace_bytes,
             output_bytes=output_bytes,
             cpu_bytes=(
-                states_bytes + fusion_bytes + output_bytes + 3 * tile_bytes // 2
+                states_bytes
+                + fusion_bytes
+                + output_bytes
+                + 3 * tile_bytes // 2
+                + cpu_workspace
             ),
             seams=seams,
         )
@@ -565,6 +578,8 @@ class ScaledGenerator:
             cpu_bytes += (
                 plan.states_bytes + plan.fusion_bytes + 3 * plan.tile_bytes // 2
             )
+            if device.type == "cpu":
+                cpu_bytes += plan.workspace_bytes
         self.check_cpu_memory(cpu_bytes)
         return selected
 

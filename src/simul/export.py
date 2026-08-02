@@ -6,7 +6,7 @@ import tifffile
 from PIL import Image
 
 from .. import AXES
-from .geometry import pack
+from .geometry import check_geometry, pack
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253
 
@@ -20,12 +20,16 @@ class Export:
 def generate(cfg: dict) -> Export:
     output = cfg["output"]
     geometry = cfg["geometry"]
+    count = output["count"]
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        raise ValueError("output count must be a positive integer.")
+    check_geometry(**geometry)
     root = Path(output["data_dir"])
     vol_dir, slice_dirs = make_dirs(root)
     volumes: list[Path] = []
     slices: dict[int, list[Path]] = {axis: [] for axis in AXES}
 
-    for idx in range(output["count"]):
+    for idx in range(count):
         vol = pack(
             size=geometry["size"],
             big_radius=geometry["big_radius"],

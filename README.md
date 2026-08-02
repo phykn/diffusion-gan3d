@@ -10,13 +10,14 @@ The generator uses a short diffusion process so that global structure can be ref
 
 ## Data
 
-`data.folder.0`, `data.folder.1`, and `data.folder.2` contain slices normal to each axis. Images must be `uint8` phase-label maps with values from `0` to `num_phases - 1`.
+`data.folder.0`, `data.folder.1`, and `data.folder.2` are lists of folders containing slices normal to each axis. Images must be `uint8` phase-label maps with values from `0` to `num_phases - 1`.
 
 - `crop_size`: area cropped from each source image
 - `patch_size`: resized 2D training size and scale-up tile spacing
+- `augment`: randomly apply one of four rotations and their flipped variants
 - `volume_sizes`: generated 3D sizes used during training
 
-These sizes are independent. Create an example three-phase dataset with:
+The three size settings are independent. Create an example three-phase dataset with:
 
 ```bash
 python gen_data.py
@@ -33,7 +34,7 @@ Each run saves the EMA generator as `model.pt`, the critics as `critic_0.pt` thr
 
 ## Anchors
 
-An anchor is a known categorical plane used throughout denoising. It is not copied into the result because exact overwriting can leave a discontinuity beside the plane. Cross-entropy teaches the plane itself, while seam-focused critic samples evaluate its surroundings. Training samples up to `anchor.max_planes`; `anchor.seam_weight` controls the seam loss and `anchor.dropout` preserves generation without anchors.
+An anchor is a known categorical plane used throughout denoising. It is not copied into the result because exact overwriting can leave a discontinuity beside the plane. Cross-entropy teaches the plane itself, while seam-focused critic samples evaluate its surroundings. Each training step places all anchors on one random axis so independent crops cannot conflict at intersections. Training samples up to `anchor.max_planes`; `anchor.seam_weight` controls the seam loss and `anchor.dropout` preserves generation without anchors.
 
 ## VF conditioning
 
