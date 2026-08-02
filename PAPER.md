@@ -5,71 +5,73 @@
 
 ## Abstract
 
-Material simulations need sufficiently large 3D microstructures to represent connected pores and transport paths, but acquiring such volumes experimentally is expensive. Two-dimensional microscopy is much easier to obtain, so we train a 3D generator using independent 2D sections viewed from three perpendicular directions. This recovers the overall appearance of the material, but a measured section must also remain at its known position. Simply pasting it into a generated volume can break structures on either side of the section. Our method instead provides the measured section and its location to the generator during every denoising step. It directly penalizes incorrect phase labels on the section and examines crossing sections to encourage a continuous 3D neighborhood around it. We also generate volumes larger than the training size. Rather than completing small blocks independently and stitching them together, overlapping blocks are denoised as parts of one shared volume and their predictions are blended at every step. In a deterministic coverage sweep, whole-volume voxel accuracy increased from 54.93% without measured sections to 98.26% when all axis-0 sections were supplied. A 3 × 3 × 3 expansion produced a 192³ volume while preserving 100.00% of the protected central region. The method therefore turns sparse 2D observations into large 3D microstructures that retain measured information and connected morphology.
+Three-dimensional microstructures must be large enough to represent pore connectivity and transport, yet volumetric imaging is often more costly than acquiring 2D sections. Existing 2D-supervised generators can reproduce section statistics but cannot ensure that a measured section appears at a prescribed location; independently generated blocks can also introduce discontinuities when the volume is enlarged. We address both problems with anchor-conditioned diffusion. Masked categorical sections and their coordinates are supplied at every reverse step, constrained voxels receive direct phase supervision, and orthogonal critics assess the surrounding morphology. For scale-up, overlapping blocks predict one shared noisy volume and their estimates are fused before each update. A protected base core is retained exactly, while a soft outer shell adapts to the generated surroundings. In a controlled fixed-seed sweep, whole-volume voxel accuracy rose from 54.93% without anchors to 98.26% with complete axis-0 coverage. A 3 × 3 × 3 expansion generated a 192³ volume—27 times the base voxel count—with a local pore-continuation drop of −0.68 ± 0.13 percentage points at tile boundaries. The results demonstrate coordinate-aware, scalable 3D synthesis from 2D observations while identifying the need for validation on experimental 3D data.
 
 ## 1. Introduction
 
-Digital 3D microstructures provide the geometric domains used to study permeability, diffusion, and other connectivity-dependent material behavior. These predictions require volumes that are both representative in size and consistent with available measurements. Experimental 3D imaging, however, is costly and often limited in either resolution or field of view, whereas high-quality 2D sections are much easier to collect.
+Transport and mechanical response depend on three-dimensional morphology, not only on the appearance of individual sections. Digital material studies therefore require volumes that are large enough to contain representative connected paths. Tomography can provide such data, but its cost, resolution, and field of view often make 2D microscopy the more accessible source of microstructural information.
 
-Methods such as SliceGAN [1] address this data gap by training a 3D generator against 2D sections. More recent diffusion-based dimensional-expansion methods likewise reconstruct 3D structure from one or more 2D views [2–4]. Their main objective is statistical reconstruction: generated sections should resemble the training images. This is sufficient for producing representative samples, but not for reconstructing around a particular measured section at a known location. A statistically plausible volume may still contradict that measurement, while replacing a generated plane afterward can sever pores and create an artificial transport barrier.
+Optimization, adversarial, and diffusion methods can infer statistically plausible 3D structures from one or more 2D images [1–5]. Their usual objective is distributional: generated sections should resemble the observed 2D population. This does not guarantee that a particular measured section is retained at a known coordinate. Inserting that section after generation satisfies the local labels but can break structures on either side of the plane.
 
-We treat a measured section as a spatial constraint rather than only as a training example. The section, its orientation, and its position are supplied to the 3D generator throughout denoising. A direct phase-label loss encourages agreement on the constrained voxels, and 2D critics inspect orthogonal sections that cross the constraint so that the surrounding morphology connects to it. Because these signals are constructed from the same independent 2D datasets used for ordinary training, the method does not require paired 2D–3D examples or ground-truth training volumes.
+Volume size creates a second difficulty. A model trained on small patches cannot directly represent a much larger field of view, whereas generating blocks independently and stitching them afterward leaves no mechanism for reconciling their boundaries. Shared-state diffusion offers a way to couple overlapping predictions during sampling [6].
 
-A second challenge is output size. A model trained on small patches cannot directly cover the larger domains needed for simulation, while independently generated blocks generally disagree at their boundaries. Inspired by shared-path tiled diffusion methods such as MultiDiffusion [6], we maintain one noisy 3D state for the complete output. Overlapping tiles predict the same regions, their predictions are blended, and the shared volume is updated only after this fusion. The process can grow around an anchored base while retaining its inner region and allowing its boundary to adapt to the newly generated surroundings.
-
-### Contributions
-
-The individual ideas of masked diffusion conditioning, boundary-aware adversarial learning, and overlapping tiled denoising are not claimed as novel in isolation. The contribution of this work is their specialization and integration for categorical 3D microstructure synthesis from unpaired 2D data:
-
-1. **Plane-anchored reconstruction without paired 3D supervision.** A 2D-supervised diffusion–GAN is extended to reconstruct a categorical 3D neighborhood around one or more measured internal sections placed at explicit axes and coordinates. The image-mask condition, anchor-voxel loss, and seam-focused orthogonal critics are trained using only unaligned 2D section datasets.
-2. **Anchor-preserving scalable synthesis.** The anchored result can be embedded into a larger jointly denoised volume. A retained inner core preserves the supplied structure, an adaptive shell connects it to newly generated material, and overlapping 3D tile predictions are fused at every reverse transition rather than stitching independently completed blocks.
-3. **Controlled validation of conditioning and scale-up.** Anchor coverage is varied from zero to complete axis coverage and evaluated against the same reference volume, separating whole-volume voxel fidelity from section-distribution similarity, porosity, and transport behavior. The scale-up experiment additionally measures continuity across block boundaries.
+We combine these ideas in a categorical 3D generator trained without paired 2D–3D data. The method (i) integrates full or partial plane anchors throughout denoising, with direct label supervision and cross-plane adversarial evaluation; (ii) enlarges volumes by jointly denoising overlapping 3D blocks around a protected core; and (iii) evaluates spatial recovery, section distribution, phase fraction, diffusive tortuosity, and local boundary continuity separately. This separation is important because a volume can match 2D statistics without recovering the correct coordinates, or preserve coordinates while changing global morphology.
 
 ## 2. Related Work
 
-### 2.1 3D microstructure reconstruction from 2D data
+### 2.1 Reconstruction from 2D observations
 
-SliceGAN showed that a 3D generator can be trained without 3D examples by asking 2D discriminators to judge generated cross-sections [1]. This dimensional-expansion strategy makes 3D synthesis possible from a single representative micrograph and supports large outputs through a fully convolutional generator. Diffusion models have since been applied to microstructure reconstruction because their iterative sampling provides a stable alternative to direct adversarial generation [2,3]. Multi-plane diffusion further uses sections from different orientations to improve consistency between the three spatial directions [4]. Other conditional approaches control global descriptors such as phase fraction or spatial statistics [8,9]. These methods aim primarily at statistical equivalence: the generated sections or descriptors should follow the reference distribution. They do not directly address the separate requirement that a particular measured section must appear at a specified coordinate inside the generated volume.
+Feature-matching and conditional neural methods reconstruct 3D microstructures from a 2D exemplar [1,2]. SliceGAN removes the need for paired 3D supervision by applying 2D discriminators to sections of a generated volume [3]. Diffusion has also been used for 2D microstructure synthesis [7] and, more recently, for 2D-to-3D dimensional expansion [4,5]. Property-conditioned approaches control quantities such as phase fraction or spatial statistics [8,9]. These methods constrain distributions or global properties, but they do not preserve a specified internal section at a known location.
 
-### 2.2 Conditioning on measured regions
+### 2.2 Conditioning on known regions
 
-Image inpainting provides a related form of spatial conditioning. RePaint repeatedly restores known pixels during reverse diffusion so that an unconditional model can fill an unknown region [10], while coherent diffusion inpainting methods explicitly reduce disagreement at the boundary between known and generated content [7]. Such methods establish that a mask can preserve observations and that boundary treatment is essential. An internal microstructure section presents a different geometric constraint: it is a thin categorical plane surrounded by unknown material on both sides, and its quality depends on 3D connections that are visible only in crossing sections. The present work adapts masked conditioning to this setting by learning the plane condition together with phase-label supervision and adversarial evaluation of orthogonal seams, using only unpaired 2D micrographs for training.
+Diffusion inpainting preserves observed pixels while generating their surroundings [10,11]. A measured internal section poses a stricter 3D problem: unknown material lies on both sides, and structures must remain compatible across the plane. We adapt masked conditioning to categorical internal sections and evaluate orthogonal slices that cross the constrained region.
 
-### 2.3 Scalable and tiled diffusion generation
+### 2.3 Generation beyond the training size
 
-Diffusion models are commonly trained at a fixed spatial size because storing and denoising an entire high-resolution state is expensive. MultiDiffusion addresses this limitation in 2D by applying a pretrained model to overlapping crops and combining their denoising paths into one output [6]. Patch-DM likewise uses overlapping patch information to suppress boundaries in high-resolution image synthesis [12]. For microstructures, GrainPaint expands generation domains through diffusion inpainting [11]. These studies show that overlap must be resolved during generation rather than after independently completed patches are stitched together. Our scale-up procedure follows this principle in a categorical 3D setting: all tiles read from a shared noisy volume, overlapping clean predictions are cosine-fused before each posterior update, and an optional anchored base is connected through a protected core and a gradual transition shell.
+MultiDiffusion and Patch-DM couple overlapping denoising paths to synthesize outputs larger than the training domain [6,13]. GrainPaint applies diffusion inpainting to large microstructures [12]. Our scale-up procedure extends shared-state fusion to 3D categorical volumes and adds a hard inner core with a soft transition shell.
 
 ## 3. Method
 
-### 3.1 Problem formulation
+### 3.1 Task definition
 
-Let $\mathcal{D}_a$ be a dataset of categorical 2D sections normal to axis $a \in \{0,1,2\}$. Each pixel is a phase label in $\{0,\ldots,K-1\}$, where $K$ is the number of material phases. The three datasets are independent: images from different axes do not need to depict the same specimen or spatial location. Our goal is to learn a generator for a categorical volume $X \in \{0,\ldots,K-1\}^{D \times H \times W}$ whose sections match the corresponding 2D distributions. At inference, the generator may additionally receive measured full or partial planes with specified orientations and coordinates. These planes constrain selected voxels, while the remaining volume is generated stochastically.
+Let $\mathcal{D}_a$ be a set of categorical 2D sections normal to axis $a \in \{0,1,2\}$, with phase labels in $\{0,\ldots,K-1\}$. The axis-specific sets need not be spatially aligned. We learn a volume
 
-### 3.2 2D-supervised 3D generation
+$$
+X \in \{0,\ldots,K-1\}^{D \times H \times W}
+$$
 
-The generator is a 3D denoising network $G_\theta(x_t,t,z,c)$, where $x_t$ is the current noisy volume, $t$ is the diffusion state, $z$ is a newly sampled latent vector, and $c$ contains any active conditions. The network predicts $K$ logits per voxel. A softmax converts these logits into phase probabilities, which are mapped to $[-1,1]$ to obtain a clean-volume estimate $\hat{x}_0$. Each reverse step samples the next state from the diffusion posterior $q(x_{t-1}\mid x_t,\hat{x}_0)$. Following the short denoising diffusion-GAN formulation [5], adversarial training makes it possible to use only a small number of reverse transitions.
+whose sections match the corresponding 2D distributions. At inference, any subset of voxels on one or more planes may be supplied as spatial constraints; the remaining volume is sampled stochastically.
 
-Because no real 3D volumes are available, supervision is applied through three 2D critics $C_a$, one for each axis. A critic receives consecutive noisy section states $(x_{t-1}^{(a)},x_t^{(a)})$. Real pairs are produced by forward-noising images from $\mathcal{D}_a$, while generated pairs are sliced from the 3D reverse process. Each critic has a global head for whole-section structure and a local head for phase boundaries. The base generator objective is
+### 3.2 2D-supervised 3D diffusion
+
+The generator is a 3D denoising network $G_\theta(x_t,t,z,c)$ that predicts a clean categorical volume $\hat{x}_0$ from noisy state $x_t$, diffusion step $t$, latent vector $z$, and optional conditions $c$. It follows the forward–reverse diffusion formulation [14] and the short adversarial reverse process of denoising diffusion GANs [15]. The denoiser uses channel widths 16, 32, 64, and 64, a 128-dimensional conditioning embedding, and a 64-dimensional latent vector.
+
+Because paired 3D targets are unavailable, three 2D critics $C_a$ supervise orthogonal sections. Each critic distinguishes forward-noised real section pairs from pairs sliced from the generated reverse process. A global head evaluates the whole section, and a patch head evaluates fine-scale structure. The generator objective is
 
 $$
 \mathcal{L}_{\mathrm{adv}}
-=\sum_{a=0}^{2}\left(\mathcal{L}_{\mathrm{global}}^{(a)}
-+\lambda_{\mathrm{local}}\mathcal{L}_{\mathrm{local}}^{(a)}\right).
+=\sum_{a=0}^{2}\left(
+\mathcal{L}_{\mathrm{global}}^{(a)}
++\lambda_{\mathrm{local}}\mathcal{L}_{\mathrm{local}}^{(a)}
+\right).
 $$
 
-This arrangement constrains 3D generation from all three directions while requiring only unaligned 2D examples.
+This provides 3D supervision through observable 2D distributions rather than through a volumetric target.
 
 ### 3.3 Plane-anchor conditioning
 
-An anchor is defined by a categorical image, its normal axis, its index on that axis, and an optional in-plane offset. Multiple anchors are assembled into a target tensor $Y$ and a binary mask $M$ over the generated volume. $M(v)=1$ indicates that voxel $v$ is constrained; elsewhere the target is ignored. Full planes and smaller rectangular patches use the same representation.
+An anchor contains categorical labels, a plane normal, a coordinate on that axis, and an optional in-plane offset. Multiple anchors are assembled into a target tensor $Y$ and binary mask $M$, where $M(v)=1$ marks constrained voxel $v$. Full planes and smaller rectangular regions use the same representation.
 
-The masked one-hot anchor and its mask are passed through a zero-initialized 3D convolution and added to the first generator feature map:
+The masked one-hot labels and mask are projected by a zero-initialized 3D convolution and added to the first denoiser feature map:
 
 $$
-h_A=\operatorname{Conv}_{3D}\!\left(\left[\operatorname{onehot}(Y)\odot M,\;M\right]\right).
+h_A=\operatorname{Conv}_{3D}\!\left(
+\left[\operatorname{onehot}(Y)\odot M,\;M\right]
+\right).
 $$
 
-The zero initialization preserves the unconditioned network at the start of training. The same anchor features are supplied at every reverse step, allowing the model to organize the surrounding structure around the measured phases rather than inserting them after generation. Agreement on constrained voxels is learned with
+Zero initialization leaves the unconditioned mapping unchanged at the start of training. The anchor is provided at every reverse step, and constrained labels are optimized with masked cross-entropy,
 
 $$
 \mathcal{L}_{\mathrm{anchor}}
@@ -77,13 +79,17 @@ $$
 \log p_\theta\!\left(Y(v)\mid x_t,t,z,M\right).
 $$
 
-Training randomly selects the anchor axis, plane positions, and source crops. Anchors in one training sample share an axis so that unrelated images from independent datasets do not impose contradictory intersection labels. Anchor dropout retains the ability to generate without a constraint.
+Correct labels alone do not ensure a compatible neighborhood. The 2D critics therefore also evaluate orthogonal sections centered where they cross an anchor, giving a seam-aware adversarial term $\mathcal{L}_{\mathrm{seam}}$. During training, anchor position and count are randomized, with up to four same-axis planes per sample.
 
-### 3.4 Seam-aware training
+### 3.4 Phase-fraction conditioning and full objective
 
-The voxel loss alone does not ensure that structures connect across an anchored plane. We therefore sample additional generated sections whose normals are orthogonal to the anchor and whose crop centers intersect its mask. The corresponding critics evaluate these crossing sections at the clean transition, producing a seam adversarial loss $\mathcal{L}_{\mathrm{seam}}$. This loss exposes discontinuities on both sides of the anchor even though the training data contain no paired 3D neighborhood.
+An optional vector $v\in[0,1]^K$ specifies the desired phase fractions. Its embedding conditions the denoiser, while predicted mean fractions $\hat{p}$ receive
 
-With optional phase-fraction conditioning, the complete generator objective is
+$$
+\mathcal{L}_{\mathrm{vf}}=\lVert\hat{p}-v\rVert_1.
+$$
+
+The complete generator objective is
 
 $$
 \mathcal{L}_{G}=\mathcal{L}_{\mathrm{adv}}
@@ -92,19 +98,11 @@ $$
 +\lambda_{\mathrm{vf}}\mathcal{L}_{\mathrm{vf}}.
 $$
 
-### 3.5 Phase-fraction conditioning
+The reported model uses 10 reverse transitions and weights $\lambda_{\mathrm{anchor}}=1$, $\lambda_{\mathrm{seam}}=0.25$, and $\lambda_{\mathrm{vf}}=1$. Condition dropout retains unconditioned sampling with the same network.
 
-An optional vector $v\in[0,1]^K$, normalized so that $\sum_k v_k=1$, controls the desired phase composition. Its embedding is added to the time and latent embeddings used by the denoiser. If $\hat{p}$ denotes the spatial mean of the predicted phase probabilities, the conditioning loss is
+### 3.5 Shared-state tiled scale-up
 
-$$
-\mathcal{L}_{\mathrm{vf}}=\lVert\hat{p}-v\rVert_1.
-$$
-
-Dropping this condition for a fraction of training samples allows conditioned and unconditioned generation with the same model. Phase-fraction and plane-anchor conditions can be active simultaneously.
-
-### 3.6 Joint tiled scale-up
-
-Let $P$ be the training patch size and $o$ the overlap on each side. Scale-up covers the requested output with tiles of input size $(P+2o)^3$ whose core regions are spaced $P$ voxels apart. Unlike independent block generation, every tile reads from one shared noisy volume $x_t$. At reverse step $t$, tile $k$ predicts a clean volume $\hat{x}_{0,k}$. A separable cosine-taper window $w_k$ blends all predictions that cover voxel $v$:
+Let $P$ be the block core size and $o$ the overlap on each side. Each $(P+2o)^3$ tile reads from one shared noisy volume. At reverse step $t$, a separable cosine-taper window $w_k$ fuses overlapping clean-volume predictions:
 
 $$
 \bar{x}_0(v)=
@@ -112,172 +110,146 @@ $$
 {\sum_k w_k(v)}.
 $$
 
-Only after this fusion is the shared state updated through $q(x_{t-1}\mid x_t,\bar{x}_0)$. Consequently, neighboring tiles repeatedly reconcile their overlap throughout denoising instead of meeting for the first time in the final output.
-
-An optional base volume is placed at the center of the global state. Its inner core is retained, while a cosine-weighted shell gradually reduces the constraint toward the boundary so the generated surroundings can connect to it. The complete base is preserved when $o=0$. For outputs that exceed GPU memory, the global states remain in CPU memory and only the active tile is transferred to the generator; this changes storage location but not the update rule.
+The global state is updated only after fusion, so adjacent tiles negotiate their overlaps throughout denoising rather than after generation. When a base volume is supplied, its inner core is retained exactly by construction. A cosine-weighted outer shell is only softly constrained, allowing the new surroundings to adapt to the base boundary.
 
 ## 4. Experimental Setup
 
-### 4.1 Data and preprocessing
+### 4.1 Data and scope
 
-The training data consist of a binary phase map of size 226 × 690 pixels. Phase 0 denotes pore space and phase 1 denotes solid material. Because only one section orientation is available, the same image pool is used for all three axes, which assumes isotropic section statistics. During training, 128 × 128 regions are sampled at random, resized to 64 × 64 with nearest-neighbor interpolation, and augmented by rotations and reflections. Figure 1 shows the source image and example crop regions.
+The source is a 226 × 690 binary phase map. Phase 0 is pore and phase 1 is solid. Under an isotropy assumption, the same image distribution supervises all three axes. Random 128 × 128 crops are resized by nearest-neighbor sampling to 64 × 64 and augmented by rotations and reflections (Figure 1).
 
 <p align="center">
-  <img src="assets/paper/01-training-data.png" alt="Categorical 2D training data with 128 by 128 crop regions" width="680">
+  <img src="assets/paper/01-training-data.png" alt="Binary training image with three 128 by 128 crop regions" width="680">
 </p>
-<p align="center"><em>Figure 1. Binary training micrograph. Orange boxes indicate example 128 × 128 training crops.</em></p>
+<p align="center"><em>Figure 1. Binary 2D training image. Orange boxes show example 128 × 128 crops, which are resized to 64 × 64. Black denotes pore and gray denotes solid throughout.</em></p>
 
-For the final distribution-level evaluation, the real 2D set is defined as 64 independently sampled 128 × 128 crops from the source image. The crops are resized to the model resolution before comparison with generated sections. The 64³ volume in `scripts/gt.tiff` is used only as a controlled reference for the anchor-coverage experiment; it is not treated as experimentally measured 3D ground truth.
+Evaluation uses 64 randomly sampled real crops. A fixed unconditioned 64³ sample from the trained generator serves as synthetic pseudo-ground truth for controlled anchor tests; it is denoted GT only in that context and is not experimental 3D ground truth. All real crops come from the training image, so the study is an in-sample proof of concept rather than a held-out generalization test.
 
-### 4.2 Training configuration
+### 4.2 Evaluation protocols
 
-The 3D denoiser uses base width 16, channel multipliers (1, 2, 4, 4), a 128-dimensional embedding, and a 64-dimensional latent vector. Training alternates between 64³ and 96³ generated volumes and samples 16 sections per axis. The diffusion process uses 10 transitions with beta limits of 0.1 and 20. The generator and critics are optimized for 30,000 steps with learning rates of 1.6 × 10⁻⁴ and 1.0 × 10⁻⁴, respectively, Adam coefficients (0.5, 0.9), mixed-precision arithmetic, and an exponential moving average of 0.999. The resolved settings are summarized in Table 1.
+The single-plane test places one 64 × 64 crop at the axis-0 center of a 64³ volume. A fixed-seed coverage sweep then supplies 0, 1, 2, 4, 8, 16, 32, or 64 planes from the synthetic GT at evenly distributed axis-0 coordinates. The final multi-sample evaluation uses 25%, 50%, 75%, and 100% coverage with four random seeds.
 
-| Setting | Value |
-|---|---:|
-| Number of phases | 2 |
-| Source crop / model patch | 128² / 64² |
-| 2D batch size / 3D volume batch size | 8 / 1 |
-| Training volume sizes | 64³, 96³ |
-| Diffusion transitions | 10 |
-| Training steps | 30,000 |
-| Maximum anchor planes per training sample | 4 |
-| Anchor dropout / loss weight | 0.2 / 1.0 |
-| Seam loss weight | 0.25 |
-| Phase-fraction dropout / loss weight | 0.2 / 1.0 |
+For scale-up, a single-plane-anchored 64³ base is placed at the center of a 192³ output. The sampler uses 3 × 3 × 3 block cores with 16-voxel overlap. An eight-voxel shell on each base face may adapt, leaving a hard-retained 48³ base core.
 
-### 4.3 Anchor and scale-up protocols
+### 4.3 Metrics
 
-Two anchor tests are used. First, the central 128 × 128 crop from the training image is resized to 64 × 64 and placed at axis 0, index 32 of a 64³ volume. Second, complete axis-0 planes are drawn from the controlled GT volume and supplied at counts of 0, 1, 2, 4, 8, 16, 32, and 64. The selected planes are distributed through the volume, corresponding to coverages from 0% to 100%. Every condition uses the same random seed so that changes can be attributed to the anchors rather than initial noise.
+- **Kernel Inception Distance (KID):** the squared maximum mean discrepancy between 2,048-dimensional Inception features [16]. Table 1 compares 64 real crops with 64 generated axis-0 sections at the same 64 × 64 field of view; lower is better. For scale-up, one 64 × 64 crop is taken from each of 64 evenly spaced sections.
 
-The scale-up test embeds the anchored 64³ base at the center of a 192³ output. The output is generated using a 3 × 3 × 3 block arrangement with an overlap of 16 voxels. An eight-voxel transition shell is allowed to adapt, leaving a protected 48³ core.
+- **Porosity:** the fraction of pixels or voxels assigned to phase-0 pore. Agreement with the reference value is desired.
 
-### 4.4 Evaluation metrics
+- **Tortuosity:** the axis-0 diffusive tortuosity factor of the pore phase, computed by a steady-state voxel diffusion solve [17]. It follows $D_{\mathrm{eff}}=D\varepsilon/\tau$, where $\varepsilon$ is porosity; agreement with the reference is desired.
 
-The evaluation separates section appearance, phase proportion, 3D transport, anchor fidelity, and scale-up boundaries:
+- **Voxel accuracy:** the fraction of all 64³ voxels whose phase matches the synthetic GT at the same coordinate. This is a whole-volume recovery score, not accuracy restricted to supplied planes.
 
-- **Kernel Inception Distance (KID):** compares real and generated section distributions; lower is better. Generated axis-0 sections are compared with reference sections using 2,048-dimensional Inception features, 100 subsets, and a subset size of 50.
-- **Porosity:** the fraction of all pixels or voxels assigned to phase 0. Two-dimensional porosity is an area fraction and three-dimensional porosity is a volume fraction; agreement with the reference is desired.
-- **Tortuosity:** the ratio between the effective pore-path length and the straight transport distance. It is computed along axis 0 by a steady-state diffusion solve through phase-0 pore space; agreement with the reference is desired.
-- **Voxel accuracy:** the fraction of all generated voxels whose phase equals the voxel at the same coordinate in GT. This whole-volume score measures how spatial reconstruction improves as anchor coverage increases; higher is better.
-- **Seam connectivity drop:** the connectivity in ordinary interior regions minus the connectivity across scale-up boundaries. A value near zero indicates that tiling introduces little connectivity loss.
+- **Local pore-continuation drop:** for adjacent planes normal to axis $a$, $C_a=P(X_{i+1}=0\mid X_i=0)$. The reported value is the three-axis mean $\Delta C=C_{\mathrm{interior}}-C_{\mathrm{boundary}}$, excluding pairs within four voxels of each boundary from the interior estimate. Zero indicates no measured boundary effect; a negative value means slightly greater local continuation at the boundary.
 
-Table 2 defines which metrics apply to each final comparison. KID replaces FID because the available section set is small. The final evaluation should report four independently generated 3D samples per condition as mean ± standard deviation. The currently available CSV contains one deterministic volume per anchor count; therefore, its KID deviation is the deviation across KID subsets, not variation across generated volumes.
-
-| Evaluation data | KID | Porosity | Tortuosity | Voxel accuracy | Seam connectivity drop |
-|---|:---:|:---:|:---:|:---:|:---:|
-| GT reference volume | — | ✓ | ✓ | — | — |
-| Real 2D crops | ✓ | ✓ | — | — | — |
-| 3D | ✓ | ✓ | ✓ | — | — |
-| 3D (phase-fraction conditioned) | ✓ | ✓ | ✓ | — | — |
-| 3D (anchored, 25%) | ✓ | ✓ | ✓ | ✓ | — |
-| 3D (anchored, 50%) | ✓ | ✓ | ✓ | ✓ | — |
-| 3D (anchored, 75%) | ✓ | ✓ | ✓ | ✓ | — |
-| 3D (anchored, 100%) | ✓ | ✓ | ✓ | ✓ | — |
-| 3D (scale-up) | ✓ | ✓ | ✓ | — | ✓ |
+Table 1 averages four random seeds. For KID, `±` is the mean standard deviation across 100 KID subsets, as defined by the metric; for porosity, tortuosity, voxel accuracy, and pore continuation, it is the sample standard deviation across the four generated volumes. The real-data KID is a baseline between independent crop sets. Figure 5 is a separate fixed-seed diagnostic whose KID is measured against synthetic-GT sections.
 
 ## 5. Results
 
-### 5.1 Three-dimensional generation from 2D data
+Table 1 summarizes the quantitative results. The unconditioned 3D samples reproduce the controlled reference porosity and axis-0 tortuosity closely on average. Phase-fraction conditioning moves mean porosity slightly closer to the target, from 0.3499 to 0.3530 versus 0.3518, but does not improve KID. Thus, composition control and section-distribution similarity should be evaluated separately.
 
-The model produces a binary 3D volume after training only on 2D sections. Figure 2 removes one octant to show both the exterior and the internal pore morphology. The three orthogonal center sections in Figure 3 contain feature sizes and phase patterns similar to those in the training image. These figures provide qualitative evidence of plausible 3D synthesis; the distributional and physical metrics below provide the quantitative checks.
+| Evaluation data | KID | Porosity | Tortuosity | Voxel accuracy | Local pore-continuation drop |
+|---|---:|---:|---:|---:|---:|
+| Controlled reference (GT) | — | 0.352 | 2.224 | — | — |
+| Real 2D crops | 0.0025 ± 0.0016 | 0.3625 ± 0.0043 | — | — | — |
+| 3D | 0.0282 ± 0.0030 | 0.3499 ± 0.0042 | 2.2337 ± 0.1206 | — | — |
+| 3D (phase-fraction conditioned) | 0.0294 ± 0.0034 | 0.3530 ± 0.0051 | 2.1957 ± 0.1068 | — | — |
+| 3D (anchored, 25%) | 0.0103 ± 0.0011 | 0.3431 ± 0.0025 | 2.4668 ± 0.0211 | 89.07 ± 0.10% | — |
+| 3D (anchored, 50%) | 0.0138 ± 0.0016 | 0.3286 ± 0.0014 | 2.2980 ± 0.0199 | 95.61 ± 0.03% | — |
+| 3D (anchored, 75%) | 0.0184 ± 0.0017 | 0.3347 ± 0.0011 | 2.2747 ± 0.0108 | 96.92 ± 0.04% | — |
+| 3D (anchored, 100%) | 0.0177 ± 0.0016 | 0.3392 ± 0.0008 | 2.2412 ± 0.0055 | 98.17 ± 0.06% | — |
+| 3D (scale-up) | 0.0269 ± 0.0033 | 0.3435 ± 0.0011 | 2.3263 ± 0.0295 | — | −0.68 ± 0.13 pp |
 
-<p align="center">
-  <img src="assets/paper/02-generated-volume.png" alt="Generated 3D categorical volume with one octant removed" width="420">
-</p>
-<p align="center"><em>Figure 2. Generated 64³ volume with one octant removed to expose the internal structure.</em></p>
+### 5.1 Three-dimensional synthesis
 
-<p align="center">
-  <img src="assets/paper/03-generated-slices.png" alt="Orthogonal sections of the generated 3D volume" width="720">
-</p>
-<p align="center"><em>Figure 3. Orthogonal center sections of the generated volume.</em></p>
-
-### 5.2 Single-plane conditioning
-
-In the fixed-seed center-plane test, all 4,096 constrained voxels match the supplied section, giving 100.00% anchor-plane accuracy without overwriting the generated output after sampling. The cutaway in Figure 4 shows that the model generates material on both sides of the measured plane rather than inserting the plane into an already completed volume. This exact match is a result for this reproducible example, not a guarantee for every seed and anchor geometry.
-
-<p align="center">
-  <img src="assets/paper/04-anchor-conditioning.png" alt="Input center anchor, matching generated plane, and anchored 3D volume" width="820">
-</p>
-<p align="center"><em>Figure 4. Supplied center section, corresponding generated section, and the surrounding anchored 3D volume.</em></p>
-
-### 5.3 Effect of anchor coverage
-
-Table 3 reports the values stored in `temp/anchor_sweep_metrics.csv`. Whole-volume voxel accuracy increases consistently from 54.93% with no anchors to 98.26% with all 64 axis-0 planes supplied. The strongest increases occur at low and intermediate coverage, while the final gain from 50% to 100% is smaller because most voxels already agree with GT.
-
-| Anchor planes | Coverage | Voxel accuracy | KID | Porosity | Tortuosity |
-|---:|---:|---:|---:|---:|---:|
-| 0 | 0.00% | 54.93% | 0.0104 ± 0.0014 | 0.3535 | 2.2572 |
-| 1 | 1.56% | 58.41% | 0.0065 ± 0.0012 | 0.3487 | 2.1764 |
-| 2 | 3.12% | 63.25% | 0.0037 ± 0.0008 | 0.3532 | 2.2478 |
-| 4 | 6.25% | 70.95% | 0.0032 ± 0.0011 | 0.3616 | 2.1004 |
-| 8 | 12.50% | 80.97% | 0.0242 ± 0.0040 | 0.3499 | 2.6027 |
-| 16 | 25.00% | 89.16% | 0.0130 ± 0.0027 | 0.3421 | 2.4861 |
-| 32 | 50.00% | 95.64% | 0.0080 ± 0.0022 | 0.3296 | 2.2954 |
-| 64 | 100.00% | 98.26% | 0.0101 ± 0.0018 | 0.3402 | 2.2339 |
-
-GT has a porosity of 0.352 and an axis-0 tortuosity of 2.224. Across the sweep, generated porosity remains between 0.330 and 0.362. Tortuosity ranges from 2.100 to 2.603, with the fully anchored volume close to the GT value. KID ranges from 0.0032 to 0.0242 and is not monotonic with anchor count. This is expected because KID compares an unordered distribution of sections, whereas voxel accuracy tests phase identity at corresponding 3D coordinates. Increasing spatial agreement with GT therefore need not reduce KID at every intermediate coverage.
+The cutaway in Figure 2 exposes both the surface and interior of a generated 64³ volume. Its three orthogonal center sections (Figure 3) show feature scales comparable to those in the training image. These figures provide qualitative context; Table 1 supplies the distributional and transport measurements.
 
 <p align="center">
-  <img src="assets/paper/06-anchor-sweep-metrics.png" alt="Voxel accuracy, KID, porosity, and axis-0 tortuosity across anchor-plane coverage" width="780">
+  <img src="assets/paper/02-generated-volume.png" alt="Generated binary 3D volume with one octant removed" width="470">
 </p>
-<p align="center"><em>Figure 5. Quantitative effect of the number of supplied axis-0 anchor planes. Horizontal GT lines are shown for porosity and tortuosity.</em></p>
-
-### 5.4 Anchored scale-up
-
-The 3 × 3 × 3 scale-up produces a 192³ volume around the anchored 64³ base. The complete 64 × 64 center anchor area retains 3,809 of 4,096 voxels, or 92.99% agreement, because its transition shell is deliberately allowed to change. Within the protected 48 × 48 center region, all 2,304 voxels are preserved, corresponding to 100.00% accuracy. Figure 6 shows the embedded region within the full center section and the resulting cutaway volume. Seam connectivity drop has not yet been computed, so the figure demonstrates scale and anchor retention but does not by itself establish quantitative seam equivalence.
+<p align="center"><em>Figure 2. Generated 64³ volume with one octant removed. Black denotes pore and gray denotes solid.</em></p>
 
 <p align="center">
-  <img src="assets/paper/05-scale-up.png" alt="Anchored 3 by 3 by 3 scale-up with a 192 by 192 center section and 192 cubed volume" width="820">
+  <img src="assets/paper/03-generated-slices.png" alt="Three orthogonal center sections of a generated volume" width="760">
 </p>
-<p align="center"><em>Figure 6. Anchored scale-up to 192³ using 27 overlapping blocks.</em></p>
+<p align="center"><em>Figure 3. Center sections normal to axes 0, 1, and 2 of the volume in Figure 2.</em></p>
+
+### 5.2 Plane anchoring
+
+In the fixed-seed single-plane example, the generated center section matches all 4,096 supplied voxels without post-generation replacement (Figure 4). This is anchor-plane accuracy for one controlled example and is distinct from the whole-volume accuracy in Table 1.
+
+<p align="center">
+  <img src="assets/paper/04-anchor-conditioning.png" alt="Supplied center section, matching generated section, and anchored 3D volume" width="780">
+</p>
+<p align="center"><em>Figure 4. Fixed-seed single-plane conditioning. (a) Supplied axis-0 center section; (b) generated section, matching 4,096/4,096 constrained voxels; (c) surrounding 64³ volume.</em></p>
+
+Across four seeds, whole-volume accuracy increases from 89.07 ± 0.10% at 25% coverage to 98.17 ± 0.06% at full coverage. The denser fixed-seed sweep in Figure 5 shows the same trend from the unanchored baseline: 54.93% at zero planes and 98.26% at all 64 planes. Porosity, tortuosity, and KID are not monotonic because they measure global or distributional properties rather than coordinate-wise identity.
+
+<p align="center">
+  <img src="assets/paper/06-anchor-sweep-metrics.png" alt="Whole-volume accuracy, KID, porosity, and tortuosity versus supplied axis-0 planes" width="780">
+</p>
+<p align="center"><em>Figure 5. Fixed-seed controlled-reference diagnostic for 0–64 supplied axis-0 planes. (a) Accuracy is measured over the complete 64³ volume. (b) KID compares generated sections with synthetic-GT sections and is not directly comparable with Table 1. Dashed lines in (c,d) show GT porosity and tortuosity. No across-volume uncertainty is shown because the seed is fixed.</em></p>
+
+### 5.3 Anchored scale-up
+
+The shared-state sampler expands the 64³ base to 192³. In the illustrated center plane, the complete 64 × 64 anchor retains 3,809 of 4,096 voxels (92.99%) because the outer shell may adapt, whereas all 2,304 voxels in the protected 48 × 48 anchor region remain exact. The complete 48³ base core is hard-retained by construction. Across four samples, the local pore-continuation drop at tile boundaries is −0.68 ± 0.13 percentage points, so this statistic detects no reduction relative to ordinary interior pairs.
+
+<p align="center">
+  <img src="assets/paper/05-scale-up.png" alt="Anchor, scaled center section, and cutaway of a 192 cubed volume" width="780">
+</p>
+<p align="center"><em>Figure 6. Scale-up with 3 × 3 × 3 block cores and 16-voxel overlap. (a) 64² center-plane anchor; (b) 192² center section, with the orange box marking the full 64² anchor extent and the blue dashed box the protected 48² region; (c) cutaway of the 192³ output.</em></p>
 
 ## 6. Discussion
 
-The coverage experiment separates two properties that are often combined under the term reconstruction quality. Voxel accuracy measures whether the model recovers a particular reference volume at the correct coordinates, while KID measures whether its sections belong to a similar image distribution regardless of position. The monotonic accuracy increase confirms that additional planes provide useful spatial information. The non-monotonic KID values do not contradict this result: a volume can become more accurate voxel by voxel while its finite set of sections changes only slightly, or temporarily moves within the natural variation of the reference distribution.
+Plane anchors change the task from statistical synthesis to coordinate-aware conditional synthesis. The controlled sweep shows that additional sections consistently narrow the set of admissible volumes: whole-volume accuracy rises monotonically even though KID does not. This distinction matters in practice. KID asks whether an unordered set of sections has a similar feature distribution, while voxel accuracy asks whether a specific structure appears at the correct location.
 
-Porosity is comparatively stable because it depends only on the total number of pore voxels. Tortuosity is more sensitive to how those voxels connect across the volume, which explains its larger variation at sparse and intermediate coverage. The approach therefore does more than copy the global phase fraction: dense anchors progressively recover spatial arrangement and bring the axis-0 transport response closer to GT. At the same time, full coverage reaches 98.26% rather than exactly 100%, reflecting the use of learned soft conditioning instead of post-generation replacement.
+The morphology metrics reveal a second distinction. Porosity depends only on phase count and is relatively stable; tortuosity depends on connected transport paths and varies more under sparse anchoring. At full coverage, mean tortuosity approaches the controlled reference, but porosity remains lower. Anchors therefore provide strong spatial information without guaranteeing monotonic improvement in every aggregate property.
 
-The scale-up result illustrates a related trade-off. Freezing the complete base would preserve every voxel but could create a sharp interface with the new surroundings. The adaptive shell sacrifices some agreement near the base boundary, while the protected core remains essentially unchanged. Joint denoising then allows overlapping blocks to negotiate shared regions throughout generation. The present result supports anchor retention at larger scale; a seam-connectivity measurement is still required to determine how well the new regions connect across every block boundary.
-
-More broadly, the method should be interpreted as conditional synthesis rather than unique 3D recovery. Sparse sections reduce the set of admissible volumes, but regions between them remain stochastic. This is useful when a measured section must be honored while multiple plausible 3D continuations are needed for uncertainty analysis.
+Joint tiled denoising produces a 27-fold increase in voxel count while preserving a chosen base core. The slightly negative local pore-continuation drop indicates no measured penalty at tile boundaries for the tested setting. It does not prove topological or permeability equivalence, nor isolate the effect of shared-state fusion, because independent-tile and overlap ablations were not performed.
 
 ## 7. Limitations
 
-The present study has several limitations. First, unpaired 2D statistics cannot uniquely determine a 3D structure. The controlled GT volume is itself a generated reference used to verify anchor behavior, not an experimental tomographic volume. The current quantitative CSV also contains only one generated volume per anchor count and one random seed. Consequently, the KID deviations in Table 3 describe subset sampling and must not be interpreted as variation across independent generated volumes.
+The synthetic GT is sampled from the trained model and therefore lies within its learned distribution. It tests whether anchor information can recover a known target, but not whether the method reconstructs unseen experimental 3D material. The real crop baseline, training data, and single-plane anchor also come from the same 2D image, with no held-out specimen.
 
-Second, the experiments use one binary, isotropic training image and evaluate anchors only along axis 0. Tortuosity is likewise measured only along axis 0 through phase-0 pore space. Multi-axis anchors, intersecting measurements, anisotropic datasets, additional phase counts, and transport in the other directions remain to be tested. Inception features used by KID were learned from natural images and may not capture every morphology relevant to porous media.
-
-Finally, the scale-up demonstration covers one 192³ output with one overlap setting. Seam connectivity drop, repeated scale-up samples, and ablations over overlap width, seam loss, and shell thickness are not yet available. These tests are needed before claiming that block boundaries preserve transport connectivity as reliably as ordinary interior regions.
+The evaluation uses four samples, one binary image, an isotropy assumption, and axis-0 anchors and tortuosity. Multi-axis or intersecting anchors, anisotropic and multiphase media, and independent experimental volumes remain untested. KID features are learned from natural images and may miss material-specific morphology. Finally, local pore continuation measures only adjacent-voxel agreement; connected components, percolation, and permeability are needed for stronger physical validation.
 
 ## 8. Conclusion
 
-This work presents a 2D-supervised framework for generating categorical 3D microstructures while preserving measured internal sections and expanding beyond the training volume size. Plane anchors are supplied throughout denoising, direct phase supervision enforces their content, orthogonal critics encourage compatible surroundings, and overlapping blocks are fused through a shared reverse process during scale-up.
-
-In the controlled anchor sweep, whole-volume voxel accuracy increases from 54.93% without anchors to 98.26% at complete axis-0 coverage. The 192³ scale-up retains 100.00% of the protected center region while allowing its outer shell to adapt. These results establish the feasibility of anchor-conditioned and scalable generation, but experimental 3D validation, repeated-sample statistics, multi-axis tests, and seam-connectivity measurements are still required to establish generality and physical reliability.
+This work integrates plane anchors and shared-state tiled diffusion into a 2D-supervised categorical 3D generator. Controlled experiments show that anchor coverage increases coordinate-wise recovery, while 3D tiled sampling expands the volume 27-fold and preserves a protected core without a measured reduction in local pore continuation at block boundaries. The method is a proof of concept for retaining measured 2D information inside large stochastic 3D microstructures; validation on held-out experimental volumes is the next requirement.
 
 ## References
 
-[1] S. Kench and S. J. Cooper, “Generating three-dimensional structures from a two-dimensional slice with generative adversarial network-based dimensionality expansion,” *Nature Machine Intelligence*, vol. 3, pp. 299–305, 2021.
+[1] R. Bostanabad, “Reconstruction of 3D microstructures from 2D images via transfer learning,” *Computer-Aided Design*, vol. 128, art. 102906, 2020.
 
-[2] C. Düreth et al., “Conditional diffusion-based microstructure reconstruction,” *arXiv preprint arXiv:2211.13497*, 2022.
+[2] J. Feng, Q. Teng, B. Li, X. He, H. Chen, and Y. Li, “An end-to-end three-dimensional reconstruction framework of porous media from a single two-dimensional image based on deep learning,” *Computer Methods in Applied Mechanics and Engineering*, vol. 368, art. 113043, 2020.
 
-[3] J. Phan et al., “Generating 3D images of material microstructures from a single 2D image: a denoising diffusion approach,” *Scientific Reports*, vol. 14, art. 6498, 2024.
+[3] S. Kench and S. J. Cooper, “Generating three-dimensional structures from a two-dimensional slice with generative adversarial network-based dimensionality expansion,” *Nature Machine Intelligence*, vol. 3, pp. 299–305, 2021.
 
-[4] K.-H. Lee and G. J. Yun, “Multi-plane denoising diffusion-based dimensionality expansion for 2D-to-3D reconstruction of microstructures with harmonized sampling,” *npj Computational Materials*, vol. 10, art. 99, 2024.
+[4] J. Phan et al., “Generating 3D images of material microstructures from a single 2D image: a denoising diffusion approach,” *Scientific Reports*, vol. 14, art. 6498, 2024.
 
-[5] Z. Xiao, K. Kreis, and A. Vahdat, “Tackling the generative learning trilemma with denoising diffusion GANs,” in *International Conference on Learning Representations*, 2022.
+[5] K.-H. Lee and G. J. Yun, “Multi-plane denoising diffusion-based dimensionality expansion for 2D-to-3D reconstruction of microstructures with harmonized sampling,” *npj Computational Materials*, vol. 10, art. 99, 2024.
 
-[6] O. Bar-Tal et al., “MultiDiffusion: Fusing diffusion paths for controlled image generation,” in *Proceedings of the 40th International Conference on Machine Learning*, vol. 202, pp. 1737–1752, 2023.
+[6] O. Bar-Tal, L. Yariv, Y. Lipman, and T. Dekel, “MultiDiffusion: Fusing diffusion paths for controlled image generation,” in *Proceedings of the 40th International Conference on Machine Learning*, vol. 202, pp. 1737–1752, 2023.
 
-[7] G. Zhang et al., “Towards coherent image inpainting using denoising diffusion implicit models,” in *Proceedings of the 40th International Conference on Machine Learning*, vol. 202, pp. 41164–41193, 2023.
+[7] C. Düreth, P. Seibert, D. Rücker, S. Handford, M. Kästner, and M. Gude, “Conditional diffusion-based microstructure reconstruction,” *Materials Today Communications*, vol. 35, art. 105608, 2023.
 
-[8] A. Sadeghkhani, B. Bennett, and A. Rabbani, “Property-constrained 3D porous media reconstruction from 2D images via conditional generative adversarial networks,” *arXiv preprint arXiv:2607.02693*, 2026.
+[8] A. Sadeghkhani, B. Bennett, and A. Rabbani, “Property-constrained 3D porous media reconstruction from 2D images via conditional generative adversarial networks,” in *87th EAGE Annual Conference & Exhibition*, vol. 2026, pp. 1–5, 2026.
 
 [9] Z. Ma et al., “A sliced-Wasserstein and neural network framework for statistically controllable 3D microstructure reconstruction,” *Computer-Aided Design*, vol. 198, art. 104100, 2026.
 
-[10] A. Lugmayr et al., “RePaint: Inpainting using denoising diffusion probabilistic models,” in *Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition*, pp. 11461–11471, 2022.
+[10] G. Zhang et al., “Towards coherent image inpainting using denoising diffusion implicit models,” in *Proceedings of the 40th International Conference on Machine Learning*, vol. 202, pp. 41164–41193, 2023.
 
-[11] N. Hoffman et al., “GrainPaint: A multi-scale diffusion-based generative model for microstructure reconstruction of large-scale objects,” *arXiv preprint arXiv:2503.04776*, 2025.
+[11] A. Lugmayr et al., “RePaint: Inpainting using denoising diffusion probabilistic models,” in *Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition*, pp. 11461–11471, 2022.
 
-[12] Z. Ding, M. Zhang, J. Wu, and Z. Tu, “Patched denoising diffusion models for high-resolution image synthesis,” in *International Conference on Learning Representations*, 2024.
+[12] N. Hoffman, C. Diniz, D. Liu, T. M. Rodgers, A. Tran, and M. D. Fuge, “GrainPaint: A multi-scale diffusion-based generative model for microstructure reconstruction of large-scale objects,” *Acta Materialia*, vol. 288, art. 120784, 2025.
+
+[13] Z. Ding, M. Zhang, J. Wu, and Z. Tu, “Patched denoising diffusion models for high-resolution image synthesis,” in *International Conference on Learning Representations*, 2024.
+
+[14] J. Ho, A. Jain, and P. Abbeel, “Denoising diffusion probabilistic models,” in *Advances in Neural Information Processing Systems*, vol. 33, pp. 6840–6851, 2020.
+
+[15] Z. Xiao, K. Kreis, and A. Vahdat, “Tackling the generative learning trilemma with denoising diffusion GANs,” in *International Conference on Learning Representations*, 2022.
+
+[16] M. Bińkowski, D. J. Sutherland, M. Arbel, and A. Gretton, “Demystifying MMD GANs,” in *International Conference on Learning Representations*, 2018.
+
+[17] S. J. Cooper, A. Bertei, P. R. Shearing, J. A. Kilner, and N. P. Brandon, “TauFactor: An open-source application for calculating tortuosity factors from tomographic data,” *SoftwareX*, vol. 5, pp. 203–210, 2016.
