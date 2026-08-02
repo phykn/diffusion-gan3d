@@ -66,8 +66,8 @@ An anchor contains categorical labels, a plane normal, a coordinate on that axis
 The masked one-hot labels and mask are projected by a zero-initialized 3D convolution and added to the first denoiser feature map:
 
 $$
-h_A=\operatorname{Conv}_{3D}\!\left(
-\left[\operatorname{onehot}(Y)\odot M,\;M\right]
+h_A=\mathrm{Conv}_{3D}\!\left(
+\left[\mathrm{onehot}(Y)\odot M,\;M\right]
 \right).
 $$
 
@@ -143,7 +143,7 @@ For scale-up, a single-plane-anchored 64³ base is placed at the center of a 192
 
 - **Local pore-continuation drop:** for adjacent planes normal to axis $a$, $C_a=P(X_{i+1}=0\mid X_i=0)$. The reported value is the three-axis mean $\Delta C=C_{\mathrm{interior}}-C_{\mathrm{boundary}}$, excluding pairs within four voxels of each boundary from the interior estimate. Zero indicates no measured boundary effect; a negative value means slightly greater local continuation at the boundary.
 
-Table 1 averages four random seeds. For KID, `±` is the mean standard deviation across 100 KID subsets, as defined by the metric; for porosity, tortuosity, voxel accuracy, and pore continuation, it is the sample standard deviation across the four generated volumes. The real-data KID is a baseline between independent crop sets. Figure 5 is a separate fixed-seed diagnostic whose KID is measured against synthetic-GT sections.
+Table 1 reports mean values over four random seeds. The real-data KID is a baseline between independent crop sets. Figure 5 is a separate fixed-seed diagnostic whose KID is measured against synthetic-GT sections.
 
 ## 5. Results
 
@@ -152,14 +152,14 @@ Table 1 summarizes the quantitative results. The unconditioned 3D samples reprod
 | Evaluation data | KID | Porosity | Tortuosity | Voxel accuracy | Local pore-continuation drop |
 |---|---:|---:|---:|---:|---:|
 | Controlled reference (GT) | — | 0.352 | 2.224 | — | — |
-| Real 2D crops | 0.0025 ± 0.0016 | 0.3625 ± 0.0043 | — | — | — |
-| 3D | 0.0282 ± 0.0030 | 0.3499 ± 0.0042 | 2.2337 ± 0.1206 | — | — |
-| 3D (phase-fraction conditioned) | 0.0294 ± 0.0034 | 0.3530 ± 0.0051 | 2.1957 ± 0.1068 | — | — |
-| 3D (anchored, 25%) | 0.0103 ± 0.0011 | 0.3431 ± 0.0025 | 2.4668 ± 0.0211 | 89.07 ± 0.10% | — |
-| 3D (anchored, 50%) | 0.0138 ± 0.0016 | 0.3286 ± 0.0014 | 2.2980 ± 0.0199 | 95.61 ± 0.03% | — |
-| 3D (anchored, 75%) | 0.0184 ± 0.0017 | 0.3347 ± 0.0011 | 2.2747 ± 0.0108 | 96.92 ± 0.04% | — |
-| 3D (anchored, 100%) | 0.0177 ± 0.0016 | 0.3392 ± 0.0008 | 2.2412 ± 0.0055 | 98.17 ± 0.06% | — |
-| 3D (scale-up) | 0.0269 ± 0.0033 | 0.3435 ± 0.0011 | 2.3263 ± 0.0295 | — | −0.68 ± 0.13 pp |
+| Real 2D crops | 0.0025 | 0.3625 | — | — | — |
+| 3D | 0.0282 | 0.3499 | 2.2337 | — | — |
+| 3D (phase-fraction conditioned) | 0.0294 | 0.3530 | 2.1957 | — | — |
+| 3D (anchored, 25%) | 0.0103 | 0.3431 | 2.4668 | 89.07% | — |
+| 3D (anchored, 50%) | 0.0138 | 0.3286 | 2.2980 | 95.61% | — |
+| 3D (anchored, 75%) | 0.0184 | 0.3347 | 2.2747 | 96.92% | — |
+| 3D (anchored, 100%) | 0.0177 | 0.3392 | 2.2412 | 98.17% | — |
+| 3D (scale-up) | 0.0269 | 0.3435 | 2.3263 | — | −0.68 pp |
 
 ### 5.1 Three-dimensional synthesis
 
