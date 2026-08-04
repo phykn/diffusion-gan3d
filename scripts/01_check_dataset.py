@@ -1,6 +1,5 @@
 """Show random crops from each training axis."""
 
-import argparse
 import sys
 from pathlib import Path
 
@@ -15,27 +14,21 @@ from src.build import build_datasets
 from src.utils import load_yaml
 
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "train.yaml"
+SAMPLES = 4
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--samples", type=int, default=4)
-    args = parser.parse_args()
-    if args.samples < 1:
-        parser.error("--samples must be positive.")
-
-    cfg = load_yaml(args.config)
+    cfg = load_yaml(DEFAULT_CONFIG)
     datasets = build_datasets(cfg)
     fig, panels = plt.subplots(
         len(AXES),
-        args.samples,
+        SAMPLES,
         squeeze=False,
-        figsize=(3 * args.samples, 8),
+        figsize=(3 * SAMPLES, 8),
     )
     for row, axis in enumerate(AXES):
         ds = datasets[axis]
-        for col in range(args.samples):
+        for col in range(SAMPLES):
             img = ds[np.random.randint(len(ds))].numpy()
             panels[row, col].imshow(
                 img,

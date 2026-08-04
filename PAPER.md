@@ -3,6 +3,8 @@
   <p><strong>Kwangnam Yu</strong></p>
 </div>
 
+> **Implementation status (2026-08-04):** The current scale-up sampler uses soft base conditioning only and no longer restores an exact inner core after denoising. The scale-up figures and numerical results below document the earlier hard-core experiment and must be regenerated before they can be used to evaluate the current sampler.
+
 ## Abstract
 
 Three-dimensional microstructures must be large enough to represent pore connectivity and transport, yet volumetric imaging is often more costly than acquiring 2D sections. Existing 2D-supervised generators can reproduce section statistics but cannot ensure that a measured section appears at a prescribed location; independently generated blocks can also introduce discontinuities when the volume is enlarged. We address both problems with anchor-conditioned diffusion. Masked categorical sections and their coordinates are supplied at every reverse step, constrained voxels receive direct phase supervision, and orthogonal critics assess the surrounding morphology. For scale-up, overlapping blocks predict one shared noisy volume and their estimates are fused before each update. A protected base core is retained exactly, while a soft outer shell adapts to the generated surroundings. In a controlled fixed-seed sweep, whole-volume voxel accuracy rose from 54.93% without anchors to 98.26% with complete axis-0 coverage. A 3 × 3 × 3 expansion generated a 192³ volume—27 times the base voxel count—with a local pore-continuation drop of −0.68 ± 0.13 percentage points at tile boundaries. The results demonstrate coordinate-aware, scalable 3D synthesis from 2D observations while identifying the need for validation on experimental 3D data.

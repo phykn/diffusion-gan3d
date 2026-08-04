@@ -49,7 +49,6 @@ class Base:
     clean: torch.Tensor
     noise: torch.Tensor
     region: tuple[slice, slice, slice]
-    core: torch.Tensor
     weight: torch.Tensor
 
 
@@ -569,22 +568,14 @@ class ScaledGenerator:
         )
         clean = clean.movedim(-1, 0).unsqueeze(0).to(torch.float32).mul_(2.0).sub_(1.0)
 
-        core_axes = []
         weight_axes = []
         for axis in range(3):
-            core_axis = torch.ones(
-                generator.patch_size,
-                device=generator.device,
-                dtype=torch.bool,
-            )
             weight_axis = torch.ones(
                 generator.patch_size,
                 device=generator.device,
                 dtype=torch.float32,
             )
             if plan.shape[axis] > generator.patch_size and plan.base_shell:
-                core_axis[: plan.base_shell] = False
-                core_axis[-plan.base_shell :] = False
                 positions = torch.arange(
                     1,
                     plan.base_shell + 1,
@@ -596,13 +587,7 @@ class ScaledGenerator:
                 )
                 weight_axis[: plan.base_shell] = ramp
                 weight_axis[-plan.base_shell :] = ramp.flip(0)
-            core_axes.append(core_axis)
             weight_axes.append(weight_axis)
-        core = (
-            core_axes[0].view(1, 1, -1, 1, 1)
-            & core_axes[1].view(1, 1, 1, -1, 1)
-            & core_axes[2].view(1, 1, 1, 1, -1)
-        )
         weight = (
             weight_axes[0].view(1, 1, -1, 1, 1)
             * weight_axes[1].view(1, 1, 1, -1, 1)
@@ -612,7 +597,6 @@ class ScaledGenerator:
             clean=clean,
             noise=torch.randn_like(clean),
             region=region,
-            core=core,
             weight=weight,
         )
 
@@ -848,11 +832,6 @@ class ScaledGenerator:
                 if final_labels is None:
                     current, next_state = next_state, current
                 bar.update()
-            if base is not None:
-                if labels is None:
-                    self.restore_base(current, base)
-                else:
-                    self.write_base(labels, base)
         finally:
             bar.close()
         return current
@@ -965,22 +944,6 @@ class ScaledGenerator:
         )
         current.lerp_(values, base.weight)
         state.write(base.region, current)
-
-    @staticmethod
-    def restore_base(state: VolumeState, base: Base) -> None:
-        current = state.read(base.region).to(
-            device=base.clean.device,
-            dtype=torch.float32,
-        )
-        current.copy_(torch.where(base.core, base.clean, current))
-        state.write(base.region, current)
-
-    @staticmethod
-    def write_base(labels: torch.Tensor, base: Base) -> None:
-        values = base.clean.argmax(dim=1).squeeze(0).to(device="cpu", dtype=torch.uint8)
-        core = base.core[0, 0].to(device="cpu")
-        region = labels[base.region]
-        region[core] = values[core]
 
     @staticmethod
     def write_output(

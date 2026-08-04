@@ -5,15 +5,16 @@ from uuid import uuid4
 import torch
 from torch import nn
 
-MODEL_FILE = "model.pt"
+GENERATOR_FILE = "generator.pt"
 CRITIC_FILES = tuple(f"critic_{axis}.pt" for axis in range(3))
+CRITIC_C_FILE = "critic_c.pt"
 
 
 def find_weights(run_root: str | Path) -> Path:
     root = Path(run_root)
-    paths = tuple(root.glob(f"*/{MODEL_FILE}"))
+    paths = tuple(root.glob(f"*/{GENERATOR_FILE}"))
     if not paths:
-        raise FileNotFoundError(f"no {MODEL_FILE} file was found under {root}.")
+        raise FileNotFoundError(f"no {GENERATOR_FILE} file was found under {root}.")
     return max(paths, key=lambda path: path.stat().st_mtime_ns)
 
 
@@ -22,7 +23,7 @@ def save_weights(
     model: nn.Module,
 ) -> Path:
     root = Path(run_dir)
-    path = root / MODEL_FILE
+    path = root / GENERATOR_FILE
     save_atomic(model.state_dict(), path)
     return path
 
@@ -31,11 +32,16 @@ def save_all_weights(
     run_dir: str | Path,
     model: nn.Module,
     critics: nn.ModuleDict,
+    connectivity_critic: nn.Module,
 ) -> Path:
     check_critics(critics)
     root = Path(run_dir)
     for axis, name in enumerate(CRITIC_FILES):
         save_atomic(critics[str(axis)].state_dict(), root / name)
+    save_atomic(
+        connectivity_critic.state_dict(),
+        root / CRITIC_C_FILE,
+    )
     return save_weights(root, model)
 
 

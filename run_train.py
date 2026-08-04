@@ -29,26 +29,38 @@ def main() -> None:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available.")
 
-    checkpoint = cfg["train"].get("checkpoint") or {}
-    for name in ("model", "critic_0", "critic_1", "critic_2"):
-        path = checkpoint.get(name)
+    train = cfg["train"]
+    for name in (
+        "generator",
+        "critic_0",
+        "critic_1",
+        "critic_2",
+        "critic_c",
+    ):
+        path = train.get(name)
         if path is not None:
             print(f"Loading {name} checkpoint: {path}")
     trainer = build_trainer(cfg, device)
     run_dir = make_run_dir(RUN_ROOT)
     save_yaml(run_dir / "train.yaml", cfg)
     trainer.fit(
-        steps=cfg["train"]["steps"],
+        steps=cfg["train"]["total_steps"],
         save_every=cfg["train"]["save_every_steps"],
         run_dir=run_dir,
     )
 
 
 def make_run_dir(root: Path) -> Path:
-    name = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-    run_dir = root / name
-    run_dir.mkdir(parents=True, exist_ok=False)
-    return run_dir
+    name = datetime.now().astimezone().strftime("%m%d%H%M")
+    for sequence in range(1, 100):
+        suffix = "" if sequence == 1 else f"{sequence:02d}"
+        run_dir = root / f"{name}{suffix}"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            continue
+        return run_dir
+    raise FileExistsError(f"too many runs already exist for minute {name}.")
 
 
 if __name__ == "__main__":

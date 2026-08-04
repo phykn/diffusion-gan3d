@@ -1,73 +1,58 @@
-"""Generate and inspect one volume."""
+"""Generate and inspect one unconditioned volume without output replacement."""
 
 import argparse
 import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import tifffile
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.build import load_generator
-from src.train.weights import find_weights
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--weight",
+        type=Path,
+        required=True,
+        help="model weight to load",
+    )
+    parser.add_argument(
         "--napari",
         action="store_true",
         help="show the complete 3D phase volume in Napari",
     )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        help="save the generated phase volume as a TIFF stack",
-    )
-    parser.add_argument(
-        "--figure",
-        type=Path,
-        help="save the orthogonal slice figure instead of showing it",
-    )
     args = parser.parse_args()
-    if args.napari and args.figure is not None:
-        parser.error("--napari and --figure cannot be used together.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    weights = find_weights(PROJECT_ROOT / "run")
+    weight = args.weight
     print("\nGeneration")
     print("----------")
-    print(f"Weights : {weights.resolve()}", flush=True)
+    print(f"Weight  : {weight.resolve()}", flush=True)
 
-    generator = load_generator(weights, device=device)
+    generator = load_generator(weight, device=device)
     shape = (generator.patch_size,) * 3
     print(f"Shape   : {' × '.join(map(str, shape))}")
     print(f"Device  : {device}")
+    print("Conditioning : none")
+    print("Postprocess  : none")
     print("Status  : generating...", flush=True)
 
     vol = generator.generate(vf=None)
     print("Status  : complete", flush=True)
-    if args.output is not None:
-        save_volume(vol, args.output)
-        print(f"Output  : {args.output.resolve()}")
     if args.napari:
         show_napari(vol)
     else:
-        show_slices(vol, generator.num_phases, args.figure)
-
-
-def save_volume(vol: torch.Tensor, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(path, vol.to(dtype=torch.uint8).cpu().numpy())
+        show_slices(vol, generator.num_phases)
 
 
 def show_slices(
     vol: torch.Tensor,
     num_phases: int,
-    output: Path | None = None,
 ) -> None:
     mid = tuple(size // 2 for size in vol.shape)
     slices = (
@@ -89,13 +74,7 @@ def show_slices(
         panels[axis].axis("off")
     fig.suptitle("EMA model")
     fig.tight_layout()
-    if output is None:
-        plt.show()
-    else:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output, dpi=180, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Figure  : {output.resolve()}")
+    plt.show()
 
 
 def show_napari(vol: torch.Tensor) -> None:

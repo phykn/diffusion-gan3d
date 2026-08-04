@@ -2,7 +2,7 @@
 
 Three-dimensional imaging is expensive, so material structures are often known only through a few measured 2D sections. Existing generators can produce plausible 3D volumes, but they do not preserve a section at its measured location. Pasting it into the result afterward can also create an artificial discontinuity.
 
-This project uses measured sections as anchors throughout denoising, preserving their phases while generating a connected 3D structure around them. The anchored volume can then be extended through jointly generated overlapping blocks, allowing the measured structure to remain embedded in a larger microstructure.
+This project uses measured sections as anchors throughout denoising, preserving their phases while generating a connected 3D structure around them. The anchored volume can then guide jointly generated overlapping blocks. During scale-up, the base is softly conditioned at every reverse step and remains free to adapt to its new surroundings; it is not pasted back into the final volume.
 
 See [`PAPER.md`](PAPER.md) for the complete method, experiments, and evaluation results.
 
@@ -40,6 +40,18 @@ volume = ScaledGenerator(generator).generate(
     base=base,
 )
 ```
+
+Run the diagnostic scripts with an explicit model weight and GT path:
+
+```bash
+python scripts/01_check_dataset.py
+python scripts/02_check_generated.py --weight run/<run-id>/generator.pt
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --gt scripts/gt.tiff --count 3
+python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt
+python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --gt scripts/gt.tiff --count 3
+```
+
+The `gt` argument supplied to script `03`, or to script `04` with a positive `--count`, is the reference volume from which anchor planes are selected.
 
 ## Citation
 

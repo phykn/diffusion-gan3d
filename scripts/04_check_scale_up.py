@@ -20,9 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.generate import ScaledGenerator, ScalePlan
-from src.train.weights import find_weights
 
-VOLUME_PATH = PROJECT_ROOT / "scripts" / "gt.tiff"
 AXIS = 0
 
 
@@ -35,6 +33,17 @@ class SeamQuality:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--weight",
+        type=Path,
+        required=True,
+        help="model weight to load",
+    )
+    parser.add_argument(
+        "--gt",
+        type=Path,
+        help="ground-truth TIFF volume used to build anchors",
+    )
     parser.add_argument(
         "--blocks",
         nargs=3,
@@ -59,31 +68,29 @@ def main() -> None:
         action="store_true",
         help="show the complete scaled phase volume in Napari",
     )
-    parser.add_argument(
-        "--figure",
-        type=Path,
-        help="save the diagnostic figure instead of showing it",
-    )
     args = parser.parse_args()
     if args.count is not None and args.count < 0:
         parser.error("--count must be non-negative.")
-    if args.napari and args.figure is not None:
-        parser.error("--napari and --figure cannot be used together.")
+    if args.count is not None and args.count > 0 and args.gt is None:
+        parser.error("--gt is required when --count is positive.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    weights = find_weights(PROJECT_ROOT / "run")
+    weight = args.weight
     print("\nScale-up generation")
     print("-------------------")
-    print(f"Weights    : {weights.resolve()}", flush=True)
+    print(f"Weight     : {weight.resolve()}", flush=True)
+    if args.gt is not None:
+        print(f"GT         : {args.gt.resolve()}")
 
-    generator = load_generator(weights, device=device)
+    generator = load_generator(weight, device=device)
+    overlap = args.overlap
     shape = tuple(generator.patch_size * count for count in args.blocks)
     if args.count is not None and args.count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
     if args.count and not generator.anchor_enabled:
-        raise ValueError("selected weights were trained with anchors disabled.")
+        raise ValueError("selected weight was trained with anchors disabled.")
     scaled = ScaledGenerator(generator)
-    plan = scaled.plan(shape, args.overlap)
+    plan = scaled.plan(shape, overlap)
     print_plan(plan, device)
     base = None
     target = None
@@ -96,8 +103,9 @@ def main() -> None:
         print("Status     : generating base...", flush=True)
         base = generator.generate()
     else:
+        assert args.gt is not None
         target = load_volume(
-            VOLUME_PATH,
+            args.gt,
             generator.patch_size,
             generator.num_phases,
         )
@@ -107,20 +115,25 @@ def main() -> None:
             PlaneAnchor(image=slices[idx], axis=AXIS, index=idx) for idx in indices
         )
         print(f"Base       : {len(indices)} anchor planes")
-        print(f"Volume     : {VOLUME_PATH.resolve()}")
+        print(f"GT         : {args.gt.resolve()}")
         print("Status     : generating base...", flush=True)
         base = generator.generate(anchors=anchors)
         base_acc = get_accuracy(base, target, indices, AXIS)
 
+    conditioning = "soft base" if base is not None else "none"
+    print(f"Conditioning : {conditioning}")
+    print("Postprocess  : none")
+
     print("Status     : scaling...", flush=True)
 
     if device.type == "cuda":
+        torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
 
     start = perf_counter()
     vol = scaled.generate(
         blocks=tuple(args.blocks),
-        overlap=args.overlap,
+        overlap=overlap,
         base=base,
         vf=None,
     )
@@ -137,24 +150,24 @@ def main() -> None:
 
     vfs = get_vf(vol, generator.num_phases)
     scaled_acc = None
-    base_retained = None
-    base_core_retained = None
-    core_quality = None
+    base_match = None
+    base_interior_match = None
+    interior_quality = None
     center = None
     if base is not None:
         start = tuple((size - generator.patch_size) // 2 for size in vol.shape)
         region = tuple(slice(idx, idx + generator.patch_size) for idx in start)
         center = vol[region]
-        base_retained = float((center == base).to(torch.float32).mean())
+        base_match = float((center == base).to(torch.float32).mean())
         shell = stats.base_shell
-        core = tuple(
+        interior = tuple(
             slice(shell, -shell)
             if vol.shape[axis] > generator.patch_size and shell
             else slice(None)
             for axis in range(3)
         )
-        base_core_retained = float(
-            (center[core] == base[core]).to(torch.float32).mean()
+        base_interior_match = float(
+            (center[interior] == base[interior]).to(torch.float32).mean()
         )
         if target is not None:
             scaled_acc = get_accuracy(center, target, indices, AXIS)
@@ -173,7 +186,7 @@ def main() -> None:
             )
             for axis in range(3)
         )
-        core_quality = measure_seams(
+        interior_quality = measure_seams(
             vol,
             boundaries,
             stats.overlap,
@@ -188,16 +201,16 @@ def main() -> None:
     if base is not None:
         print("\nBase")
         print("----")
-        print(f"Core retained       : {format_score(base_core_retained)}")
+        print(f"Base interior match : {format_score(base_interior_match)}")
         if target is None:
-            print(f"Whole base retained : {format_score(base_retained)}")
+            print(f"Whole base match    : {format_score(base_match)}")
         else:
             print(f"Anchor match before : {format_score(base_acc)}")
             print(f"Anchor match after  : {format_score(scaled_acc)}")
-        assert core_quality is not None
-        print(f"Core boundary change : {format_axes(core_quality.change_ratio)}")
-        print(f"Core boundary TV     : {format_axes(core_quality.transition_tv)}")
-        print(f"Core continuity      : {format_axes(core_quality.continuation_delta)}")
+        assert interior_quality is not None
+        print(f"Base boundary change : {format_axes(interior_quality.change_ratio)}")
+        print(f"Base boundary TV     : {format_axes(interior_quality.transition_tv)}")
+        print(f"Base continuity      : {format_axes(interior_quality.continuation_delta)}")
 
     print("\nPerformance")
     print("-----------")
@@ -215,7 +228,6 @@ def main() -> None:
                 base,
                 center,
                 generator.num_phases,
-                args.figure,
             )
         else:
             show_base_result(
@@ -226,10 +238,9 @@ def main() -> None:
                 indices,
                 AXIS,
                 generator.num_phases,
-                args.figure,
             )
     else:
-        show_slices(vol, generator.num_phases, args.figure)
+        show_slices(vol, generator.num_phases)
 
 
 def positive_int(value: str) -> int:
@@ -450,7 +461,6 @@ def get_continuation(counts: torch.Tensor) -> torch.Tensor:
 def show_slices(
     vol: torch.Tensor,
     num_phases: int,
-    output: Path | None = None,
 ) -> None:
     mid = tuple(size // 2 for size in vol.shape)
     imgs = (
@@ -471,7 +481,7 @@ def show_slices(
         panel.axis("off")
     fig.suptitle("Joint tiled diffusion scale-up")
     fig.tight_layout()
-    save_or_show(fig, output)
+    plt.show()
 
 
 def show_unanchored_base_result(
@@ -479,7 +489,6 @@ def show_unanchored_base_result(
     base: torch.Tensor,
     center: torch.Tensor,
     num_phases: int,
-    output: Path | None = None,
 ) -> None:
     idx = base.shape[0] // 2
     base_plane = base[idx]
@@ -551,7 +560,7 @@ def show_unanchored_base_result(
         f"cyan box: base {base.shape[0]}×{base.shape[1]}×{base.shape[2]} area"
     )
     fig.tight_layout(rect=(0, 0, 1, 0.93))
-    save_or_show(fig, output)
+    plt.show()
 
 
 def show_base_result(
@@ -562,7 +571,6 @@ def show_base_result(
     indices: tuple[int, ...],
     axis: int,
     num_phases: int,
-    output: Path | None = None,
 ) -> None:
     idx = select_display_index(base.shape[axis], indices)
     target_plane = target.movedim(axis, 0)[idx]
@@ -674,17 +682,7 @@ def show_base_result(
         f"full slice: {full_height}×{full_width}"
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    save_or_show(fig, output)
-
-
-def save_or_show(fig: plt.Figure, output: Path | None) -> None:
-    if output is None:
-        plt.show()
-    else:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output, dpi=180, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Figure      : {output.resolve()}")
+    plt.show()
 
 
 def show_napari(vol: torch.Tensor) -> None:

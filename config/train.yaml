@@ -1,12 +1,12 @@
 data:
-  folder:
+  folders:
     0: [data]
     1: [data]
     2: [data]
-  crop_size: 128
-  patch_size: 64
-  augment: true
   num_phases: 2
+  crop_size: 128
+  input_size: 128
+  augment: true
   batch_size: 8
   num_workers: 0
 
@@ -24,30 +24,46 @@ diffusion:
   beta_max: 20.0
 
 anchor:
-  dropout: 0.2
+  start_ratio: 0.3
+  ramp_ratio: 0.2
+  dropout_probability: 0.2
+  multi_anchor_probability: 0.5
+  max_density: 0.05
+  min_spacing: 4
+  mixed_axis_probability: 0.5
+  teacher_bank_size_mib: 128
   loss_weight: 1.0
-  seam_weight: 0.25
-  max_planes: 4
+
+connectivity:
+  replay_triplets_per_axis: 4
+  replay_capacity_per_axis: 64
+  max_triplets_per_step: 4
+  reversal_invariant: true
+  loss_weight: 0.25
 
 vf:
+  dropout_probability: 0.2
   loss_weight: 1.0
-  dropout: 0.2
 
 optim:
-  generator_lr: 0.00016
+  denoiser_lr: 0.00016
   critic_lr: 0.0001
   beta1: 0.5
   beta2: 0.9
   r1_gamma: 0.05
   r1_interval: 16
-  critic_local_weight: 0.5
+  local_loss_weight: 0.5
 
 train:
-  steps: 30000
+  total_steps: 10000
+  volume_sizes: [128, 136, 144, 152, 160]
   volume_batch_size: 1
-  volume_sizes: [64, 96]
-  slices_per_axis: 16
+  slice_pairs_per_axis: 16
   mixed_precision: true
   ema_decay: 0.999
   save_every_steps: 100
-  checkpoint: null
+  generator: null
+  critic_0: null
+  critic_1: null
+  critic_2: null
+  critic_c: null

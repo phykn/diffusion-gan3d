@@ -17,9 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
-from src.train.weights import find_weights
 
-VOLUME_PATH = PROJECT_ROOT / "scripts" / "gt.tiff"
 AXIS = 0
 
 
@@ -34,7 +32,18 @@ class BoundaryQuality:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--weights", type=Path)
+    parser.add_argument(
+        "--weight",
+        type=Path,
+        required=True,
+        help="model weight to load",
+    )
+    parser.add_argument(
+        "--gt",
+        type=Path,
+        required=True,
+        help="ground-truth TIFF volume used to build anchors",
+    )
     parser.add_argument(
         "--count",
         type=int,
@@ -46,34 +55,25 @@ def main() -> None:
         action="store_true",
         help="show the complete generated phase volume in Napari",
     )
-    parser.add_argument(
-        "--figure",
-        type=Path,
-        help="save the diagnostic figure instead of showing it",
-    )
     args = parser.parse_args()
     if args.count < 0:
         parser.error("--count must be non-negative.")
-    if args.napari and args.figure is not None:
-        parser.error("--napari and --figure cannot be used together.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    weights = (
-        find_weights(PROJECT_ROOT / "run") if args.weights is None else args.weights
-    )
+    weight = args.weight
     print("\nAnchor generation")
     print("-----------------")
-    print(f"Weights : {Path(weights).resolve()}")
-    print(f"Volume  : {VOLUME_PATH.resolve()}", flush=True)
+    print(f"Weight  : {Path(weight).resolve()}")
+    print(f"GT      : {args.gt.resolve()}", flush=True)
 
-    generator = load_generator(weights, device=device)
+    generator = load_generator(weight, device=device)
     if args.count > 0 and not generator.anchor_enabled:
-        raise ValueError("selected weights were trained with anchors disabled.")
+        raise ValueError("selected weight was trained with anchors disabled.")
 
     if args.count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
     target = load_volume(
-        VOLUME_PATH,
+        args.gt,
         patch_size=generator.patch_size,
         num_phases=generator.num_phases,
     )
@@ -89,6 +89,9 @@ def main() -> None:
         axis=AXIS,
         indices=indices,
     )
+    mode = "soft anchors" if indices else "none"
+    print(f"Conditioning : {mode}")
+    print("Postprocess  : none")
     print("Status   : generating...", flush=True)
 
     gen = generator.generate(anchors=anchors)
@@ -143,7 +146,6 @@ def main() -> None:
             index=index,
             num_phases=generator.num_phases,
             accuracy=slice_acc,
-            output=args.figure,
         )
 
 
@@ -189,7 +191,7 @@ def print_quality(
     print("\nQuality")
     print("-------")
     score = "n/a" if anchor_acc is None else f"{anchor_acc:7.2%}"
-    print(f"Selected planes : {score}")
+    print(f"Soft anchor match : {score}")
     print(f"Complete volume : {vol_acc:7.2%}")
     print(f"Phase IoU       : {format_scores(iou)}")
     print(f"Phase recall    : {format_scores(recall)}")
@@ -296,7 +298,6 @@ def show_result(
     index: int,
     num_phases: int,
     accuracy: float,
-    output: Path | None = None,
 ) -> None:
     slices = get_slices(vol, axis)
     cmap = "gray"
@@ -305,7 +306,7 @@ def show_result(
 
     comparisons = (
         (target, "1. Input anchor" if indices else "1. Reference center", False),
-        (gen, "2. Generated at anchor", False),
+        (gen, "2. Soft-conditioned output", False),
         (mismatch, "3. Difference (red = mismatch)", True),
     )
     for panel, (img, title, difference) in zip(
@@ -384,13 +385,7 @@ def show_result(
         f"{len(indices)} planes · axis {axis} · slice {index}"
     )
     fig.tight_layout(rect=(0, 0, 1, 0.93))
-    if output is None:
-        plt.show()
-    else:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output, dpi=180, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Figure   : {output.resolve()}")
+    plt.show()
 
 
 def load_volume(

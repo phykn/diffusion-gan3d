@@ -3,6 +3,7 @@ from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -15,13 +16,17 @@ from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
 from ..dataset import BatchStream
 from ..diffusion import Diffusion
 from ..model.denoiser import Denoiser3D
+from .connect import (
+    Connectivity,
+    TripletBatch,
+)
 from .ema import update_ema
 from .loss import (
     get_critic_loss,
     get_critic_r1,
     get_generator_loss,
 )
-from .weights import MODEL_FILE, save_all_weights
+from .weights import GENERATOR_FILE, save_all_weights
 
 
 @dataclass(frozen=True)
@@ -37,8 +42,15 @@ class Metrics:
     anchor_conflict_rate: float
     anchor_loss: float
     anchor_accuracy: float
-    generator_seam: float
-    critic_seam: float
+    generator_connectivity: float
+    critic_connectivity: float
+    connectivity_r1: float
+    anchor_ramp: float
+    connectivity_triplets: int
+    connectivity_replay: int
+    anchor_teacher: bool
+    teacher_volumes: int
+    teacher_mebibytes: float
     generator_global: float = 0.0
     generator_local: float = 0.0
     critic_global: float = 0.0
@@ -52,16 +64,26 @@ class Metrics:
     hard_vf_mae: float = 0.0
 
 
+@dataclass(frozen=True)
+class AnchorSelection:
+    condition: AnchorCondition
+    source: Literal["real", "teacher"]
+    seeds: tuple[PlaneAnchor, ...] = ()
+    target_vf: torch.Tensor | None = None
+
+
 class Trainer:
     def __init__(
         self,
         denoiser: Denoiser3D,
         ema_denoiser: Denoiser3D,
         critics: nn.ModuleDict,
+        connectivity_critic: nn.Module,
         streams: dict[int, BatchStream],
         diffusion: Diffusion,
         denoiser_optim: torch.optim.Optimizer,
         critic_optims: dict[str, torch.optim.Optimizer],
+        connectivity_optim: torch.optim.Optimizer,
         scaler: torch.amp.GradScaler,
         device: torch.device,
         volume_batch_size: int,
@@ -74,9 +96,18 @@ class Trainer:
         r1_interval: int,
         critic_local_weight: float,
         anchor_dropout: float,
+        anchor_start_step: int,
+        anchor_ramp_steps: int,
+        anchor_multi_probability: float,
+        anchor_max_density: float,
+        anchor_min_spacing: int,
+        anchor_mixed_axis_probability: float,
+        anchor_teacher_bank_mebibytes: float,
         anchor_loss_weight: float,
-        anchor_seam_weight: float,
-        anchor_max_planes: int,
+        connectivity_weight: float,
+        connectivity_samples_per_axis: int,
+        connectivity_replay_capacity_per_axis: int,
+        connectivity_triplets_per_step: int,
         vf_loss_weight: float,
         vf_dropout: float,
         latent_channels: int,
@@ -95,7 +126,13 @@ class Trainer:
             ("patch_size", patch_size),
             ("slices_per_axis", slices_per_axis),
             ("r1_interval", r1_interval),
-            ("anchor_max_planes", anchor_max_planes),
+            ("connectivity_samples_per_axis", connectivity_samples_per_axis),
+            (
+                "connectivity_replay_capacity_per_axis",
+                connectivity_replay_capacity_per_axis,
+            ),
+            ("connectivity_triplets_per_step", connectivity_triplets_per_step),
+            ("anchor_min_spacing", anchor_min_spacing),
             ("latent_channels", latent_channels),
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -103,15 +140,24 @@ class Trainer:
         if any(
             not isinstance(size, int)
             or isinstance(size, bool)
-            or size < patch_size
+            or size < max(patch_size, 3)
             for size in volume_sizes
         ):
             raise ValueError(
-                "volume_sizes must contain integers at least as large as patch_size."
+                "volume_sizes must contain integers at least as large as patch_size "
+                "and three."
             )
+        for name, value in (
+            ("anchor_start_step", anchor_start_step),
+            ("anchor_ramp_steps", anchor_ramp_steps),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer.")
         for name, value in (
             ("anchor_dropout", anchor_dropout),
             ("vf_dropout", vf_dropout),
+            ("anchor_multi_probability", anchor_multi_probability),
+            ("anchor_mixed_axis_probability", anchor_mixed_axis_probability),
         ):
             if (
                 not isinstance(value, (int, float))
@@ -120,6 +166,13 @@ class Trainer:
                 or not 0.0 <= value <= 1.0
             ):
                 raise ValueError(f"{name} must be between zero and one.")
+        if (
+            not isinstance(anchor_teacher_bank_mebibytes, (int, float))
+            or isinstance(anchor_teacher_bank_mebibytes, bool)
+            or not math.isfinite(anchor_teacher_bank_mebibytes)
+            or anchor_teacher_bank_mebibytes <= 0.0
+        ):
+            raise ValueError("anchor_teacher_bank_mebibytes must be positive.")
         if (
             not isinstance(ema_decay, (int, float))
             or isinstance(ema_decay, bool)
@@ -131,7 +184,7 @@ class Trainer:
             ("r1_gamma", r1_gamma),
             ("critic_local_weight", critic_local_weight),
             ("anchor_loss_weight", anchor_loss_weight),
-            ("anchor_seam_weight", anchor_seam_weight),
+            ("connectivity_weight", connectivity_weight),
             ("vf_loss_weight", vf_loss_weight),
         ):
             if (
@@ -143,18 +196,15 @@ class Trainer:
                 raise ValueError(f"{name} must be finite and non-negative.")
         if not isinstance(amp_enabled, bool):
             raise TypeError("amp_enabled must be a boolean.")
-        max_positions = (min(volume_sizes) + 1) // 2
-        if anchor_max_planes > max_positions:
-            raise ValueError(
-                "anchor_max_planes exceeds the available separated positions."
-            )
         self.denoiser = denoiser
         self.ema_denoiser = ema_denoiser
         self.critics = critics
+        self.connectivity_critic = connectivity_critic
         self.streams = streams
         self.diffusion = diffusion
         self.denoiser_optim = denoiser_optim
         self.critic_optims = critic_optims
+        self.connectivity_optim = connectivity_optim
         self.scaler = scaler
         self.device = device
         self.volume_batch_size = volume_batch_size
@@ -167,9 +217,24 @@ class Trainer:
         self.r1_interval = r1_interval
         self.critic_local_weight = critic_local_weight
         self.anchor_dropout = anchor_dropout
+        self.anchor_start_step = anchor_start_step
+        self.anchor_ramp_steps = anchor_ramp_steps
+        self.anchor_multi_start_step = anchor_start_step + anchor_ramp_steps
+        self.anchor_multi_probability = float(anchor_multi_probability)
         self.anchor_loss_weight = anchor_loss_weight
-        self.anchor_seam_weight = anchor_seam_weight
-        self.anchor_max_planes = anchor_max_planes
+        self.connectivity_weight = connectivity_weight
+        self.connect = Connectivity(
+            num_phases=num_phases,
+            patch_size=patch_size,
+            samples_per_axis=connectivity_samples_per_axis,
+            replay_capacity_per_axis=connectivity_replay_capacity_per_axis,
+            triplets_per_step=connectivity_triplets_per_step,
+            teacher_bank_bytes=round(anchor_teacher_bank_mebibytes * 1024**2),
+            teacher_min_entries=4,
+            max_density=anchor_max_density,
+            min_spacing=anchor_min_spacing,
+            mixed_axis_probability=anchor_mixed_axis_probability,
+        )
         self.vf_loss_weight = vf_loss_weight
         self.vf_dropout = vf_dropout
         self.latent_channels = latent_channels
@@ -194,7 +259,7 @@ class Trainer:
             raise ValueError("save_every must be a positive integer.")
         root = Path(run_dir)
         done = 0
-        weights = root / MODEL_FILE
+        weights = root / GENERATOR_FILE
         print("\nTraining")
         print("--------")
         print(f"Steps  : {steps}")
@@ -224,18 +289,21 @@ class Trainer:
                         root,
                         self.ema_denoiser,
                         self.critics,
+                        self.connectivity_critic,
                     )
             if done % save_every:
                 weights = save_all_weights(
                     root,
                     self.ema_denoiser,
                     self.critics,
+                    self.connectivity_critic,
                 )
         except KeyboardInterrupt:
             weights = save_all_weights(
                 root,
                 self.ema_denoiser,
                 self.critics,
+                self.connectivity_critic,
             )
             print(f"Training interrupted after step {done}; weights={weights}")
             raise
@@ -253,6 +321,7 @@ class Trainer:
             raise ValueError("step must be a non-negative integer.")
         self.denoiser.train()
         self.critics.train()
+        self.connectivity_critic.train()
         if transition is not None and (
             not isinstance(transition, int)
             or isinstance(transition, bool)
@@ -266,8 +335,16 @@ class Trainer:
             for axis, images in batches.items()
         }
         target_vf = self.get_vf(batches.values()).expand(self.volume_batch_size, -1)
+        ramp = self.get_anchor_ramp(step)
+        selection = (
+            None
+            if ramp == 0.0
+            else self.sample_anchor(batches, volume_size, step)
+        )
+        anchor = None if selection is None else selection.condition
+        if selection is not None and selection.target_vf is not None:
+            target_vf = selection.target_vf
         vf = self.apply_vf_dropout(target_vf)
-        anchor = self.sample_anchor(batches, volume_size)
         if transition is None:
             transition = self.sample_transition(anchor is not None)
         (
@@ -291,19 +368,38 @@ class Trainer:
             )
             for axis in AXES
         }
-        seam_pairs = self.make_seam_pairs(prediction, anchor)
+
+        connectivity_fake = TripletBatch(
+            values=prediction.new_empty(
+                (0, 3, self.num_phases, self.patch_size, self.patch_size)
+            ),
+            axes=torch.empty(0, device=self.device, dtype=torch.long),
+        )
+        connectivity_real = connectivity_fake.values
+        if (
+            self.connectivity_weight > 0.0
+            and transition == 0
+            and anchor is not None
+        ):
+            connectivity_real, connectivity_fake = self.connect.match_anchor(
+                prediction,
+                anchor,
+            )
 
         (
             critic_vals,
             r1,
             critic_global,
             critic_local,
-            critic_seam,
         ) = self.update_critics(
             transition,
             fake,
-            seam_pairs,
             real,
+            step,
+        )
+        critic_connectivity, connectivity_r1 = self.update_connectivity_critic(
+            connectivity_real,
+            connectivity_fake,
             step,
         )
         (
@@ -311,17 +407,18 @@ class Trainer:
             generator_total,
             generator_global,
             generator_local,
-            generator_seam,
+            generator_connectivity,
             anchor_loss,
             anchor_accuracy,
             vf_loss,
         ) = self.update_denoiser(
             transition,
             fake,
-            seam_pairs,
+            connectivity_fake,
             logits,
             clean_probs,
             anchor,
+            ramp,
             target_vf,
             vf_active=vf is not None,
         )
@@ -330,6 +427,16 @@ class Trainer:
             target_vf,
         )
         target_stds = self.update_target_stats(target_values)
+        if transition == 0:
+            if selection is None:
+                if self.connectivity_weight > 0.0:
+                    self.connect.record_unconditional(prediction)
+            elif selection.source == "real":
+                self.connect.record_seeded(
+                    prediction,
+                    selection.condition,
+                    selection.seeds,
+                )
         update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
         return Metrics(
             generator=generator_loss,
@@ -343,8 +450,17 @@ class Trainer:
             anchor_conflict_rate=0.0 if anchor is None else anchor.conflict_rate,
             anchor_loss=anchor_loss,
             anchor_accuracy=anchor_accuracy,
-            generator_seam=generator_seam,
-            critic_seam=critic_seam,
+            generator_connectivity=generator_connectivity,
+            critic_connectivity=critic_connectivity,
+            connectivity_r1=connectivity_r1,
+            anchor_ramp=ramp,
+            connectivity_triplets=len(connectivity_fake),
+            connectivity_replay=self.connect.replay_size,
+            anchor_teacher=(
+                selection is not None and selection.source == "teacher"
+            ),
+            teacher_volumes=self.connect.teacher_size,
+            teacher_mebibytes=self.connect.teacher_bytes / 1024**2,
             generator_global=generator_global,
             generator_local=generator_local,
             critic_global=critic_global,
@@ -436,97 +552,99 @@ class Trainer:
             return None
         return target
 
+    def get_anchor_ramp(self, step: int) -> float:
+        if step < self.anchor_start_step:
+            return 0.0
+        if self.anchor_ramp_steps == 0:
+            return 1.0
+        return min(
+            (step - self.anchor_start_step + 1) / self.anchor_ramp_steps,
+            1.0,
+        )
+
     def sample_anchor(
         self,
         batches: dict[int, torch.Tensor],
         volume_size: int,
-    ) -> AnchorCondition | None:
+        step: int,
+    ) -> AnchorSelection | None:
         if self.anchor_dropout >= 1.0:
             return None
         if not bool(torch.rand(()) < 1.0 - self.anchor_dropout):
             return None
-        count = int(
-            torch.randint(
-                1,
-                self.anchor_max_planes + 1,
-                (),
-            ).item()
-        )
-        positions = self.sample_anchor_positions(
-            count,
-            volume_size=volume_size,
-        )
-        selections = {}
-        for axis in AXES:
-            axis_count = sum(normal == axis for normal, _ in positions)
-            if axis_count == 0:
-                continue
-            batch_size = batches[axis].shape[0]
-            if axis_count > batch_size:
-                raise ValueError(
-                    "anchor planes per axis must not exceed the image batch size."
-                )
-            selections[axis] = iter(
-                torch.stack(
-                    [
-                        torch.randperm(batch_size, device=self.device)[:axis_count]
-                        for _ in range(self.volume_batch_size)
-                    ],
-                    dim=1,
-                ).unbind()
+        if (
+            step >= self.anchor_multi_start_step
+            and self.anchor_multi_probability > 0.0
+            and bool(torch.rand(()) < self.anchor_multi_probability)
+        ):
+            teacher = self.connect.sample_teacher(
+                volume_size=volume_size,
+                batch_size=self.volume_batch_size,
+                device=self.device,
+                dtype=torch.float32,
             )
+            if teacher is not None:
+                return AnchorSelection(
+                    condition=teacher.condition,
+                    source="teacher",
+                    target_vf=teacher.target_vf,
+                )
+        return self.sample_real_anchor(batches, volume_size)
 
-        planes = []
-        for axis, plane_index in positions:
-            images = batches[axis]
-            batch_indices = next(selections[axis])
-            selected = images.index_select(0, batch_indices)
-            size = min(volume_size, *selected.shape[-2:])
-            selected = self.crop_images(selected, size)
-            position = tuple(
-                int(torch.randint(volume_size - size + 1, ()).item()) for _ in range(2)
+    def sample_real_anchor(
+        self,
+        batches: dict[int, torch.Tensor],
+        volume_size: int,
+    ) -> AnchorSelection:
+        axis = int(torch.randint(len(AXES), ()).item())
+        images = batches[axis]
+        if images.shape[0] < self.volume_batch_size:
+            raise ValueError(
+                "the real image batch must cover the generated volume batch."
             )
-            planes.append(
-                PlaneAnchor(
-                    image=selected,
-                    axis=axis,
-                    index=plane_index,
-                    position=position,
-                )
-            )
-        return build_anchors(
-            planes,
+        batch_indices = torch.randperm(
+            images.shape[0],
+            device=images.device,
+        )[: self.volume_batch_size]
+        selected = images.index_select(0, batch_indices)
+        size = min(volume_size, *selected.shape[-2:])
+        selected = self.crop_images(selected, size)
+        position = tuple(
+            int(torch.randint(volume_size - size + 1, ()).item())
+            for _ in range(2)
+        )
+        plane_index = int(torch.randint(volume_size, ()).item())
+        plane = PlaneAnchor(
+            image=selected,
+            axis=axis,
+            index=plane_index,
+            position=position,
+        )
+        condition = build_anchors(
+            (plane,),
             batch_size=self.volume_batch_size,
             num_phases=self.num_phases,
             volume_size=volume_size,
             device=self.device,
             dtype=torch.float32,
-            reconcile=True,
+            reconcile=False,
         )
-
-    @staticmethod
-    def sample_anchor_positions(
-        count: int,
-        volume_size: int,
-    ) -> tuple[tuple[int, int], ...]:
-        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
-            raise ValueError("count must be a positive integer.")
-        if (
-            not isinstance(volume_size, int)
-            or isinstance(volume_size, bool)
-            or volume_size < 1
-        ):
-            raise ValueError("volume_size must be a positive integer.")
-        separated = (volume_size + 1) // 2
-        if count > separated:
-            raise ValueError("count exceeds the available separated positions.")
-
-        gap = max(2, volume_size // (2 * count))
-        available = volume_size - (gap - 1) * (count - 1)
-        indices = torch.randperm(available)[:count].sort().values
-        indices += torch.arange(count) * (gap - 1)
-        axis = int(torch.randint(len(AXES), ()).item())
-        return tuple((axis, int(index)) for index in indices)
+        if condition is None:
+            raise RuntimeError("real anchor construction returned no condition.")
+        seeds = tuple(
+            PlaneAnchor(
+                image=selected[batch],
+                axis=axis,
+                index=plane_index,
+                position=position,
+            )
+            for batch in range(self.volume_batch_size)
+        )
+        return AnchorSelection(
+            condition=condition,
+            source="real",
+            seeds=seeds,
+        )
 
     def generate_pair(
         self,
@@ -584,38 +702,12 @@ class Trainer:
             )
         return previous, current, logits, prediction
 
-    def make_seam_pairs(
-        self,
-        prediction: torch.Tensor,
-        anchor: AnchorCondition | None,
-    ) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
-        if anchor is None or self.anchor_seam_weight <= 0.0:
-            return {}
-        previous, current = self.diffusion.sample_pair(prediction, 0)
-        active = anchor.axis_masks.flatten(2).any(dim=(0, 2)).tolist()
-        axes = tuple(
-            axis
-            for axis in AXES
-            if any(active[normal] for normal in AXES if normal != axis)
-        )
-        return {
-            axis: self.sample_pairs(
-                previous,
-                current,
-                axis,
-                anchor.axis_masks,
-                focus_all=True,
-            )
-            for axis in axes
-        }
-
     def sample_pairs(
         self,
         previous: torch.Tensor,
         current: torch.Tensor,
         axis: int,
         axis_masks: torch.Tensor | None = None,
-        focus_all: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if previous.shape != current.shape:
             raise ValueError("previous and current volumes must have the same shape.")
@@ -623,10 +715,6 @@ class Trainer:
             raise ValueError("volumes must have shape [B, C, D, H, W].")
         if axis not in AXES:
             raise ValueError("axis must be 0, 1, or 2.")
-        if not isinstance(focus_all, bool):
-            raise TypeError("focus_all must be a boolean.")
-        if focus_all and axis_masks is None:
-            raise ValueError("focus_all requires anchor axis masks.")
         if axis_masks is not None and (
             axis_masks.shape != (previous.shape[0], 3, *previous.shape[2:])
             or axis_masks.device != previous.device
@@ -654,7 +742,7 @@ class Trainer:
             focus = focus.movedim(axis + 2, 2)[:, 0]
             points = focus.nonzero()
             if points.numel():
-                focused = count if focus_all else min(count, max(1, count // 2))
+                focused = min(count, max(1, count // 2))
                 selected = points.index_select(
                     0,
                     torch.randint(points.shape[0], (focused,), device=points.device),
@@ -664,9 +752,6 @@ class Trainer:
                 centers = [
                     (int(row), int(col)) for row, col in selected[:, 2:].tolist()
                 ]
-            elif focus_all:
-                raise ValueError("focus_all requires an anchor crossing this axis.")
-
         previous = previous.movedim(axis + 2, 2)
         current = current.movedim(axis + 2, 2)
         previous = previous[batch_indices, :, plane_indices]
@@ -683,16 +768,14 @@ class Trainer:
         self,
         transition: int,
         fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
-        seam_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]],
         batches: dict[int, torch.Tensor],
         step: int,
-    ) -> tuple[list[float], float, float, float, float]:
+    ) -> tuple[list[float], float, float, float]:
         apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
         critic_losses = []
         r1_sum = 0.0
         global_sum = 0.0
         local_sum = 0.0
-        seam_sum = 0.0
         local_weight = self.critic_local_weight
         for axis in AXES:
             critic = self.critics[str(axis)]
@@ -724,25 +807,6 @@ class Trainer:
                 fake_score = critic(fake_prev, fake_curr, fake_time)
                 losses = get_critic_loss(real_score, fake_score)
                 loss = losses.combine(local_weight)
-                if axis in seam_pairs:
-                    real_seam_prev, real_seam_curr = self.diffusion.sample_pair(real, 0)
-                    fake_seam_prev, fake_seam_curr = seam_pairs[axis]
-                    real_seam_score = critic(
-                        real_seam_prev,
-                        real_seam_curr,
-                        self.make_time(0, real_seam_prev.shape[0]),
-                    )
-                    fake_seam_score = critic(
-                        fake_seam_prev.detach().float(),
-                        fake_seam_curr.detach().float(),
-                        self.make_time(0, fake_seam_prev.shape[0]),
-                    )
-                    seam_loss = get_critic_loss(
-                        real_seam_score,
-                        fake_seam_score,
-                    ).combine(local_weight)
-                    seam_sum += float(seam_loss.detach())
-                    loss = loss + self.anchor_seam_weight * seam_loss
             global_sum += float(losses.global_loss.detach())
             local_sum += float(losses.local_loss.detach())
             if apply_r1:
@@ -757,22 +821,57 @@ class Trainer:
             self.scaler.step(optimizer)
             critic_losses.append(float(loss.detach()))
         self.scaler.update()
-        return critic_losses, r1_sum, global_sum, local_sum, seam_sum
+        return critic_losses, r1_sum, global_sum, local_sum
+
+    def update_connectivity_critic(
+        self,
+        real: torch.Tensor,
+        fake: TripletBatch,
+        step: int,
+    ) -> tuple[float, float]:
+        if not len(fake):
+            return 0.0, 0.0
+        if real.shape != fake.values.shape:
+            raise ValueError("real and fake connectivity triplets must match.")
+
+        apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
+        self.connectivity_optim.zero_grad(set_to_none=True)
+        real = real.detach().float().requires_grad_(apply_r1)
+        fake_values = fake.values.detach().float()
+        autocast = self.autocast(self.amp_enabled and not apply_r1)
+        with autocast:
+            real_score = self.connectivity_critic(real, fake.axes)
+            fake_score = self.connectivity_critic(fake_values, fake.axes)
+            losses = get_critic_loss(real_score, fake_score)
+            loss = losses.combine(self.critic_local_weight)
+        adversarial = float(loss.detach())
+        r1_value = 0.0
+        if apply_r1:
+            r1 = get_critic_r1(real_score, (real,))
+            penalty = r1.combine(self.critic_local_weight)
+            r1_value = float(penalty.detach())
+            loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
+        self.scaler.scale(loss).backward()
+        self.scaler.step(self.connectivity_optim)
+        self.scaler.update()
+        return adversarial, r1_value
 
     def update_denoiser(
         self,
         transition: int,
         fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
-        seam_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        connectivity_fake: TripletBatch,
         logits: torch.Tensor,
         clean_probs: torch.Tensor,
         anchor: AnchorCondition | None,
+        anchor_ramp_value: float,
         target_vf: torch.Tensor,
         vf_active: bool,
     ) -> tuple[float, float, float, float, float, float, float, float]:
         self.denoiser_optim.zero_grad(set_to_none=True)
         for critic in self.critics.values():
             critic.requires_grad_(False)
+        self.connectivity_critic.requires_grad_(False)
         try:
             heads = []
             local_weight = self.critic_local_weight
@@ -789,23 +888,14 @@ class Trainer:
                 global_loss = torch.stack([loss.global_loss for loss in heads]).sum()
                 local_loss = torch.stack([loss.local_loss for loss in heads]).sum()
                 adversarial_loss = global_loss + local_weight * local_loss
-                seam_loss = adversarial_loss.new_zeros(())
-                if seam_pairs:
-                    seam_heads = []
-                    for axis, (fake_prev, fake_curr) in seam_pairs.items():
-                        scores = self.critics[str(axis)](
-                            fake_prev,
-                            fake_curr,
-                            self.make_time(0, fake_prev.shape[0]),
-                        )
-                        seam_heads.append(get_generator_loss(scores))
-                    seam_global = torch.stack(
-                        [loss.global_loss for loss in seam_heads]
-                    ).sum()
-                    seam_local = torch.stack(
-                        [loss.local_loss for loss in seam_heads]
-                    ).sum()
-                    seam_loss = seam_global + local_weight * seam_local
+                connectivity_loss = adversarial_loss.new_zeros(())
+                if len(connectivity_fake):
+                    connectivity_scores = self.connectivity_critic(
+                        connectivity_fake.values,
+                        connectivity_fake.axes,
+                    )
+                    connectivity_head = get_generator_loss(connectivity_scores)
+                    connectivity_loss = connectivity_head.combine(local_weight)
                 anchor_loss = adversarial_loss.new_zeros(())
                 anchor_accuracy = adversarial_loss.new_zeros(())
                 if anchor is not None:
@@ -824,8 +914,11 @@ class Trainer:
                     vf_loss = (pred_vf - target_vf).abs().sum(dim=1).mean()
                 total = (
                     adversarial_loss
-                    + self.anchor_seam_weight * seam_loss
-                    + self.anchor_loss_weight * anchor_loss
+                    + anchor_ramp_value
+                    * (
+                        self.connectivity_weight * connectivity_loss
+                        + self.anchor_loss_weight * anchor_loss
+                    )
                     + self.vf_loss_weight * vf_loss
                 )
             self.scaler.scale(total).backward()
@@ -834,12 +927,13 @@ class Trainer:
         finally:
             for critic in self.critics.values():
                 critic.requires_grad_(True)
+            self.connectivity_critic.requires_grad_(True)
         return (
             float(adversarial_loss.detach()),
             float(total.detach()),
             float(global_loss.detach()),
             float(local_loss.detach()),
-            float(seam_loss.detach()),
+            float(connectivity_loss.detach()),
             float(anchor_loss.detach()),
             float(anchor_accuracy.detach()),
             float(vf_loss.detach()),
@@ -899,13 +993,52 @@ class Trainer:
         writer.add_scalar("loss/critic_total", metrics.critic, step)
         writer.add_scalar("loss/critic_global", metrics.critic_global, step)
         writer.add_scalar("loss/critic_local_raw", metrics.critic_local, step)
-        writer.add_scalar("loss/generator_seam", metrics.generator_seam, step)
-        writer.add_scalar("loss/critic_seam", metrics.critic_seam, step)
+        writer.add_scalar(
+            "loss/generator_connectivity",
+            metrics.generator_connectivity,
+            step,
+        )
+        writer.add_scalar(
+            "loss/critic_connectivity",
+            metrics.critic_connectivity,
+            step,
+        )
+        writer.add_scalar(
+            "loss/connectivity_r1_raw",
+            metrics.connectivity_r1,
+            step,
+        )
         writer.add_scalar("loss/r1_raw", metrics.r1, step)
         writer.add_scalar("loss/vf", metrics.vf_loss, step)
         writer.add_scalar("train/transition", metrics.transition, step)
         writer.add_scalar("train/volume_size", metrics.volume_size, step)
+        writer.add_scalar(
+            "train/connectivity_triplets",
+            metrics.connectivity_triplets,
+            step,
+        )
+        writer.add_scalar(
+            "train/connectivity_replay",
+            metrics.connectivity_replay,
+            step,
+        )
+        writer.add_scalar(
+            "train/teacher_volumes",
+            metrics.teacher_volumes,
+            step,
+        )
+        writer.add_scalar(
+            "train/teacher_mebibytes",
+            metrics.teacher_mebibytes,
+            step,
+        )
         writer.add_scalar("conditioning/anchor_planes", metrics.anchor_planes, step)
+        writer.add_scalar("conditioning/anchor_ramp", metrics.anchor_ramp, step)
+        writer.add_scalar(
+            "conditioning/anchor_teacher",
+            float(metrics.anchor_teacher),
+            step,
+        )
         writer.add_scalar(
             "conditioning/vf_active",
             float(metrics.vf_active),

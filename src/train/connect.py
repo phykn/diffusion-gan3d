@@ -1,0 +1,715 @@
+import math
+from collections import deque
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+import torch
+import torch.nn.functional as F
+
+from .. import AXES
+from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
+
+
+@dataclass(frozen=True)
+class TripletBatch:
+    values: torch.Tensor
+    axes: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.values.ndim != 5 or self.values.shape[1] != 3:
+            raise ValueError("triplets must have shape [B, 3, C, H, W].")
+        if self.axes.shape != (self.values.shape[0],):
+            raise ValueError("triplet axes must have shape [B].")
+
+    def __len__(self) -> int:
+        return self.values.shape[0]
+
+    def index_select(self, indices: torch.Tensor) -> "TripletBatch":
+        return TripletBatch(
+            values=self.values.index_select(0, indices),
+            axes=self.axes.index_select(0, indices),
+        )
+
+
+@dataclass(frozen=True)
+class TeacherAnchor:
+    condition: AnchorCondition
+    target_vf: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _ReplayEntry:
+    values: torch.Tensor
+    phase_fraction: torch.Tensor
+
+
+class _TripletReplay:
+    def __init__(self, capacity_per_axis: int) -> None:
+        if (
+            not isinstance(capacity_per_axis, int)
+            or isinstance(capacity_per_axis, bool)
+            or capacity_per_axis < 1
+        ):
+            raise ValueError("replay capacity must be a positive integer.")
+        self._items = {
+            axis: deque(maxlen=capacity_per_axis)
+            for axis in AXES
+        }
+
+    def __len__(self) -> int:
+        return sum(len(values) for values in self._items.values())
+
+    def add(self, batch: TripletBatch) -> None:
+        for values, axis_value in zip(
+            batch.values,
+            batch.axes.tolist(),
+            strict=True,
+        ):
+            self._check_axis(axis_value)
+            stored = values.detach().to(
+                device="cpu",
+                dtype=torch.float16,
+            ).contiguous().clone()
+            fraction = ((stored.to(torch.float32) + 1.0) * 0.5).mean(
+                dim=(0, 2, 3)
+            )
+            self._items[axis_value].append(_ReplayEntry(stored, fraction))
+
+    def sample_matched(
+        self,
+        target: TripletBatch,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        selected = []
+        indices = []
+        target_fractions = (
+            (target.values.detach().to(torch.float32) + 1.0) * 0.5
+        ).mean(dim=(1, 3, 4)).to(device="cpu")
+        for index, (axis_value, fraction) in enumerate(
+            zip(target.axes.tolist(), target_fractions, strict=True)
+        ):
+            self._check_axis(axis_value)
+            candidates = self._items[axis_value]
+            if not candidates:
+                continue
+            distances = torch.stack(
+                [
+                    (entry.phase_fraction - fraction).abs().mean()
+                    for entry in candidates
+                ]
+            )
+            nearest = distances.argsort()[: min(4, len(candidates))]
+            choice = int(
+                torch.randint(
+                    len(nearest),
+                    (),
+                    generator=generator,
+                ).item()
+            )
+            selected.append(candidates[int(nearest[choice])].values.clone())
+            indices.append(index)
+
+        if not selected:
+            return (
+                target.values.new_empty((0, *target.values.shape[1:])),
+                torch.empty(0, device=target.values.device, dtype=torch.long),
+            )
+        return (
+            torch.stack(selected).to(
+                device=target.values.device,
+                dtype=target.values.dtype,
+            ),
+            torch.tensor(indices, device=target.values.device, dtype=torch.long),
+        )
+
+    @staticmethod
+    def _check_axis(axis: int) -> None:
+        if not isinstance(axis, int) or isinstance(axis, bool) or axis not in AXES:
+            raise ValueError("axis must be 0, 1, or 2.")
+
+
+@dataclass(frozen=True)
+class _TeacherEntry:
+    labels: torch.Tensor
+    seed: PlaneAnchor
+    target_vf: torch.Tensor
+
+    @property
+    def size(self) -> int:
+        return self.labels.shape[0]
+
+    @property
+    def storage_bytes(self) -> int:
+        seed = self.seed.image
+        return (
+            self.labels.numel() * self.labels.element_size()
+            + seed.numel() * seed.element_size()
+            + self.target_vf.numel() * self.target_vf.element_size()
+        )
+
+
+class _TeacherBank:
+    def __init__(self, max_bytes: int) -> None:
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
+            raise ValueError("teacher bank byte budget must be a positive integer.")
+        self.max_bytes = max_bytes
+        self.storage_bytes = 0
+        self._items: deque[_TeacherEntry] = deque()
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def size_count(self, size: int) -> int:
+        return sum(entry.size == size for entry in self._items)
+
+    def add(
+        self,
+        labels: torch.Tensor,
+        seeds: Sequence[PlaneAnchor],
+        num_phases: int,
+    ) -> None:
+        if labels.ndim != 4 or len(set(labels.shape[1:])) != 1:
+            raise ValueError("teacher labels must have shape [B, S, S, S].")
+        if len(seeds) != labels.shape[0]:
+            raise ValueError("one real seed plane is required per teacher volume.")
+        for values, seed in zip(labels, seeds, strict=True):
+            stored = values.detach().to(
+                device="cpu",
+                dtype=torch.uint8,
+            ).contiguous().clone()
+            if int(stored.max()) >= num_phases:
+                raise ValueError("teacher labels contain a phase outside num_phases.")
+            image = seed.image
+            if image.ndim != 2:
+                raise ValueError("stored seed images must have shape [H, W].")
+            stored_seed = PlaneAnchor(
+                image=image.detach().to(
+                    device="cpu",
+                    dtype=torch.uint8,
+                ).contiguous().clone(),
+                axis=seed.axis,
+                index=seed.index,
+                position=seed.position,
+            )
+            counts = torch.bincount(
+                stored.to(torch.long).flatten(),
+                minlength=num_phases,
+            ).to(torch.float32)
+            target_vf = counts.div(counts.sum())
+            entry = _TeacherEntry(stored, stored_seed, target_vf)
+            if entry.storage_bytes > self.max_bytes:
+                raise ValueError("one teacher volume exceeds the bank byte budget.")
+            while self._items and (
+                self.storage_bytes + entry.storage_bytes > self.max_bytes
+            ):
+                self.storage_bytes -= self._items.popleft().storage_bytes
+            self._items.append(entry)
+            self.storage_bytes += entry.storage_bytes
+
+    def sample(
+        self,
+        size: int,
+        count: int,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> tuple[_TeacherEntry, ...]:
+        matches = tuple(entry for entry in self._items if entry.size == size)
+        if not matches:
+            return ()
+        indices = torch.randint(
+            len(matches),
+            (count,),
+            generator=generator,
+        ).tolist()
+        return tuple(matches[index] for index in indices)
+
+
+class Connectivity:
+    def __init__(
+        self,
+        *,
+        num_phases: int,
+        patch_size: int,
+        samples_per_axis: int,
+        replay_capacity_per_axis: int,
+        triplets_per_step: int,
+        teacher_bank_bytes: int,
+        teacher_min_entries: int,
+        max_density: float,
+        min_spacing: int,
+        mixed_axis_probability: float,
+    ) -> None:
+        for name, value in (
+            ("num_phases", num_phases),
+            ("patch_size", patch_size),
+            ("samples_per_axis", samples_per_axis),
+            ("triplets_per_step", triplets_per_step),
+            ("teacher_min_entries", teacher_min_entries),
+            ("min_spacing", min_spacing),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{name} must be a positive integer.")
+        if num_phases > 256:
+            raise ValueError("uint8 teacher storage supports at most 256 phases.")
+        if (
+            not isinstance(max_density, (int, float))
+            or isinstance(max_density, bool)
+            or not math.isfinite(max_density)
+            or not 0.0 < max_density <= 1.0
+        ):
+            raise ValueError("max_density must be between zero and one.")
+        if (
+            not isinstance(mixed_axis_probability, (int, float))
+            or isinstance(mixed_axis_probability, bool)
+            or not math.isfinite(mixed_axis_probability)
+            or not 0.0 <= mixed_axis_probability <= 1.0
+        ):
+            raise ValueError("mixed_axis_probability must be between zero and one.")
+
+        self.num_phases = num_phases
+        self.patch_size = patch_size
+        self.samples_per_axis = samples_per_axis
+        self.triplets_per_step = triplets_per_step
+        self.teacher_min_entries = teacher_min_entries
+        self.max_density = float(max_density)
+        self.min_spacing = min_spacing
+        self.mixed_axis_probability = float(mixed_axis_probability)
+        self._replay = _TripletReplay(replay_capacity_per_axis)
+        self._teachers = _TeacherBank(teacher_bank_bytes)
+
+    @property
+    def replay_size(self) -> int:
+        return len(self._replay)
+
+    @property
+    def teacher_size(self) -> int:
+        return len(self._teachers)
+
+    @property
+    def teacher_bytes(self) -> int:
+        return self._teachers.storage_bytes
+
+    def teacher_size_for(self, volume_size: int) -> int:
+        return self._teachers.size_count(volume_size)
+
+    def record_unconditional(self, prediction: torch.Tensor) -> None:
+        labels = self._hard_labels(prediction)
+        categorical = F.one_hot(
+            labels,
+            num_classes=self.num_phases,
+        ).movedim(-1, 1).to(dtype=prediction.dtype).mul_(2.0).sub_(1.0)
+        for axis in AXES:
+            self._replay.add(
+                self._sample_volume_triplets(
+                    categorical,
+                    axis,
+                    self.samples_per_axis,
+                )
+            )
+
+    def record_seeded(
+        self,
+        prediction: torch.Tensor,
+        condition: AnchorCondition,
+        seeds: Sequence[PlaneAnchor],
+    ) -> None:
+        labels = self._hard_labels(prediction, condition)
+        self._teachers.add(labels, seeds, self.num_phases)
+
+    def match_anchor(
+        self,
+        prediction: torch.Tensor,
+        condition: AnchorCondition,
+    ) -> tuple[torch.Tensor, TripletBatch]:
+        categorical = self._straight_through(prediction, condition)
+        candidates = self._sample_anchor_triplets(categorical, condition)
+        candidates = self._limit_triplets(candidates)
+        real, matched = self._replay.sample_matched(candidates)
+        return real, candidates.index_select(matched)
+
+    def sample_teacher(
+        self,
+        *,
+        volume_size: int,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        generator: torch.Generator | None = None,
+    ) -> TeacherAnchor | None:
+        if self.teacher_size_for(volume_size) < self.teacher_min_entries:
+            return None
+        entries = self._teachers.sample(
+            volume_size,
+            batch_size,
+            generator=generator,
+        )
+        if len(entries) != batch_size:
+            return None
+
+        target_count = self._sample_plane_count(volume_size, generator)
+        plane_sets = [
+            self._sample_planes(entry, target_count, generator)
+            for entry in entries
+        ]
+        actual_count = min(len(planes) for planes in plane_sets)
+        if actual_count < 2:
+            return None
+
+        conditions = []
+        for planes in plane_sets:
+            condition = build_anchors(
+                planes[:actual_count],
+                batch_size=1,
+                num_phases=self.num_phases,
+                volume_size=volume_size,
+                device=device,
+                dtype=dtype,
+                reconcile=False,
+            )
+            if condition is None:
+                raise RuntimeError("teacher anchor construction returned no condition.")
+            conditions.append(condition)
+        condition = self._combine_conditions(conditions, actual_count)
+        target_vf = torch.stack([entry.target_vf for entry in entries]).to(
+            device=device,
+            dtype=torch.float32,
+        )
+        return TeacherAnchor(condition, target_vf)
+
+    def _sample_plane_count(
+        self,
+        volume_size: int,
+        generator: torch.Generator | None,
+    ) -> int:
+        maximum = max(
+            2,
+            round(
+                self.max_density
+                * volume_size**3
+                / self.patch_size**2
+            ),
+        )
+        return int(
+            torch.randint(
+                2,
+                maximum + 1,
+                (),
+                generator=generator,
+            ).item()
+        )
+
+    def _sample_planes(
+        self,
+        entry: _TeacherEntry,
+        count: int,
+        generator: torch.Generator | None,
+    ) -> tuple[PlaneAnchor, ...]:
+        seed = entry.seed
+        selected = [(seed.axis, seed.index)]
+        mixed = bool(
+            torch.rand((), generator=generator).item()
+            < self.mixed_axis_probability
+        )
+        while len(selected) < count:
+            candidates = [
+                (axis, index)
+                for axis in (AXES if mixed else (seed.axis,))
+                for index in range(entry.size)
+                if (axis, index) not in selected
+                and all(
+                    other_axis != axis
+                    or abs(other_index - index) >= self.min_spacing
+                    for other_axis, other_index in selected
+                )
+            ]
+            if not candidates:
+                break
+            missing_axes = tuple(axis for axis in AXES if axis not in {a for a, _ in selected})
+            if mixed and missing_axes:
+                required = missing_axes[
+                    int(
+                        torch.randint(
+                            len(missing_axes),
+                            (),
+                            generator=generator,
+                        ).item()
+                    )
+                ]
+                required_candidates = [
+                    candidate for candidate in candidates if candidate[0] == required
+                ]
+                if required_candidates:
+                    candidates = required_candidates
+            choice = int(
+                torch.randint(
+                    len(candidates),
+                    (),
+                    generator=generator,
+                ).item()
+            )
+            selected.append(candidates[choice])
+
+        planes = [
+            PlaneAnchor(
+                image=seed.image.clone(),
+                axis=seed.axis,
+                index=seed.index,
+                position=seed.position,
+            )
+        ]
+        for axis, index in selected[1:]:
+            top = self._random_start(entry.size, self.patch_size, generator)
+            left = self._random_start(entry.size, self.patch_size, generator)
+            image = entry.labels.select(axis, index)[
+                top : top + self.patch_size,
+                left : left + self.patch_size,
+            ].clone()
+            planes.append(
+                PlaneAnchor(
+                    image=image,
+                    axis=axis,
+                    index=index,
+                    position=(top, left),
+                )
+            )
+        return tuple(planes)
+
+    def _sample_volume_triplets(
+        self,
+        volume: torch.Tensor,
+        axis: int,
+        count: int,
+    ) -> TripletBatch:
+        self._check_volume(volume)
+        self._check_axis(axis)
+        moved = volume.movedim(axis + 2, 2)
+        depth, height, width = moved.shape[2:]
+        if depth < 3:
+            raise ValueError("triplet axis size must be at least three.")
+        if self.patch_size > min(height, width):
+            raise ValueError("patch size must fit inside every triplet plane.")
+
+        batch_indices = torch.randint(
+            moved.shape[0],
+            (count,),
+            device=volume.device,
+        )
+        starts = torch.randint(depth - 2, (count,), device=volume.device)
+        triplets = []
+        for batch, start in zip(batch_indices.tolist(), starts.tolist(), strict=True):
+            top = self._device_random_start(height, volume.device)
+            left = self._device_random_start(width, volume.device)
+            values = moved[
+                batch,
+                :,
+                start : start + 3,
+                top : top + self.patch_size,
+                left : left + self.patch_size,
+            ]
+            triplets.append(values.movedim(0, 1))
+        return TripletBatch(
+            values=torch.stack(triplets),
+            axes=torch.full(
+                (count,),
+                axis,
+                device=volume.device,
+                dtype=torch.long,
+            ),
+        )
+
+    def _sample_anchor_triplets(
+        self,
+        volume: torch.Tensor,
+        condition: AnchorCondition,
+    ) -> TripletBatch:
+        self._check_volume(volume)
+        if condition.axis_masks.shape != (volume.shape[0], 3, *volume.shape[2:]):
+            raise ValueError("anchor axis masks must match the generated volume.")
+        if condition.mask.shape != (volume.shape[0], 1, *volume.shape[2:]):
+            raise ValueError("anchor mask must match the generated volume.")
+
+        triplets = []
+        axes = []
+        occupied: set[tuple[int, int, int, int, int]] = set()
+        for batch in range(volume.shape[0]):
+            for axis in AXES:
+                moved = volume[batch].movedim(axis + 1, 1)
+                moved_axis_mask = condition.axis_masks[batch, axis].movedim(axis, 0)
+                moved_full_mask = condition.mask[batch].movedim(axis + 1, 1)
+                depth, height, width = moved.shape[1:]
+                indices = moved_axis_mask.flatten(1).any(dim=1).nonzero().flatten()
+                for index_value in indices.tolist():
+                    plane_mask = moved_axis_mask[index_value]
+                    points = plane_mask.nonzero()
+                    if not points.numel():
+                        continue
+                    row = (int(points[:, 0].min()) + int(points[:, 0].max())) // 2
+                    col = (int(points[:, 1].min()) + int(points[:, 1].max())) // 2
+                    top = self._centered_start(row, height)
+                    left = self._centered_start(col, width)
+                    start = self._window_start(index_value, depth)
+                    key = (batch, axis, start, top, left)
+                    if key in occupied:
+                        continue
+                    occupied.add(key)
+                    values = moved[
+                        :,
+                        start : start + 3,
+                        top : top + self.patch_size,
+                        left : left + self.patch_size,
+                    ].movedim(0, 1)
+                    mask = moved_full_mask[
+                        :,
+                        start : start + 3,
+                        top : top + self.patch_size,
+                        left : left + self.patch_size,
+                    ].movedim(0, 1)
+                    if bool(mask.all().item()):
+                        continue
+                    triplets.append(values)
+                    axes.append(axis)
+
+        if not triplets:
+            return self._empty_triplets(volume)
+        return TripletBatch(
+            values=torch.stack(triplets),
+            axes=torch.tensor(axes, device=volume.device, dtype=torch.long),
+        )
+
+    def _limit_triplets(self, batch: TripletBatch) -> TripletBatch:
+        if len(batch) <= self.triplets_per_step:
+            return batch
+        selected = []
+        for axis in torch.randperm(len(AXES)).tolist():
+            candidates = (batch.axes == axis).nonzero().flatten()
+            if candidates.numel() and len(selected) < self.triplets_per_step:
+                choice = int(torch.randint(candidates.numel(), ()).item())
+                selected.append(int(candidates[choice]))
+        if len(selected) < self.triplets_per_step:
+            remaining = torch.tensor(
+                [index for index in range(len(batch)) if index not in selected],
+                device=batch.axes.device,
+                dtype=torch.long,
+            )
+            order = torch.randperm(remaining.numel(), device=remaining.device)
+            selected.extend(
+                remaining[order[: self.triplets_per_step - len(selected)]].tolist()
+            )
+        indices = torch.tensor(selected, device=batch.axes.device, dtype=torch.long)
+        return batch.index_select(indices)
+
+    def _straight_through(
+        self,
+        prediction: torch.Tensor,
+        condition: AnchorCondition | None = None,
+    ) -> torch.Tensor:
+        self._check_volume(prediction)
+        hard = F.one_hot(
+            prediction.argmax(dim=1),
+            num_classes=self.num_phases,
+        ).movedim(-1, 1).to(dtype=prediction.dtype)
+        values = hard.mul(2.0).sub(1.0)
+        values = values + (prediction - prediction.detach())
+        if condition is not None:
+            target = F.one_hot(
+                condition.target,
+                num_classes=self.num_phases,
+            ).movedim(-1, 1).to(
+                device=prediction.device,
+                dtype=prediction.dtype,
+            ).mul_(2.0).sub_(1.0)
+            values = torch.where(condition.mask.to(prediction.device), target, values)
+        return values
+
+    def _hard_labels(
+        self,
+        prediction: torch.Tensor,
+        condition: AnchorCondition | None = None,
+    ) -> torch.Tensor:
+        self._check_volume(prediction)
+        labels = prediction.detach().argmax(dim=1)
+        if condition is not None:
+            labels = torch.where(
+                condition.mask[:, 0].to(prediction.device),
+                condition.target.to(prediction.device),
+                labels,
+            )
+        return labels
+
+    def _check_volume(self, volume: torch.Tensor) -> None:
+        if volume.ndim != 5 or volume.shape[1] != self.num_phases:
+            raise ValueError("volume must have shape [B, C, D, H, W].")
+
+    @staticmethod
+    def _check_axis(axis: int) -> None:
+        if not isinstance(axis, int) or isinstance(axis, bool) or axis not in AXES:
+            raise ValueError("axis must be 0, 1, or 2.")
+
+    @staticmethod
+    def _window_start(index: int, size: int) -> int:
+        if size < 3:
+            raise ValueError("triplet axis size must be at least three.")
+        if not 0 <= index < size:
+            raise ValueError("triplet index is outside the volume.")
+        return min(max(index - 1, 0), size - 3)
+
+    @staticmethod
+    def _combine_conditions(
+        conditions: Sequence[AnchorCondition],
+        planes: int,
+    ) -> AnchorCondition:
+        return AnchorCondition(
+            image=torch.cat([condition.image for condition in conditions]),
+            mask=torch.cat([condition.mask for condition in conditions]),
+            axis_masks=torch.cat(
+                [condition.axis_masks for condition in conditions]
+            ),
+            target=torch.cat([condition.target for condition in conditions]),
+            planes=planes,
+            conflicts=sum(condition.conflicts for condition in conditions),
+            source_voxels=sum(
+                condition.source_voxels for condition in conditions
+            ),
+        )
+
+    def _empty_triplets(self, volume: torch.Tensor) -> TripletBatch:
+        return TripletBatch(
+            values=volume.new_empty(
+                (0, 3, self.num_phases, self.patch_size, self.patch_size)
+            ),
+            axes=torch.empty(0, device=volume.device, dtype=torch.long),
+        )
+
+    def _device_random_start(self, size: int, device: torch.device) -> int:
+        if size == self.patch_size:
+            return 0
+        return int(
+            torch.randint(
+                size - self.patch_size + 1,
+                (),
+                device=device,
+            ).item()
+        )
+
+    def _centered_start(self, center: int, size: int) -> int:
+        return min(
+            max(center - self.patch_size // 2, 0),
+            size - self.patch_size,
+        )
+
+    @staticmethod
+    def _random_start(
+        size: int,
+        patch_size: int,
+        generator: torch.Generator | None,
+    ) -> int:
+        if size == patch_size:
+            return 0
+        return int(
+            torch.randint(
+                size - patch_size + 1,
+                (),
+                generator=generator,
+            ).item()
+        )
