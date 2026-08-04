@@ -36,7 +36,7 @@ def main() -> None:
         "--weight",
         type=Path,
         required=True,
-        help="model weight to load",
+        help="generator weight to load",
     )
     parser.add_argument(
         "--gt",

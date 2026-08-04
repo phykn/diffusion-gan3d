@@ -90,7 +90,7 @@ class Trainer:
         volume_sizes: Sequence[int],
         num_phases: int,
         patch_size: int,
-        slices_per_axis: int,
+        slice_pairs_per_axis: int,
         ema_decay: float,
         r1_gamma: float,
         r1_interval: int,
@@ -105,9 +105,9 @@ class Trainer:
         anchor_teacher_bank_mebibytes: float,
         anchor_loss_weight: float,
         connectivity_weight: float,
-        connectivity_samples_per_axis: int,
+        connectivity_replay_triplets_per_axis: int,
         connectivity_replay_capacity_per_axis: int,
-        connectivity_triplets_per_step: int,
+        connectivity_max_triplets_per_step: int,
         vf_loss_weight: float,
         vf_dropout: float,
         latent_channels: int,
@@ -124,14 +124,20 @@ class Trainer:
             ("volume_batch_size", volume_batch_size),
             ("num_phases", num_phases),
             ("patch_size", patch_size),
-            ("slices_per_axis", slices_per_axis),
+            ("slice_pairs_per_axis", slice_pairs_per_axis),
             ("r1_interval", r1_interval),
-            ("connectivity_samples_per_axis", connectivity_samples_per_axis),
+            (
+                "connectivity_replay_triplets_per_axis",
+                connectivity_replay_triplets_per_axis,
+            ),
             (
                 "connectivity_replay_capacity_per_axis",
                 connectivity_replay_capacity_per_axis,
             ),
-            ("connectivity_triplets_per_step", connectivity_triplets_per_step),
+            (
+                "connectivity_max_triplets_per_step",
+                connectivity_max_triplets_per_step,
+            ),
             ("anchor_min_spacing", anchor_min_spacing),
             ("latent_channels", latent_channels),
         ):
@@ -211,7 +217,7 @@ class Trainer:
         self.volume_sizes = volume_sizes
         self.num_phases = num_phases
         self.patch_size = patch_size
-        self.slices_per_axis = slices_per_axis
+        self.slice_pairs_per_axis = slice_pairs_per_axis
         self.ema_decay = ema_decay
         self.r1_gamma = r1_gamma
         self.r1_interval = r1_interval
@@ -226,9 +232,9 @@ class Trainer:
         self.connect = Connectivity(
             num_phases=num_phases,
             patch_size=patch_size,
-            samples_per_axis=connectivity_samples_per_axis,
+            replay_triplets_per_axis=connectivity_replay_triplets_per_axis,
             replay_capacity_per_axis=connectivity_replay_capacity_per_axis,
-            triplets_per_step=connectivity_triplets_per_step,
+            max_triplets_per_step=connectivity_max_triplets_per_step,
             teacher_bank_bytes=round(anchor_teacher_bank_mebibytes * 1024**2),
             teacher_min_entries=4,
             max_density=anchor_max_density,
@@ -337,9 +343,7 @@ class Trainer:
         target_vf = self.get_vf(batches.values()).expand(self.volume_batch_size, -1)
         ramp = self.get_anchor_ramp(step)
         selection = (
-            None
-            if ramp == 0.0
-            else self.sample_anchor(batches, volume_size, step)
+            None if ramp == 0.0 else self.sample_anchor(batches, volume_size, step)
         )
         anchor = None if selection is None else selection.condition
         if selection is not None and selection.target_vf is not None:
@@ -376,11 +380,7 @@ class Trainer:
             axes=torch.empty(0, device=self.device, dtype=torch.long),
         )
         connectivity_real = connectivity_fake.values
-        if (
-            self.connectivity_weight > 0.0
-            and transition == 0
-            and anchor is not None
-        ):
+        if self.connectivity_weight > 0.0 and transition == 0 and anchor is not None:
             connectivity_real, connectivity_fake = self.connect.match_anchor(
                 prediction,
                 anchor,
@@ -431,7 +431,7 @@ class Trainer:
             if selection is None:
                 if self.connectivity_weight > 0.0:
                     self.connect.record_unconditional(prediction)
-            elif selection.source == "real":
+            elif selection.source == "real" and self.anchor_multi_probability > 0.0:
                 self.connect.record_seeded(
                     prediction,
                     selection.condition,
@@ -456,11 +456,9 @@ class Trainer:
             anchor_ramp=ramp,
             connectivity_triplets=len(connectivity_fake),
             connectivity_replay=self.connect.replay_size,
-            anchor_teacher=(
-                selection is not None and selection.source == "teacher"
-            ),
-            teacher_volumes=self.connect.teacher_size,
-            teacher_mebibytes=self.connect.teacher_bytes / 1024**2,
+            anchor_teacher=(selection is not None and selection.source == "teacher"),
+            teacher_volumes=self.connect.teacher_count,
+            teacher_mebibytes=self.connect.teacher_storage_bytes / 1024**2,
             generator_global=generator_global,
             generator_local=generator_local,
             critic_global=critic_global,
@@ -610,8 +608,7 @@ class Trainer:
         size = min(volume_size, *selected.shape[-2:])
         selected = self.crop_images(selected, size)
         position = tuple(
-            int(torch.randint(volume_size - size + 1, ()).item())
-            for _ in range(2)
+            int(torch.randint(volume_size - size + 1, ()).item()) for _ in range(2)
         )
         plane_index = int(torch.randint(volume_size, ()).item())
         plane = PlaneAnchor(
@@ -723,7 +720,7 @@ class Trainer:
                 "axis_masks must match the volume batch and spatial shape."
             )
 
-        count = self.slices_per_axis
+        count = self.slice_pairs_per_axis
         batch_indices = torch.randint(
             previous.shape[0],
             (count,),

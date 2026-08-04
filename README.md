@@ -4,7 +4,9 @@ Three-dimensional imaging is expensive, so material structures are often known o
 
 This project uses measured sections as anchors throughout denoising, preserving their phases while generating a connected 3D structure around them. The anchored volume can then guide jointly generated overlapping blocks. During scale-up, the base is softly conditioned at every reverse step and remains free to adapt to its new surroundings; it is not pasted back into the final volume.
 
-See [`PAPER.md`](PAPER.md) for the complete method, experiments, and evaluation results.
+[`PAPER.md`](PAPER.md) records the earlier 64³ proof-of-concept and its
+evaluation. Its status note lists the material differences from the current
+training and scale-up implementation.
 
 ## Installation
 
@@ -29,7 +31,7 @@ from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.generate import ScaledGenerator
 
-generator = load_generator(model_path, device)
+generator = load_generator(generator_path, device)
 
 anchor = PlaneAnchor(image, axis=0, index=32)
 base = generator.generate(anchors=(anchor,))
@@ -41,7 +43,9 @@ volume = ScaledGenerator(generator).generate(
 )
 ```
 
-Run the diagnostic scripts with an explicit model weight and GT path:
+Run the diagnostic scripts with an explicit generator weight. Script `03`, and
+script `04` when `--count` is positive, also require a GT volume from which to
+select anchor planes:
 
 ```bash
 python scripts/01_check_dataset.py

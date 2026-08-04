@@ -3,7 +3,7 @@
   <p><strong>Kwangnam Yu</strong></p>
 </div>
 
-> **Implementation status (2026-08-04):** The current scale-up sampler uses soft base conditioning only and no longer restores an exact inner core after denoising. The scale-up figures and numerical results below document the earlier hard-core experiment and must be regenerated before they can be used to evaluate the current sampler.
+> **Archived experiment note (2026-08-05):** The manuscript below documents the earlier 64³ proof-of-concept and its reported results. The current implementation no longer restores a hard inner core during scale-up, and its anchor curriculum now learns three-slice connectivity from unconditional volumes before introducing density-based, potentially mixed-axis teacher anchors. The method descriptions, figures, and numerical results below have not been regenerated for this implementation and must not be treated as its evaluation.
 
 ## Abstract
 

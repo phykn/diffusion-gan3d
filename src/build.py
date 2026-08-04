@@ -39,9 +39,7 @@ def find_slices(
         paths = []
         for folder in axis_folders:
             if not folder.is_dir():
-                raise FileNotFoundError(
-                    f"axis {axis} folder does not exist: {folder}"
-                )
+                raise FileNotFoundError(f"axis {axis} folder does not exist: {folder}")
             found = sorted(
                 path
                 for path in folder.iterdir()
@@ -98,9 +96,7 @@ def build_denoiser(
     data = cfg["data"]
     model = cfg["model"]
     checkpointing = (
-        model.get("gradient_checkpointing", True)
-        if checkpointing is None
-        else checkpointing
+        model["gradient_checkpointing"] if checkpointing is None else checkpointing
     )
     return Denoiser3D(
         num_phases=data["num_phases"],
@@ -125,7 +121,7 @@ def build_models(
                 num_phases=data["num_phases"],
                 channels=model["critic_channels"],
                 embedding_channels=model["embedding_channels"],
-                gradient_checkpointing=model.get("gradient_checkpointing", True),
+                gradient_checkpointing=model["gradient_checkpointing"],
             )
             for axis in AXES
         }
@@ -134,8 +130,8 @@ def build_models(
         num_phases=data["num_phases"],
         channels=model["critic_channels"],
         embedding_channels=model["embedding_channels"],
-        reversal_invariant=connectivity.get("reversal_invariant", True),
-        gradient_checkpointing=model.get("gradient_checkpointing", True),
+        reversal_invariant=connectivity["reversal_invariant"],
+        gradient_checkpointing=model["gradient_checkpointing"],
     )
     return denoiser, critics, connectivity_critic
 
@@ -167,7 +163,7 @@ def build_optimizers(
     }
     connectivity_optim = torch.optim.Adam(
         connectivity_critic.parameters(),
-        lr=optim.get("connectivity_lr", optim["critic_lr"]),
+        lr=optim["critic_lr"],
         betas=betas,
     )
     return denoiser_optim, critic_optims, connectivity_optim
@@ -199,7 +195,9 @@ def load_generator(
     data = cfg["data"]
     model = cfg["model"]
     anchor = cfg["anchor"]
-    use_amp = cfg["train"]["mixed_precision"] and device.type == "cuda"
+    train = cfg["train"]
+    use_amp = train["mixed_precision"] and device.type == "cuda"
+    anchor_start_step = round(train["total_steps"] * anchor["start_ratio"])
     return Generator(
         denoiser,
         build_diffusion(cfg).to(device),
@@ -207,7 +205,10 @@ def load_generator(
         patch_size=data["input_size"],
         num_phases=data["num_phases"],
         latent_channels=model["latent_channels"],
-        anchor_enabled=anchor["dropout_probability"] < 1.0,
+        anchor_enabled=(
+            anchor["dropout_probability"] < 1.0
+            and anchor_start_step < train["total_steps"]
+        ),
         use_amp=use_amp,
     )
 
@@ -258,7 +259,7 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         axis: build_stream(
             datasets[axis],
             batch_size=data["batch_size"],
-            num_workers=data.get("num_workers", 0),
+            num_workers=data["num_workers"],
             pin_memory=device.type == "cuda",
         )
         for axis in AXES
@@ -280,11 +281,11 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         volume_sizes=train["volume_sizes"],
         num_phases=data["num_phases"],
         patch_size=data["input_size"],
-        slices_per_axis=train["slice_pairs_per_axis"],
+        slice_pairs_per_axis=train["slice_pairs_per_axis"],
         ema_decay=train["ema_decay"],
         r1_gamma=optim["r1_gamma"],
         r1_interval=optim["r1_interval"],
-        critic_local_weight=optim.get("local_loss_weight", 0.5),
+        critic_local_weight=optim["local_loss_weight"],
         anchor_dropout=anchor["dropout_probability"],
         anchor_start_step=anchor_start_step,
         anchor_ramp_steps=anchor_ramp_steps,
@@ -295,11 +296,9 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         anchor_teacher_bank_mebibytes=anchor["teacher_bank_size_mib"],
         anchor_loss_weight=anchor["loss_weight"],
         connectivity_weight=connectivity["loss_weight"],
-        connectivity_samples_per_axis=connectivity["replay_triplets_per_axis"],
-        connectivity_replay_capacity_per_axis=connectivity[
-            "replay_capacity_per_axis"
-        ],
-        connectivity_triplets_per_step=connectivity["max_triplets_per_step"],
+        connectivity_replay_triplets_per_axis=connectivity["replay_triplets_per_axis"],
+        connectivity_replay_capacity_per_axis=connectivity["replay_capacity_per_axis"],
+        connectivity_max_triplets_per_step=connectivity["max_triplets_per_step"],
         vf_loss_weight=vf["loss_weight"],
         vf_dropout=vf["dropout_probability"],
         latent_channels=model["latent_channels"],

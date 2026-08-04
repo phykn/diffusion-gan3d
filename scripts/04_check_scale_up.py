@@ -37,7 +37,7 @@ def main() -> None:
         "--weight",
         type=Path,
         required=True,
-        help="model weight to load",
+        help="generator weight to load",
     )
     parser.add_argument(
         "--gt",
@@ -73,6 +73,8 @@ def main() -> None:
         parser.error("--count must be non-negative.")
     if args.count is not None and args.count > 0 and args.gt is None:
         parser.error("--gt is required when --count is positive.")
+    if args.gt is not None and not args.count:
+        parser.error("--gt requires a positive --count.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight = args.weight
@@ -210,7 +212,9 @@ def main() -> None:
         assert interior_quality is not None
         print(f"Base boundary change : {format_axes(interior_quality.change_ratio)}")
         print(f"Base boundary TV     : {format_axes(interior_quality.transition_tv)}")
-        print(f"Base continuity      : {format_axes(interior_quality.continuation_delta)}")
+        print(
+            f"Base continuity      : {format_axes(interior_quality.continuation_delta)}"
+        )
 
     print("\nPerformance")
     print("-----------")
