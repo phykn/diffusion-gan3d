@@ -1,6 +1,5 @@
 <div align="center">
   <h1>Anchor-Conditioned Diffusion for Scalable 3D Microstructure Synthesis</h1>
-  <p><strong>Kwangnam Yu</strong></p>
 </div>
 
 > **Archived experiment note (2026-08-05):** The manuscript below documents the earlier 64³ proof-of-concept and its reported results. The current implementation no longer restores a hard inner core during scale-up, and its anchor curriculum now learns three-slice connectivity from unconditional volumes before introducing density-based, potentially mixed-axis teacher anchors. The method descriptions, figures, and numerical results below have not been regenerated for this implementation and must not be treated as its evaluation.

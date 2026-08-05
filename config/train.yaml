@@ -24,7 +24,7 @@ diffusion:
   beta_max: 20.0
 
 anchor:
-  start_ratio: 0.3
+  start_ratio: 0.0
   ramp_ratio: 0.2
   dropout_probability: 0.2
   multi_anchor_probability: 0.5
@@ -62,8 +62,8 @@ train:
   mixed_precision: true
   ema_decay: 0.999
   save_every_steps: 100
-  generator: null
-  critic_0: null
-  critic_1: null
-  critic_2: null
-  critic_c: null
+  generator: run/08050116/generator.pt
+  critic_0: run/08050116/critic_0.pt
+  critic_1: run/08050116/critic_1.pt
+  critic_2: run/08050116/critic_2.pt
+  critic_c: run/08050116/critic_c.pt
