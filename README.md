@@ -41,7 +41,7 @@ from src.generate import ScaledGenerator
 generator = load_generator(generator_path, device)
 
 anchor = PlaneAnchor(image, axis=0, index=32)
-base = generator.generate(anchors=(anchor,), anchor_strength=0.75)
+base = generator.generate(anchors=(anchor,))
 
 volume = ScaledGenerator(generator).generate(
     blocks=(3, 3, 3),
@@ -50,9 +50,17 @@ volume = ScaledGenerator(generator).generate(
 )
 ```
 
-Run the diagnostic scripts with an explicit generator weight. Script `03`, and
-script `04` when `--count` is positive, also require a GT volume from which to
-select anchor planes:
+At the default `anchor_strength=1`, known voxels follow the matching DDPM
+forward/reverse bridge at every transition and are exact in the final base.
+Values between zero and one relax that projection by blending it with the model
+prediction; zero leaves the unconditioned sampling path unchanged. Exact anchor
+values do not by themselves guarantee a smooth normal-direction continuation,
+so the anchor diagnostic reports boundary change, transition, and continuation
+metrics separately from anchor accuracy.
+
+Run the diagnostic scripts with an explicit generator weight. Script `03`
+always requires a GT volume; script `04` requires one when `--count` is positive
+and `--anchor-strength` is nonzero:
 
 ```bash
 python scripts/01_check_dataset.py
@@ -63,7 +71,8 @@ python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --gt scripts/gt.tiff --count 3
 ```
 
-The `gt` argument supplied to script `03`, or to script `04` with a positive `--count`, is the reference volume from which anchor planes are selected.
+The `gt` argument supplied to script `03`, or to script `04` with active
+anchors, is the reference volume from which anchor planes are selected.
 
 `save_every_steps` updates the latest `generator.pt` and critic files. The
 independent `checkpoint_every_steps` interval preserves complete numbered sets

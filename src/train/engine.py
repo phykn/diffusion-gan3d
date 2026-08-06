@@ -701,6 +701,16 @@ class Trainer:
         if anchor is not None:
             conditions["anchor_image"] = anchor.image
             conditions["anchor_mask"] = anchor.mask
+            known_at_start = self.diffusion.add_noise(
+                anchor.image,
+                self.diffusion.timesteps,
+                noise=current,
+            )
+            current = self.diffusion.blend_known(
+                current,
+                known_at_start,
+                anchor.mask,
+            )
         if vf is not None:
             conditions["vf"] = vf
 
@@ -714,6 +724,12 @@ class Trainer:
                     latent,
                     **conditions,
                 )
+                if anchor is not None:
+                    prediction = self.diffusion.blend_known(
+                        prediction,
+                        anchor.image,
+                        anchor.mask,
+                    )
                 current = self.diffusion.sample_posterior(
                     current,
                     prediction,
@@ -731,9 +747,16 @@ class Trainer:
                 **conditions,
             )
             prediction = self.denoiser.decode(logits)
+            posterior_prediction = prediction
+            if anchor is not None:
+                posterior_prediction = self.diffusion.blend_known(
+                    prediction,
+                    anchor.image,
+                    anchor.mask,
+                )
             previous = self.diffusion.sample_posterior(
                 current,
-                prediction,
+                posterior_prediction,
                 transition,
             )
         return previous, current, logits, prediction

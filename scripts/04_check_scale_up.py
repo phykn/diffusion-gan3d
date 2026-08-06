@@ -77,10 +77,18 @@ def main() -> None:
     args = parser.parse_args()
     if args.count is not None and args.count < 0:
         parser.error("--count must be non-negative.")
-    if args.count is not None and args.count > 0 and args.gt is None:
+    anchor_count = (
+        args.count
+        if args.count is None or args.anchor_strength > 0.0
+        else 0
+    )
+    if anchor_count is not None and anchor_count > 0 and args.gt is None:
         parser.error("--gt is required when --count is positive.")
-    if args.gt is not None and not args.count:
-        parser.error("--gt requires a positive --count.")
+    if args.gt is not None and not anchor_count:
+        parser.error(
+            "--gt requires active anchors (--count > 0 and "
+            "--anchor-strength > 0)."
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight = args.weight
@@ -93,9 +101,9 @@ def main() -> None:
     generator = load_generator(weight, device=device)
     overlap = args.overlap
     shape = tuple(generator.patch_size * count for count in args.blocks)
-    if args.count is not None and args.count > generator.patch_size:
+    if anchor_count is not None and anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
-    if args.count and not generator.anchor_enabled:
+    if anchor_count and not generator.anchor_enabled:
         raise ValueError("selected weight was trained with anchors disabled.")
     scaled = ScaledGenerator(generator)
     plan = scaled.plan(shape, overlap)
@@ -104,9 +112,9 @@ def main() -> None:
     target = None
     indices = ()
     base_acc = None
-    if args.count is None:
+    if anchor_count is None:
         print("Base       : none")
-    elif args.count == 0:
+    elif anchor_count == 0:
         print("Base       : unanchored")
         print("Status     : generating base...", flush=True)
         base = generator.generate()
@@ -118,7 +126,7 @@ def main() -> None:
             generator.num_phases,
         )
         slices = target.movedim(AXIS, 0)
-        indices = select_indices(slices.shape[0], args.count)
+        indices = select_indices(slices.shape[0], anchor_count)
         anchors = tuple(
             PlaneAnchor(image=slices[idx], axis=AXIS, index=idx) for idx in indices
         )

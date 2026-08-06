@@ -280,18 +280,22 @@ class Generator:
             device=self.device,
             dtype=torch.float32,
         )
-        anchor = build_anchors(
-            anchors,
-            batch_size=1,
-            num_phases=self.num_phases,
-            volume_size=size,
-            device=self.device,
-            dtype=initial_noise.dtype,
-        )
+        anchor = None
+        if anchor_strength > 0.0:
+            anchor = build_anchors(
+                anchors,
+                batch_size=1,
+                num_phases=self.num_phases,
+                volume_size=size,
+                device=self.device,
+                dtype=initial_noise.dtype,
+            )
         if anchor is not None and not self.anchor_enabled:
             raise ValueError("selected weights were trained with anchors disabled.")
 
         conditions = {}
+        known_clean: torch.Tensor | None = None
+        known_mask: torch.Tensor | None = None
         if anchor is not None:
             anchor_mask = anchor.mask
             if anchor_strength != 1.0:
@@ -302,6 +306,8 @@ class Generator:
                     "anchor_mask": anchor_mask,
                 }
             )
+            known_clean = anchor.image
+            known_mask = anchor_mask
         if vf is not None:
             conditions["vf"] = vf
         with torch.autocast(
@@ -314,6 +320,8 @@ class Generator:
                 initial_noise,
                 self.latent_channels,
                 conditions=conditions or None,
+                known_clean=known_clean,
+                known_mask=known_mask,
             )
         probs = (clean.float() + 1.0).mul_(0.5).clamp_(0.0, 1.0)
         probs.div_(

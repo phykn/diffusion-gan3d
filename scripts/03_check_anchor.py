@@ -1,4 +1,4 @@
-"""Check evenly distributed soft anchor planes from a reference volume."""
+"""Check evenly distributed diffusion-bridge anchors from a reference volume."""
 
 import argparse
 import sys
@@ -64,6 +64,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.count < 0:
         parser.error("--count must be non-negative.")
+    anchor_count = args.count if args.anchor_strength > 0.0 else 0
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight = args.weight
@@ -73,10 +74,10 @@ def main() -> None:
     print(f"GT      : {args.gt.resolve()}", flush=True)
 
     generator = load_generator(weight, device=device)
-    if args.count > 0 and not generator.anchor_enabled:
+    if anchor_count > 0 and not generator.anchor_enabled:
         raise ValueError("selected weight was trained with anchors disabled.")
 
-    if args.count > generator.patch_size:
+    if anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
     target = load_volume(
         args.gt,
@@ -84,7 +85,7 @@ def main() -> None:
         num_phases=generator.num_phases,
     )
     target_slices = get_slices(target, AXIS)
-    indices = select_indices(target_slices.shape[0], args.count)
+    indices = select_indices(target_slices.shape[0], anchor_count)
     anchors = tuple(
         PlaneAnchor(image=target_slices[index], axis=AXIS, index=index)
         for index in indices
@@ -95,7 +96,7 @@ def main() -> None:
         axis=AXIS,
         indices=indices,
     )
-    mode = "soft anchors" if indices else "none"
+    mode = "diffusion-bridge anchors" if indices else "none"
     print(f"Conditioning : {mode}")
     if indices:
         print(f"Anchor strength : {args.anchor_strength:.2f}")
@@ -209,7 +210,7 @@ def print_quality(
     print("\nQuality")
     print("-------")
     score = "n/a" if anchor_acc is None else f"{anchor_acc:7.2%}"
-    print(f"Soft anchor match : {score}")
+    print(f"Anchor match      : {score}")
     print(f"Complete volume : {vol_acc:7.2%}")
     print(f"Phase IoU       : {format_scores(iou)}")
     print(f"Phase recall    : {format_scores(recall)}")
@@ -324,7 +325,7 @@ def show_result(
 
     comparisons = (
         (target, "1. Input anchor" if indices else "1. Reference center", False),
-        (gen, "2. Soft-conditioned output", False),
+        (gen, "2. Bridge-conditioned output", False),
         (mismatch, "3. Difference (red = mismatch)", True),
     )
     for panel, (img, title, difference) in zip(
@@ -396,7 +397,7 @@ def show_result(
     anchor_map.set_title("9. Anchor positions (red)")
     anchor_map.axis("off")
 
-    mode = "Distributed soft anchors" if indices else "Unanchored baseline"
+    mode = "Distributed diffusion-bridge anchors" if indices else "Unanchored baseline"
     score_label = "anchor" if indices else "reference center"
     fig.suptitle(
         f"{mode} · {score_label} {100 * accuracy:.1f}% matched\n"

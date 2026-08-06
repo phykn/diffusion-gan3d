@@ -130,8 +130,10 @@ class Diffusion(nn.Module):
         initial_noise: torch.Tensor,
         latent_channels: int,
         conditions: dict[str, object] | None = None,
+        known_clean: torch.Tensor | None = None,
+        known_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """A fresh latent keeps every reverse transition multimodal."""
+        """Sample while keeping an optional known region on its DDPM bridge."""
         self.check_batch("initial_noise", initial_noise)
         if (
             not isinstance(latent_channels, int)
@@ -139,7 +141,16 @@ class Diffusion(nn.Module):
             or latent_channels < 1
         ):
             raise ValueError("latent_channels must be a positive integer.")
+        if (known_clean is None) != (known_mask is None):
+            raise ValueError("known_clean and known_mask must be provided together.")
         current = initial_noise
+        if known_clean is not None and known_mask is not None:
+            known_at_start = self.add_noise(
+                known_clean,
+                self.timesteps,
+                noise=initial_noise,
+            )
+            current = self.blend_known(current, known_at_start, known_mask)
         cond = {} if conditions is None else conditions
 
         for transition in reversed(range(self.timesteps)):
@@ -161,12 +172,47 @@ class Diffusion(nn.Module):
                 latent,
                 **cond,
             )
+            if known_clean is not None and known_mask is not None:
+                pred = self.blend_known(pred, known_clean, known_mask)
             current = self.sample_posterior(
                 current,
                 pred,
                 transition,
             )
         return current
+
+    @classmethod
+    def blend_known(
+        cls,
+        values: torch.Tensor,
+        known: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Replace or blend a known region without changing unmasked values."""
+        cls.check_batch("values", values)
+        cls.check_matching("known", known, values)
+        if not isinstance(mask, torch.Tensor):
+            raise TypeError("mask must be a torch.Tensor.")
+        expected = (values.shape[0], 1, *values.shape[2:])
+        if mask.shape not in (expected, values.shape):
+            raise ValueError(
+                f"mask must have shape {expected} or {tuple(values.shape)}."
+            )
+        if mask.device != values.device:
+            raise ValueError("mask and values must use the same device.")
+        if mask.dtype == torch.bool:
+            return torch.where(mask, known, values)
+        if not mask.is_floating_point():
+            raise TypeError("mask must use a boolean or floating-point dtype.")
+        if not bool(torch.isfinite(mask).all()):
+            raise ValueError("mask values must be finite.")
+        if bool(((mask < 0.0) | (mask > 1.0)).any()):
+            raise ValueError("mask values must be between zero and one.")
+        return torch.lerp(
+            values,
+            known,
+            mask.to(dtype=values.dtype),
+        )
 
     def mix_noise(
         self,
