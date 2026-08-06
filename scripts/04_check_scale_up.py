@@ -64,6 +64,12 @@ def main() -> None:
         help="generate a base with this many anchor planes",
     )
     parser.add_argument(
+        "--anchor-strength",
+        type=unit_interval,
+        default=1.0,
+        help="base anchor conditioning strength from 0 to 1 (default: 1)",
+    )
+    parser.add_argument(
         "--napari",
         action="store_true",
         help="show the complete scaled phase volume in Napari",
@@ -119,7 +125,10 @@ def main() -> None:
         print(f"Base       : {len(indices)} anchor planes")
         print(f"GT         : {args.gt.resolve()}")
         print("Status     : generating base...", flush=True)
-        base = generator.generate(anchors=anchors)
+        base = generator.generate(
+            anchors=anchors,
+            anchor_strength=args.anchor_strength,
+        )
         base_acc = get_accuracy(base, target, indices, AXIS)
 
     conditioning = "soft base" if base is not None else "none"
@@ -258,6 +267,13 @@ def non_negative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
+def unit_interval(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("value must be between zero and one")
     return parsed
 
 

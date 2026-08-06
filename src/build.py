@@ -11,12 +11,52 @@ from .diffusion import Diffusion
 from .generate import Generator
 from .model.critic import ConnectivityCritic2D, PairCritic2D
 from .model.denoiser import Denoiser3D
+from .train.augment import CriticAugment
 from .train.ema import build_ema
 from .train.engine import Trainer
 from .train.weights import load_weights
 from .utils import load_yaml
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
+
+
+def get_config_value(section: dict, name: str, legacy_name: str) -> object:
+    if name in section and legacy_name in section:
+        raise ValueError(f"use only {name!r}; remove legacy {legacy_name!r}.")
+    if name in section:
+        return section[name]
+    if legacy_name in section:
+        return section[legacy_name]
+    raise KeyError(name)
+
+
+def get_anchor_steps(anchor: dict, total_steps: int) -> tuple[int, int]:
+    uses_steps = "start_step" in anchor or "ramp_steps" in anchor
+    uses_ratios = "start_ratio" in anchor or "ramp_ratio" in anchor
+    if uses_steps and uses_ratios:
+        raise ValueError("anchor step and ratio fields cannot be mixed.")
+    if uses_steps:
+        start = anchor.get("start_step")
+        ramp = anchor.get("ramp_steps")
+        for name, value in (("start_step", start), ("ramp_steps", ramp)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"anchor.{name} must be a non-negative integer.")
+        if start + ramp > total_steps:
+            raise ValueError("anchor start and ramp steps must not exceed total steps.")
+        return start, ramp
+
+    start_ratio = anchor.get("start_ratio")
+    ramp_ratio = anchor.get("ramp_ratio")
+    for name, value in (("start_ratio", start_ratio), ("ramp_ratio", ramp_ratio)):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not 0.0 <= value <= 1.0
+        ):
+            raise ValueError(f"anchor.{name} must be between zero and one.")
+    if start_ratio + ramp_ratio > 1.0:
+        raise ValueError("anchor start and ramp ratios must not exceed one.")
+    return round(total_steps * start_ratio), round(total_steps * ramp_ratio)
 
 
 def find_slices(
@@ -60,7 +100,6 @@ def build_datasets(cfg: dict) -> dict[int, SliceDataset]:
             grouped[axis],
             crop_size=data["crop_size"],
             patch_size=data["input_size"],
-            augment=data["augment"],
         )
         for axis in AXES
     }
@@ -183,7 +222,17 @@ def load_generator(
     device: torch.device,
 ) -> Generator:
     path = Path(weights).resolve()
-    cfg = load_yaml(path.parent / "train.yaml")
+    config = next(
+        (
+            parent / "train.yaml"
+            for parent in path.parents
+            if (parent / "train.yaml").is_file()
+        ),
+        None,
+    )
+    if config is None:
+        raise FileNotFoundError(f"train.yaml was not found above weights file: {path}")
+    cfg = load_yaml(config)
     denoiser = build_denoiser(cfg, checkpointing=False).to(device)
     try:
         load_weights(path, denoiser)
@@ -197,7 +246,12 @@ def load_generator(
     anchor = cfg["anchor"]
     train = cfg["train"]
     use_amp = train["mixed_precision"] and device.type == "cuda"
-    anchor_start_step = round(train["total_steps"] * anchor["start_ratio"])
+    anchor_start_step, _ = get_anchor_steps(anchor, train["total_steps"])
+    anchor_dropout = get_config_value(
+        anchor,
+        "dropout_prob",
+        "dropout_probability",
+    )
     return Generator(
         denoiser,
         build_diffusion(cfg).to(device),
@@ -206,8 +260,7 @@ def load_generator(
         num_phases=data["num_phases"],
         latent_channels=model["latent_channels"],
         anchor_enabled=(
-            anchor["dropout_probability"] < 1.0
-            and anchor_start_step < train["total_steps"]
+            anchor_dropout < 1.0 and anchor_start_step < train["total_steps"]
         ),
         use_amp=use_amp,
     )
@@ -241,18 +294,30 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     connectivity = cfg["connectivity"]
     vf = cfg["vf"]
     optim = cfg["optim"]
-    for name in ("start_ratio", "ramp_ratio"):
-        value = anchor[name]
-        if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not 0.0 <= value <= 1.0
-        ):
-            raise ValueError(f"anchor.{name} must be between zero and one.")
-    if anchor["start_ratio"] + anchor["ramp_ratio"] > 1.0:
-        raise ValueError("anchor start and ramp ratios must not exceed one.")
-    anchor_start_step = round(train["total_steps"] * anchor["start_ratio"])
-    anchor_ramp_steps = round(train["total_steps"] * anchor["ramp_ratio"])
+    anchor_start_step, anchor_ramp_steps = get_anchor_steps(
+        anchor,
+        train["total_steps"],
+    )
+    anchor_dropout = get_config_value(
+        anchor,
+        "dropout_prob",
+        "dropout_probability",
+    )
+    anchor_multi_prob = get_config_value(
+        anchor,
+        "multi_anchor_prob",
+        "multi_anchor_probability",
+    )
+    anchor_mixed_axis_prob = get_config_value(
+        anchor,
+        "mixed_axis_prob",
+        "mixed_axis_probability",
+    )
+    vf_dropout = get_config_value(vf, "dropout_prob", "dropout_probability")
+    critic_augment = CriticAugment(
+        data.get("augment", False),
+        prob=data.get("augment_prob", 1.0),
+    )
     use_amp = train["mixed_precision"] and device.type == "cuda"
     datasets = build_datasets(cfg)
     streams = {
@@ -286,13 +351,13 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         r1_gamma=optim["r1_gamma"],
         r1_interval=optim["r1_interval"],
         critic_local_weight=optim["local_loss_weight"],
-        anchor_dropout=anchor["dropout_probability"],
+        anchor_dropout=anchor_dropout,
         anchor_start_step=anchor_start_step,
         anchor_ramp_steps=anchor_ramp_steps,
-        anchor_multi_probability=anchor["multi_anchor_probability"],
+        anchor_multi_probability=anchor_multi_prob,
         anchor_max_density=anchor["max_density"],
         anchor_min_spacing=anchor["min_spacing"],
-        anchor_mixed_axis_probability=anchor["mixed_axis_probability"],
+        anchor_mixed_axis_probability=anchor_mixed_axis_prob,
         anchor_teacher_bank_mebibytes=anchor["teacher_bank_size_mib"],
         anchor_loss_weight=anchor["loss_weight"],
         connectivity_weight=connectivity["loss_weight"],
@@ -300,7 +365,8 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         connectivity_replay_capacity_per_axis=connectivity["replay_capacity_per_axis"],
         connectivity_max_triplets_per_step=connectivity["max_triplets_per_step"],
         vf_loss_weight=vf["loss_weight"],
-        vf_dropout=vf["dropout_probability"],
+        vf_dropout=vf_dropout,
         latent_channels=model["latent_channels"],
         amp_enabled=use_amp,
+        critic_augment=critic_augment,
     )

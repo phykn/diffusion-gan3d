@@ -16,6 +16,7 @@ from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
 from ..dataset import BatchStream
 from ..diffusion import Diffusion
 from ..model.denoiser import Denoiser3D
+from .augment import CriticAugment
 from .connect import (
     Connectivity,
     TripletBatch,
@@ -26,7 +27,7 @@ from .loss import (
     get_critic_r1,
     get_generator_loss,
 )
-from .weights import GENERATOR_FILE, save_all_weights
+from .weights import GENERATOR_FILE, save_all_weights, save_checkpoint
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,7 @@ class Trainer:
         vf_dropout: float,
         latent_channels: int,
         amp_enabled: bool,
+        critic_augment: CriticAugment | None = None,
     ) -> None:
         if set(streams) != set(AXES):
             raise ValueError("streams must contain axes 0, 1, and 2.")
@@ -202,6 +204,11 @@ class Trainer:
                 raise ValueError(f"{name} must be finite and non-negative.")
         if not isinstance(amp_enabled, bool):
             raise TypeError("amp_enabled must be a boolean.")
+        if critic_augment is not None and not isinstance(
+            critic_augment,
+            CriticAugment,
+        ):
+            raise TypeError("critic_augment must be a CriticAugment or None.")
         self.denoiser = denoiser
         self.ema_denoiser = ema_denoiser
         self.critics = critics
@@ -245,6 +252,9 @@ class Trainer:
         self.vf_dropout = vf_dropout
         self.latent_channels = latent_channels
         self.amp_enabled = amp_enabled
+        self.critic_augment = (
+            CriticAugment(False) if critic_augment is None else critic_augment
+        )
         self.target_count = 0
         self.target_mean = torch.zeros(num_phases, dtype=torch.float64)
         self.target_m2 = torch.zeros(num_phases, dtype=torch.float64)
@@ -254,6 +264,7 @@ class Trainer:
         steps: int,
         save_every: int,
         run_dir: str | Path,
+        checkpoint_every: int | None = None,
     ) -> Path:
         if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
             raise ValueError("steps must be a positive integer.")
@@ -263,6 +274,12 @@ class Trainer:
             or save_every < 1
         ):
             raise ValueError("save_every must be a positive integer.")
+        if checkpoint_every is not None and (
+            not isinstance(checkpoint_every, int)
+            or isinstance(checkpoint_every, bool)
+            or checkpoint_every < 1
+        ):
+            raise ValueError("checkpoint_every must be a positive integer or None.")
         root = Path(run_dir)
         done = 0
         weights = root / GENERATOR_FILE
@@ -297,6 +314,15 @@ class Trainer:
                         self.critics,
                         self.connectivity_critic,
                     )
+                if checkpoint_every is not None and done % checkpoint_every == 0:
+                    checkpoint = save_checkpoint(
+                        root,
+                        done,
+                        self.ema_denoiser,
+                        self.critics,
+                        self.connectivity_critic,
+                    )
+                    print(f"Saved checkpoint: {checkpoint}")
             if done % save_every:
                 weights = save_all_weights(
                     root,
@@ -364,11 +390,14 @@ class Trainer:
         )
         clean_probs = (prediction + 1.0) * 0.5
         fake = {
-            axis: self.sample_pairs(
-                previous,
-                current,
+            axis: self.critic_augment.apply_pair(
+                *self.sample_pairs(
+                    previous,
+                    current,
+                    axis,
+                    axis_masks=None if anchor is None else anchor.axis_masks,
+                ),
                 axis,
-                axis_masks=None if anchor is None else anchor.axis_masks,
             )
             for axis in AXES
         }
@@ -384,6 +413,16 @@ class Trainer:
             connectivity_real, connectivity_fake = self.connect.match_anchor(
                 prediction,
                 anchor,
+            )
+            connectivity_real, connectivity_values = (
+                self.critic_augment.apply_together(
+                    (connectivity_real, connectivity_fake.values),
+                    connectivity_fake.axes,
+                )
+            )
+            connectivity_fake = TripletBatch(
+                values=connectivity_values,
+                axes=connectivity_fake.axes,
             )
 
         (
@@ -791,6 +830,11 @@ class Trainer:
             real_prev, real_curr = self.diffusion.sample_pair(
                 real,
                 transition,
+            )
+            real_prev, real_curr = self.critic_augment.apply_pair(
+                real_prev,
+                real_curr,
+                axis,
             )
             real_prev.requires_grad_(apply_r1)
             fake_prev, fake_curr = fake[axis]

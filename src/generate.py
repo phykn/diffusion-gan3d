@@ -257,10 +257,19 @@ class Generator:
         anchors: Sequence[PlaneAnchor] = (),
         vf: Sequence[float] | None = None,
         size: int | None = None,
+        anchor_strength: float = 1.0,
     ) -> torch.Tensor:
         size = self.patch_size if size is None else size
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
             raise ValueError("size must be a positive integer.")
+        if (
+            not isinstance(anchor_strength, (int, float))
+            or isinstance(anchor_strength, bool)
+            or not math.isfinite(anchor_strength)
+            or not 0.0 <= anchor_strength <= 1.0
+        ):
+            raise ValueError("anchor_strength must be between zero and one.")
+        anchor_strength = float(anchor_strength)
         vf = self.prepare_vf(vf)
         initial_noise = torch.randn(
             1,
@@ -284,10 +293,13 @@ class Generator:
 
         conditions = {}
         if anchor is not None:
+            anchor_mask = anchor.mask
+            if anchor_strength != 1.0:
+                anchor_mask = anchor_mask.to(initial_noise.dtype).mul(anchor_strength)
             conditions.update(
                 {
                     "anchor_image": anchor.image,
-                    "anchor_mask": anchor.mask,
+                    "anchor_mask": anchor_mask,
                 }
             )
         if vf is not None:
@@ -314,11 +326,13 @@ class Generator:
         anchors: Sequence[PlaneAnchor] = (),
         vf: Sequence[float] | None = None,
         size: int | None = None,
+        anchor_strength: float = 1.0,
     ) -> torch.Tensor:
         probs = self.generate_probs(
             anchors=anchors,
             vf=vf,
             size=size,
+            anchor_strength=anchor_strength,
         )
         return probs.argmax(dim=0).to(torch.uint8)
 

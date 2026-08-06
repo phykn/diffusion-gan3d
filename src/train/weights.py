@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,6 +9,7 @@ from torch import nn
 GENERATOR_FILE = "generator.pt"
 CRITIC_FILES = tuple(f"critic_{axis}.pt" for axis in range(3))
 CRITIC_C_FILE = "critic_c.pt"
+CHECKPOINT_DIR = "checkpoints"
 
 
 def find_weights(run_root: str | Path) -> Path:
@@ -43,6 +45,38 @@ def save_all_weights(
         root / CRITIC_C_FILE,
     )
     return save_weights(root, model)
+
+
+def save_checkpoint(
+    run_dir: str | Path,
+    step: int,
+    model: nn.Module,
+    critics: nn.ModuleDict,
+    connectivity_critic: nn.Module,
+) -> Path:
+    if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+        raise ValueError("checkpoint step must be a positive integer.")
+    root = Path(run_dir)
+    parent = root / CHECKPOINT_DIR
+    target = parent / f"step_{step:08d}"
+    if target.exists():
+        raise FileExistsError(f"checkpoint already exists: {target}")
+
+    parent.mkdir(parents=True, exist_ok=True)
+    temporary = parent / f".{target.name}.{uuid4().hex}.tmp"
+    temporary.mkdir()
+    try:
+        save_all_weights(
+            temporary,
+            model,
+            critics,
+            connectivity_critic,
+        )
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+    return target / GENERATOR_FILE
 
 
 def load_weights(

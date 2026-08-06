@@ -51,6 +51,12 @@ def main() -> None:
         help="number of evenly distributed anchor planes to use (default: 3)",
     )
     parser.add_argument(
+        "--anchor-strength",
+        type=unit_interval,
+        default=1.0,
+        help="anchor conditioning strength from 0 to 1 (default: 1)",
+    )
+    parser.add_argument(
         "--napari",
         action="store_true",
         help="show the complete generated phase volume in Napari",
@@ -91,10 +97,15 @@ def main() -> None:
     )
     mode = "soft anchors" if indices else "none"
     print(f"Conditioning : {mode}")
+    if indices:
+        print(f"Anchor strength : {args.anchor_strength:.2f}")
     print("Postprocess  : none")
     print("Status   : generating...", flush=True)
 
-    gen = generator.generate(anchors=anchors)
+    gen = generator.generate(
+        anchors=anchors,
+        anchor_strength=args.anchor_strength,
+    )
     print("Status   : complete", flush=True)
     gen_slices = get_slices(gen, AXIS)
     vol_acc = float((gen == target).to(torch.float32).mean())
@@ -157,6 +168,13 @@ def select_indices(size: int, count: int) -> tuple[int, ...]:
     if count == 0:
         return ()
     return tuple(((2 * index + 1) * size) // (2 * count) for index in range(count))
+
+
+def unit_interval(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("value must be between zero and one")
+    return parsed
 
 
 def select_display_index(size: int, indices: tuple[int, ...]) -> int:

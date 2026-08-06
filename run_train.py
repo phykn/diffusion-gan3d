@@ -47,6 +47,7 @@ def main() -> None:
         steps=cfg["train"]["total_steps"],
         save_every=cfg["train"]["save_every_steps"],
         run_dir=run_dir,
+        checkpoint_every=cfg["train"].get("checkpoint_every_steps"),
     )
 
 

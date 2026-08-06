@@ -24,6 +24,13 @@ Set the 2D section folders and training options in [`config/train.yaml`](config/
 python run_train.py --device cuda
 ```
 
+The `data.augment` preset controls differentiable critic augmentation for both
+real and generated slices. Use `isotropic` when all three axes are equivalent,
+`transverse_0`, `transverse_1`, or `transverse_2` when one axis is distinct,
+`directional` when axis identities must be preserved without 90-degree swaps,
+or `false` to disable it. The configuration file keeps the same choices in a
+comment above the data section.
+
 Generate a 3D volume around a known section and extend it to `3 × 3 × 3` blocks:
 
 ```python
@@ -34,7 +41,7 @@ from src.generate import ScaledGenerator
 generator = load_generator(generator_path, device)
 
 anchor = PlaneAnchor(image, axis=0, index=32)
-base = generator.generate(anchors=(anchor,))
+base = generator.generate(anchors=(anchor,), anchor_strength=0.75)
 
 volume = ScaledGenerator(generator).generate(
     blocks=(3, 3, 3),
@@ -51,11 +58,16 @@ select anchor planes:
 python scripts/01_check_dataset.py
 python scripts/02_check_generated.py --weight run/<run-id>/generator.pt
 python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --gt scripts/gt.tiff --count 3
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --gt scripts/gt.tiff --count 3 --anchor-strength 0.65
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --gt scripts/gt.tiff --count 3
 ```
 
 The `gt` argument supplied to script `03`, or to script `04` with a positive `--count`, is the reference volume from which anchor planes are selected.
+
+`save_every_steps` updates the latest `generator.pt` and critic files. The
+independent `checkpoint_every_steps` interval preserves complete numbered sets
+under `checkpoints/step_XXXXXXXX/`, so intermediate weights are not overwritten.
 
 ## Citation
 

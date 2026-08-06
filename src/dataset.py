@@ -13,7 +13,6 @@ class SliceDataset(Dataset[torch.Tensor]):
         paths: Sequence[str | Path],
         crop_size: int = 64,
         patch_size: int = 64,
-        augment: bool = False,
     ) -> None:
         self.paths = tuple(Path(path) for path in paths)
         if not self.paths:
@@ -25,9 +24,6 @@ class SliceDataset(Dataset[torch.Tensor]):
             raise ValueError("crop and patch sizes must be positive integers.")
         self.crop_size = crop_size
         self.patch_size = patch_size
-        if not isinstance(augment, bool):
-            raise TypeError("augment must be a boolean.")
-        self.augment = augment
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -36,8 +32,6 @@ class SliceDataset(Dataset[torch.Tensor]):
         img = self.load(self.paths[idx])
         img = self.crop(img)
         img = self.resize(img)
-        if self.augment:
-            img = self.transform(img, int(np.random.randint(8)))
         return torch.from_numpy(img.copy()).to(torch.long)
 
     def load(self, path: Path) -> np.ndarray:
@@ -66,12 +60,6 @@ class SliceDataset(Dataset[torch.Tensor]):
             ),
             dtype=np.uint8,
         )
-
-    @staticmethod
-    def transform(img: np.ndarray, idx: int) -> np.ndarray:
-        if idx >= 4:
-            img = np.flip(img, axis=1)
-        return np.rot90(img, idx % 4)
 
     @staticmethod
     def check_image(img: np.ndarray) -> None:
