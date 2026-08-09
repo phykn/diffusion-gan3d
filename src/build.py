@@ -6,42 +6,20 @@ from torch import nn
 from torch.utils.data import DataLoader, RandomSampler
 
 from . import AXES
+from .config import find_train_config, get_schedule_steps, require_schema
 from .dataset import BatchStream, SliceDataset
 from .diffusion import Diffusion
 from .generate import Generator
 from .model.critic import ConnectivityCritic2D, PairCritic2D
 from .model.denoiser import Denoiser3D
 from .train.augment import CriticAugment
+from .train.connect import TEACHER_MIN_ENTRIES
 from .train.ema import build_ema
 from .train.engine import Trainer, TrainerComponents, TrainerSettings
 from .train.weights import load_weights
 from .utils import load_yaml
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
-SCHEMA_VERSION = 2
-
-
-def require_schema(cfg: dict) -> None:
-    if cfg.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError(
-            f"train config schema_version must be {SCHEMA_VERSION}; "
-            "old training configs are not supported."
-        )
-
-
-def get_schedule_steps(
-    section: dict,
-    name: str,
-    total_steps: int,
-) -> tuple[int, int]:
-    start = section["start_step"]
-    ramp = section["ramp_steps"]
-    for field, value in (("start_step", start), ("ramp_steps", ramp)):
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"{name}.{field} must be a non-negative integer.")
-    if start + ramp > total_steps:
-        raise ValueError(f"{name} start and ramp steps must not exceed total steps.")
-    return start, ramp
 
 
 def find_slices(
@@ -207,16 +185,7 @@ def load_generator(
     device: torch.device,
 ) -> Generator:
     path = Path(weights).resolve()
-    config = next(
-        (
-            parent / "train.yaml"
-            for parent in path.parents
-            if (parent / "train.yaml").is_file()
-        ),
-        None,
-    )
-    if config is None:
-        raise FileNotFoundError(f"train.yaml was not found above weights file: {path}")
+    config = find_train_config(path)
     cfg = load_yaml(config)
     require_schema(cfg)
     denoiser = build_denoiser(cfg, checkpointing=False).to(device)
@@ -247,6 +216,7 @@ def load_generator(
         anchor_enabled=(
             anchor["training_probability"] > 0.0
             and anchor_start_step < train["total_steps"]
+            and bool(torch.count_nonzero(denoiser.anchor_input.weight))
         ),
         use_amp=use_amp,
     )
@@ -254,18 +224,7 @@ def load_generator(
 
 def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     require_schema(cfg)
-    denoiser, critics, connectivity_critic = build_models(cfg)
     train = cfg["train"]
-    denoiser = denoiser.to(device)
-    critics = critics.to(device)
-    connectivity_critic = connectivity_critic.to(device)
-    ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
-        denoiser,
-        critics,
-        connectivity_critic,
-        cfg,
-    )
     data = cfg["data"]
     model = cfg["model"]
     anchor = cfg["anchor"]
@@ -284,10 +243,27 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         "scale_consistency",
         train["total_steps"],
     )
+    validate_anchor_capacity(
+        data=data,
+        train=train,
+        anchor=anchor,
+        anchor_start_step=anchor_start_step,
+    )
     if vf["target_sampling"] != "per_crop_empirical":
         raise ValueError("vf.target_sampling must be 'per_crop_empirical'.")
     if vf["loss"] != "total_variation":
         raise ValueError("vf.loss must be 'total_variation'.")
+    denoiser, critics, connectivity_critic = build_models(cfg)
+    denoiser = denoiser.to(device)
+    critics = critics.to(device)
+    connectivity_critic = connectivity_critic.to(device)
+    ema = build_ema(denoiser)
+    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
+        denoiser,
+        critics,
+        connectivity_critic,
+        cfg,
+    )
     critic_augment = CriticAugment(
         data.get("augment", False),
         prob=data.get("augment_prob", 1.0),
@@ -359,3 +335,37 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             amp_enabled=use_amp,
         ),
     )
+
+
+def validate_anchor_capacity(
+    *,
+    data: dict,
+    train: dict,
+    anchor: dict,
+    anchor_start_step: int,
+) -> None:
+    anchor_active = (
+        anchor["training_probability"] > 0.0
+        and anchor_start_step < train["total_steps"]
+    )
+    if not anchor_active:
+        return
+    if train["volume_batch_size"] > data["batch_size"]:
+        raise ValueError(
+            "train.volume_batch_size must not exceed data.batch_size when "
+            "anchor training is enabled."
+        )
+    if anchor["multi_anchor_prob"] <= 0.0:
+        return
+
+    largest = max(train["volume_sizes"])
+    entry_bytes = largest**3 + data["input_size"] ** 2 + 4 * data["num_phases"]
+    required_bytes = TEACHER_MIN_ENTRIES * entry_bytes
+    budget_bytes = round(anchor["teacher_bank_size_mib"] * 1024**2)
+    if budget_bytes < required_bytes:
+        required_mib = required_bytes / 1024**2
+        raise ValueError(
+            "anchor.teacher_bank_size_mib is too small for "
+            f"{TEACHER_MIN_ENTRIES} largest teacher volumes; "
+            f"at least {required_mib:.2f} MiB is required."
+        )

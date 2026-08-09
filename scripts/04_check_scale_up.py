@@ -19,7 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
-from src.generate import DEFAULT_SCALE_OVERLAP, ScaledGenerator, ScalePlan
+from src.scale import DEFAULT_SCALE_OVERLAP, ScaledGenerator, ScalePlan
 
 AXIS = 0
 
@@ -83,17 +83,12 @@ def main() -> None:
     args = parser.parse_args()
     if args.count is not None and args.count < 0:
         parser.error("--count must be non-negative.")
-    anchor_count = (
-        args.count
-        if args.count is None or args.anchor_strength > 0.0
-        else 0
-    )
+    anchor_count = args.count if args.count is None or args.anchor_strength > 0.0 else 0
     if anchor_count is not None and anchor_count > 0 and args.gt is None:
         parser.error("--gt is required when --count is positive.")
     if args.gt is not None and not anchor_count:
         parser.error(
-            "--gt requires active anchors (--count > 0 and "
-            "--anchor-strength > 0)."
+            "--gt requires active anchors (--count > 0 and --anchor-strength > 0)."
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

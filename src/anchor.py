@@ -43,6 +43,17 @@ def build_anchors(
         return None
     if any(not isinstance(anchor, PlaneAnchor) for anchor in anchors):
         raise TypeError("anchors must contain only PlaneAnchor values.")
+    for name, value in (
+        ("batch_size", batch_size),
+        ("num_phases", num_phases),
+        ("volume_size", volume_size),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"{name} must be a positive integer.")
+    if not dtype.is_floating_point:
+        raise TypeError("anchor condition dtype must be floating point.")
+    if not isinstance(reconcile, bool):
+        raise TypeError("reconcile must be a boolean.")
 
     target = torch.zeros(
         batch_size,
@@ -102,6 +113,14 @@ def build_anchors(
                 raise ValueError(f"anchor.image batch size must be {batch_size}.")
         else:
             raise ValueError("anchor.image must have shape [H, W] or [B, H, W].")
+        if img.dtype not in {
+            torch.uint8,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        }:
+            raise TypeError("anchor.image must use an integer dtype.")
         height, width = img.shape[-2:]
         if height < 1 or width < 1:
             raise ValueError("anchor.image must not be empty.")
@@ -131,7 +150,8 @@ def build_anchors(
             ):
                 raise ValueError("anchor.position places the image outside the plane.")
         img = img.to(device=device, dtype=torch.long)
-        if int(img.min()) < 0 or int(img.max()) >= num_phases:
+        lower, upper = torch.aminmax(img)
+        if int(lower) < 0 or int(upper) >= num_phases:
             raise ValueError("anchor.image contains a phase outside num_phases.")
 
         target_plane = target.select(anchor.axis + 1, anchor.index)

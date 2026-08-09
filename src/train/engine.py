@@ -2,14 +2,11 @@ import math
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
 
 from .. import AXES
 from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
@@ -18,6 +15,7 @@ from ..diffusion import Diffusion
 from ..model.denoiser import Denoiser3D
 from .augment import CriticAugment
 from .connect import (
+    TEACHER_MIN_ENTRIES,
     Connectivity,
     TripletBatch,
     normal_transition_loss,
@@ -32,7 +30,6 @@ from .scale_consistency import (
     make_adjacent_view_plan,
     weighted_probability_mse,
 )
-from .weights import GENERATOR_FILE, save_all_weights, save_checkpoint
 
 
 @dataclass(frozen=True)
@@ -407,7 +404,7 @@ class Trainer:
             replay_capacity_per_axis=settings.connectivity_replay_capacity_per_axis,
             max_triplets_per_step=settings.connectivity_max_triplets_per_step,
             teacher_bank_bytes=round(settings.anchor_teacher_bank_mebibytes * 1024**2),
-            teacher_min_entries=4,
+            teacher_min_entries=TEACHER_MIN_ENTRIES,
             max_density=settings.anchor_max_density,
             min_spacing=settings.anchor_min_spacing,
             mixed_axis_probability=settings.anchor_mixed_axis_probability,
@@ -433,91 +430,6 @@ class Trainer:
         self.target_count = 0
         self.target_mean = torch.zeros(settings.num_phases, dtype=torch.float64)
         self.target_m2 = torch.zeros(settings.num_phases, dtype=torch.float64)
-
-    def fit(
-        self,
-        steps: int,
-        save_every: int,
-        run_dir: str | Path,
-        checkpoint_every: int | None = None,
-    ) -> Path:
-        if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
-            raise ValueError("steps must be a positive integer.")
-        if (
-            not isinstance(save_every, int)
-            or isinstance(save_every, bool)
-            or save_every < 1
-        ):
-            raise ValueError("save_every must be a positive integer.")
-        if checkpoint_every is not None and (
-            not isinstance(checkpoint_every, int)
-            or isinstance(checkpoint_every, bool)
-            or checkpoint_every < 1
-        ):
-            raise ValueError("checkpoint_every must be a positive integer or None.")
-        root = Path(run_dir)
-        done = 0
-        weights = root / GENERATOR_FILE
-        print("\nTraining")
-        print("--------")
-        print(f"Steps  : {steps}")
-        print(f"Device : {self.device}")
-        print(f"Run    : {root}")
-        writer = SummaryWriter(root / "tensorboard")
-        bar = tqdm(
-            range(steps),
-            total=steps,
-            desc="Diffusion GAN3D",
-            dynamic_ncols=True,
-        )
-        try:
-            for step in bar:
-                metrics = self.step(step)
-                done = step + 1
-                self.write_metrics(writer, done, metrics)
-                bar.set_postfix(
-                    G=f"{metrics.generator:.4g}",
-                    D=f"{metrics.critic:.4g}",
-                    t=metrics.transition,
-                    S=metrics.volume_size,
-                    A=metrics.anchor_planes,
-                )
-                if done % save_every == 0:
-                    weights = save_all_weights(
-                        root,
-                        self.ema_denoiser,
-                        self.critics,
-                        self.connectivity_critic,
-                    )
-                if checkpoint_every is not None and done % checkpoint_every == 0:
-                    checkpoint = save_checkpoint(
-                        root,
-                        done,
-                        self.ema_denoiser,
-                        self.critics,
-                        self.connectivity_critic,
-                    )
-                    print(f"Saved checkpoint: {checkpoint}")
-            if done % save_every:
-                weights = save_all_weights(
-                    root,
-                    self.ema_denoiser,
-                    self.critics,
-                    self.connectivity_critic,
-                )
-        except KeyboardInterrupt:
-            weights = save_all_weights(
-                root,
-                self.ema_denoiser,
-                self.critics,
-                self.connectivity_critic,
-            )
-            print(f"Training interrupted after step {done}; weights={weights}")
-            raise
-        finally:
-            bar.close()
-            writer.close()
-        return weights
 
     def step(
         self,
@@ -708,19 +620,28 @@ class Trainer:
                 (0, 3, self.num_phases, self.patch_size, self.patch_size)
             ),
             axes=torch.empty(0, device=self.device, dtype=torch.long),
+            center_slots=torch.empty(0, device=self.device, dtype=torch.long),
         )
         enabled = self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
         if not enabled or transition != 0 or anchor is None:
             return empty, empty
 
-        real_values, fake = self.connect.match_anchor(prediction, anchor)
+        real, fake = self.connect.match_anchor(prediction, anchor)
         real_values, fake_values = self.critic_augment.apply_together(
-            (real_values, fake.values),
+            (real.values, fake.values),
             fake.axes,
         )
         return (
-            TripletBatch(values=real_values, axes=fake.axes),
-            TripletBatch(values=fake_values, axes=fake.axes),
+            TripletBatch(
+                values=real_values,
+                axes=real.axes,
+                center_slots=real.center_slots,
+            ),
+            TripletBatch(
+                values=fake_values,
+                axes=fake.axes,
+                center_slots=fake.center_slots,
+            ),
         )
 
     def record_connectivity_prediction(
@@ -815,12 +736,22 @@ class Trainer:
             if images.numel() == 0:
                 raise ValueError("training crops must not be empty.")
             labels = images.to(torch.long)
-            if int(labels.min()) < 0 or int(labels.max()) >= self.num_phases:
+            lower, upper = torch.aminmax(labels)
+            if int(lower) < 0 or int(upper) >= self.num_phases:
                 raise ValueError("training images contain a phase outside num_phases.")
-            fractions = (
-                F.one_hot(labels, num_classes=self.num_phases)
-                .to(torch.float32)
-                .mean(dim=(1, 2))
+            batch = labels.shape[0]
+            offsets = torch.arange(
+                batch,
+                device=labels.device,
+                dtype=labels.dtype,
+            ).mul_(self.num_phases)
+            encoded = labels.flatten(1).add(offsets[:, None])
+            counts = torch.bincount(
+                encoded.flatten(),
+                minlength=batch * self.num_phases,
+            ).reshape(batch, self.num_phases)
+            fractions = counts.to(torch.float32).div_(
+                labels.shape[-2] * labels.shape[-1]
             )
             values.append(fractions)
         return torch.cat(values, dim=0)
@@ -1420,14 +1351,14 @@ class Trainer:
                 latent,
                 **teacher_conditions,
             )
-        teacher_probs = ((teacher_prediction.to(torch.float32) + 1.0) * 0.5).clamp(
+        teacher_values = teacher_prediction[
+            (..., *(plan.first_band if teacher_first else plan.second_band))
+        ]
+        teacher_band = ((teacher_values.to(torch.float32) + 1.0) * 0.5).clamp(
             0.0,
             1.0,
         )
-        teacher_band = teacher_probs[
-            (..., *(plan.first_band if teacher_first else plan.second_band))
-        ]
-        del teacher_prediction, teacher_probs
+        del teacher_prediction, teacher_values
         with self.autocast():
             student_prediction = self.denoiser(
                 student_current,
@@ -1435,13 +1366,13 @@ class Trainer:
                 latent,
                 **student_conditions,
             )
-        student_probs = ((student_prediction.to(torch.float32) + 1.0) * 0.5).clamp(
+        student_values = student_prediction[
+            (..., *(plan.second_band if teacher_first else plan.first_band))
+        ]
+        student_band = ((student_values.to(torch.float32) + 1.0) * 0.5).clamp(
             0.0,
             1.0,
         )
-        student_band = student_probs[
-            (..., *(plan.second_band if teacher_first else plan.first_band))
-        ]
 
         known_band = None
         if known_mask is not None:
@@ -1514,181 +1445,6 @@ class Trainer:
             return tuple(0.0 for _ in range(self.num_phases))
         std = (self.target_m2 / (self.target_count - 1)).sqrt()
         return tuple(float(value) for value in std)
-
-    @staticmethod
-    def write_metrics(
-        writer: SummaryWriter,
-        step: int,
-        metrics: Metrics,
-    ) -> None:
-        writer.add_scalar("loss/generator", metrics.generator, step)
-        writer.add_scalar("loss/generator_total", metrics.generator_total, step)
-        writer.add_scalar("loss/generator_global", metrics.generator_global, step)
-        writer.add_scalar("loss/generator_local_raw", metrics.generator_local, step)
-        writer.add_scalar("loss/critic_total", metrics.critic, step)
-        writer.add_scalar("loss/critic_global", metrics.critic_global, step)
-        writer.add_scalar("loss/critic_local_raw", metrics.critic_local, step)
-        writer.add_scalar(
-            "loss/generator_connectivity",
-            metrics.generator_connectivity,
-            step,
-        )
-        writer.add_scalar(
-            "loss/critic_connectivity",
-            metrics.critic_connectivity,
-            step,
-        )
-        writer.add_scalar(
-            "loss/connectivity_r1_raw",
-            metrics.connectivity_r1,
-            step,
-        )
-        writer.add_scalar("loss/r1_raw", metrics.r1, step)
-        writer.add_scalar("loss/vf", metrics.vf_loss, step)
-        writer.add_scalar(
-            "loss/normal_transition",
-            metrics.normal_transition_loss,
-            step,
-        )
-        writer.add_scalar(
-            "loss/scale_consistency",
-            metrics.scale_consistency_loss,
-            step,
-        )
-        writer.add_scalar(
-            "loss/scale_consistency_contribution",
-            metrics.scale_consistency_contribution,
-            step,
-        )
-        writer.add_scalar("train/transition", metrics.transition, step)
-        writer.add_scalar("train/volume_size", metrics.volume_size, step)
-        writer.add_scalar(
-            "train/connectivity_triplets",
-            metrics.connectivity_triplets,
-            step,
-        )
-        writer.add_scalar(
-            "train/connectivity_replay",
-            metrics.connectivity_replay,
-            step,
-        )
-        writer.add_scalar(
-            "train/teacher_volumes",
-            metrics.teacher_volumes,
-            step,
-        )
-        writer.add_scalar(
-            "train/teacher_mebibytes",
-            metrics.teacher_mebibytes,
-            step,
-        )
-        writer.add_scalar("conditioning/anchor_planes", metrics.anchor_planes, step)
-        writer.add_scalar("conditioning/anchor_ramp", metrics.anchor_ramp, step)
-        writer.add_scalar(
-            "conditioning/anchor_input_active_fraction",
-            metrics.anchor_input_active_fraction,
-            step,
-        )
-        writer.add_scalar(
-            "conditioning/anchor_teacher",
-            float(metrics.anchor_teacher),
-            step,
-        )
-        writer.add_scalar(
-            "conditioning/vf_active",
-            float(metrics.vf_active),
-            step,
-        )
-        writer.add_scalar(
-            "conditioning/vf_active_fraction",
-            metrics.vf_active_fraction,
-            step,
-        )
-        writer.add_scalar(
-            "conditioning/vf_target_resample_rate",
-            metrics.vf_target_resample_rate,
-            step,
-        )
-        state_names = ("both", "anchor_only", "vf_only", "joint_null")
-        for name, fraction in zip(
-            state_names,
-            metrics.condition_state_fractions,
-            strict=True,
-        ):
-            writer.add_scalar(
-                f"conditioning/state_{name}_fraction",
-                fraction,
-                step,
-            )
-        writer.add_scalar(
-            "conditioning/scale_consistency_ramp",
-            metrics.scale_consistency_ramp,
-            step,
-        )
-        writer.add_scalar(
-            "train/scale_consistency_active",
-            float(metrics.scale_consistency_active),
-            step,
-        )
-        writer.add_scalar(
-            "conditioning/vf_hard_mae",
-            metrics.hard_vf_mae,
-            step,
-        )
-        if metrics.anchor_planes:
-            writer.add_scalar("loss/anchor", metrics.anchor_loss, step)
-            writer.add_scalar(
-                "conditioning/anchor_accuracy",
-                metrics.anchor_accuracy,
-                step,
-            )
-            writer.add_scalar(
-                "conditioning/anchor_conflict_rate",
-                metrics.anchor_conflict_rate,
-                step,
-            )
-            writer.add_scalar(
-                f"loss/anchor_{metrics.anchor_planes}_planes",
-                metrics.anchor_loss,
-                step,
-            )
-            writer.add_scalar(
-                f"conditioning/anchor_accuracy_{metrics.anchor_planes}_planes",
-                metrics.anchor_accuracy,
-                step,
-            )
-        for axis, value in zip(AXES, metrics.critic_axes, strict=True):
-            writer.add_scalar(f"loss/critic_axis_{axis}", value, step)
-        for phase, vals in enumerate(
-            zip(
-                metrics.target_vfs,
-                metrics.target_vf_stds,
-                metrics.soft_vfs,
-                metrics.hard_vfs,
-                strict=True,
-            )
-        ):
-            target, target_std, soft, hard = vals
-            writer.add_scalar(
-                f"conditioning/vf_target_{phase}",
-                target,
-                step,
-            )
-            writer.add_scalar(
-                f"conditioning/vf_target_std_{phase}",
-                target_std,
-                step,
-            )
-            writer.add_scalar(
-                f"conditioning/vf_soft_{phase}",
-                soft,
-                step,
-            )
-            writer.add_scalar(
-                f"conditioning/vf_hard_{phase}",
-                hard,
-                step,
-            )
 
     def make_time(self, transition: int, batch: int) -> torch.Tensor:
         return torch.full(

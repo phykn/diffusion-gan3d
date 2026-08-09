@@ -100,7 +100,9 @@ class CriticAugment:
             if tensor.shape[:-3] != first.shape[:-3]:
                 raise ValueError("augmentation inputs must have matching batch axes.")
             if tensor.shape[-2:] != first.shape[-2:]:
-                raise ValueError("augmentation inputs must have matching spatial sizes.")
+                raise ValueError(
+                    "augmentation inputs must have matching spatial sizes."
+                )
             if tensor.device != first.device or tensor.dtype != first.dtype:
                 raise ValueError("augmentation inputs must share device and dtype.")
         if not self.enabled or first.shape[0] == 0:

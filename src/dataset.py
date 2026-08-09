@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from torch.utils.data import DataLoader, Dataset
 
 
 class SliceDataset(Dataset[torch.Tensor]):
+    CACHE_BYTES = 64 * 1024**2
+
     def __init__(
         self,
         paths: Sequence[str | Path],
@@ -24,6 +27,8 @@ class SliceDataset(Dataset[torch.Tensor]):
             raise ValueError("crop and patch sizes must be positive integers.")
         self.crop_size = crop_size
         self.patch_size = patch_size
+        self._cache: OrderedDict[Path, np.ndarray] = OrderedDict()
+        self._cache_bytes = 0
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -35,6 +40,20 @@ class SliceDataset(Dataset[torch.Tensor]):
         return torch.from_numpy(img.copy()).to(torch.long)
 
     def load(self, path: Path) -> np.ndarray:
+        cached = self._cache.get(path)
+        if cached is not None:
+            self._cache.move_to_end(path)
+            return cached
+        data = self.decode(path)
+        if data.nbytes <= self.CACHE_BYTES:
+            while self._cache and self._cache_bytes + data.nbytes > self.CACHE_BYTES:
+                _, removed = self._cache.popitem(last=False)
+                self._cache_bytes -= removed.nbytes
+            self._cache[path] = data
+            self._cache_bytes += data.nbytes
+        return data
+
+    def decode(self, path: Path) -> np.ndarray:
         with Image.open(path) as img:
             data = np.asarray(img)
         self.check_image(data)

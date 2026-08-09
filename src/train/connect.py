@@ -9,17 +9,32 @@ import torch.nn.functional as F
 from .. import AXES
 from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
 
+TEACHER_MIN_ENTRIES = 4
+
 
 @dataclass(frozen=True)
 class TripletBatch:
     values: torch.Tensor
     axes: torch.Tensor
+    center_slots: torch.Tensor
 
     def __post_init__(self) -> None:
         if self.values.ndim != 5 or self.values.shape[1] != 3:
             raise ValueError("triplets must have shape [B, 3, C, H, W].")
         if self.axes.shape != (self.values.shape[0],):
             raise ValueError("triplet axes must have shape [B].")
+        if self.axes.dtype != torch.long or self.axes.device != self.values.device:
+            raise ValueError("triplet axes must use torch.long on the values device.")
+        if self.center_slots.shape != (self.values.shape[0],):
+            raise ValueError("triplet center slots must have shape [B].")
+        if self.center_slots.dtype != torch.long:
+            raise ValueError("triplet center slots must use torch.long dtype.")
+        if self.center_slots.device != self.values.device:
+            raise ValueError("triplet center slots must be on the values device.")
+        if self.center_slots.numel() and (
+            int(self.center_slots.min()) < 0 or int(self.center_slots.max()) > 2
+        ):
+            raise ValueError("triplet center slots must be zero, one, or two.")
 
     def __len__(self) -> int:
         return self.values.shape[0]
@@ -28,6 +43,7 @@ class TripletBatch:
         return TripletBatch(
             values=self.values.index_select(0, indices),
             axes=self.axes.index_select(0, indices),
+            center_slots=self.center_slots.index_select(0, indices),
         )
 
 
@@ -37,29 +53,54 @@ def normal_transition_loss(real: TripletBatch, fake: TripletBatch) -> torch.Tens
         raise ValueError("real and fake triplets must have the same shape.")
     if not torch.equal(real.axes, fake.axes):
         raise ValueError("real and fake triplets must use the same axes.")
-
     _, _, phase_count, height, width = real.values.shape
     if phase_count == 0 or height == 0 or width == 0:
         raise ValueError("triplets must contain phases and spatial values.")
     if len(fake) == 0:
         return fake.values.sum() * 0.0
 
-    def transition_matrices(values: torch.Tensor) -> torch.Tensor:
+    batch_indices = torch.arange(len(real), device=real.values.device)
+
+    def transition_matrices(
+        values: torch.Tensor,
+        center_slots: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        neighbor_slots = torch.stack(
+            (
+                (center_slots - 1).clamp_min(0),
+                (center_slots + 1).clamp_max(2),
+            ),
+            dim=1,
+        )
+        valid_neighbors = torch.stack(
+            (center_slots > 0, center_slots < 2),
+            dim=1,
+        )
         probabilities = (values.to(torch.float32) + 1.0) * 0.5
-        center = probabilities[:, 1]
-        neighbors = probabilities[:, (0, 2)]
-        return torch.einsum(
+        center = probabilities[batch_indices, center_slots]
+        neighbors = probabilities[batch_indices[:, None], neighbor_slots]
+        transitions = torch.einsum(
             "bchw,bnkhw->bnck",
             center,
             neighbors,
         ) / (height * width)
+        return transitions, valid_neighbors
 
-    real_transitions = transition_matrices(real.values)
-    fake_transitions = transition_matrices(fake.values)
+    real_transitions, real_valid = transition_matrices(
+        real.values,
+        real.center_slots,
+    )
+    fake_transitions, fake_valid = transition_matrices(
+        fake.values,
+        fake.center_slots,
+    )
+    valid_neighbors = real_valid & fake_valid
     total_variation = 0.5 * (real_transitions - fake_transitions).abs().sum(
         dim=(-2, -1)
     )
-    return total_variation.mean()
+    return (total_variation * valid_neighbors).sum() / valid_neighbors.sum().clamp_min(
+        1
+    )
 
 
 @dataclass(frozen=True)
@@ -72,6 +113,7 @@ class TeacherAnchor:
 class _ReplayEntry:
     values: torch.Tensor
     phase_fraction: torch.Tensor
+    center_slot: int
 
 
 class _TripletReplay:
@@ -88,9 +130,10 @@ class _TripletReplay:
         return sum(len(values) for values in self._items.values())
 
     def add(self, batch: TripletBatch) -> None:
-        for values, axis_value in zip(
+        for values, axis_value, center_slot in zip(
             batch.values,
             batch.axes.tolist(),
+            batch.center_slots.tolist(),
             strict=True,
         ):
             self._check_axis(axis_value)
@@ -104,15 +147,16 @@ class _TripletReplay:
                 .clone()
             )
             fraction = ((stored.to(torch.float32) + 1.0) * 0.5).mean(dim=(0, 2, 3))
-            self._items[axis_value].append(_ReplayEntry(stored, fraction))
+            self._items[axis_value].append(_ReplayEntry(stored, fraction, center_slot))
 
     def sample_matched(
         self,
         target: TripletBatch,
         *,
         generator: torch.Generator | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[TripletBatch, torch.Tensor]:
         selected = []
+        selected_centers = []
         indices = []
         target_fractions = (
             ((target.values.detach().to(torch.float32) + 1.0) * 0.5)
@@ -137,20 +181,41 @@ class _TripletReplay:
                     generator=generator,
                 ).item()
             )
-            selected.append(candidates[int(nearest[choice])].values.clone())
+            entry = candidates[int(nearest[choice])]
+            selected.append(entry.values.clone())
+            selected_centers.append(entry.center_slot)
             indices.append(index)
 
         if not selected:
-            return (
-                target.values.new_empty((0, *target.values.shape[1:])),
-                torch.empty(0, device=target.values.device, dtype=torch.long),
-            )
-        return (
-            torch.stack(selected).to(
+            empty_indices = torch.empty(
+                0,
                 device=target.values.device,
-                dtype=target.values.dtype,
+                dtype=torch.long,
+            )
+            return (
+                target.index_select(empty_indices),
+                empty_indices,
+            )
+        matched = torch.tensor(
+            indices,
+            device=target.values.device,
+            dtype=torch.long,
+        )
+        metadata = target.index_select(matched)
+        return (
+            TripletBatch(
+                values=torch.stack(selected).to(
+                    device=target.values.device,
+                    dtype=target.values.dtype,
+                ),
+                axes=metadata.axes,
+                center_slots=torch.tensor(
+                    selected_centers,
+                    device=target.values.device,
+                    dtype=torch.long,
+                ),
             ),
-            torch.tensor(indices, device=target.values.device, dtype=torch.long),
+            matched,
         )
 
     @staticmethod
@@ -360,7 +425,7 @@ class Connectivity:
         self,
         prediction: torch.Tensor,
         condition: AnchorCondition,
-    ) -> tuple[torch.Tensor, TripletBatch]:
+    ) -> tuple[TripletBatch, TripletBatch]:
         categorical = self._straight_through(prediction, condition)
         candidates = self._sample_anchor_triplets(categorical, condition)
         candidates = self._limit_triplets(candidates)
@@ -561,6 +626,11 @@ class Connectivity:
                 device=volume.device,
                 dtype=torch.long,
             ),
+            center_slots=torch.ones(
+                count,
+                device=volume.device,
+                dtype=torch.long,
+            ),
         )
 
     def _sample_anchor_triplets(
@@ -576,6 +646,7 @@ class Connectivity:
 
         triplets = []
         axes = []
+        center_slots = []
         occupied: set[tuple[int, int, int, int, int]] = set()
         for batch in range(volume.shape[0]):
             for axis in AXES:
@@ -614,12 +685,18 @@ class Connectivity:
                         continue
                     triplets.append(values)
                     axes.append(axis)
+                    center_slots.append(index_value - start)
 
         if not triplets:
             return self._empty_triplets(volume)
         return TripletBatch(
             values=torch.stack(triplets),
             axes=torch.tensor(axes, device=volume.device, dtype=torch.long),
+            center_slots=torch.tensor(
+                center_slots,
+                device=volume.device,
+                dtype=torch.long,
+            ),
         )
 
     def _limit_triplets(self, batch: TripletBatch) -> TripletBatch:
@@ -730,6 +807,7 @@ class Connectivity:
                 (0, 3, self.num_phases, self.patch_size, self.patch_size)
             ),
             axes=torch.empty(0, device=volume.device, dtype=torch.long),
+            center_slots=torch.empty(0, device=volume.device, dtype=torch.long),
         )
 
     def _device_random_start(self, size: int, device: torch.device) -> int:

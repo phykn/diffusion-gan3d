@@ -16,10 +16,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from make_assets import OUTPUT_DIR, ROI_COLOR
-from provenance import build_provenance, describe_files
+from provenance import (
+    build_provenance,
+    describe_files,
+    validate_output_paths,
+    verify_provenance_inputs,
+)
 
 from src.build import load_generator
-from src.generate import DEFAULT_SCALE_OVERLAP, ScaledGenerator
+from src.scale import DEFAULT_SCALE_OVERLAP, ScaledGenerator
 
 OVERLAPS = (0, 4, 8, 12, 16)
 SEEDS = tuple(range(20_260_808, 20_260_813))
@@ -52,10 +57,16 @@ def main() -> None:
             "default_overlap": DEFAULT_SCALE_OVERLAP,
             "seam_exclusion_radius": SEAM_EXCLUSION_RADIUS,
         },
+        source_files=(__file__,),
+    )
+    validate_output_paths(
+        provenance,
+        (RAW_CSV, SUMMARY_CSV, MANIFEST, FIGURE),
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
+    verify_provenance_inputs(provenance)
     scaled = ScaledGenerator(generator)
     diagnostic = importlib.import_module("scripts.04_check_scale_up")
     rows: list[dict[str, float | int]] = []
@@ -99,9 +110,9 @@ def main() -> None:
                 "overlap": overlap,
                 "guidance_scale": args.guidance_scale,
                 "exact_seam_change_ratio": exact_ratio,
-                "band_change_ratio": float(quality.change_ratio[0]),
-                "transition_tv": float(quality.transition_tv[0]),
-                "continuation_delta": float(quality.continuation_delta[0]),
+                "band_change_ratio": optional_float(quality.change_ratio[0]),
+                "transition_tv": optional_float(quality.transition_tv[0]),
+                "continuation_delta": optional_float(quality.continuation_delta[0]),
                 "elapsed_seconds": elapsed,
                 "peak_memory_gib": (
                     torch.cuda.max_memory_allocated(device) / 1024**3
@@ -126,9 +137,7 @@ def main() -> None:
                 "overlaps": list(OVERLAPS),
                 "default_overlap": DEFAULT_SCALE_OVERLAP,
                 "blocks": list(BLOCKS),
-                "output_shape": [
-                    generator.patch_size * count for count in BLOCKS
-                ],
+                "output_shape": [generator.patch_size * count for count in BLOCKS],
                 "seam_exclusion_radius": SEAM_EXCLUSION_RADIUS,
                 "exact_seam_change_ratio": (
                     "phase-change rate at the exact tile boundary divided by "
@@ -168,8 +177,14 @@ def exact_seam_change_ratio(volume: torch.Tensor, seam: int) -> float:
         rates.append(
             float((volume[index] != volume[index + 1]).to(torch.float32).mean())
         )
+    if not rates:
+        return float("nan")
     interior = float(torch.tensor(rates).median())
-    return exact / interior
+    return exact / interior if interior > 0.0 else float("nan")
+
+
+def optional_float(value: float | None) -> float:
+    return float("nan") if value is None else float(value)
 
 
 def summarize(

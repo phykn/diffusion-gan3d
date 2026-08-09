@@ -14,6 +14,8 @@ from .blocks import (
     Upsample3D,
 )
 
+MAX_GUIDANCE_SCALE = 10_000.0
+
 
 def validate_guidance_scale(value: float) -> float:
     if (
@@ -21,8 +23,12 @@ def validate_guidance_scale(value: float) -> float:
         or isinstance(value, bool)
         or not math.isfinite(value)
         or value < 0.0
+        or value > MAX_GUIDANCE_SCALE
     ):
-        raise ValueError("guidance_scale must be a finite non-negative number.")
+        raise ValueError(
+            "guidance_scale must be a finite number between zero and "
+            f"{MAX_GUIDANCE_SCALE:g}."
+        )
     return float(value)
 
 
@@ -223,8 +229,10 @@ class Denoiser3D(nn.Module):
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
         )
-        guided = unconditional + guidance_scale * (conditional - unconditional)
-        return self.decode(guided)
+        baseline = unconditional.to(torch.float32)
+        guided = conditional.to(torch.float32)
+        guided.sub_(baseline).mul_(guidance_scale).add_(baseline)
+        return self.decode(guided).to(unconditional.dtype)
 
     @staticmethod
     def decode(logits: torch.Tensor) -> torch.Tensor:
@@ -297,8 +305,20 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None,
         anchor_mask: torch.Tensor | None,
     ) -> torch.Tensor | None:
-        if anchor_image is None or anchor_mask is None:
+        if anchor_image is None and anchor_mask is None:
             return None
+        if anchor_image is None or anchor_mask is None:
+            raise ValueError("anchor_image and anchor_mask must be provided together.")
+        if not isinstance(anchor_image, torch.Tensor) or not isinstance(
+            anchor_mask,
+            torch.Tensor,
+        ):
+            raise TypeError("anchor_image and anchor_mask must be tensors.")
+        if anchor_image.shape != inputs.shape:
+            raise ValueError("anchor_image must have the same shape as inputs.")
+        expected_mask = (inputs.shape[0], 1, *inputs.shape[2:])
+        if anchor_mask.shape != expected_mask:
+            raise ValueError("anchor_mask must have shape [B, 1, D, H, W].")
         mask = anchor_mask.to(device=inputs.device, dtype=inputs.dtype)
         clean = anchor_image.to(device=inputs.device, dtype=inputs.dtype)
         probs = (clean + 1.0) * 0.5 * mask

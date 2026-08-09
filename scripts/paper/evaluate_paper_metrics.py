@@ -22,11 +22,18 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from make_anchor_asset import AXIS, load_center_roi
 from make_assets import CROP_SIZE, SAMPLE_PATH
-from provenance import build_provenance, describe_files, validate_manifest
+from provenance import (
+    build_provenance,
+    describe_files,
+    sha256_file,
+    validate_manifest,
+    validate_output_paths,
+    verify_provenance_inputs,
+)
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
-from src.generate import DEFAULT_SCALE_OVERLAP, ScaledGenerator
+from src.scale import DEFAULT_SCALE_OVERLAP, ScaledGenerator
 
 REFERENCE_PATH = PROJECT_ROOT / "scripts" / "gt_128.tiff"
 TEMP_DIR = PROJECT_ROOT / "temp"
@@ -71,11 +78,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    reference_digest = sha256_file(REFERENCE_PATH)
+    training_image_digest = sha256_file(SAMPLE_PATH)
     reference = load_volume(REFERENCE_PATH)
     patch_size = reference.shape[0]
     if reference.shape != (patch_size,) * 3:
         raise ValueError("GT reference must be cubic.")
     real_reference = sample_real_crops(REAL_REFERENCE_SEED, patch_size)
+    if sha256_file(REFERENCE_PATH) != reference_digest:
+        raise ValueError("paper reference changed while it was being loaded.")
+    if sha256_file(SAMPLE_PATH) != training_image_digest:
+        raise ValueError("training image changed while it was being loaded.")
     target_porosity = porosity(reference)
 
     VOLUME_DIR.mkdir(parents=True, exist_ok=True)
@@ -96,10 +109,20 @@ def main() -> None:
         generation=generation,
         reference=REFERENCE_PATH,
         additional_inputs={"training_image": SAMPLE_PATH},
+        source_files=(__file__,),
     )
+    if provenance["reference_sha256"] != reference_digest:
+        raise ValueError("paper reference changed before provenance was recorded.")
+    training_record = provenance["additional_inputs"]["training_image"]
+    if training_record["sha256"] != training_image_digest:
+        raise ValueError("training image changed before provenance was recorded.")
     cached_paths = [
         volume_path(condition, seed) for condition in CONDITIONS[1:] for seed in SEEDS
     ]
+    validate_output_paths(
+        provenance,
+        (*cached_paths, RAW_CSV, SUMMARY_CSV, MANIFEST_PATH),
+    )
     if args.reuse:
         validate_manifest(
             MANIFEST_PATH,
@@ -113,35 +136,21 @@ def main() -> None:
             target_porosity,
             weights,
             args.guidance_scale,
+            provenance,
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    raw_rows: list[dict[str, object]] = []
+    raw_rows, kid_scores = compute_kid_scores(
+        real_reference,
+        patch_size,
+        device,
+    )
 
-    for seed in REAL_EVALUATION_SEEDS:
-        crops = sample_real_crops(seed, patch_size)
-        kid_mean, kid_subset_std = kid_score(real_reference, crops, device)
-        raw_rows.append(
-            make_row(
-                condition="Real 2D crops",
-                seed=seed,
-                kid=kid_mean,
-                kid_subset_std=kid_subset_std,
-                porosity_value=porosity(crops),
-            )
-        )
-
+    # KID's Inception model is released before TauFactor allocates its solver fields.
     reference_tortuosity = tortuosity(reference, AXIS, device)
     for condition in CONDITIONS[1:]:
         for seed in SEEDS:
             volume = load_volume(volume_path(condition, seed))
-            slices = select_metric_slices(
-                volume,
-                axis=AXIS,
-                count=REAL_CROP_COUNT,
-                output_size=patch_size,
-                seed=seed,
-            )
             accuracy = None
             seam_drop = None
             if condition.startswith("3D (anchored"):
@@ -149,7 +158,7 @@ def main() -> None:
             if condition == "3D (scale-up)":
                 seams = scale_seams(volume.shape, patch_size)
                 seam_drop = seam_connectivity_drop(volume, seams)
-            kid_mean, kid_subset_std = kid_score(real_reference, slices, device)
+            kid_mean, kid_subset_std = kid_scores[(condition, seed)]
             raw_rows.append(
                 make_row(
                     condition=condition,
@@ -176,6 +185,7 @@ def main() -> None:
     write_manifest(
         provenance=provenance,
         cached_paths=cached_paths,
+        derived_outputs=(RAW_CSV, SUMMARY_CSV),
         reference=reference,
         reference_porosity=target_porosity,
         reference_tortuosity=reference_tortuosity,
@@ -191,9 +201,11 @@ def generate_volumes(
     target_porosity: float,
     weights: Path,
     guidance_scale: float,
+    provenance: dict[str, object],
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
+    verify_provenance_inputs(provenance)
     patch_size = generator.patch_size
     if reference.shape != (patch_size,) * 3:
         raise ValueError("GT reference must match the generator patch size.")
@@ -296,28 +308,84 @@ def sample_real_crops(seed: int, output_size: int) -> np.ndarray:
     return np.stack(crops)
 
 
-def kid_score(
+def compute_kid_scores(
     real: np.ndarray,
-    generated: np.ndarray,
+    patch_size: int,
     device: torch.device,
-) -> tuple[float, float]:
+) -> tuple[
+    list[dict[str, object]],
+    dict[tuple[str, int], tuple[float, float]],
+]:
+    metric = make_kid_metric(real, device)
+    real_rows: list[dict[str, object]] = []
+    generated_scores: dict[tuple[str, int], tuple[float, float]] = {}
+    try:
+        for seed in REAL_EVALUATION_SEEDS:
+            crops = sample_real_crops(seed, patch_size)
+            kid_mean, kid_subset_std = kid_score(metric, crops, device)
+            real_rows.append(
+                make_row(
+                    condition="Real 2D crops",
+                    seed=seed,
+                    kid=kid_mean,
+                    kid_subset_std=kid_subset_std,
+                    porosity_value=porosity(crops),
+                )
+            )
+
+        for condition in CONDITIONS[1:]:
+            for seed in SEEDS:
+                volume = load_volume(volume_path(condition, seed))
+                slices = select_metric_slices(
+                    volume,
+                    axis=AXIS,
+                    count=REAL_CROP_COUNT,
+                    output_size=patch_size,
+                    seed=seed,
+                )
+                generated_scores[(condition, seed)] = kid_score(
+                    metric,
+                    slices,
+                    device,
+                )
+    finally:
+        del metric
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    return real_rows, generated_scores
+
+
+def make_kid_metric(
+    real: np.ndarray,
+    device: torch.device,
+) -> KernelInceptionDistance:
     metric = KernelInceptionDistance(
         feature=2048,
         subsets=KID_SUBSETS,
         subset_size=KID_SUBSET_SIZE,
+        reset_real_features=False,
         normalize=False,
     ).to(device)
     metric.update(metric_images(real, device), real=True)
+    return metric
+
+
+def kid_score(
+    metric: KernelInceptionDistance,
+    generated: np.ndarray,
+    device: torch.device,
+) -> tuple[float, float]:
     metric.update(metric_images(generated, device), real=False)
-    torch.manual_seed(0)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(0)
-    mean, std = metric.compute()
-    values = (float(mean.cpu()), float(std.cpu()))
-    del metric
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    return values
+    try:
+        torch.manual_seed(0)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(0)
+        mean, std = metric.compute()
+        return float(mean.cpu()), float(std.cpu())
+    finally:
+        # reset_real_features=False preserves the shared real features while
+        # discarding every fake feature before the next comparison.
+        metric.reset()
 
 
 def metric_images(slices: np.ndarray, device: torch.device) -> torch.Tensor:
@@ -519,6 +587,7 @@ def write_csv(rows: list[dict[str, object]], output: Path) -> None:
 def write_manifest(
     provenance: dict[str, object],
     cached_paths: list[Path],
+    derived_outputs: tuple[Path, ...],
     reference: np.ndarray,
     reference_porosity: float,
     reference_tortuosity: float,
@@ -527,6 +596,7 @@ def write_manifest(
     data = {
         **provenance,
         "cached_outputs": describe_files(cached_paths),
+        "outputs": describe_files(derived_outputs),
         "reference_shape": list(reference.shape),
         "training_image": str(SAMPLE_PATH.resolve()),
         "pore_phase": PORE_PHASE,

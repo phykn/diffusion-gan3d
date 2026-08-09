@@ -1,5 +1,6 @@
 """Show random crops from each training axis."""
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -18,7 +19,10 @@ SAMPLES = 4
 
 
 def main() -> None:
-    cfg = load_yaml(DEFAULT_CONFIG)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    args = parser.parse_args()
+    cfg = load_yaml(args.config)
     datasets = build_datasets(cfg)
     fig, panels = plt.subplots(
         len(AXES),

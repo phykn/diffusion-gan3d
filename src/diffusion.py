@@ -33,11 +33,18 @@ class Diffusion(nn.Module):
             timesteps + 1,
             dtype=torch.float64,
         )
-        alpha_bars = torch.exp(
+        log_alpha_bars = (
             -0.5 * (beta_max - beta_min) * time.square() - beta_min * time
         )
+        minimum_log = math.log(torch.finfo(torch.float32).tiny)
+        if float(log_alpha_bars[-1]) < minimum_log:
+            raise ValueError(
+                "diffusion schedule is not representable in float32; "
+                "reduce beta_max."
+            )
+        alpha_bars = log_alpha_bars.exp()
         alphas = torch.ones_like(alpha_bars)
-        alphas[1:] = alpha_bars[1:] / alpha_bars[:-1]
+        alphas[1:] = (log_alpha_bars[1:] - log_alpha_bars[:-1]).exp()
         betas = 1.0 - alphas
 
         self.timesteps = timesteps
@@ -103,14 +110,14 @@ class Diffusion(nn.Module):
             self.timesteps - 1,
             "transition",
         )
+        if max_transition == 0:
+            return pred
         mean, variance = self.get_posterior(
             current,
             pred,
             transitions,
         )
         active = transitions != 0
-        if max_transition == 0:
-            return pred
         if noise is None:
             noise = torch.randn_like(current)
         else:

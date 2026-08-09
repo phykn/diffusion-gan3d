@@ -4,9 +4,9 @@ Three-dimensional imaging is expensive, so material structures are often known o
 
 This project uses measured sections as anchors throughout denoising, preserving their phases while generating a connected 3D structure around them. The anchored volume can then guide jointly generated overlapping blocks. During scale-up, the base is softly conditioned at every reverse step and remains free to adapt to its new surroundings; it is not pasted back into the final volume.
 
-[`PAPER.md`](PAPER.md) records the earlier 64³ proof-of-concept and its
-evaluation. Its status note lists the material differences from the current
-training and scale-up implementation.
+[`PAPER.md`](PAPER.md) records the evaluated method and its limitations. Its
+status note lists the material differences from the current training and
+scale-up implementation.
 
 ## Installation
 
@@ -46,7 +46,10 @@ anchor-normal term matches center-to-neighbor phase transitions to matched
 unconditional replay triplets. Scale consistency uses the EMA model as a stop-gradient teacher
 and matches the predicted clean probabilities in the 16-voxel region shared by
 adjacent 128-core, 8-halo views. Its 25% sampling probability starts after 1,000
-steps and ramps for 4,000 steps. The configured `0.10` normal-transition weight
+steps and ramps for 4,000 steps. This probability is conditional on a sampled
+training volume being large enough for the 144-voxel consistency view; with the
+default five volume sizes, three are eligible, so the steady-state rate is 15%
+of all steps. The configured `0.10` normal-transition weight
 and `1.0` scale-consistency weight are conservative starting values, not
 universal constants; compare seeded ablations before choosing final weights.
 
@@ -55,7 +58,7 @@ Generate a 3D volume around a known section and extend it to `3 × 3 × 3` block
 ```python
 from src.anchor import PlaneAnchor
 from src.build import load_generator
-from src.generate import ScaledGenerator
+from src.scale import ScaledGenerator
 
 generator = load_generator(generator_path, device)
 
@@ -105,9 +108,14 @@ python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --gt scri
 ```
 
 These generation and evaluation CLIs accept `--guidance-scale` with a default
-of `1.0`. Paper-generation CLIs also require an explicit `--weight`; they never
-select the newest run implicitly, so cached metrics and assets remain tied to a
-known checkpoint.
+of `1.0`. Generator-invoking paper CLIs also require an explicit `--weight`;
+they never select the newest run implicitly, so cached metrics and assets
+remain tied to a known checkpoint.
+
+Paper manifests include hashes of the checkpoint, configuration, reference
+inputs, generation code, cached volumes, and derived tables or figures.
+Generation aborts when any preflight input changes or an output aliases an
+input. Prefer an immutable numbered checkpoint for long evaluations.
 
 The `gt` argument supplied to script `03`, or to script `04` with active
 anchors, is the reference volume from which anchor planes are selected.
@@ -115,6 +123,28 @@ anchors, is the reference volume from which anchor planes are selected.
 `save_every_steps` updates the latest `generator.pt` and critic files. The
 independent `checkpoint_every_steps` interval preserves complete numbered sets
 under `checkpoints/step_XXXXXXXX/`, so intermediate weights are not overwritten.
+
+## Code layout
+
+- `src/generate.py` owns direct patch-size sampling; `src/scale.py` owns tiled
+  planning, storage, overlap fusion, and large-volume sampling.
+- `src/config.py` owns the schema and run-config discovery contract;
+  `src/build.py` is the composition root that creates training and inference
+  objects.
+- `src/train/engine.py` owns one optimization step and its losses;
+  `src/train/runner.py` owns progress reporting, TensorBoard output, and
+  checkpoint cadence.
+- `scripts/` contains user diagnostics, while `scripts/paper/` contains
+  provenance-checked evaluation and figure generation.
+- `tests/` contains the tracked regression suite.
+
+For development, install the runtime and test tools together and run:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+python -m ruff check src scripts tests
+```
 
 ## Citation
 

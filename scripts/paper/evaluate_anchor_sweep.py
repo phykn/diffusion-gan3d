@@ -18,7 +18,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from make_assets import OUTPUT_DIR, ROI_COLOR
-from provenance import build_provenance, describe_files, validate_manifest
+from provenance import (
+    build_provenance,
+    describe_files,
+    sha256_file,
+    validate_manifest,
+    validate_output_paths,
+    verify_provenance_inputs,
+)
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
@@ -44,7 +51,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    reference_digest = sha256_file(REFERENCE_PATH)
     reference = load_volume(REFERENCE_PATH)
+    if sha256_file(REFERENCE_PATH) != reference_digest:
+        raise ValueError("paper reference changed while it was being loaded.")
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     weights = args.weight.resolve()
@@ -60,8 +70,17 @@ def main() -> None:
         args.guidance_scale,
         generation=generation,
         reference=REFERENCE_PATH,
+        source_files=(__file__,),
     )
+    if provenance["reference_sha256"] != reference_digest:
+        raise ValueError("paper reference changed before provenance was recorded.")
     cached_paths = [volume_path(count) for count in COUNTS]
+    csv_path = TEMP_DIR / "anchor_sweep_metrics.csv"
+    figure_path = OUTPUT_DIR / "06-anchor-sweep-metrics.png"
+    validate_output_paths(
+        provenance,
+        (*cached_paths, csv_path, MANIFEST_PATH, figure_path),
+    )
 
     if args.reuse:
         validate_manifest(
@@ -71,7 +90,7 @@ def main() -> None:
             cached_paths=cached_paths,
         )
     else:
-        generate_volumes(reference, weights, args.guidance_scale)
+        generate_volumes(reference, weights, args.guidance_scale, provenance)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     kid = KernelInceptionDistance(
@@ -115,22 +134,21 @@ def main() -> None:
             f"tortuosity={row['tortuosity_axis0']:.4f} accuracy={score}"
         )
 
-    csv_path = TEMP_DIR / "anchor_sweep_metrics.csv"
     write_csv(rows, csv_path)
-    write_manifest(
-        provenance=provenance,
-        cached_paths=cached_paths,
-        reference=reference,
-        reference_porosity=reference_porosity,
-        reference_tortuosity=reference_tortuosity,
-        output=MANIFEST_PATH,
-    )
-    figure_path = OUTPUT_DIR / "06-anchor-sweep-metrics.png"
     render_chart(
         rows,
         reference_porosity=reference_porosity,
         reference_tortuosity=reference_tortuosity,
         output=figure_path,
+    )
+    write_manifest(
+        provenance=provenance,
+        cached_paths=cached_paths,
+        derived_outputs=(csv_path, figure_path),
+        reference=reference,
+        reference_porosity=reference_porosity,
+        reference_tortuosity=reference_tortuosity,
+        output=MANIFEST_PATH,
     )
     print(f"Metrics : {csv_path.resolve()}")
     print(f"Manifest: {MANIFEST_PATH.resolve()}")
@@ -141,9 +159,11 @@ def generate_volumes(
     reference: np.ndarray,
     weights: Path,
     guidance_scale: float,
+    provenance: dict[str, object],
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
+    verify_provenance_inputs(provenance)
     if (
         generator.patch_size != reference.shape[0]
         or reference.shape != (generator.patch_size,) * 3
@@ -245,6 +265,7 @@ def write_csv(rows: list[dict], output: Path) -> None:
 def write_manifest(
     provenance: dict[str, object],
     cached_paths: list[Path],
+    derived_outputs: tuple[Path, ...],
     reference: np.ndarray,
     reference_porosity: float,
     reference_tortuosity: float,
@@ -253,6 +274,7 @@ def write_manifest(
     data = {
         **provenance,
         "cached_outputs": describe_files(cached_paths),
+        "outputs": describe_files(derived_outputs),
         "reference_shape": list(reference.shape),
         "axis": AXIS,
         "pore_phase": PORE_PHASE,

@@ -3,11 +3,23 @@
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from itertools import combinations
 from pathlib import Path
 
-from src.build import SCHEMA_VERSION, require_schema
+from src.config import SCHEMA_VERSION, find_train_config, require_schema
 from src.model.denoiser import validate_guidance_scale
 from src.utils import load_yaml
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+INFERENCE_SOURCES = tuple(
+    sorted(
+        {
+            *(PROJECT_ROOT / "src").rglob("*.py"),
+            *(PROJECT_ROOT / "scripts").glob("*.py"),
+            *(PROJECT_ROOT / "scripts" / "paper").glob("*.py"),
+        }
+    )
+)
 
 
 def sha256_file(path: str | Path) -> str:
@@ -28,6 +40,7 @@ def build_provenance(
     generation: Mapping[str, object],
     reference: str | Path | None = None,
     additional_inputs: Mapping[str, str | Path] | None = None,
+    source_files: Sequence[str | Path] = (),
 ) -> dict[str, object]:
     weight_path = Path(weights).resolve()
     config_path = find_train_config(weight_path)
@@ -45,6 +58,16 @@ def build_provenance(
             allow_nan=False,
         )
     )
+    generation_sources = describe_files(
+        tuple(
+            sorted(
+                {
+                    path.resolve()
+                    for path in (*INFERENCE_SOURCES, *map(Path, source_files))
+                }
+            )
+        )
+    )
     values: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "weights": str(weight_path),
@@ -57,6 +80,7 @@ def build_provenance(
             None if reference_path is None else sha256_file(reference_path)
         ),
         "additional_inputs": inputs,
+        "generation_sources": generation_sources,
         "generation": generation_values,
     }
     values["generation_signature"] = hashlib.sha256(
@@ -70,19 +94,66 @@ def build_provenance(
     return values
 
 
-def find_train_config(weights: str | Path) -> Path:
-    path = Path(weights).resolve()
-    config = next(
-        (
-            parent / "train.yaml"
-            for parent in path.parents
-            if (parent / "train.yaml").is_file()
-        ),
-        None,
+def verify_provenance_inputs(provenance: Mapping[str, object]) -> None:
+    records = [
+        {
+            "path": provenance.get("weights"),
+            "sha256": provenance.get("weight_sha256"),
+        },
+        {
+            "path": provenance.get("train_config"),
+            "sha256": provenance.get("train_config_sha256"),
+        },
+    ]
+    if provenance.get("reference") is not None:
+        records.append(
+            {
+                "path": provenance.get("reference"),
+                "sha256": provenance.get("reference_sha256"),
+            }
+        )
+    additional = provenance.get("additional_inputs")
+    if not isinstance(additional, dict):
+        raise TypeError("provenance additional_inputs must be an object.")
+    records.extend(additional.values())
+    sources = provenance.get("generation_sources")
+    if not isinstance(sources, list):
+        raise TypeError("provenance generation_sources must be a list.")
+    records.extend(sources)
+    for record in records:
+        _verify_file_record(record)
+
+
+def validate_output_paths(
+    provenance: Mapping[str, object],
+    outputs: Sequence[str | Path],
+) -> None:
+    input_paths = {
+        Path(str(provenance["weights"])).resolve(),
+        Path(str(provenance["train_config"])).resolve(),
+    }
+    reference = provenance.get("reference")
+    if reference is not None:
+        input_paths.add(Path(str(reference)).resolve())
+    records = provenance.get("additional_inputs")
+    if not isinstance(records, dict):
+        raise TypeError("provenance additional_inputs must be an object.")
+    input_paths.update(
+        Path(str(record["path"])).resolve() for record in records.values()
     )
-    if config is None:
-        raise FileNotFoundError(f"train.yaml was not found above weights file: {path}")
-    return config.resolve()
+    sources = provenance.get("generation_sources")
+    if not isinstance(sources, list):
+        raise TypeError("provenance generation_sources must be a list.")
+    input_paths.update(Path(str(record["path"])).resolve() for record in sources)
+
+    resolved_outputs = tuple(Path(path).resolve() for path in outputs)
+    if any(
+        _same_file(left, right) for left, right in combinations(resolved_outputs, 2)
+    ):
+        raise ValueError("paper output paths must be distinct.")
+    for output in resolved_outputs:
+        if any(_same_file(output, source) for source in input_paths):
+            raise ValueError(f"paper output path conflicts with an input: {output}")
 
 
 def file_record(path: str | Path) -> dict[str, str]:
@@ -103,6 +174,7 @@ def validate_manifest(
     *,
     label: str,
     cached_paths: Sequence[str | Path] | None = None,
+    output_paths: Sequence[str | Path] | None = None,
 ) -> dict[str, object]:
     manifest = Path(path)
     if not manifest.is_file():
@@ -121,6 +193,8 @@ def validate_manifest(
             raise ValueError(f"{label} manifest '{key}' does not match current inputs.")
     if cached_paths is not None:
         validate_cached_files(data.get("cached_outputs"), cached_paths, label=label)
+    if output_paths is not None:
+        validate_cached_files(data.get("outputs"), output_paths, label=label)
     return data
 
 
@@ -159,3 +233,24 @@ def _index_file_records(recorded: object, label: str) -> dict[Path, str]:
             raise ValueError(f"{label} manifest contains duplicate cached outputs.")
         indexed[path] = digest
     return indexed
+
+
+def _verify_file_record(record: object) -> None:
+    if not isinstance(record, dict):
+        raise TypeError("provenance file records must be JSON objects.")
+    path = record.get("path")
+    expected = record.get("sha256")
+    if not isinstance(path, str) or not isinstance(expected, str):
+        raise TypeError("provenance file record has invalid fields.")
+    actual = sha256_file(path)
+    if actual != expected:
+        raise ValueError(f"provenance input changed after preflight: {Path(path)}")
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    if left == right:
+        return True
+    try:
+        return left.exists() and right.exists() and left.samefile(right)
+    except OSError:
+        return False

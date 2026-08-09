@@ -12,7 +12,12 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from provenance import build_provenance, file_record
+from provenance import (
+    build_provenance,
+    file_record,
+    validate_output_paths,
+    verify_provenance_inputs,
+)
 
 from src.build import load_generator
 
@@ -37,9 +42,12 @@ def main() -> None:
         weights,
         args.guidance_scale,
         generation={"seed": SEED, "output_size": REFERENCE_SIZE},
+        source_files=(__file__,),
     )
+    validate_output_paths(provenance, (OUTPUT, MANIFEST))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
+    verify_provenance_inputs(provenance)
     if generator.patch_size != REFERENCE_SIZE:
         raise ValueError(
             f"paper reference requires patch size {REFERENCE_SIZE}, "
@@ -49,9 +57,13 @@ def main() -> None:
     torch.manual_seed(SEED)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(SEED)
-    volume = generator.generate(
-        guidance_scale=args.guidance_scale,
-    ).to(torch.uint8).numpy()
+    volume = (
+        generator.generate(
+            guidance_scale=args.guidance_scale,
+        )
+        .to(torch.uint8)
+        .numpy()
+    )
     payload = volume.tobytes()
     digest = hashlib.sha256(payload).hexdigest()
 
