@@ -6,8 +6,6 @@
 #   transverse_2   Axis 2 is the unique direction.
 #   directional    Preserve axis identities; allow flips and 180-degree rotations.
 
-schema_version: 2
-
 data:
   folders:
     0: [data]
@@ -61,8 +59,6 @@ connectivity:
   normal_transition_loss_weight: 0.10
 
 vf:
-  target_sampling: per_crop_empirical
-  loss: total_variation
   loss_weight: 1.0
 
 scale_consistency:

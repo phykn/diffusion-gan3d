@@ -8,7 +8,12 @@ import torch
 import torch.nn.functional as F
 
 from src.anchor import PlaneAnchor
-from src.build import build_models, build_trainer, load_generator
+from src.build import (
+    build_models,
+    build_trainer,
+    load_generator,
+    validate_anchor_capacity,
+)
 from src.diffusion import Diffusion
 from src.generate import Generator
 from src.model.denoiser import Denoiser3D
@@ -100,7 +105,7 @@ def test_anchor_aware_weights_accept_soft_plane_condition(
     assert int(vol.max()) < cfg["data"]["num_phases"]
 
 
-def test_generator_disables_anchors_when_training_never_reaches_start(
+def test_generator_accepts_anchors_when_training_never_reaches_start(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
@@ -112,34 +117,15 @@ def test_generator_disables_anchors_when_training_never_reaches_start(
     weights = save_weights(run_dir, build_ema(denoiser))
 
     generator = load_generator(weights, device=torch.device("cpu"))
+    anchor = PlaneAnchor(
+        image=torch.zeros(8, 8, dtype=torch.uint8),
+        axis=0,
+        index=4,
+    )
 
-    assert not generator.anchor_enabled
+    volume = generator.generate(anchors=(anchor,))
 
-
-def test_generator_disables_zero_initialized_anchor_adapter(
-    tmp_path: Path,
-) -> None:
-    cfg = _config(tmp_path)
-    cfg["anchor"]["training_probability"] = 1.0
-    run_dir = tmp_path / "run" / "untrained_anchor"
-    run_dir.mkdir(parents=True)
-    save_yaml(run_dir / "train.yaml", cfg)
-    denoiser, _, _ = build_models(cfg)
-    weights = save_weights(run_dir, build_ema(denoiser))
-
-    generator = load_generator(weights, device=torch.device("cpu"))
-
-    assert not generator.anchor_enabled
-
-
-def test_build_trainer_rejects_config_without_schema_version(
-    tmp_path: Path,
-) -> None:
-    cfg = _config(tmp_path)
-    cfg.pop("schema_version")
-
-    with pytest.raises(ValueError, match="schema_version must be 2"):
-        build_trainer(cfg, torch.device("cpu"))
+    assert torch.all(volume[4] == 0)
 
 
 def test_build_trainer_rejects_anchor_batch_larger_than_real_batch(
@@ -153,15 +139,29 @@ def test_build_trainer_rejects_anchor_batch_larger_than_real_batch(
         build_trainer(cfg, torch.device("cpu"))
 
 
-def test_build_trainer_rejects_teacher_bank_too_small_for_multi_anchor(
+def test_build_trainer_rejects_teacher_bank_smaller_than_one_largest_entry(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
     cfg["anchor"]["training_probability"] = 1.0
     cfg["train"]["volume_sizes"] = (128,)
 
-    with pytest.raises(ValueError, match="teacher_bank_size_mib.*at least"):
+    with pytest.raises(ValueError, match="one largest teacher volume"):
         build_trainer(cfg, torch.device("cpu"))
+
+
+def test_anchor_capacity_accepts_one_largest_teacher_entry(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    cfg["anchor"]["training_probability"] = 1.0
+    cfg["anchor"]["teacher_bank_size_mib"] = 2.01
+    cfg["train"]["volume_sizes"] = (128,)
+
+    validate_anchor_capacity(
+        data=cfg["data"],
+        train=cfg["train"],
+        anchor=cfg["anchor"],
+        anchor_start_step=0,
+    )
 
 
 def test_generator_prepares_vf_on_its_device() -> None:
@@ -317,9 +317,44 @@ def test_guidance_scale_routes_direct_and_scaled_predictions() -> None:
     assert all(call[3] is vf for call in scaled_model.guidance_inputs)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_amp_guidance_runs_direct_and_scaled_with_float32_diffusion_state() -> None:
+    device = torch.device("cuda")
+    model = Denoiser3D(
+        num_phases=3,
+        base_channels=4,
+        channel_multipliers=(1, 2),
+        embedding_channels=8,
+        latent_channels=4,
+    ).eval().to(device)
+    generator = _generator(
+        model,
+        Diffusion(2).to(device),
+        patch_size=4,
+        device=device,
+        use_amp=True,
+    )
+
+    direct = generator.generate(
+        vf=(0.5, 0.1, 0.4),
+        guidance_scale=1.5,
+    )
+    scaled = ScaledGenerator(generator).generate(
+        shape=4,
+        overlap=0,
+        vf=(0.5, 0.1, 0.4),
+        storage="cuda",
+        progress=False,
+        guidance_scale=1.5,
+    )
+
+    assert direct.shape == scaled.shape == (4, 4, 4)
+    assert direct.dtype == scaled.dtype == torch.uint8
+
+
 def test_guided_sampling_preserves_hard_anchor() -> None:
     model = _GuidanceTraceModel()
-    generator = _generator(model, Diffusion(2), anchor_enabled=True)
+    generator = _generator(model, Diffusion(2))
     anchor = PlaneAnchor(
         image=torch.zeros(4, 4, dtype=torch.long),
         axis=0,
@@ -441,7 +476,6 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
 
     assert vol.shape == (6, 4, 4)
     assert vol.dtype == torch.uint8
-    assert generator.anchor_enabled is False
     assert stats is not None
     assert stats.tile_count == 2
     assert diffusion.sample_calls == 0
@@ -477,7 +511,7 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
 def test_parallel_anchors_use_one_combined_prediction_per_step() -> None:
     model = _AnchorTraceModel()
     diffusion = _TraceDiffusion(timesteps=3)
-    generator = _generator(model, diffusion, anchor_enabled=True)
+    generator = _generator(model, diffusion)
     anchors = (
         PlaneAnchor(
             image=torch.zeros(4, 4, dtype=torch.long),
@@ -512,7 +546,7 @@ def test_parallel_anchors_use_one_combined_prediction_per_step() -> None:
 
 def test_anchor_strength_scales_combined_mask_for_every_step() -> None:
     model = _AnchorTraceModel()
-    generator = _generator(model, Diffusion(2), anchor_enabled=True)
+    generator = _generator(model, Diffusion(2))
     anchor = PlaneAnchor(
         image=torch.zeros(4, 4, dtype=torch.long),
         axis=0,
@@ -534,7 +568,6 @@ def test_hard_anchor_is_exact_even_when_model_predicts_another_phase() -> None:
     generator = _generator(
         _OptionalAnchorPhaseModel(phase=2),
         Diffusion(2),
-        anchor_enabled=True,
     )
     anchor = PlaneAnchor(
         image=torch.zeros(4, 4, dtype=torch.long),
@@ -552,7 +585,6 @@ def test_zero_anchor_strength_matches_unconditioned_rng_path() -> None:
     generator = _generator(
         _OptionalAnchorPhaseModel(phase=2),
         Diffusion(3),
-        anchor_enabled=False,
     )
     anchor = PlaneAnchor(
         image=torch.zeros(4, 4, dtype=torch.long),
@@ -573,7 +605,7 @@ def test_zero_anchor_strength_matches_unconditioned_rng_path() -> None:
 
 @pytest.mark.parametrize("strength", (-0.1, 1.1, float("nan"), True))
 def test_anchor_strength_rejects_invalid_values(strength: object) -> None:
-    generator = _generator(_AnchorTraceModel(), Diffusion(1), anchor_enabled=True)
+    generator = _generator(_AnchorTraceModel(), Diffusion(1))
 
     with pytest.raises(ValueError, match="anchor_strength"):
         generator.generate_probs(anchor_strength=strength)
@@ -582,7 +614,7 @@ def test_anchor_strength_rejects_invalid_values(strength: object) -> None:
 def test_mixed_axis_anchors_keep_single_combined_prediction() -> None:
     model = _AnchorTraceModel()
     diffusion = _TraceDiffusion(timesteps=2)
-    generator = _generator(model, diffusion, anchor_enabled=True)
+    generator = _generator(model, diffusion)
     anchors = (
         PlaneAnchor(
             image=torch.zeros(4, 4, dtype=torch.long),
@@ -1799,9 +1831,9 @@ class _NoiseTraceDiffusion(_TraceDiffusion):
 def _generator(
     model: torch.nn.Module,
     diffusion: Diffusion,
-    anchor_enabled: bool = False,
     patch_size: int = 4,
     device: torch.device | None = None,
+    use_amp: bool = False,
 ) -> Generator:
     device = torch.device("cpu") if device is None else device
     return Generator(
@@ -1811,14 +1843,12 @@ def _generator(
         patch_size=patch_size,
         num_phases=3,
         latent_channels=4,
-        anchor_enabled=anchor_enabled,
-        use_amp=False,
+        use_amp=use_amp,
     )
 
 
 def _config(root: Path) -> dict:
     return {
-        "schema_version": 2,
         "data": {
             "folders": {axis: root / str(axis) for axis in (0, 1, 2)},
             "crop_size": 8,
@@ -1862,8 +1892,6 @@ def _config(root: Path) -> dict:
             "reversal_invariant": True,
         },
         "vf": {
-            "target_sampling": "per_crop_empirical",
-            "loss": "total_variation",
             "loss_weight": 1.0,
         },
         "scale_consistency": {

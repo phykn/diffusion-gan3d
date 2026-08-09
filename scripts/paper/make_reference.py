@@ -16,7 +16,6 @@ from provenance import (
     build_provenance,
     file_record,
     validate_output_paths,
-    verify_provenance_inputs,
 )
 
 from src.build import load_generator
@@ -42,12 +41,10 @@ def main() -> None:
         weights,
         args.guidance_scale,
         generation={"seed": SEED, "output_size": REFERENCE_SIZE},
-        source_files=(__file__,),
     )
     validate_output_paths(provenance, (OUTPUT, MANIFEST))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
-    verify_provenance_inputs(provenance)
     if generator.patch_size != REFERENCE_SIZE:
         raise ValueError(
             f"paper reference requires patch size {REFERENCE_SIZE}, "

@@ -104,7 +104,6 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     class FakeGenerator:
         patch_size = 4
         num_phases = 3
-        anchor_enabled = False
 
         def generate(self, *, anchors, anchor_strength, guidance_scale):
             calls.append((anchors, anchor_strength, guidance_scale))
@@ -252,7 +251,6 @@ def _load_script(filename: str):
 
 def _config(root: Path) -> dict:
     return {
-        "schema_version": 2,
         "data": {
             "folders": {axis: (root / str(axis),) for axis in (0, 1, 2)},
             "crop_size": 16,
@@ -298,8 +296,6 @@ def _config(root: Path) -> dict:
             "reversal_invariant": True,
         },
         "vf": {
-            "target_sampling": "per_crop_empirical",
-            "loss": "total_variation",
             "loss_weight": 1.0,
         },
         "scale_consistency": {

@@ -112,10 +112,12 @@ of `1.0`. Generator-invoking paper CLIs also require an explicit `--weight`;
 they never select the newest run implicitly, so cached metrics and assets
 remain tied to a known checkpoint.
 
-Paper manifests include hashes of the checkpoint, configuration, reference
-inputs, generation code, cached volumes, and derived tables or figures.
-Generation aborts when any preflight input changes or an output aliases an
-input. Prefer an immutable numbered checkpoint for long evaluations.
+Paper manifests record resolved paths and SHA-256 hashes for the checkpoint,
+training configuration, reference, and any additional explicit inputs, along
+with guidance and generation arguments/signature. Cached volumes and derived
+outputs are recorded as resolved paths; reuse requires the exact path set to
+exist. Output paths are rejected when they alias an explicit input. Prefer an
+immutable numbered checkpoint for long evaluations.
 
 The `gt` argument supplied to script `03`, or to script `04` with active
 anchors, is the reference volume from which anchor planes are selected.

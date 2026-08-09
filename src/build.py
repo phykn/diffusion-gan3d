@@ -6,14 +6,13 @@ from torch import nn
 from torch.utils.data import DataLoader, RandomSampler
 
 from . import AXES
-from .config import find_train_config, get_schedule_steps, require_schema
+from .config import find_train_config, get_schedule_steps
 from .dataset import BatchStream, SliceDataset
 from .diffusion import Diffusion
 from .generate import Generator
 from .model.critic import ConnectivityCritic2D, PairCritic2D
 from .model.denoiser import Denoiser3D
 from .train.augment import CriticAugment
-from .train.connect import TEACHER_MIN_ENTRIES
 from .train.ema import build_ema
 from .train.engine import Trainer, TrainerComponents, TrainerSettings
 from .train.weights import load_weights
@@ -187,7 +186,6 @@ def load_generator(
     path = Path(weights).resolve()
     config = find_train_config(path)
     cfg = load_yaml(config)
-    require_schema(cfg)
     denoiser = build_denoiser(cfg, checkpointing=False).to(device)
     try:
         load_weights(path, denoiser)
@@ -198,14 +196,8 @@ def load_generator(
     denoiser.eval()
     data = cfg["data"]
     model = cfg["model"]
-    anchor = cfg["anchor"]
     train = cfg["train"]
     use_amp = train["mixed_precision"] and device.type == "cuda"
-    anchor_start_step, _ = get_schedule_steps(
-        anchor,
-        "anchor",
-        train["total_steps"],
-    )
     return Generator(
         denoiser,
         build_diffusion(cfg).to(device),
@@ -213,17 +205,11 @@ def load_generator(
         patch_size=data["input_size"],
         num_phases=data["num_phases"],
         latent_channels=model["latent_channels"],
-        anchor_enabled=(
-            anchor["training_probability"] > 0.0
-            and anchor_start_step < train["total_steps"]
-            and bool(torch.count_nonzero(denoiser.anchor_input.weight))
-        ),
         use_amp=use_amp,
     )
 
 
 def build_trainer(cfg: dict, device: torch.device) -> Trainer:
-    require_schema(cfg)
     train = cfg["train"]
     data = cfg["data"]
     model = cfg["model"]
@@ -236,12 +222,10 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     anchor_start_step, anchor_ramp_steps = get_schedule_steps(
         anchor,
         "anchor",
-        train["total_steps"],
     )
     scale_start_step, scale_ramp_steps = get_schedule_steps(
         scale_consistency,
         "scale_consistency",
-        train["total_steps"],
     )
     validate_anchor_capacity(
         data=data,
@@ -249,10 +233,6 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         anchor=anchor,
         anchor_start_step=anchor_start_step,
     )
-    if vf["target_sampling"] != "per_crop_empirical":
-        raise ValueError("vf.target_sampling must be 'per_crop_empirical'.")
-    if vf["loss"] != "total_variation":
-        raise ValueError("vf.loss must be 'total_variation'.")
     denoiser, critics, connectivity_critic = build_models(cfg)
     denoiser = denoiser.to(device)
     critics = critics.to(device)
@@ -360,12 +340,12 @@ def validate_anchor_capacity(
 
     largest = max(train["volume_sizes"])
     entry_bytes = largest**3 + data["input_size"] ** 2 + 4 * data["num_phases"]
-    required_bytes = TEACHER_MIN_ENTRIES * entry_bytes
+    required_bytes = entry_bytes
     budget_bytes = round(anchor["teacher_bank_size_mib"] * 1024**2)
     if budget_bytes < required_bytes:
         required_mib = required_bytes / 1024**2
         raise ValueError(
             "anchor.teacher_bank_size_mib is too small for "
-            f"{TEACHER_MIN_ENTRIES} largest teacher volumes; "
+            "one largest teacher volume; "
             f"at least {required_mib:.2f} MiB is required."
         )

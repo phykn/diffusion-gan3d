@@ -104,8 +104,6 @@ def main() -> None:
     shape = tuple(generator.patch_size * count for count in args.blocks)
     if anchor_count is not None and anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
-    if anchor_count and not generator.anchor_enabled:
-        raise ValueError("selected weight was trained with anchors disabled.")
     scaled = ScaledGenerator(generator)
     plan = scaled.plan(shape, overlap)
     print_plan(plan, device)

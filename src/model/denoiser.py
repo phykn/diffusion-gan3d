@@ -232,7 +232,7 @@ class Denoiser3D(nn.Module):
         baseline = unconditional.to(torch.float32)
         guided = conditional.to(torch.float32)
         guided.sub_(baseline).mul_(guidance_scale).add_(baseline)
-        return self.decode(guided).to(unconditional.dtype)
+        return self.decode(guided).to(x_current.dtype)
 
     @staticmethod
     def decode(logits: torch.Tensor) -> torch.Tensor:

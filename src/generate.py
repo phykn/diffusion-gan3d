@@ -43,7 +43,6 @@ class Generator:
         patch_size: int,
         num_phases: int,
         latent_channels: int,
-        anchor_enabled: bool,
         use_amp: bool,
     ) -> None:
         self.model = model
@@ -52,7 +51,6 @@ class Generator:
         self.patch_size = patch_size
         self.num_phases = num_phases
         self.latent_channels = latent_channels
-        self.anchor_enabled = anchor_enabled
         self.use_amp = use_amp
 
     def predict(
@@ -149,9 +147,6 @@ class Generator:
                 device=self.device,
                 dtype=initial_noise.dtype,
             )
-        if anchor is not None and not self.anchor_enabled:
-            raise ValueError("selected weights were trained with anchors disabled.")
-
         conditions = {}
         known_clean: torch.Tensor | None = None
         known_mask: torch.Tensor | None = None

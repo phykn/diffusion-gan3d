@@ -2,34 +2,33 @@ from pathlib import Path
 
 import pytest
 
-from src.config import find_train_config, get_schedule_steps, require_schema
+from src.config import find_train_config, get_schedule_steps
 from src.utils import load_yaml, save_yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_schema_and_schedule_contracts() -> None:
-    require_schema({"schema_version": 2})
+def test_schedule_accepts_a_ramp_past_the_training_horizon() -> None:
     assert get_schedule_steps(
         {"start_step": 10, "ramp_steps": 20},
         "anchor",
-        total_steps=30,
     ) == (10, 20)
+    assert get_schedule_steps(
+        {"start_step": 10, "ramp_steps": 21},
+        "anchor",
+    ) == (10, 21)
 
-    with pytest.raises(ValueError, match="schema_version must be 2"):
-        require_schema({})
-    with pytest.raises(ValueError, match="must not exceed total steps"):
+    with pytest.raises(ValueError, match="non-negative integer"):
         get_schedule_steps(
-            {"start_step": 10, "ramp_steps": 21},
+            {"start_step": -1, "ramp_steps": 20},
             "anchor",
-            total_steps=30,
         )
 
 
 def test_find_train_config_walks_from_numbered_checkpoint(tmp_path: Path) -> None:
     config = tmp_path / "run" / "train.yaml"
     config.parent.mkdir()
-    config.write_text("schema_version: 2\n", encoding="utf-8")
+    config.write_text("train: {}\n", encoding="utf-8")
     weight = config.parent / "checkpoints" / "step_00000100" / "generator.pt"
     weight.parent.mkdir(parents=True)
     weight.write_bytes(b"weights")

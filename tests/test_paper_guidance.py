@@ -235,14 +235,14 @@ def test_generation_helper_accepts_guidance_explicitly(filename: str) -> None:
     assert "guidance_scale" in {argument.arg for argument in function.args.args}
 
 
-def test_common_manifest_rejects_changed_inputs_and_cache(tmp_path: Path) -> None:
+def test_common_manifest_rejects_changed_inputs_and_cache_paths(tmp_path: Path) -> None:
     module = _load_script("provenance.py")
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     weights = run_dir / "generator.pt"
     weights.write_bytes(b"weights-v1")
     config = run_dir / "train.yaml"
-    config.write_text("schema_version: 2\n", encoding="utf-8")
+    config.write_text("train: {}\n", encoding="utf-8")
     reference = tmp_path / "reference.tiff"
     reference.write_bytes(b"reference-v1")
     cached = tmp_path / "cached.tiff"
@@ -260,8 +260,8 @@ def test_common_manifest_rejects_changed_inputs_and_cache(tmp_path: Path) -> Non
     }
     manifest.write_text(json.dumps(data), encoding="utf-8")
 
-    assert provenance["schema_version"] == 2
     assert provenance["generation"]["blocks"] == [2, 2, 2]
+    assert data["cached_outputs"] == [str(cached.resolve())]
     module.validate_manifest(
         manifest,
         provenance,
@@ -291,7 +291,7 @@ def test_common_manifest_rejects_changed_inputs_and_cache(tmp_path: Path) -> Non
         module.validate_manifest(manifest, changed, label="test reuse")
     reference.write_bytes(b"reference-v1")
 
-    config.write_text("schema_version: 2\nchanged: true\n", encoding="utf-8")
+    config.write_text("train:\n  changed: true\n", encoding="utf-8")
     changed = module.build_provenance(
         weights,
         1.0,
@@ -300,10 +300,26 @@ def test_common_manifest_rejects_changed_inputs_and_cache(tmp_path: Path) -> Non
     )
     with pytest.raises(ValueError, match="train_config_sha256"):
         module.validate_manifest(manifest, changed, label="test reuse")
-    config.write_text("schema_version: 2\n", encoding="utf-8")
+    config.write_text("train: {}\n", encoding="utf-8")
 
     cached.write_bytes(b"cached-v2")
-    with pytest.raises(ValueError, match="cached output SHA-256"):
+    module.validate_manifest(
+        manifest,
+        provenance,
+        label="test reuse",
+        cached_paths=(cached,),
+    )
+    other = tmp_path / "other.tiff"
+    other.write_bytes(b"other")
+    with pytest.raises(ValueError, match="cached output paths"):
+        module.validate_manifest(
+            manifest,
+            provenance,
+            label="test reuse",
+            cached_paths=(other,),
+        )
+    cached.unlink()
+    with pytest.raises(FileNotFoundError, match="cached output was not found"):
         module.validate_manifest(
             manifest,
             provenance,
@@ -311,41 +327,22 @@ def test_common_manifest_rejects_changed_inputs_and_cache(tmp_path: Path) -> Non
             cached_paths=(cached,),
         )
 
-    config.write_text("schema_version: 1\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="schema_version must be 2"):
-        module.build_provenance(
-            weights,
-            1.0,
-            generation={"blocks": (2, 2, 2)},
-            reference=reference,
-        )
 
-
-def test_provenance_verifies_sources_and_rejects_output_collision(
-    tmp_path: Path,
-) -> None:
+def test_provenance_rejects_output_collision(tmp_path: Path) -> None:
     module = _load_script("provenance.py")
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     weights = run_dir / "generator.pt"
     weights.write_bytes(b"weights")
-    (run_dir / "train.yaml").write_text("schema_version: 2\n", encoding="utf-8")
-    source = tmp_path / "sampler.py"
-    source.write_text("VERSION = 1\n", encoding="utf-8")
+    (run_dir / "train.yaml").write_text("train: {}\n", encoding="utf-8")
     provenance = module.build_provenance(
         weights,
         1.0,
         generation={"seed": 0},
-        source_files=(source,),
     )
 
-    module.verify_provenance_inputs(provenance)
     with pytest.raises(ValueError, match="conflicts with an input"):
         module.validate_output_paths(provenance, (weights,))
-
-    source.write_text("VERSION = 2\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="changed after preflight"):
-        module.verify_provenance_inputs(provenance)
 
 
 def test_overlap_metrics_report_degenerate_outputs_without_crashing() -> None:
@@ -383,7 +380,7 @@ def test_anchor_asset_writes_generation_sidecar(
     weight = run_dir / "generator.pt"
     weight.write_bytes(b"anchor-weights")
     (run_dir / "train.yaml").write_text(
-        "schema_version: 2\n",
+        "train: {}\n",
         encoding="utf-8",
     )
     sample = tmp_path / "sample.png"
@@ -391,7 +388,6 @@ def test_anchor_asset_writes_generation_sidecar(
 
     class FakeGenerator:
         patch_size = 4
-        anchor_enabled = True
 
         def generate(self, *, anchors, guidance_scale):
             assert len(anchors) == 1
@@ -432,7 +428,6 @@ def test_anchor_asset_writes_generation_sidecar(
     assert metadata["weights"] == str(weight.resolve())
     assert len(metadata["weight_sha256"]) == 64
     assert len(metadata["train_config_sha256"]) == 64
-    assert metadata["schema_version"] == 2
     assert metadata["guidance_scale"] == 1.5
     assert len(metadata["reference_sha256"]) == 64
     assert len(metadata["generation_signature"]) == 64
@@ -451,7 +446,7 @@ def test_scale_asset_writes_generation_sidecar(
     weight = run_dir / "generator.pt"
     weight.write_bytes(b"scale-weights")
     (run_dir / "train.yaml").write_text(
-        "schema_version: 2\n",
+        "train: {}\n",
         encoding="utf-8",
     )
     sample = tmp_path / "sample.png"
@@ -459,7 +454,6 @@ def test_scale_asset_writes_generation_sidecar(
 
     class FakeGenerator:
         patch_size = 4
-        anchor_enabled = True
 
         def generate(self, *, anchors, guidance_scale):
             assert len(anchors) == 1
@@ -509,7 +503,6 @@ def test_scale_asset_writes_generation_sidecar(
     assert metadata["weights"] == str(weight.resolve())
     assert len(metadata["weight_sha256"]) == 64
     assert len(metadata["train_config_sha256"]) == 64
-    assert metadata["schema_version"] == 2
     assert metadata["guidance_scale"] == 1.75
     assert len(metadata["reference_sha256"]) == 64
     assert len(metadata["generation_signature"]) == 64

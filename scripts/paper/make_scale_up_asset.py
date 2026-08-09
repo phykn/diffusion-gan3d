@@ -29,7 +29,6 @@ from provenance import (
     build_provenance,
     file_record,
     validate_output_paths,
-    verify_provenance_inputs,
 )
 
 from src.anchor import PlaneAnchor
@@ -88,17 +87,12 @@ def main() -> None:
             "source_crop_size": CROP_SIZE,
         },
         reference=SAMPLE_PATH,
-        source_files=(__file__,),
     )
     output = OUTPUT_DIR / "05-scale-up.png"
     metadata = output.with_suffix(".json")
     validate_output_paths(provenance, (output, metadata))
     generator = load_generator(weights, device=device)
-    if not generator.anchor_enabled:
-        raise ValueError("selected weights were trained with anchors disabled.")
-
     anchor = load_center_roi(generator.patch_size)
-    verify_provenance_inputs(provenance)
     anchor_index = generator.patch_size // 2
     torch.manual_seed(SEED)
     if device.type == "cuda":

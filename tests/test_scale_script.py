@@ -67,7 +67,6 @@ def test_main_prints_plan_before_scaled_generation(
     class FakeGenerator:
         patch_size = 4
         num_phases = 3
-        anchor_enabled = True
 
     class FakeScaled:
         stats = None
@@ -137,7 +136,6 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
     class FakeGenerator:
         patch_size = 4
         num_phases = 3
-        anchor_enabled = False
 
         def generate(self, *, guidance_scale):
             events.append(("base", guidance_scale))

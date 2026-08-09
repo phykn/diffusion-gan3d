@@ -1123,7 +1123,6 @@ def _config(
     volume_sizes: tuple[int, ...] | None = None,
 ) -> TrainConfig:
     return TrainConfig(
-        schema_version=2,
         data=data,
         model=model,
         diffusion=DiffusionConfig(
@@ -1136,8 +1135,6 @@ def _config(
         conditioning=(ConditioningConfig() if conditioning is None else conditioning),
         vf=(
             VfConfig(
-                target_sampling="per_crop_empirical",
-                loss="total_variation",
                 loss_weight=1.0,
             )
             if vf is None

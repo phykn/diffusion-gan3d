@@ -118,7 +118,6 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
     save_yaml(
         config,
         {
-            "schema_version": 2,
             "data": {
                 "folders": folders,
                 "crop_size": 8,
@@ -168,8 +167,6 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
                 "reversal_invariant": True,
             },
             "vf": {
-                "target_sampling": "per_crop_empirical",
-                "loss": "total_variation",
                 "loss_weight": 1.0,
             },
             "scale_consistency": {

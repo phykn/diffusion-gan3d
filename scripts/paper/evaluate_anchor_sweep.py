@@ -24,7 +24,6 @@ from provenance import (
     sha256_file,
     validate_manifest,
     validate_output_paths,
-    verify_provenance_inputs,
 )
 
 from src.anchor import PlaneAnchor
@@ -70,7 +69,6 @@ def main() -> None:
         args.guidance_scale,
         generation=generation,
         reference=REFERENCE_PATH,
-        source_files=(__file__,),
     )
     if provenance["reference_sha256"] != reference_digest:
         raise ValueError("paper reference changed before provenance was recorded.")
@@ -163,14 +161,11 @@ def generate_volumes(
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
-    verify_provenance_inputs(provenance)
     if (
         generator.patch_size != reference.shape[0]
         or reference.shape != (generator.patch_size,) * 3
     ):
         raise ValueError("reference volume must match the generator patch size.")
-    if not generator.anchor_enabled:
-        raise ValueError("selected weights were trained with anchors disabled.")
     reference_tensor = torch.from_numpy(reference).to(torch.long)
     slices = reference_tensor.movedim(AXIS, 0)
 

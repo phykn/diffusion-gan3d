@@ -286,6 +286,29 @@ class Denoiser3DTest(unittest.TestCase):
         self.assertIs(calls[1][3], vf)
         self.assertIsNone(calls[1][4])
 
+    def test_guidance_returns_the_current_state_dtype(self):
+        model = _denoiser()
+        inputs = torch.randn(1, 3, 4, 4, 4, dtype=torch.float32)
+        time = torch.ones(1)
+        latent = torch.randn(1, 4)
+        vf = torch.tensor([[0.2, 0.3, 0.5]])
+        original = model.predict_logits
+
+        def half_logits(*args, **kwargs):
+            return original(*args, **kwargs).to(torch.float16)
+
+        model.predict_logits = half_logits
+
+        guided = model.predict_guided(
+            inputs,
+            time,
+            latent,
+            guidance_scale=1.5,
+            vf=vf,
+        )
+
+        self.assertEqual(guided.dtype, inputs.dtype)
+
     def test_vf_presence_mask_matches_exact_null_and_conditioned_paths(self):
         model = _denoiser()
         inputs = torch.randn(3, 3, 4, 4, 4)

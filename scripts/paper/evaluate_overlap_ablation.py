@@ -20,7 +20,6 @@ from provenance import (
     build_provenance,
     describe_files,
     validate_output_paths,
-    verify_provenance_inputs,
 )
 
 from src.build import load_generator
@@ -57,7 +56,6 @@ def main() -> None:
             "default_overlap": DEFAULT_SCALE_OVERLAP,
             "seam_exclusion_radius": SEAM_EXCLUSION_RADIUS,
         },
-        source_files=(__file__,),
     )
     validate_output_paths(
         provenance,
@@ -66,7 +64,6 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
-    verify_provenance_inputs(provenance)
     scaled = ScaledGenerator(generator)
     diagnostic = importlib.import_module("scripts.04_check_scale_up")
     rows: list[dict[str, float | int]] = []

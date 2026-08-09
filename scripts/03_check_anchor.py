@@ -80,9 +80,6 @@ def main() -> None:
     print(f"GT      : {args.gt.resolve()}", flush=True)
 
     generator = load_generator(weight, device=device)
-    if anchor_count > 0 and not generator.anchor_enabled:
-        raise ValueError("selected weight was trained with anchors disabled.")
-
     if anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
     target = load_volume(
