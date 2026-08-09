@@ -57,6 +57,12 @@ def main() -> None:
         help="anchor conditioning strength from 0 to 1 (default: 1)",
     )
     parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=1.0,
+        help="classifier-free guidance scale (default: 1)",
+    )
+    parser.add_argument(
         "--napari",
         action="store_true",
         help="show the complete generated phase volume in Napari",
@@ -106,6 +112,7 @@ def main() -> None:
     gen = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
+        guidance_scale=args.guidance_scale,
     )
     print("Status   : complete", flush=True)
     gen_slices = get_slices(gen, AXIS)

@@ -38,17 +38,6 @@ def main() -> None:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available.")
 
-    train = cfg["train"]
-    for name in (
-        "generator",
-        "critic_0",
-        "critic_1",
-        "critic_2",
-        "critic_c",
-    ):
-        path = train.get(name)
-        if path is not None:
-            print(f"Loading {name} checkpoint: {path}")
     trainer = build_trainer(cfg, device)
     if args.run_dir is None:
         run_dir = make_run_dir(RUN_ROOT)

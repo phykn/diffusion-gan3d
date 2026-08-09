@@ -13,50 +13,35 @@ from .model.critic import ConnectivityCritic2D, PairCritic2D
 from .model.denoiser import Denoiser3D
 from .train.augment import CriticAugment
 from .train.ema import build_ema
-from .train.engine import Trainer
+from .train.engine import Trainer, TrainerComponents, TrainerSettings
 from .train.weights import load_weights
 from .utils import load_yaml
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
+SCHEMA_VERSION = 2
 
 
-def get_config_value(section: dict, name: str, legacy_name: str) -> object:
-    if name in section and legacy_name in section:
-        raise ValueError(f"use only {name!r}; remove legacy {legacy_name!r}.")
-    if name in section:
-        return section[name]
-    if legacy_name in section:
-        return section[legacy_name]
-    raise KeyError(name)
+def require_schema(cfg: dict) -> None:
+    if cfg.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(
+            f"train config schema_version must be {SCHEMA_VERSION}; "
+            "old training configs are not supported."
+        )
 
 
-def get_anchor_steps(anchor: dict, total_steps: int) -> tuple[int, int]:
-    uses_steps = "start_step" in anchor or "ramp_steps" in anchor
-    uses_ratios = "start_ratio" in anchor or "ramp_ratio" in anchor
-    if uses_steps and uses_ratios:
-        raise ValueError("anchor step and ratio fields cannot be mixed.")
-    if uses_steps:
-        start = anchor.get("start_step")
-        ramp = anchor.get("ramp_steps")
-        for name, value in (("start_step", start), ("ramp_steps", ramp)):
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise ValueError(f"anchor.{name} must be a non-negative integer.")
-        if start + ramp > total_steps:
-            raise ValueError("anchor start and ramp steps must not exceed total steps.")
-        return start, ramp
-
-    start_ratio = anchor.get("start_ratio")
-    ramp_ratio = anchor.get("ramp_ratio")
-    for name, value in (("start_ratio", start_ratio), ("ramp_ratio", ramp_ratio)):
-        if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not 0.0 <= value <= 1.0
-        ):
-            raise ValueError(f"anchor.{name} must be between zero and one.")
-    if start_ratio + ramp_ratio > 1.0:
-        raise ValueError("anchor start and ramp ratios must not exceed one.")
-    return round(total_steps * start_ratio), round(total_steps * ramp_ratio)
+def get_schedule_steps(
+    section: dict,
+    name: str,
+    total_steps: int,
+) -> tuple[int, int]:
+    start = section["start_step"]
+    ramp = section["ramp_steps"]
+    for field, value in (("start_step", start), ("ramp_steps", ramp)):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{name}.{field} must be a non-negative integer.")
+    if start + ramp > total_steps:
+        raise ValueError(f"{name} start and ramp steps must not exceed total steps.")
+    return start, ramp
 
 
 def find_slices(
@@ -233,6 +218,7 @@ def load_generator(
     if config is None:
         raise FileNotFoundError(f"train.yaml was not found above weights file: {path}")
     cfg = load_yaml(config)
+    require_schema(cfg)
     denoiser = build_denoiser(cfg, checkpointing=False).to(device)
     try:
         load_weights(path, denoiser)
@@ -246,11 +232,10 @@ def load_generator(
     anchor = cfg["anchor"]
     train = cfg["train"]
     use_amp = train["mixed_precision"] and device.type == "cuda"
-    anchor_start_step, _ = get_anchor_steps(anchor, train["total_steps"])
-    anchor_dropout = get_config_value(
+    anchor_start_step, _ = get_schedule_steps(
         anchor,
-        "dropout_prob",
-        "dropout_probability",
+        "anchor",
+        train["total_steps"],
     )
     return Generator(
         denoiser,
@@ -260,24 +245,17 @@ def load_generator(
         num_phases=data["num_phases"],
         latent_channels=model["latent_channels"],
         anchor_enabled=(
-            anchor_dropout < 1.0 and anchor_start_step < train["total_steps"]
+            anchor["training_probability"] > 0.0
+            and anchor_start_step < train["total_steps"]
         ),
         use_amp=use_amp,
     )
 
 
 def build_trainer(cfg: dict, device: torch.device) -> Trainer:
+    require_schema(cfg)
     denoiser, critics, connectivity_critic = build_models(cfg)
     train = cfg["train"]
-    if train.get("generator") is not None:
-        load_weights(train["generator"], denoiser)
-    for axis in AXES:
-        path = train.get(f"critic_{axis}")
-        if path is not None:
-            load_weights(path, critics[str(axis)])
-    if train.get("critic_c") is not None:
-        load_weights(train["critic_c"], connectivity_critic)
-
     denoiser = denoiser.to(device)
     critics = critics.to(device)
     connectivity_critic = connectivity_critic.to(device)
@@ -292,28 +270,24 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     model = cfg["model"]
     anchor = cfg["anchor"]
     connectivity = cfg["connectivity"]
+    conditioning = cfg["conditioning"]["cfg_dropout"]
     vf = cfg["vf"]
+    scale_consistency = cfg["scale_consistency"]
     optim = cfg["optim"]
-    anchor_start_step, anchor_ramp_steps = get_anchor_steps(
+    anchor_start_step, anchor_ramp_steps = get_schedule_steps(
         anchor,
+        "anchor",
         train["total_steps"],
     )
-    anchor_dropout = get_config_value(
-        anchor,
-        "dropout_prob",
-        "dropout_probability",
+    scale_start_step, scale_ramp_steps = get_schedule_steps(
+        scale_consistency,
+        "scale_consistency",
+        train["total_steps"],
     )
-    anchor_multi_prob = get_config_value(
-        anchor,
-        "multi_anchor_prob",
-        "multi_anchor_probability",
-    )
-    anchor_mixed_axis_prob = get_config_value(
-        anchor,
-        "mixed_axis_prob",
-        "mixed_axis_probability",
-    )
-    vf_dropout = get_config_value(vf, "dropout_prob", "dropout_probability")
+    if vf["target_sampling"] != "per_crop_empirical":
+        raise ValueError("vf.target_sampling must be 'per_crop_empirical'.")
+    if vf["loss"] != "total_variation":
+        raise ValueError("vf.loss must be 'total_variation'.")
     critic_augment = CriticAugment(
         data.get("augment", False),
         prob=data.get("augment_prob", 1.0),
@@ -331,42 +305,57 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     }
 
     return Trainer(
-        denoiser=denoiser,
-        ema_denoiser=ema,
-        critics=critics,
-        connectivity_critic=connectivity_critic,
-        streams=streams,
-        diffusion=build_diffusion(cfg).to(device),
-        denoiser_optim=denoiser_optim,
-        critic_optims=critic_optims,
-        connectivity_optim=connectivity_optim,
-        scaler=torch.amp.GradScaler("cuda", enabled=use_amp),
-        device=device,
-        volume_batch_size=train["volume_batch_size"],
-        volume_sizes=train["volume_sizes"],
-        num_phases=data["num_phases"],
-        patch_size=data["input_size"],
-        slice_pairs_per_axis=train["slice_pairs_per_axis"],
-        ema_decay=train["ema_decay"],
-        r1_gamma=optim["r1_gamma"],
-        r1_interval=optim["r1_interval"],
-        critic_local_weight=optim["local_loss_weight"],
-        anchor_dropout=anchor_dropout,
-        anchor_start_step=anchor_start_step,
-        anchor_ramp_steps=anchor_ramp_steps,
-        anchor_multi_probability=anchor_multi_prob,
-        anchor_max_density=anchor["max_density"],
-        anchor_min_spacing=anchor["min_spacing"],
-        anchor_mixed_axis_probability=anchor_mixed_axis_prob,
-        anchor_teacher_bank_mebibytes=anchor["teacher_bank_size_mib"],
-        anchor_loss_weight=anchor["loss_weight"],
-        connectivity_weight=connectivity["loss_weight"],
-        connectivity_replay_triplets_per_axis=connectivity["replay_triplets_per_axis"],
-        connectivity_replay_capacity_per_axis=connectivity["replay_capacity_per_axis"],
-        connectivity_max_triplets_per_step=connectivity["max_triplets_per_step"],
-        vf_loss_weight=vf["loss_weight"],
-        vf_dropout=vf_dropout,
-        latent_channels=model["latent_channels"],
-        amp_enabled=use_amp,
-        critic_augment=critic_augment,
+        components=TrainerComponents(
+            denoiser=denoiser,
+            ema_denoiser=ema,
+            critics=critics,
+            connectivity_critic=connectivity_critic,
+            streams=streams,
+            diffusion=build_diffusion(cfg).to(device),
+            denoiser_optim=denoiser_optim,
+            critic_optims=critic_optims,
+            connectivity_optim=connectivity_optim,
+            scaler=torch.amp.GradScaler("cuda", enabled=use_amp),
+            device=device,
+            critic_augment=critic_augment,
+        ),
+        settings=TrainerSettings(
+            volume_batch_size=train["volume_batch_size"],
+            volume_sizes=train["volume_sizes"],
+            num_phases=data["num_phases"],
+            patch_size=data["input_size"],
+            slice_pairs_per_axis=train["slice_pairs_per_axis"],
+            ema_decay=train["ema_decay"],
+            r1_gamma=optim["r1_gamma"],
+            r1_interval=optim["r1_interval"],
+            critic_local_weight=optim["local_loss_weight"],
+            anchor_training_probability=anchor["training_probability"],
+            anchor_start_step=anchor_start_step,
+            anchor_ramp_steps=anchor_ramp_steps,
+            anchor_multi_probability=anchor["multi_anchor_prob"],
+            anchor_max_density=anchor["max_density"],
+            anchor_min_spacing=anchor["min_spacing"],
+            anchor_mixed_axis_probability=anchor["mixed_axis_prob"],
+            anchor_teacher_bank_mebibytes=anchor["teacher_bank_size_mib"],
+            anchor_loss_weight=anchor["loss_weight"],
+            connectivity_weight=connectivity["loss_weight"],
+            normal_transition_weight=connectivity["normal_transition_loss_weight"],
+            connectivity_replay_triplets_per_axis=(
+                connectivity["replay_triplets_per_axis"]
+            ),
+            connectivity_replay_capacity_per_axis=(
+                connectivity["replay_capacity_per_axis"]
+            ),
+            connectivity_max_triplets_per_step=(connectivity["max_triplets_per_step"]),
+            vf_loss_weight=vf["loss_weight"],
+            cfg_drop_each_probability=conditioning["drop_each_prob"],
+            cfg_single_drop_probability=conditioning["single_condition_drop_prob"],
+            scale_consistency_overlap=scale_consistency["overlap"],
+            scale_consistency_probability=scale_consistency["probability"],
+            scale_consistency_start_step=scale_start_step,
+            scale_consistency_ramp_steps=scale_ramp_steps,
+            scale_consistency_weight=scale_consistency["loss_weight"],
+            latent_channels=model["latent_channels"],
+            amp_enabled=use_amp,
+        ),
     )

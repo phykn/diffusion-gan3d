@@ -12,14 +12,6 @@ CRITIC_C_FILE = "critic_c.pt"
 CHECKPOINT_DIR = "checkpoints"
 
 
-def find_weights(run_root: str | Path) -> Path:
-    root = Path(run_root)
-    paths = tuple(root.glob(f"*/{GENERATOR_FILE}"))
-    if not paths:
-        raise FileNotFoundError(f"no {GENERATOR_FILE} file was found under {root}.")
-    return max(paths, key=lambda path: path.stat().st_mtime_ns)
-
-
 def save_weights(
     run_dir: str | Path,
     model: nn.Module,

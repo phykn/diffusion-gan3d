@@ -16,10 +16,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from make_assets import OUTPUT_DIR, ROI_COLOR
+from provenance import build_provenance, describe_files
 
 from src.build import load_generator
 from src.generate import DEFAULT_SCALE_OVERLAP, ScaledGenerator
-from src.train.weights import find_weights
 
 OVERLAPS = (0, 4, 8, 12, 16)
 SEEDS = tuple(range(20_260_808, 20_260_813))
@@ -37,13 +37,21 @@ def main() -> None:
     parser.add_argument(
         "--weight",
         type=Path,
-        help="generator weight (default: newest run/*/generator.pt)",
+        required=True,
     )
+    parser.add_argument("--guidance-scale", type=float, default=1.0)
     args = parser.parse_args()
-    weights = (
-        args.weight.resolve()
-        if args.weight is not None
-        else find_weights(PROJECT_ROOT / "run").resolve()
+    weights = args.weight.resolve()
+    provenance = build_provenance(
+        weights,
+        args.guidance_scale,
+        generation={
+            "seeds": list(SEEDS),
+            "overlaps": list(OVERLAPS),
+            "blocks": list(BLOCKS),
+            "default_overlap": DEFAULT_SCALE_OVERLAP,
+            "seam_exclusion_radius": SEAM_EXCLUSION_RADIUS,
+        },
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -58,6 +66,7 @@ def main() -> None:
     print("----------------")
     print(f"Weights : {weights}")
     print(f"Device  : {device}")
+    print(f"Guidance: {args.guidance_scale}")
     for seed in SEEDS:
         for overlap in OVERLAPS:
             set_seed(seed, device)
@@ -69,6 +78,7 @@ def main() -> None:
                 blocks=BLOCKS,
                 overlap=overlap,
                 progress=False,
+                guidance_scale=args.guidance_scale,
             )
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -87,6 +97,7 @@ def main() -> None:
             row: dict[str, float | int] = {
                 "seed": seed,
                 "overlap": overlap,
+                "guidance_scale": args.guidance_scale,
                 "exact_seam_change_ratio": exact_ratio,
                 "band_change_ratio": float(quality.change_ratio[0]),
                 "transition_tv": float(quality.transition_tv[0]),
@@ -102,14 +113,15 @@ def main() -> None:
             print(json.dumps(row), flush=True)
             del volume
 
-    summary = summarize(rows)
+    summary = summarize(rows, args.guidance_scale)
     write_csv(rows, RAW_CSV)
     write_csv(summary, SUMMARY_CSV)
     render(summary, FIGURE)
     MANIFEST.write_text(
         json.dumps(
             {
-                "weights": str(weights),
+                **provenance,
+                "outputs": describe_files((RAW_CSV, SUMMARY_CSV, FIGURE)),
                 "seeds": list(SEEDS),
                 "overlaps": list(OVERLAPS),
                 "default_overlap": DEFAULT_SCALE_OVERLAP,
@@ -162,6 +174,7 @@ def exact_seam_change_ratio(volume: torch.Tensor, seam: int) -> float:
 
 def summarize(
     rows: list[dict[str, float | int]],
+    guidance_scale: float,
 ) -> list[dict[str, float | int]]:
     metrics = (
         "exact_seam_change_ratio",
@@ -176,6 +189,7 @@ def summarize(
         selected = [row for row in rows if row["overlap"] == overlap]
         result: dict[str, float | int] = {
             "overlap": overlap,
+            "guidance_scale": guidance_scale,
             "samples": len(selected),
         }
         for metric in metrics:

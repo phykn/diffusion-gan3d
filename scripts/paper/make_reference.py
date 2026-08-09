@@ -12,8 +12,9 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from provenance import build_provenance, file_record
+
 from src.build import load_generator
-from src.train.weights import find_weights
 
 REFERENCE_SIZE = 128
 SEED = 10_000
@@ -26,14 +27,16 @@ def main() -> None:
     parser.add_argument(
         "--weight",
         type=Path,
-        help="generator weight (default: newest run/*/generator.pt)",
+        required=True,
     )
+    parser.add_argument("--guidance-scale", type=float, default=1.0)
     args = parser.parse_args()
 
-    weights = (
-        args.weight.resolve()
-        if args.weight is not None
-        else find_weights(PROJECT_ROOT / "run").resolve()
+    weights = args.weight.resolve()
+    provenance = build_provenance(
+        weights,
+        args.guidance_scale,
+        generation={"seed": SEED, "output_size": REFERENCE_SIZE},
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
@@ -46,7 +49,9 @@ def main() -> None:
     torch.manual_seed(SEED)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(SEED)
-    volume = generator.generate().to(torch.uint8).numpy()
+    volume = generator.generate(
+        guidance_scale=args.guidance_scale,
+    ).to(torch.uint8).numpy()
     payload = volume.tobytes()
     digest = hashlib.sha256(payload).hexdigest()
 
@@ -61,10 +66,13 @@ def main() -> None:
     MANIFEST.write_text(
         json.dumps(
             {
-                "weights": str(weights),
+                **provenance,
                 "seed": SEED,
-                "shape": list(volume.shape),
-                "dtype": str(volume.dtype),
+                "output": {
+                    **file_record(OUTPUT),
+                    "shape": list(volume.shape),
+                    "dtype": str(volume.dtype),
+                },
                 "sha256_voxels": digest,
                 "phase_fractions": [
                     float((volume == phase).mean())
@@ -76,6 +84,7 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"Weights  : {weights}")
+    print(f"Guidance : {args.guidance_scale}")
     print(f"Reference: {OUTPUT.resolve()}")
     print(f"Manifest : {MANIFEST.resolve()}")
     print(f"SHA-256  : {digest}")

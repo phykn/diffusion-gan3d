@@ -18,13 +18,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from make_assets import OUTPUT_DIR, ROI_COLOR
+from provenance import build_provenance, describe_files, validate_manifest
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
-from src.train.weights import find_weights
 
 REFERENCE_PATH = PROJECT_ROOT / "scripts" / "gt_128.tiff"
 TEMP_DIR = PROJECT_ROOT / "temp"
+MANIFEST_PATH = TEMP_DIR / "anchor_sweep_manifest.json"
 COUNTS = (128, 64, 32, 16, 8, 4, 2, 1, 0)
 AXIS = 0
 PORE_PHASE = 0
@@ -34,6 +35,8 @@ TAUFACTOR_CONVERGENCE = 1e-3
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--weight", type=Path, required=True)
+    parser.add_argument("--guidance-scale", type=float, default=1.0)
     parser.add_argument(
         "--reuse",
         action="store_true",
@@ -44,12 +47,31 @@ def main() -> None:
     reference = load_volume(REFERENCE_PATH)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    weights = find_weights(PROJECT_ROOT / "run")
+    weights = args.weight.resolve()
+    generation = {
+        "seed": SEED,
+        "axis": AXIS,
+        "anchor_counts": list(COUNTS),
+        "reference_shape": list(reference.shape),
+        "pore_phase": PORE_PHASE,
+    }
+    provenance = build_provenance(
+        weights,
+        args.guidance_scale,
+        generation=generation,
+        reference=REFERENCE_PATH,
+    )
+    cached_paths = [volume_path(count) for count in COUNTS]
 
     if args.reuse:
-        ensure_outputs_exist()
+        validate_manifest(
+            MANIFEST_PATH,
+            provenance,
+            label="anchor sweep reuse",
+            cached_paths=cached_paths,
+        )
     else:
-        generate_volumes(reference, weights)
+        generate_volumes(reference, weights, args.guidance_scale)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     kid = KernelInceptionDistance(
@@ -75,6 +97,7 @@ def main() -> None:
         row = {
             "anchor_count": count,
             "coverage": count / reference.shape[AXIS],
+            "guidance_scale": args.guidance_scale,
             "kid": float(kid_mean.cpu()),
             "kid_std": float(kid_std.cpu()),
             "porosity": porosity(volume),
@@ -94,13 +117,13 @@ def main() -> None:
 
     csv_path = TEMP_DIR / "anchor_sweep_metrics.csv"
     write_csv(rows, csv_path)
-    manifest_path = TEMP_DIR / "anchor_sweep_manifest.json"
     write_manifest(
-        weights=weights,
+        provenance=provenance,
+        cached_paths=cached_paths,
         reference=reference,
         reference_porosity=reference_porosity,
         reference_tortuosity=reference_tortuosity,
-        output=manifest_path,
+        output=MANIFEST_PATH,
     )
     figure_path = OUTPUT_DIR / "06-anchor-sweep-metrics.png"
     render_chart(
@@ -110,11 +133,15 @@ def main() -> None:
         output=figure_path,
     )
     print(f"Metrics : {csv_path.resolve()}")
-    print(f"Manifest: {manifest_path.resolve()}")
+    print(f"Manifest: {MANIFEST_PATH.resolve()}")
     print(f"Figure  : {figure_path.resolve()}")
 
 
-def generate_volumes(reference: np.ndarray, weights: Path) -> None:
+def generate_volumes(
+    reference: np.ndarray,
+    weights: Path,
+    guidance_scale: float,
+) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
     if (
@@ -132,6 +159,7 @@ def generate_volumes(reference: np.ndarray, weights: Path) -> None:
     print(f"Weights : {weights.resolve()}")
     print(f"Reference: {REFERENCE_PATH.resolve()}")
     print(f"Device  : {device}")
+    print(f"Guidance: {guidance_scale}")
     for count in COUNTS:
         indices = select_indices(reference.shape[AXIS], count)
         anchors = tuple(
@@ -146,7 +174,10 @@ def generate_volumes(reference: np.ndarray, weights: Path) -> None:
             f"coverage={count / reference.shape[AXIS]:.2%}...",
             flush=True,
         )
-        volume = generator.generate(anchors=anchors)
+        volume = generator.generate(
+            anchors=anchors,
+            guidance_scale=guidance_scale,
+        )
         path = volume_path(count)
         tifffile.imwrite(path, volume.numpy())
         print(f"Output  : {path.resolve()}")
@@ -161,13 +192,6 @@ def select_indices(size: int, count: int) -> tuple[int, ...]:
 
 def volume_path(count: int) -> Path:
     return TEMP_DIR / f"anchor_axis0_count_{count:02d}.tiff"
-
-
-def ensure_outputs_exist() -> None:
-    missing = [path for count in COUNTS if not (path := volume_path(count)).is_file()]
-    if missing:
-        names = ", ".join(path.name for path in missing)
-        raise FileNotFoundError(f"missing sweep TIFF files: {names}")
 
 
 def load_volume(path: Path) -> np.ndarray:
@@ -219,15 +243,16 @@ def write_csv(rows: list[dict], output: Path) -> None:
 
 
 def write_manifest(
-    weights: Path,
+    provenance: dict[str, object],
+    cached_paths: list[Path],
     reference: np.ndarray,
     reference_porosity: float,
     reference_tortuosity: float,
     output: Path,
 ) -> None:
     data = {
-        "weights": str(weights.resolve()),
-        "reference": str(REFERENCE_PATH.resolve()),
+        **provenance,
+        "cached_outputs": describe_files(cached_paths),
         "reference_shape": list(reference.shape),
         "axis": AXIS,
         "pore_phase": PORE_PHASE,

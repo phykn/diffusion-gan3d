@@ -1,5 +1,5 @@
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,12 +20,17 @@ from .augment import CriticAugment
 from .connect import (
     Connectivity,
     TripletBatch,
+    normal_transition_loss,
 )
 from .ema import update_ema
 from .loss import (
     get_critic_loss,
     get_critic_r1,
     get_generator_loss,
+)
+from .scale_consistency import (
+    make_adjacent_view_plan,
+    weighted_probability_mse,
 )
 from .weights import GENERATOR_FILE, save_all_weights, save_checkpoint
 
@@ -63,6 +68,61 @@ class Metrics:
     soft_vfs: tuple[float, ...] = ()
     hard_vfs: tuple[float, ...] = ()
     hard_vf_mae: float = 0.0
+    vf_target_resample_rate: float = 0.0
+    anchor_input_active_fraction: float = 0.0
+    vf_active_fraction: float = 0.0
+    condition_state_fractions: tuple[float, float, float, float] = (
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    normal_transition_loss: float = 0.0
+    scale_consistency_loss: float = 0.0
+    scale_consistency_contribution: float = 0.0
+    scale_consistency_ramp: float = 0.0
+    scale_consistency_active: bool = False
+
+
+@dataclass(frozen=True)
+class ScaleConsistencyResult:
+    loss: torch.Tensor
+    ramp: float
+    active: bool
+
+
+@dataclass(frozen=True)
+class DenoiserUpdate:
+    adversarial: float
+    total: float
+    global_loss: float
+    local_loss: float
+    connectivity: float
+    normal_transition: float
+    anchor: float
+    anchor_accuracy: float
+    vf: float
+    scale_consistency: float
+    scale_contribution: float
+    scale_ramp: float
+    scale_active: bool
+
+
+@dataclass(frozen=True)
+class DenoiserBatch:
+    transition: int
+    fake: dict[int, tuple[torch.Tensor, torch.Tensor]]
+    connectivity_real: TripletBatch
+    connectivity_fake: TripletBatch
+    logits: torch.Tensor
+    clean_probs: torch.Tensor
+    anchor: AnchorCondition | None
+    anchor_ramp: float
+    target_vf: torch.Tensor
+    vf_present: torch.Tensor
+    current: torch.Tensor
+    model_conditions: dict[str, torch.Tensor]
+    step: int
 
 
 @dataclass(frozen=True)
@@ -73,100 +133,208 @@ class AnchorSelection:
     target_vf: torch.Tensor | None = None
 
 
-class Trainer:
-    def __init__(
-        self,
-        denoiser: Denoiser3D,
-        ema_denoiser: Denoiser3D,
-        critics: nn.ModuleDict,
-        connectivity_critic: nn.Module,
-        streams: dict[int, BatchStream],
-        diffusion: Diffusion,
-        denoiser_optim: torch.optim.Optimizer,
-        critic_optims: dict[str, torch.optim.Optimizer],
-        connectivity_optim: torch.optim.Optimizer,
-        scaler: torch.amp.GradScaler,
-        device: torch.device,
-        volume_batch_size: int,
-        volume_sizes: Sequence[int],
-        num_phases: int,
-        patch_size: int,
-        slice_pairs_per_axis: int,
-        ema_decay: float,
-        r1_gamma: float,
-        r1_interval: int,
-        critic_local_weight: float,
-        anchor_dropout: float,
-        anchor_start_step: int,
-        anchor_ramp_steps: int,
-        anchor_multi_probability: float,
-        anchor_max_density: float,
-        anchor_min_spacing: int,
-        anchor_mixed_axis_probability: float,
-        anchor_teacher_bank_mebibytes: float,
-        anchor_loss_weight: float,
-        connectivity_weight: float,
-        connectivity_replay_triplets_per_axis: int,
-        connectivity_replay_capacity_per_axis: int,
-        connectivity_max_triplets_per_step: int,
-        vf_loss_weight: float,
-        vf_dropout: float,
-        latent_channels: int,
-        amp_enabled: bool,
-        critic_augment: CriticAugment | None = None,
-    ) -> None:
-        if set(streams) != set(AXES):
+@dataclass(frozen=True)
+class ConditionPresence:
+    anchor: torch.Tensor
+    vf: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.anchor.dtype != torch.bool or self.vf.dtype != torch.bool:
+            raise TypeError("condition presence masks must be boolean tensors.")
+        if self.anchor.ndim != 1 or self.anchor.shape != self.vf.shape:
+            raise ValueError("condition presence masks must have matching shape [B].")
+        if self.anchor.device != self.vf.device:
+            raise ValueError("condition presence masks must be on the same device.")
+
+    def fractions(self) -> tuple[float, float, float, float]:
+        anchor = self.anchor
+        vf = self.vf
+        states = (
+            anchor & vf,
+            anchor & ~vf,
+            ~anchor & vf,
+            ~anchor & ~vf,
+        )
+        return tuple(float(state.to(torch.float32).mean()) for state in states)
+
+
+@dataclass(frozen=True)
+class TrainerComponents:
+    denoiser: Denoiser3D
+    ema_denoiser: Denoiser3D
+    critics: nn.ModuleDict
+    connectivity_critic: nn.Module
+    streams: dict[int, BatchStream]
+    diffusion: Diffusion
+    denoiser_optim: torch.optim.Optimizer
+    critic_optims: dict[str, torch.optim.Optimizer]
+    connectivity_optim: torch.optim.Optimizer
+    scaler: torch.amp.GradScaler
+    device: torch.device
+    critic_augment: CriticAugment | None = None
+
+    def __post_init__(self) -> None:
+        if set(self.streams) != set(AXES):
             raise ValueError("streams must contain axes 0, 1, and 2.")
-        if set(critic_optims) != {str(axis) for axis in AXES}:
+        if set(self.critic_optims) != {str(axis) for axis in AXES}:
             raise ValueError("critic optimizers must contain axes 0, 1, and 2.")
-        volume_sizes = tuple(volume_sizes)
+        if self.critic_augment is not None and not isinstance(
+            self.critic_augment,
+            CriticAugment,
+        ):
+            raise TypeError("critic_augment must be a CriticAugment or None.")
+
+
+@dataclass(frozen=True)
+class TrainerSettings:
+    volume_batch_size: int
+    volume_sizes: Sequence[int]
+    num_phases: int
+    patch_size: int
+    slice_pairs_per_axis: int
+    ema_decay: float
+    r1_gamma: float
+    r1_interval: int
+    critic_local_weight: float
+    anchor_training_probability: float
+    anchor_start_step: int
+    anchor_ramp_steps: int
+    anchor_multi_probability: float
+    anchor_max_density: float
+    anchor_min_spacing: int
+    anchor_mixed_axis_probability: float
+    anchor_teacher_bank_mebibytes: float
+    anchor_loss_weight: float
+    connectivity_weight: float
+    normal_transition_weight: float
+    connectivity_replay_triplets_per_axis: int
+    connectivity_replay_capacity_per_axis: int
+    connectivity_max_triplets_per_step: int
+    vf_loss_weight: float
+    cfg_drop_each_probability: float
+    cfg_single_drop_probability: float
+    scale_consistency_overlap: int
+    scale_consistency_probability: float
+    scale_consistency_start_step: int
+    scale_consistency_ramp_steps: int
+    scale_consistency_weight: float
+    latent_channels: int
+    amp_enabled: bool
+
+    def __post_init__(self) -> None:
+        volume_sizes = tuple(self.volume_sizes)
+        object.__setattr__(self, "volume_sizes", volume_sizes)
         if not volume_sizes:
             raise ValueError("volume_sizes must not be empty.")
-        for name, value in (
-            ("volume_batch_size", volume_batch_size),
-            ("num_phases", num_phases),
-            ("patch_size", patch_size),
-            ("slice_pairs_per_axis", slice_pairs_per_axis),
-            ("r1_interval", r1_interval),
-            (
-                "connectivity_replay_triplets_per_axis",
-                connectivity_replay_triplets_per_axis,
-            ),
-            (
-                "connectivity_replay_capacity_per_axis",
-                connectivity_replay_capacity_per_axis,
-            ),
-            (
-                "connectivity_max_triplets_per_step",
-                connectivity_max_triplets_per_step,
-            ),
-            ("anchor_min_spacing", anchor_min_spacing),
-            ("latent_channels", latent_channels),
-        ):
-            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-                raise ValueError(f"{name} must be a positive integer.")
+        self._validate_positive_integers()
+        if self.scale_consistency_overlap < 2:
+            raise ValueError("scale_consistency_overlap must be at least two.")
         if any(
             not isinstance(size, int)
             or isinstance(size, bool)
-            or size < max(patch_size, 3)
+            or size < max(self.patch_size, 3)
             for size in volume_sizes
         ):
             raise ValueError(
                 "volume_sizes must contain integers at least as large as patch_size "
                 "and three."
             )
-        for name, value in (
-            ("anchor_start_step", anchor_start_step),
-            ("anchor_ramp_steps", anchor_ramp_steps),
+        self._validate_non_negative_integers()
+        self._validate_probabilities()
+        if 3.0 * self.cfg_drop_each_probability > 1.0:
+            raise ValueError(
+                "the three two-condition dropout states must have total "
+                "probability at most one."
+            )
+        if (
+            not isinstance(self.anchor_teacher_bank_mebibytes, (int, float))
+            or isinstance(self.anchor_teacher_bank_mebibytes, bool)
+            or not math.isfinite(self.anchor_teacher_bank_mebibytes)
+            or self.anchor_teacher_bank_mebibytes <= 0.0
         ):
+            raise ValueError("anchor_teacher_bank_mebibytes must be positive.")
+        if (
+            not isinstance(self.ema_decay, (int, float))
+            or isinstance(self.ema_decay, bool)
+            or not math.isfinite(self.ema_decay)
+            or not 0.0 <= self.ema_decay < 1.0
+        ):
+            raise ValueError("ema_decay must be between zero and one, excluding one.")
+        self._validate_non_negative_values()
+        if not isinstance(self.amp_enabled, bool):
+            raise TypeError("amp_enabled must be a boolean.")
+
+    @property
+    def scale_tile_size(self) -> int:
+        return self.patch_size + 2 * self.scale_consistency_overlap
+
+    def validate_denoiser(self, denoiser: Denoiser3D) -> None:
+        downsample_factor = getattr(denoiser, "downsample_factor", None)
+        if (
+            not isinstance(downsample_factor, int)
+            or isinstance(downsample_factor, bool)
+            or downsample_factor < 1
+        ):
+            raise ValueError("denoiser.downsample_factor must be a positive integer.")
+        if self.scale_tile_size % downsample_factor:
+            raise ValueError(
+                "scale consistency tile size must be divisible by the denoiser "
+                "downsample factor."
+            )
+        if (
+            self.scale_consistency_weight > 0.0
+            and self.scale_consistency_probability > 0.0
+            and not any(size >= self.scale_tile_size for size in self.volume_sizes)
+        ):
+            raise ValueError(
+                "at least one volume size must cover the scale consistency tile."
+            )
+
+    def _validate_positive_integers(self) -> None:
+        values = {
+            "volume_batch_size": self.volume_batch_size,
+            "num_phases": self.num_phases,
+            "patch_size": self.patch_size,
+            "slice_pairs_per_axis": self.slice_pairs_per_axis,
+            "r1_interval": self.r1_interval,
+            "connectivity_replay_triplets_per_axis": (
+                self.connectivity_replay_triplets_per_axis
+            ),
+            "connectivity_replay_capacity_per_axis": (
+                self.connectivity_replay_capacity_per_axis
+            ),
+            "connectivity_max_triplets_per_step": (
+                self.connectivity_max_triplets_per_step
+            ),
+            "anchor_min_spacing": self.anchor_min_spacing,
+            "scale_consistency_overlap": self.scale_consistency_overlap,
+            "latent_channels": self.latent_channels,
+        }
+        for name, value in values.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{name} must be a positive integer.")
+
+    def _validate_non_negative_integers(self) -> None:
+        values = {
+            "anchor_start_step": self.anchor_start_step,
+            "anchor_ramp_steps": self.anchor_ramp_steps,
+            "scale_consistency_start_step": self.scale_consistency_start_step,
+            "scale_consistency_ramp_steps": self.scale_consistency_ramp_steps,
+        }
+        for name, value in values.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer.")
-        for name, value in (
-            ("anchor_dropout", anchor_dropout),
-            ("vf_dropout", vf_dropout),
-            ("anchor_multi_probability", anchor_multi_probability),
-            ("anchor_mixed_axis_probability", anchor_mixed_axis_probability),
-        ):
+
+    def _validate_probabilities(self) -> None:
+        values = {
+            "anchor_training_probability": self.anchor_training_probability,
+            "cfg_drop_each_probability": self.cfg_drop_each_probability,
+            "cfg_single_drop_probability": self.cfg_single_drop_probability,
+            "scale_consistency_probability": self.scale_consistency_probability,
+            "anchor_multi_probability": self.anchor_multi_probability,
+            "anchor_mixed_axis_probability": self.anchor_mixed_axis_probability,
+        }
+        for name, value in values.items():
             if (
                 not isinstance(value, (int, float))
                 or isinstance(value, bool)
@@ -174,27 +342,18 @@ class Trainer:
                 or not 0.0 <= value <= 1.0
             ):
                 raise ValueError(f"{name} must be between zero and one.")
-        if (
-            not isinstance(anchor_teacher_bank_mebibytes, (int, float))
-            or isinstance(anchor_teacher_bank_mebibytes, bool)
-            or not math.isfinite(anchor_teacher_bank_mebibytes)
-            or anchor_teacher_bank_mebibytes <= 0.0
-        ):
-            raise ValueError("anchor_teacher_bank_mebibytes must be positive.")
-        if (
-            not isinstance(ema_decay, (int, float))
-            or isinstance(ema_decay, bool)
-            or not math.isfinite(ema_decay)
-            or not 0.0 <= ema_decay < 1.0
-        ):
-            raise ValueError("ema_decay must be between zero and one, excluding one.")
-        for name, value in (
-            ("r1_gamma", r1_gamma),
-            ("critic_local_weight", critic_local_weight),
-            ("anchor_loss_weight", anchor_loss_weight),
-            ("connectivity_weight", connectivity_weight),
-            ("vf_loss_weight", vf_loss_weight),
-        ):
+
+    def _validate_non_negative_values(self) -> None:
+        values = {
+            "r1_gamma": self.r1_gamma,
+            "critic_local_weight": self.critic_local_weight,
+            "anchor_loss_weight": self.anchor_loss_weight,
+            "connectivity_weight": self.connectivity_weight,
+            "normal_transition_weight": self.normal_transition_weight,
+            "vf_loss_weight": self.vf_loss_weight,
+            "scale_consistency_weight": self.scale_consistency_weight,
+        }
+        for name, value in values.items():
             if (
                 not isinstance(value, (int, float))
                 or isinstance(value, bool)
@@ -202,62 +361,78 @@ class Trainer:
                 or value < 0.0
             ):
                 raise ValueError(f"{name} must be finite and non-negative.")
-        if not isinstance(amp_enabled, bool):
-            raise TypeError("amp_enabled must be a boolean.")
-        if critic_augment is not None and not isinstance(
-            critic_augment,
-            CriticAugment,
-        ):
-            raise TypeError("critic_augment must be a CriticAugment or None.")
-        self.denoiser = denoiser
-        self.ema_denoiser = ema_denoiser
-        self.critics = critics
-        self.connectivity_critic = connectivity_critic
-        self.streams = streams
-        self.diffusion = diffusion
-        self.denoiser_optim = denoiser_optim
-        self.critic_optims = critic_optims
-        self.connectivity_optim = connectivity_optim
-        self.scaler = scaler
-        self.device = device
-        self.volume_batch_size = volume_batch_size
-        self.volume_sizes = volume_sizes
-        self.num_phases = num_phases
-        self.patch_size = patch_size
-        self.slice_pairs_per_axis = slice_pairs_per_axis
-        self.ema_decay = ema_decay
-        self.r1_gamma = r1_gamma
-        self.r1_interval = r1_interval
-        self.critic_local_weight = critic_local_weight
-        self.anchor_dropout = anchor_dropout
-        self.anchor_start_step = anchor_start_step
-        self.anchor_ramp_steps = anchor_ramp_steps
-        self.anchor_multi_start_step = anchor_start_step + anchor_ramp_steps
-        self.anchor_multi_probability = float(anchor_multi_probability)
-        self.anchor_loss_weight = anchor_loss_weight
-        self.connectivity_weight = connectivity_weight
-        self.connect = Connectivity(
-            num_phases=num_phases,
-            patch_size=patch_size,
-            replay_triplets_per_axis=connectivity_replay_triplets_per_axis,
-            replay_capacity_per_axis=connectivity_replay_capacity_per_axis,
-            max_triplets_per_step=connectivity_max_triplets_per_step,
-            teacher_bank_bytes=round(anchor_teacher_bank_mebibytes * 1024**2),
-            teacher_min_entries=4,
-            max_density=anchor_max_density,
-            min_spacing=anchor_min_spacing,
-            mixed_axis_probability=anchor_mixed_axis_probability,
+
+
+class Trainer:
+    def __init__(
+        self,
+        components: TrainerComponents,
+        settings: TrainerSettings,
+    ) -> None:
+        settings.validate_denoiser(components.denoiser)
+        self.denoiser = components.denoiser
+        self.ema_denoiser = components.ema_denoiser
+        self.critics = components.critics
+        self.connectivity_critic = components.connectivity_critic
+        self.streams = components.streams
+        self.diffusion = components.diffusion
+        self.denoiser_optim = components.denoiser_optim
+        self.critic_optims = components.critic_optims
+        self.connectivity_optim = components.connectivity_optim
+        self.scaler = components.scaler
+        self.device = components.device
+        self.volume_batch_size = settings.volume_batch_size
+        self.volume_sizes = settings.volume_sizes
+        self.num_phases = settings.num_phases
+        self.patch_size = settings.patch_size
+        self.slice_pairs_per_axis = settings.slice_pairs_per_axis
+        self.ema_decay = settings.ema_decay
+        self.r1_gamma = settings.r1_gamma
+        self.r1_interval = settings.r1_interval
+        self.critic_local_weight = settings.critic_local_weight
+        self.anchor_training_probability = float(settings.anchor_training_probability)
+        self.anchor_start_step = settings.anchor_start_step
+        self.anchor_ramp_steps = settings.anchor_ramp_steps
+        self.anchor_multi_start_step = (
+            settings.anchor_start_step + settings.anchor_ramp_steps
         )
-        self.vf_loss_weight = vf_loss_weight
-        self.vf_dropout = vf_dropout
-        self.latent_channels = latent_channels
-        self.amp_enabled = amp_enabled
+        self.anchor_multi_probability = float(settings.anchor_multi_probability)
+        self.anchor_loss_weight = settings.anchor_loss_weight
+        self.connectivity_weight = settings.connectivity_weight
+        self.normal_transition_weight = settings.normal_transition_weight
+        self.connect = Connectivity(
+            num_phases=settings.num_phases,
+            patch_size=settings.patch_size,
+            replay_triplets_per_axis=settings.connectivity_replay_triplets_per_axis,
+            replay_capacity_per_axis=settings.connectivity_replay_capacity_per_axis,
+            max_triplets_per_step=settings.connectivity_max_triplets_per_step,
+            teacher_bank_bytes=round(settings.anchor_teacher_bank_mebibytes * 1024**2),
+            teacher_min_entries=4,
+            max_density=settings.anchor_max_density,
+            min_spacing=settings.anchor_min_spacing,
+            mixed_axis_probability=settings.anchor_mixed_axis_probability,
+        )
+        self.vf_loss_weight = settings.vf_loss_weight
+        self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
+        self.cfg_single_drop_probability = float(settings.cfg_single_drop_probability)
+        self.scale_consistency_overlap = settings.scale_consistency_overlap
+        self.scale_consistency_tile_size = settings.scale_tile_size
+        self.scale_consistency_probability = float(
+            settings.scale_consistency_probability
+        )
+        self.scale_consistency_start_step = settings.scale_consistency_start_step
+        self.scale_consistency_ramp_steps = settings.scale_consistency_ramp_steps
+        self.scale_consistency_weight = settings.scale_consistency_weight
+        self.latent_channels = settings.latent_channels
+        self.amp_enabled = settings.amp_enabled
         self.critic_augment = (
-            CriticAugment(False) if critic_augment is None else critic_augment
+            CriticAugment(False)
+            if components.critic_augment is None
+            else components.critic_augment
         )
         self.target_count = 0
-        self.target_mean = torch.zeros(num_phases, dtype=torch.float64)
-        self.target_m2 = torch.zeros(num_phases, dtype=torch.float64)
+        self.target_mean = torch.zeros(settings.num_phases, dtype=torch.float64)
+        self.target_m2 = torch.zeros(settings.num_phases, dtype=torch.float64)
 
     def fit(
         self,
@@ -366,15 +541,23 @@ class Trainer:
             axis: self.crop_images(images, self.patch_size)
             for axis, images in batches.items()
         }
-        target_vf = self.get_vf(batches.values()).expand(self.volume_batch_size, -1)
+        vf_pool = self.get_vf_pool(batches)
         ramp = self.get_anchor_ramp(step)
         selection = (
             None if ramp == 0.0 else self.sample_anchor(batches, volume_size, step)
         )
         anchor = None if selection is None else selection.condition
-        if selection is not None and selection.target_vf is not None:
-            target_vf = selection.target_vf
-        vf = self.apply_vf_dropout(target_vf)
+        target_vf, vf_target_resample_rate = self.resolve_target_vf(
+            selection,
+            vf_pool,
+            anchor,
+        )
+        presence = self.sample_condition_presence(anchor is not None)
+        model_conditions = self.make_model_conditions(
+            anchor,
+            target_vf,
+            presence,
+        )
         if transition is None:
             transition = self.sample_transition(anchor is not None)
         (
@@ -385,10 +568,17 @@ class Trainer:
         ) = self.generate_pair(
             transition,
             anchor,
-            vf,
+            model_conditions,
             volume_size,
         )
-        clean_probs = (prediction + 1.0) * 0.5
+        effective_prediction = prediction
+        if anchor is not None:
+            effective_prediction = self.diffusion.blend_known(
+                prediction,
+                anchor.image,
+                anchor.mask,
+            )
+        clean_probs = (effective_prediction + 1.0) * 0.5
         fake = {
             axis: self.critic_augment.apply_pair(
                 *self.sample_pairs(
@@ -402,28 +592,11 @@ class Trainer:
             for axis in AXES
         }
 
-        connectivity_fake = TripletBatch(
-            values=prediction.new_empty(
-                (0, 3, self.num_phases, self.patch_size, self.patch_size)
-            ),
-            axes=torch.empty(0, device=self.device, dtype=torch.long),
+        connectivity_real, connectivity_fake = self.make_connectivity_triplets(
+            prediction,
+            anchor,
+            transition,
         )
-        connectivity_real = connectivity_fake.values
-        if self.connectivity_weight > 0.0 and transition == 0 and anchor is not None:
-            connectivity_real, connectivity_fake = self.connect.match_anchor(
-                prediction,
-                anchor,
-            )
-            connectivity_real, connectivity_values = (
-                self.critic_augment.apply_together(
-                    (connectivity_real, connectivity_fake.values),
-                    connectivity_fake.axes,
-                )
-            )
-            connectivity_fake = TripletBatch(
-                values=connectivity_values,
-                axes=connectivity_fake.axes,
-            )
 
         (
             critic_vals,
@@ -436,50 +609,42 @@ class Trainer:
             real,
             step,
         )
-        critic_connectivity, connectivity_r1 = self.update_connectivity_critic(
-            connectivity_real,
-            connectivity_fake,
-            step,
-        )
-        (
-            generator_loss,
-            generator_total,
-            generator_global,
-            generator_local,
-            generator_connectivity,
-            anchor_loss,
-            anchor_accuracy,
-            vf_loss,
-        ) = self.update_denoiser(
-            transition,
-            fake,
-            connectivity_fake,
-            logits,
-            clean_probs,
-            anchor,
-            ramp,
-            target_vf,
-            vf_active=vf is not None,
+        if self.connectivity_weight > 0.0:
+            critic_connectivity, connectivity_r1 = self.update_connectivity_critic(
+                connectivity_real.values,
+                connectivity_fake,
+                step,
+            )
+        else:
+            critic_connectivity, connectivity_r1 = 0.0, 0.0
+        denoiser_update = self.update_denoiser(
+            DenoiserBatch(
+                transition=transition,
+                fake=fake,
+                connectivity_real=connectivity_real,
+                connectivity_fake=connectivity_fake,
+                logits=logits,
+                clean_probs=clean_probs,
+                anchor=anchor,
+                anchor_ramp=ramp,
+                target_vf=target_vf,
+                vf_present=presence.vf,
+                current=current,
+                model_conditions=model_conditions,
+                step=step,
+            )
         )
         target_values, soft_values, hard_values, hard_mae = self.summarize_vfs(
             clean_probs,
             target_vf,
+            presence.vf,
         )
-        target_stds = self.update_target_stats(target_values)
-        if transition == 0:
-            if selection is None:
-                if self.connectivity_weight > 0.0:
-                    self.connect.record_unconditional(prediction)
-            elif selection.source == "real" and self.anchor_multi_probability > 0.0:
-                self.connect.record_seeded(
-                    prediction,
-                    selection.condition,
-                    selection.seeds,
-                )
+        target_stds = self.update_target_stats(target_vf)
+        self.record_connectivity_prediction(prediction, selection, transition)
         update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
         return Metrics(
-            generator=generator_loss,
-            generator_total=generator_total,
+            generator=denoiser_update.adversarial,
+            generator_total=denoiser_update.total,
             critic=sum(critic_vals),
             r1=r1,
             transition=transition,
@@ -487,9 +652,9 @@ class Trainer:
             critic_axes=tuple(critic_vals),
             anchor_planes=0 if anchor is None else anchor.planes,
             anchor_conflict_rate=0.0 if anchor is None else anchor.conflict_rate,
-            anchor_loss=anchor_loss,
-            anchor_accuracy=anchor_accuracy,
-            generator_connectivity=generator_connectivity,
+            anchor_loss=denoiser_update.anchor,
+            anchor_accuracy=denoiser_update.anchor_accuracy,
+            generator_connectivity=denoiser_update.connectivity,
             critic_connectivity=critic_connectivity,
             connectivity_r1=connectivity_r1,
             anchor_ramp=ramp,
@@ -498,18 +663,84 @@ class Trainer:
             anchor_teacher=(selection is not None and selection.source == "teacher"),
             teacher_volumes=self.connect.teacher_count,
             teacher_mebibytes=self.connect.teacher_storage_bytes / 1024**2,
-            generator_global=generator_global,
-            generator_local=generator_local,
+            generator_global=denoiser_update.global_loss,
+            generator_local=denoiser_update.local_loss,
             critic_global=critic_global,
             critic_local=critic_local,
-            vf_loss=vf_loss,
-            vf_active=vf is not None,
+            vf_loss=denoiser_update.vf,
+            vf_active=bool(presence.vf.any()),
             target_vfs=target_values,
             target_vf_stds=target_stds,
             soft_vfs=soft_values,
             hard_vfs=hard_values,
             hard_vf_mae=hard_mae,
+            vf_target_resample_rate=vf_target_resample_rate,
+            anchor_input_active_fraction=float(
+                presence.anchor.to(torch.float32).mean()
+            ),
+            vf_active_fraction=float(presence.vf.to(torch.float32).mean()),
+            condition_state_fractions=presence.fractions(),
+            normal_transition_loss=denoiser_update.normal_transition,
+            scale_consistency_loss=denoiser_update.scale_consistency,
+            scale_consistency_contribution=denoiser_update.scale_contribution,
+            scale_consistency_ramp=denoiser_update.scale_ramp,
+            scale_consistency_active=denoiser_update.scale_active,
         )
+
+    def resolve_target_vf(
+        self,
+        selection: AnchorSelection | None,
+        pool: torch.Tensor,
+        anchor: AnchorCondition | None,
+    ) -> tuple[torch.Tensor, float]:
+        if selection is not None and selection.target_vf is not None:
+            return self.validate_target_vf(selection.target_vf), 0.0
+        return self.sample_target_vf(pool, anchor)
+
+    def make_connectivity_triplets(
+        self,
+        prediction: torch.Tensor,
+        anchor: AnchorCondition | None,
+        transition: int,
+    ) -> tuple[TripletBatch, TripletBatch]:
+        empty = TripletBatch(
+            values=prediction.new_empty(
+                (0, 3, self.num_phases, self.patch_size, self.patch_size)
+            ),
+            axes=torch.empty(0, device=self.device, dtype=torch.long),
+        )
+        enabled = self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
+        if not enabled or transition != 0 or anchor is None:
+            return empty, empty
+
+        real_values, fake = self.connect.match_anchor(prediction, anchor)
+        real_values, fake_values = self.critic_augment.apply_together(
+            (real_values, fake.values),
+            fake.axes,
+        )
+        return (
+            TripletBatch(values=real_values, axes=fake.axes),
+            TripletBatch(values=fake_values, axes=fake.axes),
+        )
+
+    def record_connectivity_prediction(
+        self,
+        prediction: torch.Tensor,
+        selection: AnchorSelection | None,
+        transition: int,
+    ) -> None:
+        if transition != 0:
+            return
+        if selection is None:
+            if self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0:
+                self.connect.record_unconditional(prediction)
+            return
+        if selection.source == "real" and self.anchor_multi_probability > 0.0:
+            self.connect.record_seeded(
+                prediction,
+                selection.condition,
+                selection.seeds,
+            )
 
     def sample_transition(self, anchored: bool) -> int:
         if not isinstance(anchored, bool):
@@ -566,28 +797,135 @@ class Trainer:
             ]
         )
 
-    def get_vf(self, batches: Iterable[torch.Tensor]) -> torch.Tensor:
-        values = []
-        for images in batches:
-            counts = torch.bincount(images.flatten(), minlength=self.num_phases)
-            if counts.numel() != self.num_phases:
-                raise ValueError("training images contain a phase outside num_phases.")
-            values.append(counts)
-        counts = torch.stack(values).sum(dim=0)
-        vf = counts.to(torch.float32)
-        vf.div_(counts.sum())
-        return vf.unsqueeze(0)
+    def get_vf_pool(self, batches: dict[int, torch.Tensor]) -> torch.Tensor:
+        if set(batches) != set(AXES):
+            raise ValueError("batches must contain axes 0, 1, and 2.")
+        if any(
+            not isinstance(images, torch.Tensor) or images.ndim != 3
+            for images in batches.values()
+        ):
+            raise ValueError("training crops must have shape [B, H, W].")
+        batch_sizes = {images.shape[0] for images in batches.values()}
+        if len(batch_sizes) != 1 or not batch_sizes or next(iter(batch_sizes)) < 1:
+            raise ValueError("each axis must provide the same non-empty crop batch.")
 
-    def apply_vf_dropout(
-        self,
-        target: torch.Tensor,
-    ) -> torch.Tensor | None:
-        dropout = self.vf_dropout
-        if dropout <= 0.0:
-            return target
-        if dropout >= 1.0 or bool(torch.rand(()) < dropout):
-            return None
+        values = []
+        for axis in AXES:
+            images = batches[axis]
+            if images.numel() == 0:
+                raise ValueError("training crops must not be empty.")
+            labels = images.to(torch.long)
+            if int(labels.min()) < 0 or int(labels.max()) >= self.num_phases:
+                raise ValueError("training images contain a phase outside num_phases.")
+            fractions = (
+                F.one_hot(labels, num_classes=self.num_phases)
+                .to(torch.float32)
+                .mean(dim=(1, 2))
+            )
+            values.append(fractions)
+        return torch.cat(values, dim=0)
+
+    def validate_target_vf(self, target: torch.Tensor) -> torch.Tensor:
+        if not isinstance(target, torch.Tensor) or not target.is_floating_point():
+            raise TypeError("target VF must be a floating-point tensor.")
+        expected = (self.volume_batch_size, self.num_phases)
+        if target.shape != expected:
+            raise ValueError(f"target VF must have shape {expected}.")
+        target = target.to(device=self.device, dtype=torch.float32)
+        if not bool(torch.isfinite(target).all()) or bool((target < 0.0).any()):
+            raise ValueError("target VF values must be finite and non-negative.")
+        sums = target.sum(dim=1)
+        if not torch.allclose(sums, torch.ones_like(sums), atol=1e-5, rtol=0.0):
+            raise ValueError("target VF rows must sum to one.")
         return target
+
+    def sample_target_vf(
+        self,
+        pool: torch.Tensor,
+        anchor: AnchorCondition | None,
+    ) -> tuple[torch.Tensor, float]:
+        if (
+            not isinstance(pool, torch.Tensor)
+            or not pool.is_floating_point()
+            or pool.ndim != 2
+            or pool.shape[0] < 1
+            or pool.shape[1] != self.num_phases
+        ):
+            raise ValueError("VF pool must have shape [N, num_phases].")
+        pool = pool.to(device=self.device, dtype=torch.float32)
+        indices = torch.randint(
+            pool.shape[0],
+            (self.volume_batch_size,),
+            device=self.device,
+        )
+        resampled = 0
+        if anchor is not None:
+            if anchor.target.shape[0] != self.volume_batch_size:
+                raise ValueError("anchor and generated volume batches must match.")
+            voxel_count = math.prod(anchor.target.shape[1:])
+            required = []
+            for labels, mask in zip(
+                anchor.target,
+                anchor.mask[:, 0].to(torch.bool),
+                strict=True,
+            ):
+                counts = torch.bincount(
+                    labels[mask].to(torch.long),
+                    minlength=self.num_phases,
+                ).to(torch.float32)
+                required.append(counts / voxel_count)
+            for batch, minimum in enumerate(required):
+                valid = (pool + 1e-7 >= minimum).all(dim=1).nonzero().flatten()
+                if not len(valid):
+                    raise ValueError(
+                        "anchor phase minima are incompatible with every empirical "
+                        "VF target."
+                    )
+                if not bool((pool[indices[batch]] + 1e-7 >= minimum).all()):
+                    choice = int(torch.randint(len(valid), (), device=self.device))
+                    indices[batch] = valid[choice]
+                    resampled += 1
+        target = self.validate_target_vf(pool.index_select(0, indices))
+        return target, resampled / self.volume_batch_size
+
+    def sample_condition_presence(self, has_anchor: bool) -> ConditionPresence:
+        if not isinstance(has_anchor, bool):
+            raise TypeError("has_anchor must be a boolean.")
+        batch = self.volume_batch_size
+        anchor = torch.full(
+            (batch,),
+            has_anchor,
+            device=self.device,
+            dtype=torch.bool,
+        )
+        vf = torch.ones(batch, device=self.device, dtype=torch.bool)
+        random = torch.rand(batch, device=self.device)
+        if has_anchor:
+            probability = self.cfg_drop_each_probability
+            joint_null = random < probability
+            anchor_null = (random >= probability) & (random < 2.0 * probability)
+            vf_null = (random >= 2.0 * probability) & (random < 3.0 * probability)
+            anchor = ~(joint_null | anchor_null)
+            vf = ~(joint_null | vf_null)
+        else:
+            vf = random >= self.cfg_single_drop_probability
+        return ConditionPresence(anchor=anchor, vf=vf)
+
+    @staticmethod
+    def make_model_conditions(
+        anchor: AnchorCondition | None,
+        target_vf: torch.Tensor,
+        presence: ConditionPresence,
+    ) -> dict[str, torch.Tensor]:
+        conditions = {
+            "vf": target_vf,
+            "vf_present": presence.vf,
+        }
+        if anchor is not None:
+            visible = presence.anchor.reshape(-1, 1, 1, 1, 1)
+            conditions["anchor_image"] = anchor.image
+            conditions["anchor_mask"] = anchor.mask * visible.to(anchor.mask.dtype)
+        return conditions
 
     def get_anchor_ramp(self, step: int) -> float:
         if step < self.anchor_start_step:
@@ -605,9 +943,10 @@ class Trainer:
         volume_size: int,
         step: int,
     ) -> AnchorSelection | None:
-        if self.anchor_dropout >= 1.0:
+        probability = self.anchor_training_probability
+        if probability <= 0.0:
             return None
-        if not bool(torch.rand(()) < 1.0 - self.anchor_dropout):
+        if probability < 1.0 and not bool(torch.rand(()) < probability):
             return None
         if (
             step >= self.anchor_multi_start_step
@@ -686,7 +1025,7 @@ class Trainer:
         self,
         transition: int,
         anchor: AnchorCondition | None,
-        vf: torch.Tensor | None,
+        model_conditions: dict[str, torch.Tensor],
         volume_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         shape = (
@@ -697,10 +1036,7 @@ class Trainer:
             volume_size,
         )
         current = torch.randn(shape, device=self.device, dtype=torch.float32)
-        conditions = {}
         if anchor is not None:
-            conditions["anchor_image"] = anchor.image
-            conditions["anchor_mask"] = anchor.mask
             known_at_start = self.diffusion.add_noise(
                 anchor.image,
                 self.diffusion.timesteps,
@@ -711,8 +1047,6 @@ class Trainer:
                 known_at_start,
                 anchor.mask,
             )
-        if vf is not None:
-            conditions["vf"] = vf
 
         with torch.no_grad(), self.autocast():
             for index in reversed(range(transition + 1, self.diffusion.timesteps)):
@@ -722,7 +1056,7 @@ class Trainer:
                     current,
                     time,
                     latent,
-                    **conditions,
+                    **model_conditions,
                 )
                 if anchor is not None:
                     prediction = self.diffusion.blend_known(
@@ -744,7 +1078,7 @@ class Trainer:
                 current,
                 time,
                 latent,
-                **conditions,
+                **model_conditions,
             )
             prediction = self.denoiser.decode(logits)
             posterior_prediction = prediction
@@ -922,16 +1256,8 @@ class Trainer:
 
     def update_denoiser(
         self,
-        transition: int,
-        fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
-        connectivity_fake: TripletBatch,
-        logits: torch.Tensor,
-        clean_probs: torch.Tensor,
-        anchor: AnchorCondition | None,
-        anchor_ramp_value: float,
-        target_vf: torch.Tensor,
-        vf_active: bool,
-    ) -> tuple[float, float, float, float, float, float, float, float]:
+        batch: DenoiserBatch,
+    ) -> DenoiserUpdate:
         self.denoiser_optim.zero_grad(set_to_none=True)
         for critic in self.critics.values():
             critic.requires_grad_(False)
@@ -941,8 +1267,8 @@ class Trainer:
             local_weight = self.critic_local_weight
             with self.autocast():
                 for axis in AXES:
-                    fake_prev, fake_curr = fake[axis]
-                    time = self.make_time(transition, fake_prev.shape[0])
+                    fake_prev, fake_curr = batch.fake[axis]
+                    time = self.make_time(batch.transition, fake_prev.shape[0])
                     scores = self.critics[str(axis)](
                         fake_prev,
                         fake_curr,
@@ -953,19 +1279,25 @@ class Trainer:
                 local_loss = torch.stack([loss.local_loss for loss in heads]).sum()
                 adversarial_loss = global_loss + local_weight * local_loss
                 connectivity_loss = adversarial_loss.new_zeros(())
-                if len(connectivity_fake):
+                if len(batch.connectivity_fake) and self.connectivity_weight > 0.0:
                     connectivity_scores = self.connectivity_critic(
-                        connectivity_fake.values,
-                        connectivity_fake.axes,
+                        batch.connectivity_fake.values,
+                        batch.connectivity_fake.axes,
                     )
                     connectivity_head = get_generator_loss(connectivity_scores)
                     connectivity_loss = connectivity_head.combine(local_weight)
+                normal_loss = adversarial_loss.new_zeros(())
+                if len(batch.connectivity_fake) and self.normal_transition_weight > 0.0:
+                    normal_loss = normal_transition_loss(
+                        batch.connectivity_real,
+                        batch.connectivity_fake,
+                    )
                 anchor_loss = adversarial_loss.new_zeros(())
                 anchor_accuracy = adversarial_loss.new_zeros(())
-                if anchor is not None:
-                    selected = anchor.mask[:, 0]
-                    anchor_target = anchor.target[selected]
-                    anchor_logits = logits.movedim(1, -1)[selected]
+                if batch.anchor is not None:
+                    selected = batch.anchor.mask[:, 0]
+                    anchor_target = batch.anchor.target[selected]
+                    anchor_logits = batch.logits.movedim(1, -1)[selected]
                     anchor_loss = F.cross_entropy(anchor_logits, anchor_target)
                     anchor_accuracy = (
                         (anchor_logits.argmax(dim=1) == anchor_target)
@@ -973,56 +1305,192 @@ class Trainer:
                         .mean()
                     )
                 vf_loss = adversarial_loss.new_zeros(())
-                if vf_active:
-                    pred_vf = clean_probs.mean(dim=(2, 3, 4))
-                    vf_loss = (pred_vf - target_vf).abs().sum(dim=1).mean()
+                if bool(batch.vf_present.any()):
+                    pred_vf = batch.clean_probs.mean(dim=(2, 3, 4))
+                    per_sample = 0.5 * (pred_vf - batch.target_vf).abs().sum(dim=1)
+                    vf_loss = per_sample[batch.vf_present].mean()
                 total = (
                     adversarial_loss
-                    + anchor_ramp_value
+                    + batch.anchor_ramp
                     * (
                         self.connectivity_weight * connectivity_loss
+                        + self.normal_transition_weight * normal_loss
                         + self.anchor_loss_weight * anchor_loss
                     )
                     + self.vf_loss_weight * vf_loss
                 )
             self.scaler.scale(total).backward()
+            scale = self.compute_scale_consistency(
+                batch.current,
+                batch.transition,
+                batch.model_conditions,
+                None if batch.anchor is None else batch.anchor.mask,
+                batch.step,
+            )
+            scale_contribution_tensor = (
+                self.scale_consistency_weight * scale.ramp * scale.loss
+            )
+            if scale.active:
+                self.scaler.scale(scale_contribution_tensor).backward()
             self.scaler.step(self.denoiser_optim)
             self.scaler.update()
         finally:
             for critic in self.critics.values():
                 critic.requires_grad_(True)
             self.connectivity_critic.requires_grad_(True)
-        return (
-            float(adversarial_loss.detach()),
-            float(total.detach()),
-            float(global_loss.detach()),
-            float(local_loss.detach()),
-            float(connectivity_loss.detach()),
-            float(anchor_loss.detach()),
-            float(anchor_accuracy.detach()),
-            float(vf_loss.detach()),
+        return DenoiserUpdate(
+            adversarial=float(adversarial_loss.detach()),
+            total=float(total.detach() + scale_contribution_tensor.detach()),
+            global_loss=float(global_loss.detach()),
+            local_loss=float(local_loss.detach()),
+            connectivity=float(connectivity_loss.detach()),
+            normal_transition=float(normal_loss.detach()),
+            anchor=float(anchor_loss.detach()),
+            anchor_accuracy=float(anchor_accuracy.detach()),
+            vf=float(vf_loss.detach()),
+            scale_consistency=float(scale.loss.detach()),
+            scale_contribution=float(scale_contribution_tensor.detach()),
+            scale_ramp=scale.ramp,
+            scale_active=scale.active,
         )
+
+    def get_scale_consistency_ramp(self, step: int) -> float:
+        if step < self.scale_consistency_start_step:
+            return 0.0
+        if self.scale_consistency_ramp_steps == 0:
+            return 1.0
+        return min(
+            (step - self.scale_consistency_start_step + 1)
+            / self.scale_consistency_ramp_steps,
+            1.0,
+        )
+
+    def compute_scale_consistency(
+        self,
+        current: torch.Tensor,
+        transition: int,
+        model_conditions: dict[str, torch.Tensor],
+        known_mask: torch.Tensor | None,
+        step: int,
+    ) -> ScaleConsistencyResult:
+        ramp = self.get_scale_consistency_ramp(step)
+        zero = current.sum() * 0.0
+        if (
+            self.scale_consistency_weight == 0.0
+            or self.scale_consistency_probability == 0.0
+            or ramp == 0.0
+            or min(current.shape[-3:]) < self.scale_consistency_tile_size
+            or bool(torch.rand(()) >= self.scale_consistency_probability)
+        ):
+            return ScaleConsistencyResult(zero, ramp, False)
+
+        axis = int(torch.randint(3, ()).item())
+        origin = tuple(
+            int(torch.randint(size, ()).item()) for size in current.shape[-3:]
+        )
+        plan = make_adjacent_view_plan(
+            origin,
+            axis,
+            self.patch_size,
+            self.scale_consistency_overlap,
+        )
+        first_current, second_current = plan.crop_views(current)
+        first_conditions: dict[str, torch.Tensor] = {}
+        second_conditions: dict[str, torch.Tensor] = {}
+        for name, values in model_conditions.items():
+            if name in {"anchor_image", "anchor_mask"}:
+                first, second = plan.crop_views(values)
+                first_conditions[name] = first
+                second_conditions[name] = second
+            else:
+                first_conditions[name] = values
+                second_conditions[name] = values
+
+        time = self.make_time(transition, current.shape[0])
+        latent = self.sample_latent(current.shape[0], current.dtype)
+        teacher_first = bool(torch.rand(()) < 0.5)
+        teacher_current = first_current if teacher_first else second_current
+        student_current = second_current if teacher_first else first_current
+        teacher_conditions = first_conditions if teacher_first else second_conditions
+        student_conditions = second_conditions if teacher_first else first_conditions
+        with torch.no_grad(), self.autocast():
+            teacher_prediction = self.ema_denoiser(
+                teacher_current,
+                time,
+                latent,
+                **teacher_conditions,
+            )
+        teacher_probs = ((teacher_prediction.to(torch.float32) + 1.0) * 0.5).clamp(
+            0.0,
+            1.0,
+        )
+        teacher_band = teacher_probs[
+            (..., *(plan.first_band if teacher_first else plan.second_band))
+        ]
+        del teacher_prediction, teacher_probs
+        with self.autocast():
+            student_prediction = self.denoiser(
+                student_current,
+                time,
+                latent,
+                **student_conditions,
+            )
+        student_probs = ((student_prediction.to(torch.float32) + 1.0) * 0.5).clamp(
+            0.0,
+            1.0,
+        )
+        student_band = student_probs[
+            (..., *(plan.second_band if teacher_first else plan.first_band))
+        ]
+
+        known_band = None
+        if known_mask is not None:
+            first_known, second_known = plan.crop_views(known_mask.to(torch.bool))
+            first_known, second_known = plan.overlap_bands(
+                first_known,
+                second_known,
+            )
+            known_band = first_known | second_known
+        loss = weighted_probability_mse(
+            student_band,
+            teacher_band,
+            axis=axis,
+            overlap=self.scale_consistency_overlap,
+            known_mask=known_band,
+        )
+        return ScaleConsistencyResult(loss, ramp, True)
 
     @staticmethod
     def summarize_vfs(
         probs: torch.Tensor,
         target: torch.Tensor,
+        present: torch.Tensor,
     ) -> tuple[
         tuple[float, ...],
         tuple[float, ...],
         tuple[float, ...],
         float,
     ]:
+        if present.dtype != torch.bool or present.shape != (probs.shape[0],):
+            raise ValueError("VF presence must be a boolean tensor with shape [B].")
         values = probs.detach().to(torch.float32)
         target_values = target.detach().to(torch.float32).mean(dim=0)
-        soft_values = values.mean(dim=(0, 2, 3, 4))
-        phases = values.argmax(dim=1)
-        hard_values = torch.bincount(
-            phases.flatten(),
-            minlength=values.shape[1],
-        ).to(torch.float32)
-        hard_values.div_(phases.numel())
-        hard_mae = (hard_values - target_values).abs().mean()
+        if bool(present.any()):
+            values = values[present]
+            selected_target = target[present].to(torch.float32)
+            soft_values = values.mean(dim=(0, 2, 3, 4))
+            phases = values.argmax(dim=1)
+            hard_per_sample = (
+                F.one_hot(phases, num_classes=values.shape[1])
+                .to(torch.float32)
+                .mean(dim=(1, 2, 3))
+            )
+            hard_values = hard_per_sample.mean(dim=0)
+            hard_mae = (hard_per_sample - selected_target).abs().mean()
+        else:
+            soft_values = torch.zeros_like(target_values)
+            hard_values = torch.zeros_like(target_values)
+            hard_mae = torch.zeros((), device=values.device)
         return (
             tuple(float(value) for value in target_values),
             tuple(float(value) for value in soft_values),
@@ -1032,15 +1500,18 @@ class Trainer:
 
     def update_target_stats(
         self,
-        target: tuple[float, ...],
+        target: torch.Tensor,
     ) -> tuple[float, ...]:
-        values = torch.tensor(target, dtype=torch.float64)
-        self.target_count += 1
-        delta = values - self.target_mean
-        self.target_mean.add_(delta / self.target_count)
-        self.target_m2.add_(delta * (values - self.target_mean))
+        values = target.detach().to(device="cpu", dtype=torch.float64)
+        if values.ndim != 2 or values.shape[1] != self.num_phases:
+            raise ValueError("target VF statistics require shape [B, num_phases].")
+        for value in values:
+            self.target_count += 1
+            delta = value - self.target_mean
+            self.target_mean.add_(delta / self.target_count)
+            self.target_m2.add_(delta * (value - self.target_mean))
         if self.target_count < 2:
-            return tuple(0.0 for _ in target)
+            return tuple(0.0 for _ in range(self.num_phases))
         std = (self.target_m2 / (self.target_count - 1)).sqrt()
         return tuple(float(value) for value in std)
 
@@ -1074,6 +1545,21 @@ class Trainer:
         )
         writer.add_scalar("loss/r1_raw", metrics.r1, step)
         writer.add_scalar("loss/vf", metrics.vf_loss, step)
+        writer.add_scalar(
+            "loss/normal_transition",
+            metrics.normal_transition_loss,
+            step,
+        )
+        writer.add_scalar(
+            "loss/scale_consistency",
+            metrics.scale_consistency_loss,
+            step,
+        )
+        writer.add_scalar(
+            "loss/scale_consistency_contribution",
+            metrics.scale_consistency_contribution,
+            step,
+        )
         writer.add_scalar("train/transition", metrics.transition, step)
         writer.add_scalar("train/volume_size", metrics.volume_size, step)
         writer.add_scalar(
@@ -1099,6 +1585,11 @@ class Trainer:
         writer.add_scalar("conditioning/anchor_planes", metrics.anchor_planes, step)
         writer.add_scalar("conditioning/anchor_ramp", metrics.anchor_ramp, step)
         writer.add_scalar(
+            "conditioning/anchor_input_active_fraction",
+            metrics.anchor_input_active_fraction,
+            step,
+        )
+        writer.add_scalar(
             "conditioning/anchor_teacher",
             float(metrics.anchor_teacher),
             step,
@@ -1106,6 +1597,37 @@ class Trainer:
         writer.add_scalar(
             "conditioning/vf_active",
             float(metrics.vf_active),
+            step,
+        )
+        writer.add_scalar(
+            "conditioning/vf_active_fraction",
+            metrics.vf_active_fraction,
+            step,
+        )
+        writer.add_scalar(
+            "conditioning/vf_target_resample_rate",
+            metrics.vf_target_resample_rate,
+            step,
+        )
+        state_names = ("both", "anchor_only", "vf_only", "joint_null")
+        for name, fraction in zip(
+            state_names,
+            metrics.condition_state_fractions,
+            strict=True,
+        ):
+            writer.add_scalar(
+                f"conditioning/state_{name}_fraction",
+                fraction,
+                step,
+            )
+        writer.add_scalar(
+            "conditioning/scale_consistency_ramp",
+            metrics.scale_consistency_ramp,
+            step,
+        )
+        writer.add_scalar(
+            "train/scale_consistency_active",
+            float(metrics.scale_consistency_active),
             step,
         )
         writer.add_scalar(

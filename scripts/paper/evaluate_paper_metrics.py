@@ -22,11 +22,11 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from make_anchor_asset import AXIS, load_center_roi
 from make_assets import CROP_SIZE, SAMPLE_PATH
+from provenance import build_provenance, describe_files, validate_manifest
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.generate import DEFAULT_SCALE_OVERLAP, ScaledGenerator
-from src.train.weights import find_weights
 
 REFERENCE_PATH = PROJECT_ROOT / "scripts" / "gt_128.tiff"
 TEMP_DIR = PROJECT_ROOT / "temp"
@@ -62,6 +62,8 @@ CONDITIONS = (
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--weight", type=Path, required=True)
+    parser.add_argument("--guidance-scale", type=float, default=1.0)
     parser.add_argument(
         "--reuse",
         action="store_true",
@@ -77,11 +79,41 @@ def main() -> None:
     target_porosity = porosity(reference)
 
     VOLUME_DIR.mkdir(parents=True, exist_ok=True)
-    weights = find_weights(PROJECT_ROOT / "run")
+    weights = args.weight.resolve()
+    generation = {
+        "conditions": list(CONDITIONS[1:]),
+        "volume_seeds": list(SEEDS),
+        "axis": AXIS,
+        "anchor_counts": list(ANCHOR_COUNTS),
+        "scale_blocks": list(SCALE_BLOCKS),
+        "scale_overlap": SCALE_OVERLAP,
+        "reference_shape": list(reference.shape),
+        "phase_fraction_target": [target_porosity, 1.0 - target_porosity],
+    }
+    provenance = build_provenance(
+        weights,
+        args.guidance_scale,
+        generation=generation,
+        reference=REFERENCE_PATH,
+        additional_inputs={"training_image": SAMPLE_PATH},
+    )
+    cached_paths = [
+        volume_path(condition, seed) for condition in CONDITIONS[1:] for seed in SEEDS
+    ]
     if args.reuse:
-        ensure_cached_volumes()
+        validate_manifest(
+            MANIFEST_PATH,
+            provenance,
+            label="paper metrics reuse",
+            cached_paths=cached_paths,
+        )
     else:
-        generate_volumes(reference, target_porosity, weights)
+        generate_volumes(
+            reference,
+            target_porosity,
+            weights,
+            args.guidance_scale,
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     raw_rows: list[dict[str, object]] = []
@@ -122,6 +154,7 @@ def main() -> None:
                 make_row(
                     condition=condition,
                     seed=seed,
+                    guidance_scale=args.guidance_scale,
                     kid=kid_mean,
                     kid_subset_std=kid_subset_std,
                     porosity_value=porosity(volume),
@@ -137,10 +170,12 @@ def main() -> None:
         raw_rows,
         reference_porosity=target_porosity,
         reference_tortuosity=reference_tortuosity,
+        guidance_scale=args.guidance_scale,
     )
     write_csv(summary_rows, SUMMARY_CSV)
     write_manifest(
-        weights=weights,
+        provenance=provenance,
+        cached_paths=cached_paths,
         reference=reference,
         reference_porosity=target_porosity,
         reference_tortuosity=reference_tortuosity,
@@ -155,6 +190,7 @@ def generate_volumes(
     reference: np.ndarray,
     target_porosity: float,
     weights: Path,
+    guidance_scale: float,
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
@@ -177,15 +213,20 @@ def generate_volumes(
     print("-----------------------------")
     print(f"Weights : {weights.resolve()}")
     print(f"Device  : {device}")
+    print(f"Guidance: {guidance_scale}")
     for condition in CONDITIONS[1:]:
         for seed in SEEDS:
             set_seed(seed, device)
             print(f"Generating {condition}, seed={seed}...", flush=True)
             if condition == "3D":
-                volume = generator.generate(vf=None)
+                volume = generator.generate(
+                    vf=None,
+                    guidance_scale=guidance_scale,
+                )
             elif condition == "3D (phase-fraction conditioned)":
                 volume = generator.generate(
-                    vf=(target_porosity, 1.0 - target_porosity)
+                    vf=(target_porosity, 1.0 - target_porosity),
+                    guidance_scale=guidance_scale,
                 )
             elif condition in anchor_map:
                 count = anchor_map[condition]
@@ -197,7 +238,10 @@ def generate_volumes(
                     )
                     for index in select_indices(patch_size, count)
                 )
-                volume = generator.generate(anchors=anchors)
+                volume = generator.generate(
+                    anchors=anchors,
+                    guidance_scale=guidance_scale,
+                )
             elif condition == "3D (scale-up)":
                 base = generator.generate(
                     anchors=(
@@ -206,13 +250,15 @@ def generate_volumes(
                             axis=AXIS,
                             index=center_index,
                         ),
-                    )
+                    ),
+                    guidance_scale=guidance_scale,
                 )
                 volume = ScaledGenerator(generator).generate(
                     blocks=SCALE_BLOCKS,
                     overlap=SCALE_OVERLAP,
                     base=base,
                     progress=False,
+                    guidance_scale=guidance_scale,
                 )
             else:
                 raise RuntimeError(f"unsupported condition: {condition}")
@@ -331,9 +377,7 @@ def scale_seams(
     shape: tuple[int, ...],
     patch_size: int,
 ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    return tuple(
-        tuple(range(patch_size, size, patch_size)) for size in shape
-    )  # type: ignore[return-value]
+    return tuple(tuple(range(patch_size, size, patch_size)) for size in shape)  # type: ignore[return-value]
 
 
 def seam_connectivity_drop(
@@ -365,7 +409,9 @@ def seam_connectivity_drop(
                 interior_same += same
                 interior_total += total
         if seam_total == 0 or interior_total == 0:
-            raise ValueError("cannot calculate seam connectivity with an empty pore set.")
+            raise ValueError(
+                "cannot calculate seam connectivity with an empty pore set."
+            )
         seam_connectivity = seam_same / seam_total
         interior_connectivity = interior_same / interior_total
         drops.append(interior_connectivity - seam_connectivity)
@@ -375,6 +421,7 @@ def seam_connectivity_drop(
 def make_row(
     condition: str,
     seed: int,
+    guidance_scale: float | None = None,
     kid: float | None = None,
     kid_subset_std: float | None = None,
     porosity_value: float | None = None,
@@ -385,6 +432,7 @@ def make_row(
     return {
         "condition": condition,
         "seed": seed,
+        "guidance_scale": guidance_scale,
         "kid": kid,
         "kid_subset_std": kid_subset_std,
         "porosity": porosity_value,
@@ -398,10 +446,12 @@ def summarize(
     raw_rows: list[dict[str, object]],
     reference_porosity: float,
     reference_tortuosity: float,
+    guidance_scale: float,
 ) -> list[dict[str, object]]:
     summary = [
         {
             "condition": "GT reference volume",
+            "guidance_scale": None,
             "samples": 1,
             "kid_mean": None,
             "kid_std": None,
@@ -417,7 +467,13 @@ def summarize(
     ]
     for condition in CONDITIONS:
         rows = [row for row in raw_rows if row["condition"] == condition]
-        result: dict[str, object] = {"condition": condition, "samples": len(rows)}
+        result: dict[str, object] = {
+            "condition": condition,
+            "guidance_scale": (
+                None if condition == "Real 2D crops" else guidance_scale
+            ),
+            "samples": len(rows),
+        }
         kid_values = np.asarray(
             [row["kid"] for row in rows if row["kid"] is not None],
             dtype=float,
@@ -461,15 +517,16 @@ def write_csv(rows: list[dict[str, object]], output: Path) -> None:
 
 
 def write_manifest(
-    weights: Path,
+    provenance: dict[str, object],
+    cached_paths: list[Path],
     reference: np.ndarray,
     reference_porosity: float,
     reference_tortuosity: float,
     output: Path,
 ) -> None:
     data = {
-        "weights": str(weights.resolve()),
-        "reference": str(REFERENCE_PATH.resolve()),
+        **provenance,
+        "cached_outputs": describe_files(cached_paths),
         "reference_shape": list(reference.shape),
         "training_image": str(SAMPLE_PATH.resolve()),
         "pore_phase": PORE_PHASE,
@@ -540,20 +597,6 @@ def volume_path(condition: str, seed: int) -> Path:
         .replace(" ", "_")
     )
     return VOLUME_DIR / f"{slug}_seed_{seed}.tiff"
-
-
-def ensure_cached_volumes() -> None:
-    missing = [
-        volume_path(condition, seed)
-        for condition in CONDITIONS[1:]
-        for seed in SEEDS
-        if not volume_path(condition, seed).is_file()
-    ]
-    if missing:
-        raise FileNotFoundError(
-            "missing cached paper metric volumes: "
-            + ", ".join(path.name for path in missing)
-        )
 
 
 def load_volume(path: Path) -> np.ndarray:

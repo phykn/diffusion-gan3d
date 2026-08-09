@@ -22,6 +22,12 @@ def main() -> None:
         help="generator weight to load",
     )
     parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=1.0,
+        help="classifier-free guidance scale (default: 1)",
+    )
+    parser.add_argument(
         "--napari",
         action="store_true",
         help="show the complete 3D phase volume in Napari",
@@ -42,7 +48,10 @@ def main() -> None:
     print("Postprocess  : none")
     print("Status  : generating...", flush=True)
 
-    vol = generator.generate(vf=None)
+    vol = generator.generate(
+        vf=None,
+        guidance_scale=args.guidance_scale,
+    )
     print("Status  : complete", flush=True)
     if args.napari:
         show_napari(vol)

@@ -70,6 +70,12 @@ def main() -> None:
         help="base anchor conditioning strength from 0 to 1 (default: 1)",
     )
     parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=1.0,
+        help="classifier-free guidance scale (default: 1)",
+    )
+    parser.add_argument(
         "--napari",
         action="store_true",
         help="show the complete scaled phase volume in Napari",
@@ -117,7 +123,7 @@ def main() -> None:
     elif anchor_count == 0:
         print("Base       : unanchored")
         print("Status     : generating base...", flush=True)
-        base = generator.generate()
+        base = generator.generate(guidance_scale=args.guidance_scale)
     else:
         assert args.gt is not None
         target = load_volume(
@@ -136,6 +142,7 @@ def main() -> None:
         base = generator.generate(
             anchors=anchors,
             anchor_strength=args.anchor_strength,
+            guidance_scale=args.guidance_scale,
         )
         base_acc = get_accuracy(base, target, indices, AXIS)
 
@@ -155,6 +162,7 @@ def main() -> None:
         overlap=overlap,
         base=base,
         vf=None,
+        guidance_scale=args.guidance_scale,
     )
     stats = scaled.stats
     assert stats is not None

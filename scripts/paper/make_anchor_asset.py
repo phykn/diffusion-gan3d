@@ -1,5 +1,7 @@
 """Generate the fixed center-anchor example used in PAPER.md."""
 
+import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -23,18 +25,38 @@ from make_assets import (
     SAMPLE_PATH,
     draw_volume,
 )
+from provenance import build_provenance, file_record
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
-from src.train.weights import find_weights
 
 AXIS = 0
 SEED = 0
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--weight",
+        type=Path,
+        required=True,
+    )
+    parser.add_argument("--guidance-scale", type=float, default=1.0)
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    weights = find_weights(PROJECT_ROOT / "run")
+    weights = args.weight.resolve()
+    provenance = build_provenance(
+        weights,
+        args.guidance_scale,
+        generation={
+            "seed": SEED,
+            "axis": AXIS,
+            "source_roi_left_top": list(ROI_POSITIONS[1]),
+            "source_crop_size": CROP_SIZE,
+        },
+        reference=SAMPLE_PATH,
+    )
     generator = load_generator(weights, device=device)
     if not generator.anchor_enabled:
         raise ValueError("selected weights were trained with anchors disabled.")
@@ -49,10 +71,12 @@ def main() -> None:
     print("---------------------")
     print(f"Weights : {weights.resolve()}")
     print(f"Device  : {device}")
+    print(f"Guidance: {args.guidance_scale}")
     print(f"Anchor  : axis {AXIS}, index {index}, shape {tuple(anchor.shape)}")
     print("Status  : generating...", flush=True)
     volume = generator.generate(
-        anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=index),)
+        anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=index),),
+        guidance_scale=args.guidance_scale,
     )
     generated = volume.select(AXIS, index)
     matches = int((generated == anchor).sum())
@@ -64,7 +88,37 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output = OUTPUT_DIR / "04-anchor-conditioning.png"
     render_result(anchor, generated, volume, output)
+    metadata = output.with_suffix(".json")
+    metadata.write_text(
+        json.dumps(
+            {
+                **provenance,
+                "seed": SEED,
+                "anchor": {
+                    "axis": AXIS,
+                    "index": index,
+                    "shape": list(anchor.shape),
+                    "source": str(SAMPLE_PATH.resolve()),
+                    "source_roi_left_top": list(ROI_POSITIONS[1]),
+                    "source_crop_size": CROP_SIZE,
+                },
+                "output": {
+                    **file_record(output),
+                    "shape": list(volume.shape),
+                    "dtype": str(volume.dtype),
+                },
+                "anchor_match": {
+                    "matched_voxels": matches,
+                    "total_voxels": total,
+                    "accuracy": accuracy,
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     print(f"Figure  : {output.resolve()}")
+    print(f"Metadata: {metadata.resolve()}")
 
 
 def load_center_roi(size: int) -> torch.Tensor:

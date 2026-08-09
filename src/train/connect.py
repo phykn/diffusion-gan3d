@@ -31,6 +31,37 @@ class TripletBatch:
         )
 
 
+def normal_transition_loss(real: TripletBatch, fake: TripletBatch) -> torch.Tensor:
+    """Compare center-to-neighbor phase transitions along the triplet normal."""
+    if real.values.shape != fake.values.shape:
+        raise ValueError("real and fake triplets must have the same shape.")
+    if not torch.equal(real.axes, fake.axes):
+        raise ValueError("real and fake triplets must use the same axes.")
+
+    _, _, phase_count, height, width = real.values.shape
+    if phase_count == 0 or height == 0 or width == 0:
+        raise ValueError("triplets must contain phases and spatial values.")
+    if len(fake) == 0:
+        return fake.values.sum() * 0.0
+
+    def transition_matrices(values: torch.Tensor) -> torch.Tensor:
+        probabilities = (values.to(torch.float32) + 1.0) * 0.5
+        center = probabilities[:, 1]
+        neighbors = probabilities[:, (0, 2)]
+        return torch.einsum(
+            "bchw,bnkhw->bnck",
+            center,
+            neighbors,
+        ) / (height * width)
+
+    real_transitions = transition_matrices(real.values)
+    fake_transitions = transition_matrices(fake.values)
+    total_variation = 0.5 * (real_transitions - fake_transitions).abs().sum(
+        dim=(-2, -1)
+    )
+    return total_variation.mean()
+
+
 @dataclass(frozen=True)
 class TeacherAnchor:
     condition: AnchorCondition

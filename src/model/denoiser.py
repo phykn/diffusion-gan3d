@@ -1,3 +1,4 @@
+import math
 from collections.abc import Sequence
 
 import torch
@@ -12,6 +13,17 @@ from .blocks import (
     SinusoidalTimeEmbedding,
     Upsample3D,
 )
+
+
+def validate_guidance_scale(value: float) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or value < 0.0
+    ):
+        raise ValueError("guidance_scale must be a finite non-negative number.")
+    return float(value)
 
 
 class Denoiser3D(nn.Module):
@@ -113,6 +125,7 @@ class Denoiser3D(nn.Module):
         time: torch.Tensor,
         latent: torch.Tensor,
         vf: torch.Tensor | None = None,
+        vf_present: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -121,6 +134,7 @@ class Denoiser3D(nn.Module):
             time,
             latent,
             vf=vf,
+            vf_present=vf_present,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
         )
@@ -132,10 +146,11 @@ class Denoiser3D(nn.Module):
         time: torch.Tensor,
         latent: torch.Tensor,
         vf: torch.Tensor | None = None,
+        vf_present: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        emb = self.embed(x_current, time, latent, vf)
+        emb = self.embed(x_current, time, latent, vf, vf_present)
         x = self.input(x_current)
         anchor_feat = self.encode_anchor(
             x_current,
@@ -170,6 +185,47 @@ class Denoiser3D(nn.Module):
         logits = self.output(F.silu(self.output_norm(x)))
         return logits
 
+    def predict_guided(
+        self,
+        x_current: torch.Tensor,
+        time: torch.Tensor,
+        latent: torch.Tensor,
+        guidance_scale: float,
+        vf: torch.Tensor | None = None,
+        vf_present: torch.Tensor | None = None,
+        anchor_image: torch.Tensor | None = None,
+        anchor_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Combine conditional and unconditional logits with shared stochastic inputs."""
+        guidance_scale = validate_guidance_scale(guidance_scale)
+        self._validate_vf_condition(x_current, vf, vf_present)
+        if guidance_scale == 1.0 or (
+            vf is None and anchor_image is None and anchor_mask is None
+        ):
+            return self(
+                x_current,
+                time,
+                latent,
+                vf=vf,
+                vf_present=vf_present,
+                anchor_image=anchor_image,
+                anchor_mask=anchor_mask,
+            )
+        unconditional = self.predict_logits(x_current, time, latent)
+        if guidance_scale == 0.0:
+            return self.decode(unconditional)
+        conditional = self.predict_logits(
+            x_current,
+            time,
+            latent,
+            vf=vf,
+            vf_present=vf_present,
+            anchor_image=anchor_image,
+            anchor_mask=anchor_mask,
+        )
+        guided = unconditional + guidance_scale * (conditional - unconditional)
+        return self.decode(guided)
+
     @staticmethod
     def decode(logits: torch.Tensor) -> torch.Tensor:
         return 2.0 * logits.softmax(dim=1) - 1.0
@@ -180,7 +236,9 @@ class Denoiser3D(nn.Module):
         time: torch.Tensor,
         latent: torch.Tensor,
         vf: torch.Tensor | None,
+        vf_present: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        self._validate_vf_condition(inputs, vf, vf_present)
         time = time.to(device=inputs.device)
         latent = latent.to(device=inputs.device, dtype=inputs.dtype)
         time_emb = self.time_mlp(self.time_emb(time).to(dtype=inputs.dtype))
@@ -188,8 +246,35 @@ class Denoiser3D(nn.Module):
         emb = (time_emb + latent_emb) * INV_SQRT_TWO
         if vf is not None:
             vf = vf.to(device=inputs.device, dtype=inputs.dtype)
-            emb = emb + self.vf_mlp(vf)
+            vf_emb = self.vf_mlp(vf)
+            if vf_present is None:
+                emb = emb + vf_emb
+            else:
+                vf_present = vf_present.to(device=inputs.device)
+                emb = torch.where(vf_present[:, None], emb + vf_emb, emb)
         return emb
+
+    def _validate_vf_condition(
+        self,
+        inputs: torch.Tensor,
+        vf: torch.Tensor | None,
+        vf_present: torch.Tensor | None,
+    ) -> None:
+        if vf is None:
+            if vf_present is not None:
+                raise ValueError("vf_present requires vf.")
+            return
+        if not isinstance(vf, torch.Tensor) or not vf.is_floating_point():
+            raise TypeError("vf must be a floating-point tensor.")
+        expected = (inputs.shape[0], self.vf_mlp[0].in_features)
+        if vf.shape != expected:
+            raise ValueError("vf must have shape [B, num_phases].")
+        if vf_present is None:
+            return
+        if not isinstance(vf_present, torch.Tensor) or vf_present.dtype != torch.bool:
+            raise TypeError("vf_present must be a boolean tensor.")
+        if vf_present.shape != (inputs.shape[0],):
+            raise ValueError("vf_present must have shape [B].")
 
     def run_block(
         self,

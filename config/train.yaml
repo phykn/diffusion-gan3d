@@ -6,6 +6,8 @@
 #   transverse_2   Axis 2 is the unique direction.
 #   directional    Preserve axis identities; allow flips and 180-degree rotations.
 
+schema_version: 2
+
 data:
   folders:
     0: [data]
@@ -35,7 +37,7 @@ diffusion:
 anchor:
   start_step: 3000
   ramp_steps: 6000
-  dropout_prob: 0.2
+  training_probability: 0.80
   multi_anchor_prob: 0.5
   max_density: 0.05
   min_spacing: 4
@@ -43,15 +45,31 @@ anchor:
   teacher_bank_size_mib: 128
   loss_weight: 1.0
 
+conditioning:
+  cfg_dropout:
+    # With both conditions, each of anchor-null, VF-null, and joint-null uses 5%.
+    drop_each_prob: 0.05
+    # Before anchors start, VF alone is dropped on 10% of samples.
+    single_condition_drop_prob: 0.10
+
 connectivity:
   replay_triplets_per_axis: 4
   replay_capacity_per_axis: 64
   max_triplets_per_step: 4
   reversal_invariant: true
   loss_weight: 0.25
+  normal_transition_loss_weight: 0.10
 
 vf:
-  dropout_prob: 0.2
+  target_sampling: per_crop_empirical
+  loss: total_variation
+  loss_weight: 1.0
+
+scale_consistency:
+  overlap: 8
+  probability: 0.25
+  start_step: 1000
+  ramp_steps: 4000
   loss_weight: 1.0
 
 optim:
@@ -64,7 +82,7 @@ optim:
   local_loss_weight: 0.5
 
 train:
-  total_steps: 50000
+  total_steps: 20000
   volume_sizes: [128, 136, 144, 152, 160]
   volume_batch_size: 1
   slice_pairs_per_axis: 16
@@ -72,8 +90,3 @@ train:
   ema_decay: 0.999
   save_every_steps: 100
   checkpoint_every_steps: 5000
-  generator: null
-  critic_0: null
-  critic_1: null
-  critic_2: null
-  critic_c: null

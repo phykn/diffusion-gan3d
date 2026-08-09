@@ -33,6 +33,23 @@ real and generated slices. Use `isotropic` when all three axes are equivalent,
 or `false` to disable it. The configuration file keeps the same choices in a
 comment above the data section.
 
+Training configuration schema `2` intentionally starts a new run rather than
+loading pre-schema checkpoints. Anchor-task sampling is separate from
+classifier-free condition dropout: with both anchor and volume-fraction (VF)
+conditions available, the anchor-null, VF-null, and joint-null states each use
+5% of samples; a lone VF condition is dropped on 10%. VF targets are sampled
+from individual real crops instead of averaging the full axis batch, and the
+loss measures total-variation distance after exact anchor projection.
+
+Two auxiliary terms target the failure modes exposed by scale-up. The
+anchor-normal term matches center-to-neighbor phase transitions to matched
+unconditional replay triplets. Scale consistency uses the EMA model as a stop-gradient teacher
+and matches the predicted clean probabilities in the 16-voxel region shared by
+adjacent 128-core, 8-halo views. Its 25% sampling probability starts after 1,000
+steps and ramps for 4,000 steps. The configured `0.10` normal-transition weight
+and `1.0` scale-consistency weight are conservative starting values, not
+universal constants; compare seeded ablations before choosing final weights.
+
 Generate a 3D volume around a known section and extend it to `3 × 3 × 3` blocks:
 
 ```python
@@ -60,6 +77,20 @@ values do not by themselves guarantee a smooth normal-direction continuation,
 so the anchor diagnostic reports boundary change, transition, and continuation
 metrics separately from anchor accuracy.
 
+The samplers also accept `guidance_scale` for classifier-free guidance in
+logit space. The default `1.0` follows the single-pass conditional path exactly.
+Values above one extrapolate along the learned conditional-logit direction and
+may increase condition influence; zero uses one unconditional evaluation.
+`guidance_scale=0` disables only the learned condition inputs, not anchor
+projection; use `anchor_strength=0` to remove the anchor. Non-default guidance
+requires weights trained with condition dropout. Scales other than zero or one
+use two denoiser evaluations whenever a learned condition is active, so select
+the value with a seeded quality sweep rather than assuming that larger is
+better. Hard anchors remain exact because projection is applied after the
+guided prediction. For `ScaledGenerator`, guidance affects the learned `vf`
+condition; the external `base` uses a separate spatial blend and is not amplified
+by this option.
+
 Run the diagnostic scripts with an explicit generator weight. Script `03`
 always requires a GT volume; script `04` requires one when `--count` is positive
 and `--anchor-strength` is nonzero:
@@ -67,11 +98,16 @@ and `--anchor-strength` is nonzero:
 ```bash
 python scripts/01_check_dataset.py
 python scripts/02_check_generated.py --weight run/<run-id>/generator.pt
-python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --gt scripts/gt.tiff --count 3
-python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --gt scripts/gt.tiff --count 3 --anchor-strength 0.65
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --gt scripts/gt_128.tiff --count 3
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --gt scripts/gt_128.tiff --count 3 --anchor-strength 0.65
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt
-python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --gt scripts/gt.tiff --count 3
+python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --gt scripts/gt_128.tiff --count 3
 ```
+
+These generation and evaluation CLIs accept `--guidance-scale` with a default
+of `1.0`. Paper-generation CLIs also require an explicit `--weight`; they never
+select the newest run implicitly, so cached metrics and assets remain tied to a
+known checkpoint.
 
 The `gt` argument supplied to script `03`, or to script `04` with active
 anchors, is the reference volume from which anchor planes are selected.
