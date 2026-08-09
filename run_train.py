@@ -19,6 +19,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("cuda", "cpu"),
         default="cuda" if torch.cuda.is_available() else "cpu",
     )
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help=(
+            "directory for this run (created as a new directory; "
+            "default: automatic timestamp under run/)"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -41,7 +50,10 @@ def main() -> None:
         if path is not None:
             print(f"Loading {name} checkpoint: {path}")
     trainer = build_trainer(cfg, device)
-    run_dir = make_run_dir(RUN_ROOT)
+    if args.run_dir is None:
+        run_dir = make_run_dir(RUN_ROOT)
+    else:
+        run_dir = make_explicit_run_dir(args.run_dir)
     save_yaml(run_dir / "train.yaml", cfg)
     trainer.fit(
         steps=cfg["train"]["total_steps"],
@@ -62,6 +74,13 @@ def make_run_dir(root: Path) -> Path:
             continue
         return run_dir
     raise FileExistsError(f"too many runs already exist for minute {name}.")
+
+
+def make_explicit_run_dir(path: Path) -> Path:
+    """Create the user-selected run directory without overwriting an existing run."""
+    path = path.expanduser()
+    path.mkdir(parents=True, exist_ok=False)
+    return path
 
 
 if __name__ == "__main__":

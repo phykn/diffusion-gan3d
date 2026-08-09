@@ -19,7 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
-from src.generate import ScaledGenerator, ScalePlan
+from src.generate import DEFAULT_SCALE_OVERLAP, ScaledGenerator, ScalePlan
 
 AXIS = 0
 
@@ -55,8 +55,8 @@ def main() -> None:
     parser.add_argument(
         "--overlap",
         type=non_negative_int,
-        default=16,
-        help="context added to each side of a block (default: 16)",
+        default=DEFAULT_SCALE_OVERLAP,
+        help=f"context added to each side of a block (default: {DEFAULT_SCALE_OVERLAP})",
     )
     parser.add_argument(
         "--count",

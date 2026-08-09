@@ -22,6 +22,8 @@ Set the 2D section folders and training options in [`config/train.yaml`](config/
 
 ```bash
 python run_train.py --device cuda
+# Or choose the exact output directory (it must not already exist):
+python run_train.py --device cuda --run-dir run/my-experiment
 ```
 
 The `data.augment` preset controls differentiable critic augmentation for both
@@ -45,7 +47,7 @@ base = generator.generate(anchors=(anchor,))
 
 volume = ScaledGenerator(generator).generate(
     blocks=(3, 3, 3),
-    overlap=16,
+    overlap=8,
     base=base,
 )
 ```

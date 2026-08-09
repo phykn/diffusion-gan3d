@@ -13,6 +13,8 @@ from .anchor import PlaneAnchor, build_anchors
 from .diffusion import Diffusion
 from .model.denoiser import Denoiser3D
 
+DEFAULT_SCALE_OVERLAP = 8
+
 
 @dataclass(frozen=True)
 class ScalePlan:
@@ -359,7 +361,7 @@ class ScaledGenerator:
     def plan(
         self,
         shape: int | Sequence[int],
-        overlap: int,
+        overlap: int = DEFAULT_SCALE_OVERLAP,
     ) -> ScalePlan:
         shape = self.parse_shape(shape)
         factor = self.get_downsample_factor()
@@ -413,7 +415,7 @@ class ScaledGenerator:
     def generate_probs(
         self,
         shape: int | Sequence[int],
-        overlap: int,
+        overlap: int = DEFAULT_SCALE_OVERLAP,
         base: torch.Tensor | None = None,
         vf: Sequence[float] | None = None,
         progress: bool = True,
@@ -457,7 +459,7 @@ class ScaledGenerator:
     def generate(
         self,
         blocks: int | Sequence[int] | None = None,
-        overlap: int = 0,
+        overlap: int = DEFAULT_SCALE_OVERLAP,
         base: torch.Tensor | None = None,
         vf: Sequence[float] | None = None,
         storage: str = "auto",
