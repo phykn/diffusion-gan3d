@@ -145,18 +145,13 @@ def weighted_probability_mse(
     *,
     axis: int,
     overlap: int,
-    known_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Compare aligned probability bands while excluding known anchor voxels."""
+    """Compare all voxels in aligned probability bands."""
     compute_dtype = _validate_probability_pair(student, teacher, axis, overlap)
     student_values = student.to(dtype=compute_dtype)
     teacher_values = teacher.detach().to(dtype=compute_dtype)
     error = (student_values - teacher_values).square().mean(dim=1, keepdim=True)
     effective = _overlap_weights(student, axis, overlap, compute_dtype)
-
-    known = _validate_known_mask(known_mask, student)
-    if known is not None:
-        effective = effective * (~known).to(dtype=compute_dtype)
 
     numerator = (error * effective).sum()
     denominator = effective.expand_as(error).sum()
@@ -206,28 +201,3 @@ def _overlap_weights(
     weight_shape = [1, 1, 1, 1, 1]
     weight_shape[axis + 2] = 2 * overlap
     return weights.view(weight_shape)
-
-
-def _validate_known_mask(
-    known_mask: torch.Tensor | None,
-    probabilities: torch.Tensor,
-) -> torch.Tensor | None:
-    if known_mask is None:
-        return None
-    if not isinstance(known_mask, torch.Tensor):
-        raise TypeError("known_mask must be a torch.Tensor or None.")
-    expected_spatial = probabilities.shape[2:]
-    if (
-        known_mask.ndim != 5
-        or known_mask.shape[0] != probabilities.shape[0]
-        or known_mask.shape[1] not in (1, probabilities.shape[1])
-        or known_mask.shape[2:] != expected_spatial
-    ):
-        raise ValueError(
-            "known_mask must match [B, 1, D, H, W] or the probability shape."
-        )
-    if known_mask.device != probabilities.device:
-        raise ValueError("known_mask and probabilities must use the same device.")
-    if known_mask.dtype != torch.bool:
-        raise TypeError("known_mask must use torch.bool.")
-    return known_mask.any(dim=1, keepdim=True)

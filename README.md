@@ -1,12 +1,10 @@
 # Anchor-Conditioned Diffusion for Scalable 3D Microstructure Synthesis
 
-Three-dimensional imaging is expensive, so material structures are often known only through a few measured 2D sections. Existing generators can produce plausible 3D volumes, but they do not preserve a section at its measured location. Pasting it into the result afterward can also create an artificial discontinuity.
+Three-dimensional imaging is expensive, so material structures are often known only through a few measured 2D sections. Models trained only to match 2D section distributions do not ensure that a supplied section influences a prescribed 3D location. Pasting it into the result afterward can create an artificial discontinuity.
 
-This project uses measured sections as anchors throughout denoising, preserving their phases while generating a connected 3D structure around them. The anchored volume can then guide jointly generated overlapping blocks. During scale-up, the base is softly conditioned at every reverse step and remains free to adapt to its new surroundings; it is not pasted back into the final volume.
+This project supplies measured sections as learned conditions throughout denoising, encouraging phase agreement and natural continuity without overwriting generated values. The conditioned volume can then guide jointly generated overlapping blocks. During scale-up, the base is softly conditioned at every reverse step and remains free to adapt to its new surroundings; it is not pasted back into the final volume.
 
-[`PAPER.md`](PAPER.md) records the evaluated method and its limitations. Its
-status note lists the material differences from the current training and
-scale-up implementation.
+[`PAPER.md`](PAPER.md) records the evaluated method and its limitations.
 
 ## Installation
 

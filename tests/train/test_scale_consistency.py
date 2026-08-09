@@ -119,48 +119,19 @@ def test_zero_weight_endpoints_do_not_contribute() -> None:
     torch.testing.assert_close(loss, torch.tensor(0.0))
 
 
-def test_known_anchor_voxels_are_excluded() -> None:
+def test_nonzero_weight_anchor_position_contributes_to_loss() -> None:
     teacher = torch.zeros(1, 2, 4, 2, 2)
     student = teacher.clone()
     student[:, :, 1, 0, 0] = 1.0
-    known = torch.zeros(1, 1, 4, 2, 2, dtype=torch.bool)
-    known[:, :, 1, 0, 0] = True
-
-    masked = weighted_probability_mse(
-        student,
-        teacher,
-        axis=0,
-        overlap=2,
-        known_mask=known,
-    )
-    unmasked = weighted_probability_mse(
-        student,
-        teacher,
-        axis=0,
-        overlap=2,
-    )
-
-    torch.testing.assert_close(masked, torch.tensor(0.0))
-    assert float(unmasked) > 0.0
-
-
-def test_all_known_voxels_return_a_differentiable_zero() -> None:
-    student = torch.rand(1, 2, 4, 2, 2, requires_grad=True)
-    teacher = torch.rand_like(student)
-    known = torch.ones(1, 1, 4, 2, 2, dtype=torch.bool)
 
     loss = weighted_probability_mse(
         student,
         teacher,
         axis=0,
         overlap=2,
-        known_mask=known,
     )
-    loss.backward()
 
-    torch.testing.assert_close(loss, torch.tensor(0.0))
-    assert student.grad is not None
-    assert torch.equal(student.grad, torch.zeros_like(student))
+    torch.testing.assert_close(loss, torch.tensor(0.125))
 
 
 def test_teacher_is_stop_gradient_and_student_receives_gradient() -> None:
@@ -208,25 +179,3 @@ def test_teacher_is_stop_gradient_and_student_receives_gradient() -> None:
 def test_invalid_geometry_is_rejected(call, error: str) -> None:
     with pytest.raises((TypeError, ValueError), match=error):
         call()
-
-
-def test_known_mask_requires_boolean_matching_spatial_shape() -> None:
-    student = torch.zeros(1, 2, 4, 2, 2)
-    teacher = torch.zeros_like(student)
-
-    with pytest.raises(TypeError, match="bool"):
-        weighted_probability_mse(
-            student,
-            teacher,
-            axis=0,
-            overlap=2,
-            known_mask=torch.zeros(1, 1, 4, 2, 2),
-        )
-    with pytest.raises(ValueError, match="known_mask"):
-        weighted_probability_mse(
-            student,
-            teacher,
-            axis=0,
-            overlap=2,
-            known_mask=torch.zeros(1, 1, 3, 2, 2, dtype=torch.bool),
-        )

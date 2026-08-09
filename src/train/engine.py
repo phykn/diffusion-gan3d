@@ -1221,7 +1221,6 @@ class Trainer:
                 batch.current,
                 batch.transition,
                 batch.model_conditions,
-                None if batch.anchor is None else batch.anchor.mask,
                 batch.step,
             )
             scale_contribution_tensor = (
@@ -1267,7 +1266,6 @@ class Trainer:
         current: torch.Tensor,
         transition: int,
         model_conditions: dict[str, torch.Tensor],
-        known_mask: torch.Tensor | None,
         step: int,
     ) -> ScaleConsistencyResult:
         ramp = self.get_scale_consistency_ramp(step)
@@ -1340,20 +1338,11 @@ class Trainer:
             1.0,
         )
 
-        known_band = None
-        if known_mask is not None:
-            first_known, second_known = plan.crop_views(known_mask.to(torch.bool))
-            first_known, second_known = plan.overlap_bands(
-                first_known,
-                second_known,
-            )
-            known_band = first_known | second_known
         loss = weighted_probability_mse(
             student_band,
             teacher_band,
             axis=axis,
             overlap=self.scale_consistency_overlap,
-            known_mask=known_band,
         )
         return ScaleConsistencyResult(loss, ramp, True)
 
