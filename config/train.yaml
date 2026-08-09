@@ -63,7 +63,7 @@ vf:
 
 scale_consistency:
   overlap: 8
-  probability: 0.25
+  probability: 0.30
   start_step: 1000
   ramp_steps: 4000
   loss_weight: 1.0
@@ -79,7 +79,7 @@ optim:
 
 train:
   total_steps: 20000
-  volume_sizes: [128, 136, 144, 152, 160]
+  volume_sizes: [128, 144]
   volume_batch_size: 1
   slice_pairs_per_axis: 16
   mixed_precision: true

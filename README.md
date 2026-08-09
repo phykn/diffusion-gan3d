@@ -45,11 +45,11 @@ Two auxiliary terms target the failure modes exposed by scale-up. The
 anchor-normal term matches center-to-neighbor phase transitions to matched
 unconditional replay triplets. Scale consistency uses the EMA model as a stop-gradient teacher
 and matches the predicted clean probabilities in the 16-voxel region shared by
-adjacent 128-core, 8-halo views. Its 25% sampling probability starts after 1,000
+adjacent 128-core, 8-halo views. Its 30% sampling probability starts after 1,000
 steps and ramps for 4,000 steps. This probability is conditional on a sampled
 training volume being large enough for the 144-voxel consistency view; with the
-default five volume sizes, three are eligible, so the steady-state rate is 15%
-of all steps. The configured `0.10` normal-transition weight
+default 128- and 144-voxel volume sizes, one of two is eligible, so the
+steady-state rate remains 15% of all steps. The configured `0.10` normal-transition weight
 and `1.0` scale-consistency weight are conservative starting values, not
 universal constants; compare seeded ablations before choosing final weights.
 
