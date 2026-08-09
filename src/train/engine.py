@@ -479,18 +479,10 @@ class Trainer:
             prediction,
         ) = self.generate_pair(
             transition,
-            anchor,
             model_conditions,
             volume_size,
         )
-        effective_prediction = prediction
-        if anchor is not None:
-            effective_prediction = self.diffusion.blend_known(
-                prediction,
-                anchor.image,
-                anchor.mask,
-            )
-        clean_probs = (effective_prediction + 1.0) * 0.5
+        clean_probs = (prediction + 1.0) * 0.5
         fake = {
             axis: self.critic_augment.apply_pair(
                 *self.sample_pairs(
@@ -659,7 +651,6 @@ class Trainer:
         if selection.source == "real" and self.anchor_multi_probability > 0.0:
             self.connect.record_seeded(
                 prediction,
-                selection.condition,
                 selection.seeds,
             )
 
@@ -955,7 +946,6 @@ class Trainer:
     def generate_pair(
         self,
         transition: int,
-        anchor: AnchorCondition | None,
         model_conditions: dict[str, torch.Tensor],
         volume_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -967,17 +957,6 @@ class Trainer:
             volume_size,
         )
         current = torch.randn(shape, device=self.device, dtype=torch.float32)
-        if anchor is not None:
-            known_at_start = self.diffusion.add_noise(
-                anchor.image,
-                self.diffusion.timesteps,
-                noise=current,
-            )
-            current = self.diffusion.blend_known(
-                current,
-                known_at_start,
-                anchor.mask,
-            )
 
         with torch.no_grad(), self.autocast():
             for index in reversed(range(transition + 1, self.diffusion.timesteps)):
@@ -989,12 +968,6 @@ class Trainer:
                     latent,
                     **model_conditions,
                 )
-                if anchor is not None:
-                    prediction = self.diffusion.blend_known(
-                        prediction,
-                        anchor.image,
-                        anchor.mask,
-                    )
                 current = self.diffusion.sample_posterior(
                     current,
                     prediction,
@@ -1012,16 +985,9 @@ class Trainer:
                 **model_conditions,
             )
             prediction = self.denoiser.decode(logits)
-            posterior_prediction = prediction
-            if anchor is not None:
-                posterior_prediction = self.diffusion.blend_known(
-                    prediction,
-                    anchor.image,
-                    anchor.mask,
-                )
             previous = self.diffusion.sample_posterior(
                 current,
-                posterior_prediction,
+                prediction,
                 transition,
             )
         return previous, current, logits, prediction

@@ -39,7 +39,7 @@ classifier-free condition dropout: with both anchor and volume-fraction (VF)
 conditions available, the anchor-null, VF-null, and joint-null states each use
 5% of samples; a lone VF condition is dropped on 10%. VF targets are sampled
 from individual real crops instead of averaging the full axis batch, and the
-loss measures total-variation distance after exact anchor projection.
+loss measures total-variation distance from the raw predicted clean probabilities.
 
 Two auxiliary terms target the failure modes exposed by scale-up. The
 anchor-normal term matches center-to-neighbor phase transitions to matched
@@ -72,25 +72,24 @@ volume = ScaledGenerator(generator).generate(
 )
 ```
 
-At the default `anchor_strength=1`, known voxels follow the matching DDPM
-forward/reverse bridge at every transition and are exact in the final base.
-Values between zero and one relax that projection by blending it with the model
-prediction; zero leaves the unconditioned sampling path unchanged. Exact anchor
-values do not by themselves guarantee a smooth normal-direction continuation,
-so the anchor diagnostic reports boundary change, transition, and continuation
-metrics separately from anchor accuracy.
+At the default `anchor_strength=1`, known sections are supplied to the denoiser
+as learned conditions at full mask strength. Values between zero and one scale
+that condition mask; zero leaves the unconditioned sampling path unchanged.
+Anchor values are never projected into diffusion states or outputs, so the
+anchor diagnostic reports learned match, boundary change, transition, and
+continuation metrics separately.
 
 The samplers also accept `guidance_scale` for classifier-free guidance in
 logit space. The default `1.0` follows the single-pass conditional path exactly.
 Values above one extrapolate along the learned conditional-logit direction and
 may increase condition influence; zero uses one unconditional evaluation.
-`guidance_scale=0` disables only the learned condition inputs, not anchor
-projection; use `anchor_strength=0` to remove the anchor. Non-default guidance
+`guidance_scale=0` disables the learned condition inputs; use
+`anchor_strength=0` to remove the anchor condition. Non-default guidance
 requires weights trained with condition dropout. Scales other than zero or one
 use two denoiser evaluations whenever a learned condition is active, so select
 the value with a seeded quality sweep rather than assuming that larger is
-better. Hard anchors remain exact because projection is applied after the
-guided prediction. For `ScaledGenerator`, guidance affects the learned `vf`
+better. Anchored outputs remain raw guided model predictions. For
+`ScaledGenerator`, guidance affects the learned `vf`
 condition; the external `base` uses a separate spatial blend and is not amplified
 by this option.
 

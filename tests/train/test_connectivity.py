@@ -10,9 +10,7 @@ from src.model.critic import ConnectivityCritic2D
 from src.train.connect import Connectivity, TripletBatch, normal_transition_loss
 
 
-def test_straight_through_anchor_is_hard_and_only_surroundings_receive_gradients() -> (
-    None
-):
+def test_straight_through_uses_raw_prediction_at_anchor_and_backpropagates() -> None:
     connect = _connectivity(
         num_phases=3,
         patch_size=5,
@@ -26,21 +24,19 @@ def test_straight_through_anchor_is_hard_and_only_surroundings_receive_gradients
         index=2,
     )
     condition = _condition((seed,), num_phases=3, volume_size=5)
-    prediction = torch.randn(1, 3, 5, 5, 5, requires_grad=True)
+    prediction = _constant_prediction(2, 3, 5, requires_grad=True)
 
     real, fake = connect.match_anchor(prediction, condition)
 
     assert len(fake) == len(real) == 1
     assert set(fake.values.detach().unique().tolist()) == {-1.0, 1.0}
-    expected = torch.full((3, 5, 5), -1.0)
-    expected[1] = 1.0
-    assert torch.equal(fake.values[0, 1], expected)
+    assert torch.all(fake.values.argmax(dim=2) == 2)
     assert real.values.requires_grad is False
 
     fake.values.sum().backward()
 
     assert prediction.grad is not None
-    assert not bool(prediction.grad[:, :, 2].any())
+    assert bool(prediction.grad[:, :, 2].any())
     assert bool(prediction.grad[:, :, 1].any())
     assert bool(prediction.grad[:, :, 3].any())
 
@@ -151,14 +147,13 @@ def test_online_reference_matching_never_crosses_axes() -> None:
     assert torch.equal((phases[1:] - phases[:-1]).remainder(3), torch.ones(2))
 
 
-def test_teacher_storage_is_cpu_uint8_detached_and_hard_overlays_real_seed() -> None:
+def test_teacher_storage_keeps_raw_predicted_labels_without_seed_overlay() -> None:
     connect = _connectivity(num_phases=2, patch_size=4)
     prediction = _constant_prediction(0, 2, 4, requires_grad=True)
     seed_image = torch.ones(4, 4, dtype=torch.uint8)
     seed = PlaneAnchor(seed_image, axis=0, index=0)
-    condition = _condition((seed,), num_phases=2, volume_size=4)
 
-    connect.record_seeded(prediction, condition, (seed,))
+    connect.record_seeded(prediction, (seed,))
     prediction.data.fill_(-7.0)
     seed_image.zero_()
 
@@ -168,12 +163,11 @@ def test_teacher_storage_is_cpu_uint8_detached_and_hard_overlays_real_seed() -> 
     assert entry.labels.dtype == torch.uint8
     assert entry.labels.is_contiguous()
     assert entry.labels.grad_fn is None
-    assert bool((entry.labels[0] == 1).all())
-    assert bool((entry.labels[1:] == 0).all())
-    assert bool((entry.seed.image == 1).all())
+    assert bool((entry.labels == 0).all())
+    assert bool((entry.seed.image == 0).all())
     assert entry.seed.image.device.type == "cpu"
     assert entry.seed.image.dtype == torch.uint8
-    assert torch.allclose(entry.target_vf, torch.tensor((0.75, 0.25)))
+    assert torch.allclose(entry.target_vf, torch.tensor((1.0, 0.0)))
 
 
 def test_teacher_bank_uses_one_global_fifo_byte_budget_across_volume_sizes() -> None:
@@ -209,29 +203,17 @@ def test_record_seeded_splits_prediction_batch_into_independent_teachers() -> No
             torch.ones(3, 3, dtype=torch.uint8),
         )
     )
-    batched_seed = PlaneAnchor(
-        seed_images,
-        axis=0,
-        index=0,
-        position=(0, 0),
-    )
-    condition = _condition(
-        (batched_seed,),
-        num_phases=3,
-        volume_size=4,
-        batch_size=2,
-    )
     seeds = tuple(
         PlaneAnchor(image, axis=0, index=0, position=(0, 0)) for image in seed_images
     )
 
-    connect.record_seeded(prediction, condition, seeds)
+    connect.record_seeded(prediction, seeds)
 
     assert connect.teacher_count == 2
     first, second = connect._teachers._items
     assert first.labels.shape == second.labels.shape == (4, 4, 4)
-    assert bool((first.labels[1:] == 0).all())
-    assert bool((second.labels[1:] == 2).all())
+    assert bool((first.labels == 0).all())
+    assert bool((second.labels == 2).all())
     assert first.seed.image.ndim == second.seed.image.ndim == 2
 
 
@@ -553,12 +535,7 @@ def _record_constant_teacher(
         dtype=torch.uint8,
     )
     seed = PlaneAnchor(seed_image, axis=0, index=0, position=(0, 0))
-    condition = _condition(
-        (seed,),
-        num_phases=connect.num_phases,
-        volume_size=volume_size,
-    )
-    connect.record_seeded(prediction, condition, (seed,))
+    connect.record_seeded(prediction, (seed,))
 
 
 def _mixed_teacher(*, max_triplets_per_step: int):
@@ -580,8 +557,7 @@ def _mixed_teacher(*, max_triplets_per_step: int):
         index=0,
         position=(0, 0),
     )
-    condition = _condition((seed,), num_phases=3, volume_size=size)
-    connect.record_seeded(prediction, condition, (seed,))
+    connect.record_seeded(prediction, (seed,))
     with patch.object(connect, "_sample_plane_count", return_value=8):
         teacher = connect.sample_teacher(
             volume_size=size,

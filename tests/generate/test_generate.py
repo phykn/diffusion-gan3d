@@ -2,6 +2,7 @@ import importlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -125,7 +126,9 @@ def test_generator_accepts_anchors_when_training_never_reaches_start(
 
     volume = generator.generate(anchors=(anchor,))
 
-    assert torch.all(volume[4] == 0)
+    assert volume.shape == (8, 8, 8)
+    assert volume.dtype == torch.uint8
+    assert int(volume.max()) < cfg["data"]["num_phases"]
 
 
 def test_build_trainer_rejects_anchor_batch_larger_than_real_batch(
@@ -352,7 +355,7 @@ def test_amp_guidance_runs_direct_and_scaled_with_float32_diffusion_state() -> N
     assert direct.dtype == scaled.dtype == torch.uint8
 
 
-def test_guided_sampling_preserves_hard_anchor() -> None:
+def test_guided_sampling_uses_anchor_as_a_condition() -> None:
     model = _GuidanceTraceModel()
     generator = _generator(model, Diffusion(2))
     anchor = PlaneAnchor(
@@ -361,13 +364,23 @@ def test_guided_sampling_preserves_hard_anchor() -> None:
         index=1,
     )
 
-    volume = generator.generate(
-        anchors=(anchor,),
-        guidance_scale=1.5,
-    )
+    with patch.object(
+        model,
+        "predict_guided",
+        wraps=model.predict_guided,
+    ) as predict_guided:
+        volume = generator.generate(
+            anchors=(anchor,),
+            guidance_scale=1.5,
+        )
 
-    assert torch.all(volume[1] == 0)
+    assert volume.shape == (4, 4, 4)
     assert model.guidance_scales == [1.5, 1.5]
+    assert all(call.kwargs["anchor_image"] is not None for call in predict_guided.call_args_list)
+    assert all(
+        int(call.kwargs["anchor_mask"].sum()) == 16
+        for call in predict_guided.call_args_list
+    )
 
 
 @pytest.mark.parametrize(
@@ -564,7 +577,7 @@ def test_anchor_strength_scales_combined_mask_for_every_step() -> None:
     assert all(torch.equal(call.anchor_mask, expected) for call in model.calls)
 
 
-def test_hard_anchor_is_exact_even_when_model_predicts_another_phase() -> None:
+def test_anchor_never_overwrites_a_different_model_prediction() -> None:
     generator = _generator(
         _OptionalAnchorPhaseModel(phase=2),
         Diffusion(2),
@@ -577,8 +590,7 @@ def test_hard_anchor_is_exact_even_when_model_predicts_another_phase() -> None:
 
     volume = generator.generate(anchors=(anchor,))
 
-    assert torch.all(volume[1] == 0)
-    assert torch.all(volume[(0, 2, 3), :, :] == 2)
+    assert torch.all(volume == 2)
 
 
 def test_zero_anchor_strength_matches_unconditioned_rng_path() -> None:
@@ -1762,8 +1774,6 @@ class _TraceDiffusion(Diffusion):
         latent_channels: int,
         *,
         conditions: dict[str, object] | None = None,
-        known_clean: torch.Tensor | None = None,
-        known_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self.sample_calls += 1
         return super().sample(
@@ -1771,8 +1781,6 @@ class _TraceDiffusion(Diffusion):
             initial_noise,
             latent_channels,
             conditions=conditions,
-            known_clean=known_clean,
-            known_mask=known_mask,
         )
 
     def sample_posterior(

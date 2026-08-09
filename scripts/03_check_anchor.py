@@ -1,4 +1,4 @@
-"""Check evenly distributed diffusion-bridge anchors from a reference volume."""
+"""Check evenly distributed learned conditional anchors from a reference volume."""
 
 import argparse
 import sys
@@ -99,7 +99,7 @@ def main() -> None:
         axis=AXIS,
         indices=indices,
     )
-    mode = "diffusion-bridge anchors" if indices else "none"
+    mode = "learned conditional anchors" if indices else "none"
     print(f"Conditioning : {mode}")
     if indices:
         print(f"Anchor strength : {args.anchor_strength:.2f}")
@@ -401,7 +401,7 @@ def show_result(
     anchor_map.set_title("9. Anchor positions (red)")
     anchor_map.axis("off")
 
-    mode = "Distributed diffusion-bridge anchors" if indices else "Unanchored baseline"
+    mode = "Distributed learned conditional anchors" if indices else "Unanchored baseline"
     score_label = "anchor" if indices else "reference center"
     fig.suptitle(
         f"{mode} · {score_label} {100 * accuracy:.1f}% matched\n"

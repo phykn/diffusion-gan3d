@@ -148,8 +148,6 @@ class Generator:
                 dtype=initial_noise.dtype,
             )
         conditions = {}
-        known_clean: torch.Tensor | None = None
-        known_mask: torch.Tensor | None = None
         if anchor is not None:
             anchor_mask = anchor.mask
             if anchor_strength != 1.0:
@@ -160,8 +158,6 @@ class Generator:
                     "anchor_mask": anchor_mask,
                 }
             )
-            known_clean = anchor.image
-            known_mask = anchor_mask
         if vf is not None:
             conditions["vf"] = vf
         with torch.autocast(
@@ -179,8 +175,6 @@ class Generator:
                 initial_noise,
                 self.latent_channels,
                 conditions=conditions or None,
-                known_clean=known_clean,
-                known_mask=known_mask,
             )
         return clean
 

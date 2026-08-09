@@ -287,14 +287,18 @@ class _TeacherBank:
             image = seed.image
             if image.ndim != 2:
                 raise ValueError("stored seed images must have shape [H, W].")
+            height, width = image.shape
+            if seed.position is None:
+                row = (stored.shape[1] - height) // 2
+                col = (stored.shape[2] - width) // 2
+            else:
+                row, col = seed.position
+            predicted_seed = stored.select(seed.axis, seed.index)[
+                row : row + height,
+                col : col + width,
+            ]
             stored_seed = PlaneAnchor(
-                image=image.detach()
-                .to(
-                    device="cpu",
-                    dtype=torch.uint8,
-                )
-                .contiguous()
-                .clone(),
+                image=predicted_seed.contiguous().clone(),
                 axis=seed.axis,
                 index=seed.index,
                 position=seed.position,
@@ -415,10 +419,9 @@ class Connectivity:
     def record_seeded(
         self,
         prediction: torch.Tensor,
-        condition: AnchorCondition,
         seeds: Sequence[PlaneAnchor],
     ) -> None:
-        labels = self._hard_labels(prediction, condition)
+        labels = self._hard_labels(prediction)
         self._teachers.add(labels, seeds, self.num_phases)
 
     def match_anchor(
@@ -426,7 +429,7 @@ class Connectivity:
         prediction: torch.Tensor,
         condition: AnchorCondition,
     ) -> tuple[TripletBatch, TripletBatch]:
-        categorical = self._straight_through(prediction, condition)
+        categorical = self._straight_through(prediction)
         candidates = self._sample_anchor_triplets(categorical, condition)
         candidates = self._limit_triplets(candidates)
         real, matched = self._replay.sample_matched(candidates)
@@ -724,7 +727,6 @@ class Connectivity:
     def _straight_through(
         self,
         prediction: torch.Tensor,
-        condition: AnchorCondition | None = None,
     ) -> torch.Tensor:
         self._check_volume(prediction)
         hard = (
@@ -737,37 +739,14 @@ class Connectivity:
         )
         values = hard.mul(2.0).sub(1.0)
         values = values + (prediction - prediction.detach())
-        if condition is not None:
-            target = (
-                F.one_hot(
-                    condition.target,
-                    num_classes=self.num_phases,
-                )
-                .movedim(-1, 1)
-                .to(
-                    device=prediction.device,
-                    dtype=prediction.dtype,
-                )
-                .mul_(2.0)
-                .sub_(1.0)
-            )
-            values = torch.where(condition.mask.to(prediction.device), target, values)
         return values
 
     def _hard_labels(
         self,
         prediction: torch.Tensor,
-        condition: AnchorCondition | None = None,
     ) -> torch.Tensor:
         self._check_volume(prediction)
-        labels = prediction.detach().argmax(dim=1)
-        if condition is not None:
-            labels = torch.where(
-                condition.mask[:, 0].to(prediction.device),
-                condition.target.to(prediction.device),
-                labels,
-            )
-        return labels
+        return prediction.detach().argmax(dim=1)
 
     def _check_volume(self, volume: torch.Tensor) -> None:
         if volume.ndim != 5 or volume.shape[1] != self.num_phases:

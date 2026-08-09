@@ -538,7 +538,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     assert float(gradient.abs().sum()) > 0.0
 
 
-def test_generate_pair_projects_posterior_but_keeps_raw_anchor_prediction() -> None:
+def test_generate_pair_keeps_initial_noise_and_posterior_unprojected() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
     )
@@ -553,19 +553,36 @@ def test_generate_pair_projects_posterior_but_keeps_raw_anchor_prediction() -> N
         torch.tensor(((0.3, 0.3, 0.4),)),
         presence,
     )
+    trainer.diffusion = Diffusion(1)
 
-    previous, _, _, prediction = trainer.generate_pair(
-        transition=0,
-        anchor=selection.condition,
-        model_conditions=model_conditions,
-        volume_size=8,
+    initial = torch.linspace(
+        -0.9,
+        0.9,
+        selection.condition.image.numel(),
+        device=trainer.device,
+    ).reshape_as(selection.condition.image)
+    latent = torch.zeros(
+        trainer.volume_batch_size,
+        trainer.latent_channels,
+        device=trainer.device,
     )
+    with (
+        patch("src.train.engine.torch.randn", return_value=initial.clone()),
+        patch.object(trainer, "sample_latent", return_value=latent),
+    ):
+        previous, current, _, prediction = trainer.generate_pair(
+            transition=0,
+            model_conditions=model_conditions,
+            volume_size=8,
+        )
 
     mask = selection.condition.mask.expand_as(previous)
     clean = selection.condition.image
     assert not bool(model_conditions["anchor_mask"].any())
     assert not bool(model_conditions["vf_present"].any())
-    assert torch.equal(previous[mask], clean[mask])
+    assert torch.equal(current, initial)
+    assert torch.equal(previous, prediction)
+    assert not torch.equal(previous[mask], clean[mask])
     assert not torch.equal(prediction[mask], clean[mask])
 
 
@@ -691,7 +708,7 @@ def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
     assert presence.fractions() == (0.25, 0.25, 0.25, 0.25)
 
 
-def test_anchor_input_can_drop_while_projection_and_anchor_loss_stay_active() -> None:
+def test_anchor_input_can_drop_while_raw_anchor_loss_stays_active() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
     )
@@ -704,8 +721,7 @@ def test_anchor_input_can_drop_while_projection_and_anchor_loss_stay_active() ->
 
     def capture_generate_pair(*args, **kwargs):
         result = original_generate_pair(*args, **kwargs)
-        generated["anchor"] = args[1]
-        generated["conditions"] = args[2]
+        generated["conditions"] = args[1]
         generated["previous"] = result[0]
         generated["prediction"] = result[3]
         return result
@@ -716,17 +732,19 @@ def test_anchor_input_can_drop_while_projection_and_anchor_loss_stay_active() ->
     ):
         metrics = trainer.step(0, transition=0)
 
-    condition = generated["anchor"]
-    assert condition is not None
-    assert not bool(generated["conditions"]["anchor_mask"].any())
-    mask = condition.mask.expand_as(generated["previous"])
-    assert torch.equal(generated["previous"][mask], condition.image[mask])
-    assert not torch.equal(generated["prediction"][mask], condition.image[mask])
+    conditions = generated["conditions"]
+    assert not bool(conditions["anchor_mask"].any())
+    anchor_image = conditions["anchor_image"]
+    mask = anchor_image.abs().sum(dim=1, keepdim=True).bool()
+    mask = mask.expand_as(generated["previous"])
+    assert torch.equal(generated["previous"], generated["prediction"])
+    assert not torch.equal(generated["previous"][mask], anchor_image[mask])
+    assert not torch.equal(generated["prediction"][mask], anchor_image[mask])
     assert metrics.anchor_input_active_fraction == 0.0
     assert metrics.anchor_loss > 0.0
 
 
-def test_vf_total_variation_uses_projection_effective_prediction() -> None:
+def test_vf_total_variation_uses_raw_prediction() -> None:
     trainer, _, _ = _conditioning_trainer(anchored=True)
     batches = trainer.get_batches()
     selection = trainer.sample_real_anchor(batches, volume_size=8)
@@ -734,12 +752,14 @@ def test_vf_total_variation_uses_projection_effective_prediction() -> None:
     prediction = torch.full((1, 3, 8, 8, 8), -1.0)
     prediction[:, 0] = 1.0
     prediction.requires_grad_()
-    effective = trainer.diffusion.blend_known(
-        prediction,
-        condition.image,
+    raw_probs = (prediction.detach() + 1.0) * 0.5
+    target = raw_probs.mean(dim=(2, 3, 4))
+    projected = torch.where(
         condition.mask,
+        condition.image,
+        prediction.detach(),
     )
-    target = ((effective.detach() + 1.0) * 0.5).mean(dim=(2, 3, 4))
+    projected_vf = ((projected + 1.0) * 0.5).mean(dim=(2, 3, 4))
     logits = torch.zeros_like(prediction, requires_grad=True)
 
     with (
@@ -748,14 +768,13 @@ def test_vf_total_variation_uses_projection_effective_prediction() -> None:
         patch.object(
             trainer,
             "generate_pair",
-            return_value=(effective, prediction, logits, prediction),
+            return_value=(prediction, prediction, logits, prediction),
         ),
     ):
         metrics = trainer.step(0, transition=0)
 
-    raw_vf = ((prediction.detach() + 1.0) * 0.5).mean(dim=(2, 3, 4))
-    raw_tv = 0.5 * (raw_vf - target).abs().sum()
-    assert float(raw_tv) > 0.0
+    projected_tv = 0.5 * (projected_vf - target).abs().sum()
+    assert float(projected_tv) > 0.0
     assert metrics.vf_active
     assert math.isclose(metrics.vf_loss, 0.0, abs_tol=1e-7)
 
