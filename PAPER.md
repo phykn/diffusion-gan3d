@@ -4,7 +4,7 @@
 
 ## Abstract
 
-Three-dimensional microstructures must be large enough to represent pore connectivity and transport, yet volumetric imaging is often more costly than acquiring 2D sections. Matching 2D section distributions alone does not ensure that a specified section appears at a prescribed coordinate, and independently generated blocks can introduce discontinuities when a volume is enlarged. We address these problems with anchor-conditioned diffusion. Rectangular categorical section regions and their coordinates condition the denoiser, constrained voxels receive direct phase supervision, and a three-plane critic regularizes the anchor neighborhood against triplets from unconditioned model samples. In direct 128³ sampling, full-strength labels are clamped into every clean prediction and are exact at the final transition. Scale-up instead uses the resulting volume as a soft state condition, so it may adapt and is never pasted back afterward. Across four seeds, 25% axis-0 coverage produced 95.48 ± 0.03% whole-volume agreement with an in-distribution synthetic reference; 100% coverage is an exact-by-construction sanity check because all voxels are supplied. A 3 × 3 × 3 expansion generated a 384³ volume—27 times the base voxel count—with a mean local pore-continuation difference of −0.36 ± 0.26 percentage points at tile boundaries. In a five-seed ablation, removing overlap raised the exact-boundary phase-change rate to 6.85 ± 0.24 times its interior value, whereas eight-voxel overlap reduced the ratio to 0.82 ± 0.08. These controlled results establish an algorithmic proof of concept, not reconstruction fidelity on unseen experimental 3D material.
+Three-dimensional microstructures must be large enough to represent connectivity and transport, yet volumetric imaging is often more costly than acquiring 2D sections. Matching 2D section distributions alone does not ensure that a specified section appears at a prescribed coordinate, and independently generated blocks can introduce discontinuities when a volume is enlarged. We address these problems with anchor-conditioned diffusion. Rectangular categorical section regions and their coordinates condition the denoiser, constrained voxels receive direct phase supervision, and adversarial and transition-distribution losses regularize the anchor neighborhood against triplets from unconditioned model samples. Anchors remain learned conditions throughout direct 128³ sampling; generated labels are neither clamped nor overwritten. Across four seeds, 25% and 100% axis-0 coverage produced 94.88 ± 0.03% and 97.93 ± 0.08% whole-volume agreement, respectively, with an in-distribution synthetic reference. A 3 × 3 × 3 expansion generated a 384³ volume—27 times the base voxel count—with a mean local pore-continuation drop of 0.68 ± 0.02 percentage points at tile boundaries. In a five-seed ablation, the exact-boundary phase-change ratio was 6.90 ± 0.52 without overlap and 1.02 ± 0.04 with eight-voxel overlap. The evaluation uses one binary training image and a same-model synthetic reference.
 
 ## 1. Introduction
 
@@ -14,13 +14,13 @@ Optimization, adversarial, and diffusion methods can infer statistically plausib
 
 Volume size creates a second difficulty. A model trained on small patches cannot directly represent a much larger field of view, whereas generating blocks independently and stitching them afterward leaves no mechanism for reconciling their boundaries. Shared-state diffusion offers a way to couple overlapping predictions during sampling [6].
 
-We combine these ideas in a categorical 3D generator trained without paired 2D–3D data. The method (i) integrates full or rectangular partial plane anchors throughout denoising, with direct label supervision and a three-plane adversarial regularizer; (ii) enlarges volumes by jointly denoising overlapping 3D blocks around a softly conditioned base; and (iii) evaluates coordinate agreement, section distribution, phase fraction, diffusive tortuosity, and tile-boundary continuity separately. This separation is important because a volume can match 2D statistics without matching a controlled target at the same coordinates, or satisfy supplied coordinates while changing global morphology.
+We combine these ideas in a categorical 3D generator trained without paired 2D–3D data. The method (i) integrates full or rectangular partial plane anchors throughout denoising, with direct label supervision and adversarial and transition-distribution regularization; (ii) trains and applies overlapping tiled contexts around a softly conditioned base; and (iii) evaluates coordinate agreement, section distributions, phase fraction, diffusive tortuosity, three-axis pore percolation, and tile-boundary continuity separately. This separation is important because a volume can match 2D statistics without matching a controlled target at the same coordinates, or satisfy supplied coordinates while changing global morphology.
 
 ## 2. Related Work
 
 ### 2.1 Reconstruction from 2D observations
 
-Feature-matching and conditional neural methods reconstruct 3D microstructures from a 2D exemplar [1,2]. SliceGAN removes the need for paired 3D supervision by applying 2D discriminators to sections of a generated volume [3]. Diffusion has also been used for 2D microstructure synthesis [7] and, more recently, for 2D-to-3D dimensional expansion [4,5]. Property-conditioned approaches control quantities such as phase fraction or spatial statistics [8,9]. Recent volumetrically supervised methods additionally condition on fixed or sparse observed slices [10,11]. Our distinct setting uses unregistered 2D section collections rather than volumetric training targets and guarantees full-strength labels only in direct, base-size samples.
+Feature-matching and conditional neural methods reconstruct 3D microstructures from a 2D exemplar [1,2]. SliceGAN removes the need for paired 3D supervision by applying 2D discriminators to sections of a generated volume [3]. Diffusion has also been used for 2D microstructure synthesis [7] and, more recently, for 2D-to-3D dimensional expansion [4,5]. Property-conditioned approaches control quantities such as phase fraction or spatial statistics [8,9]. Recent volumetrically supervised methods additionally condition on fixed or sparse observed slices [10,11]. Our distinct setting uses unregistered 2D section collections rather than volumetric training targets and treats supplied internal sections as learned conditions in direct, base-size samples.
 
 ### 2.2 Conditioning on known regions
 
@@ -82,30 +82,34 @@ Correct labels alone do not ensure a compatible neighborhood. At the final trans
 
 A separate teacher-volume bank stores volumes generated from real single-plane anchors. After the anchor ramp, a multi-plane teacher condition may sample several mutually registered planes from one stored volume, subject to a density limit, minimum same-axis spacing, and optional mixed axes. Keeping this bank separate from the triplet replay avoids treating unrelated real 2D sections as registered slices of one volume.
 
-At full inference strength, constrained voxels in the initial state are drawn from $q(x_T\mid Y)$ using the initial noise. Before each reverse-posterior update, the clean prediction is clamped to $Y$ on $M$; intermediate constrained states remain stochastic posterior samples. The final transition returns the clamped clean prediction directly, which makes the constrained labels exact without post-generation replacement.
+At inference, $c_A$ is supplied to the denoiser at every reverse transition with a user-controlled strength. Sampling starts from the same ordinary noise state as unconditioned generation, applies the standard reverse posterior, and returns a phase-wise argmax after the final transition. The sampler does not initialize constrained voxels from $q(x_T\mid Y)$, clamp intermediate clean predictions, or overwrite final labels. Anchor agreement is therefore a measured learned-conditioning outcome rather than a sampler invariant.
 
-### 3.4 Phase-fraction conditioning and full objective
+### 3.4 Phase-fraction conditioning and training objective
 
 An optional phase-fraction vector $v\in\Delta^{K-1}$, with $v_k\geq0$ and $\sum_k v_k=1$, specifies the desired composition. Non-negative user inputs are normalized to this simplex before sampling. Its embedding conditions the denoiser, while predicted mean fractions $\hat{p}$ receive
 
 $$
-\mathcal{L}_{\mathrm{vf}}=\lVert\hat{p}-v\rVert_1.
+\mathcal{L}_{\mathrm{vf}}=\frac{1}{2}\sum_{k=0}^{K-1}|\hat{p}_k-v_k|.
 $$
 
 At training step $s$, the implemented generator objective is
 
 $$
 \mathcal{L}_{G}=\mathcal{L}_{\mathrm{adv}}
-+r(s)\left(
++r_A(s)\left(
 \lambda_{\mathrm{anchor}}\mathcal{L}_{\mathrm{anchor}}
 +\lambda_{\mathrm{conn}}\mathcal{L}_{\mathrm{conn}}
++\lambda_{\mathrm{normal}}\mathcal{L}_{\mathrm{normal}}
 \right)
-+\lambda_{\mathrm{vf}}\mathcal{L}_{\mathrm{vf}},
++\lambda_{\mathrm{vf}}\mathcal{L}_{\mathrm{vf}}
++r_S(s)\lambda_{\mathrm{scale}}\mathcal{L}_{\mathrm{scale}},
 $$
 
-where $r(s)$ ramps linearly to one over the first 1,000 steps. The connectivity term is active only for anchored samples at the final transition, when anchor-spanning triplets are available. The reported model uses 10 reverse transitions, $\lambda_{\mathrm{local}}=0.5$ inside $\mathcal{L}_{\mathrm{adv}}$, and weights $\lambda_{\mathrm{anchor}}=1$, $\lambda_{\mathrm{conn}}=0.25$, and $\lambda_{\mathrm{vf}}=1$. Independent anchor and phase-fraction dropout probabilities of 0.2 retain unconditioned sampling with the same network.
+where unavailable conditional terms are zero. The anchor ramp $r_A$ starts at step 3,000 and reaches one after 6,000 additional steps; the scale ramp $r_S$ starts at step 1,000 and reaches one after 4,000 additional steps. The connectivity critic term is active only for anchored final-transition samples. On the same matched anchor triplets, $\mathcal{L}_{\mathrm{normal}}$ compares soft center-to-previous and center-to-next $K\times K$ phase-transition matrices with total-variation distance. The reported model uses 10 reverse transitions, $\lambda_{\mathrm{local}}=0.5$ inside $\mathcal{L}_{\mathrm{adv}}$, and weights $\lambda_{\mathrm{anchor}}=1$, $\lambda_{\mathrm{conn}}=0.25$, $\lambda_{\mathrm{normal}}=0.10$, $\lambda_{\mathrm{vf}}=1$, and $\lambda_{\mathrm{scale}}=1$.
 
-### 3.5 Shared-state tiled scale-up
+Anchor conditions are requested for 80% of eligible training samples. When anchor and phase-fraction conditions are both available, the joint-null, anchor-null-only, and phase-fraction-null-only states are mutually exclusive and each occurs with probability 0.05; both conditions are retained for the remaining 0.85. When no anchor is present, the lone phase-fraction condition is dropped with probability 0.10. This supplies unconditional and partially conditional states to the same network without independent 0.2 dropouts.
+
+### 3.5 Scale-consistent shared-state tiled scale-up
 
 Let $P$ be the block core size and $o$ the halo width on each side; the reported model uses $P=128$. Each tile reads a $(P+2o)^3$ field from one shared noisy volume and predicts the full relaxed clean field. At every reverse transition, one newly sampled latent vector $z_t$ is shared by all tiles. A separable cosine-taper window $w_k$ then fuses their overlapping predictions:
 
@@ -116,6 +120,8 @@ $$
 $$
 
 The reverse posterior updates the shared global state only after fusion, so adjacent tiles exchange information throughout denoising rather than being stitched after generation. Halo reads that extend beyond the outer output boundary wrap periodically to the opposite side; the method therefore imposes a periodic outer-context assumption. The default halo width is eight voxels per side, giving a 144³ model input around each 128³ core.
+
+To train for overlapping inference, $\mathcal{L}_{\mathrm{scale}}$ is sampled with probability 0.30 only on 144³ training volumes. It forms two periodic 144³ views around adjacent 128³ cores with the same reverse transition, latent vector, and conditions. One EMA prediction is randomly assigned as a detached teacher and the online denoiser predicts the other view; a cosine-weighted probability mean-squared error is evaluated over their aligned 16-voxel overlap band. This term uses an eight-voxel halo and trains local agreement between tiled contexts without imposing equality on final categorical samples.
 
 When a base volume $B$ is supplied, define its signed one-hot field as $b(v)=2\,\mathrm{onehot}(B(v))-1$ and keep one fixed noise field $\epsilon_B$. The corresponding fixed-noise forward realization is
 
@@ -145,25 +151,27 @@ The available source artifact, `data/sample.png`, is a 226 × 690 binary phase m
 </p>
 <p align="center"><em>Figure 1. Binary 2D training image. Orange boxes show example 128 × 128 crops used at the real critic-section size. Black denotes pore and gray denotes solid throughout.</em></p>
 
-Evaluation uses 64 randomly sampled real crops. A fixed unconditioned 128³ seed-10000 sample from the trained generator serves as synthetic pseudo-ground truth for controlled anchor tests; it is denoted GT only in that context and is not experimental 3D ground truth or a real-material fidelity reference. Evaluation volumes use separate seeds 0–3. All real crops come from the training image, so the study is an in-sample proof of concept rather than a held-out generalization test.
+Evaluation uses 64 randomly sampled real crops. A fixed unconditioned 128³ seed-10000 sample from the trained generator serves as synthetic pseudo-ground truth for controlled anchor tests; it is denoted GT only in that context. Evaluation volumes use separate seeds 0–3. All real crops come from the training image, and no held-out experimental 3D volume is included.
 
 ### 4.2 Training and implementation
 
 The evaluated model is the EMA output of a 20,000-step run with decay 0.999.
 
-Each step generates one relaxed 3D volume whose side length is sampled uniformly from 128, 136, 144, 152, or 160 voxels; 16 section pairs per axis are passed to the critics. The real-section loader uses batch size 8. Adam uses learning rates $1.6\times10^{-4}$ for the denoiser and $1.0\times10^{-4}$ for all critics, with $\beta_1=0.5$ and $\beta_2=0.9$. Training uses mixed precision and an R1 penalty with $\gamma=0.2$ every 16 steps. The 10-transition variance-preserving schedule uses continuous rate endpoints $\beta_{\min}=0.1$ and $\beta_{\max}=20$, with $\bar{\alpha}(u)=\exp[-\tfrac{1}{2}(\beta_{\max}-\beta_{\min})u^2-\beta_{\min}u]$ for $u\in[0,1]$. The shared anchor/connectivity ramp reaches one after 1,000 steps; anchor dropout is 0.2, the probability of requesting a multi-plane teacher after the ramp is 0.5, the maximum plane density is 0.05, minimum same-axis spacing is four voxels, and the mixed-axis probability is 0.5.
+Each step generates one relaxed 3D volume whose side length is sampled uniformly from 128 or 144 voxels; 16 section pairs per axis are passed to the critics. The real-section loader uses batch size 8. Adam uses learning rates $1.6\times10^{-4}$ for the denoiser and $1.0\times10^{-4}$ for all critics, with $\beta_1=0.5$ and $\beta_2=0.9$. Training uses mixed precision and an R1 penalty with $\gamma=0.2$ every 16 steps. The 10-transition variance-preserving schedule uses continuous rate endpoints $\beta_{\min}=0.1$ and $\beta_{\max}=20$, with $\bar{\alpha}(u)=\exp[-\tfrac{1}{2}(\beta_{\max}-\beta_{\min})u^2-\beta_{\min}u]$ for $u\in[0,1]$. Anchor conditioning starts at step 3,000 and ramps over 6,000 steps; an anchor is requested on 80% of eligible steps. With both anchor and phase-fraction conditions available, joint-null, anchor-null-only, and phase-fraction-null-only states are mutually exclusive and each has probability 0.05; the remaining 0.85 retains both. When only phase-fraction conditioning is available, it is dropped with probability 0.10. After the anchor ramp, a multi-plane teacher is requested with probability 0.5; maximum plane density is 0.05, minimum same-axis spacing is four voxels, and mixed-axis probability is 0.5.
 
 ### 4.3 Evaluation protocols
 
 The single-plane examples in Figures 4 and 6 use the 128 × 128 crop at $(\mathrm{left},\mathrm{top})=(281,58)$ in `data/sample.png`, place it at the axis-0 center of a 128³ volume, and use seed 0. A separate seed-0 coverage sweep supplies 0, 1, 2, 4, 8, 16, 32, 64, or 128 planes from the synthetic GT at evenly distributed axis-0 coordinates. Coordinates are recomputed for each count, so successive sets are not generally nested. The multi-sample evaluation uses 32, 64, 96, and 128 planes—25%, 50%, 75%, and 100% coverage—with seeds 0–3.
 
-The phase-fraction-conditioned samples receive the synthetic reference fractions $(0.3526607,0.6473393)$ as an oracle target. Only this one target is tested.
+The phase-fraction-conditioned samples receive the synthetic reference fractions $(0.3390789,0.6609211)$ as an oracle target. Only this one target is tested.
 
 For each scale-up seed, a new single-plane-anchored 128³ base is generated and centered in a 384³ output. The sampler uses 3 × 3 × 3 block cores with eight-voxel halos. A four-voxel shell on each base face tapers the conditioning strength; no part of the base is pasted into the final volume. Figure 6 uses seed 0. A separate unanchored overlap ablation uses a 2 × 1 × 1 grid, output shape 256 × 128 × 128, overlaps of 0, 4, 8, 12, and 16 voxels per side, and five seeds (20260808–20260812).
 
 ### 4.4 Metrics
 
-- **Kernel Inception Distance (KID):** the unbiased squared maximum mean discrepancy between 2,048-dimensional Inception-v3 features [18], using 100 subsets of 50 images. A fixed set of 64 real crops (seed 10000) is compared with either an independently sampled real crop set or 64 axis-0 sections drawn without replacement from each generated volume. All inputs use a 128 × 128 field of view and are repeated into three binary RGB channels. For scale-up, one seeded 128 × 128 crop is taken from each selected section. Lower is better, and the unbiased estimate may be slightly negative.
+- **Kernel Inception Distance (KID):** the unbiased squared maximum mean discrepancy between 2,048-dimensional Inception-v3 features [18], using 100 subsets of 50 images. Table 1 compares a fixed set of 64 real crops (seed 10000) with either an independently sampled real crop set or 64 axis-0 sections drawn without replacement from each generated volume. Figure 5 instead compares all 128 generated axis-0 sections with all 128 synthetic-GT sections. All inputs use a 128 × 128 field of view and are repeated into three binary RGB channels. For scale-up, one seeded 128 × 128 crop is taken from each selected section. Lower is better, and the unbiased estimate may be slightly negative.
+
+- **Fréchet Inception Distance (FID):** the Fréchet distance between Gaussian fits to 2,048-dimensional Inception-v3 features [20]. Figure 5 compares all 128 generated axis-0 sections with all 128 synthetic-GT sections after the same binary-RGB conversion used for KID. Lower is better. This fixed-seed diagnostic is not reported in Table 1.
 
 - **Porosity:** the fraction of pixels or voxels assigned to phase-0 pore. Agreement with the reference value is desired.
 
@@ -171,27 +179,29 @@ For each scale-up seed, a new single-plane-anchored 128³ base is generated and 
 
 - **Voxel accuracy:** the fraction of all 128³ voxels whose phase matches the synthetic GT at the same coordinate. This is a whole-volume recovery score, not accuracy restricted to supplied planes.
 
+- **Pore-percolation error:** phase 0 is the pore phase, and connected components use non-periodic 6-connectivity, so only face-sharing voxels are adjacent and opposite boundaries do not wrap. For axis $a$, let $S_a$ contain every phase-0 component that touches both opposing faces normal to $a$. Its percolating fraction is $P_a=\lvert\bigcup_{C\in S_a}C\rvert/\lvert\{v:X(v)=0\}\rvert$, where all spanning components are included. Figure 5 reports $E_{\mathrm{pore}}=\frac{100}{3}\sum_{a=0}^{2}\lvert P_a^{\mathrm{pred}}-P_a^{\mathrm{GT}}\rvert$ in percentage points. Lower is better. If either volume has no phase-0 voxels, the metric is undefined and evaluation raises an error.
+
 - **Local pore-continuation drop:** for adjacent planes normal to axis $a$, $C_a=P(X_{i+1}=0\mid X_i=0)$. The reported value is the three-axis mean $\Delta C=C_{\mathrm{interior}}-C_{\mathrm{boundary}}$, excluding pairs within four voxels of each boundary from the interior estimate. Zero indicates no measured boundary effect; a negative value means slightly greater local continuation at the boundary.
 
 - **Overlap diagnostics:** the exact seam-change ratio divides the phase-change rate at the tile boundary by the median of the remaining pair rates; the evaluator's radius-4 exclusion removes the boundary pair together with its four lower-index and five higher-index neighbors. A ratio of one is ideal. For the other diagnostics, the seam-band half-width is $b=\max[1,\min(o,4)]$. Each adjacent-plane pair in that band is compared with a pooled interior distribution, subsampled to at most 64 pairs. Transition TV is the maximum total-variation distance between phase-transition distributions, and continuation delta is the maximum absolute phase-wise continuation difference; lower is better for both.
 
-Unless marked otherwise, Table 1 values are means over four seeded replicates. KID ± is the mean of the four within-replicate sample standard deviations across 100 KID subsets; every other ± value is the between-replicate sample standard deviation. Depending on the row, replicate variation arises from volume sampling, crop selection, and/or section selection. These uncertainties do not cover specimens, datasets, or training runs. The controlled reference is one volume. The real-data KID is a baseline between independently sampled crop sets. Figure 5 is a separate seed-0 diagnostic whose KID is measured against synthetic-GT sections.
+Unless marked otherwise, Table 1 values are means over four seeded replicates. KID ± is the mean of the four within-replicate sample standard deviations across 100 KID subsets; every other ± value is the between-replicate sample standard deviation. Depending on the row, replicate variation arises from volume sampling, crop selection, and/or section selection. These uncertainties do not cover specimens, datasets, or training runs. The controlled reference is one volume. The real-data KID is a baseline between independently sampled crop sets. Figure 5 is a separate seed-0 diagnostic: KID and FID are measured against synthetic-GT sections, and pore-percolation error compares the generated and GT phase-0 spanning-component fractions over all three axes. No across-volume uncertainty is shown for this fixed-seed sweep.
 
 ## 5. Results
 
-Table 1 separates similarity to real 2D crops from consistency with the synthetic reference. The real-versus-real KID is 0.0004 ± 0.0013, whereas the unconditioned 3D KID is 0.0345 ± 0.0043; this gap shows that generated axis-0 sections do not match the training-image crop features as closely as independently sampled real crops do. Relative to the synthetic reference, unconditioned samples have similar mean porosity (0.3520 versus 0.3527) but lower mean axis-0 tortuosity (1.8843 versus 1.9519). Supplying the reference phase fractions as an oracle target moves mean porosity to 0.3538, increasing its absolute error from 0.0007 to 0.0011, and does not improve KID or tortuosity. A single target therefore does not establish effective phase-fraction control.
+Table 1 reports KID, porosity, tortuosity, voxel accuracy, and local pore-continuation drop. Real-versus-real KID is 0.0004 ± 0.0013 and unconditioned 3D KID is 0.0146 ± 0.0016. The synthetic reference has porosity 0.3391 and axis-0 tortuosity 2.1025; the unconditioned means are 0.3430 and 2.0444. With the reference phase fractions supplied as the single oracle target, the corresponding values are KID 0.0414, porosity 0.3530, and tortuosity 1.9173.
 
 | Evaluation data | KID | Porosity | Tortuosity | Voxel accuracy | Local pore-continuation drop |
 |---|---:|---:|---:|---:|---:|
-| Controlled reference (GT) | — | 0.3527 | 1.9519 | — | — |
+| Controlled reference (GT) | — | 0.3391 | 2.1025 | — | — |
 | Real 2D crops | 0.0004 ± 0.0013 | 0.3625 ± 0.0042 | — | — | — |
-| 3D | 0.0345 ± 0.0043 | 0.3520 ± 0.0033 | 1.8843 ± 0.0586 | — | — |
-| 3D (phase-fraction conditioned) | 0.0420 ± 0.0047 | 0.3538 ± 0.0025 | 1.8665 ± 0.0550 | — | — |
-| 3D (anchored, 25%) | 0.0452 ± 0.0049 | 0.3470 ± 0.0010 | 2.0559 ± 0.0134 | 95.48 ± 0.03% | — |
-| 3D (anchored, 50%) | 0.0604 ± 0.0054 | 0.3561 ± 0.0005 | 1.9446 ± 0.0015 | 98.04 ± 0.01% | — |
-| 3D (anchored, 75%) | 0.0496 ± 0.0051 | 0.3525 ± 0.0004 | 1.9453 ± 0.0013 | 99.00 ± 0.01% | — |
-| 3D (anchored, 100%) | 0.0418 ± 0.0046 | 0.3527 ± 0.0000 | 1.9519 ± 0.0000 | 100.00 ± 0.00% | — |
-| 3D (scale-up) | 0.0171 ± 0.0028 | 0.3482 ± 0.0012 | 1.9191 ± 0.0308 | — | −0.36 ± 0.26 pp |
+| 3D | 0.0146 ± 0.0016 | 0.3430 ± 0.0039 | 2.0444 ± 0.0928 | — | — |
+| 3D (phase-fraction conditioned) | 0.0414 ± 0.0046 | 0.3530 ± 0.0025 | 1.9173 ± 0.0642 | — | — |
+| 3D (anchored, 25%) | 0.0293 ± 0.0033 | 0.3405 ± 0.0012 | 2.1486 ± 0.0116 | 94.88 ± 0.03% | — |
+| 3D (anchored, 50%) | 0.0364 ± 0.0027 | 0.3210 ± 0.0012 | 2.1765 ± 0.0108 | 97.13 ± 0.06% | — |
+| 3D (anchored, 75%) | 0.0369 ± 0.0026 | 0.3190 ± 0.0011 | 2.2004 ± 0.0077 | 97.23 ± 0.07% | — |
+| 3D (anchored, 100%) | 0.0389 ± 0.0025 | 0.3224 ± 0.0011 | 2.1723 ± 0.0080 | 97.93 ± 0.08% | — |
+| 3D (scale-up) | 0.0084 ± 0.0012 | 0.3393 ± 0.0012 | 2.0855 ± 0.0236 | — | 0.68 ± 0.02 pp |
 
 ### 5.1 Three-dimensional synthesis
 
@@ -209,23 +219,23 @@ The cutaway in Figure 2 exposes both the surface and interior of the fixed 128³
 
 ### 5.2 Plane anchoring
 
-In the seed-0 single-plane example, the generated center section matches all 16,384 supplied voxels without post-generation replacement (Figure 4). Because the final clean prediction is clamped on the mask, this confirms the sampler invariant rather than learned reconstruction accuracy. It is also distinct from the whole-volume agreement reported for partial coverage in Table 1.
+In the seed-0 single-plane example, the generated center section matches 16,097 of 16,384 supplied voxels (98.25%) without post-generation replacement (Figure 4). This is measured learned-conditioning accuracy, not a sampler invariant. It is also distinct from the whole-volume agreement reported for multi-plane coverage in Table 1.
 
 <p align="center">
-  <img src="assets/paper/04-anchor-conditioning.png" alt="Supplied center section, matching generated section, and anchored 3D volume" width="780">
+  <img src="assets/paper/04-anchor-conditioning.png" alt="Supplied center section, generated center section, and anchored 3D volume" width="780">
 </p>
-<p align="center"><em>Figure 4. Fixed-seed single-plane conditioning. (a) Supplied axis-0 center section; (b) generated section, matching 16,384/16,384 constrained voxels; (c) surrounding 128³ volume.</em></p>
+<p align="center"><em>Figure 4. Fixed-seed single-plane conditioning. (a) Supplied axis-0 center section; (b) generated center section, matching 16,097/16,384 constrained voxels (98.25%); (c) surrounding 128³ volume.</em></p>
 
-Across four seeds, whole-volume agreement is 95.48 ± 0.03% at 25% coverage, 98.04 ± 0.01% at 50%, and 99.00 ± 0.01% at 75%. Supplying all 128 axis-0 planes covers every voxel and therefore gives 100% by construction. The seed-0 sweep in Figure 5 shows the corresponding association with denser evenly spaced coverage: 54.64% at zero planes, 95.45% at 32 planes, 98.04% at 64 planes, and the exact full-coverage endpoint. Because each count recomputes its coordinates, this is not a nested sequence of constraints. Porosity, tortuosity, and KID are not monotonic because they measure aggregate or distributional properties rather than coordinate-wise identity.
+Across four seeds, whole-volume agreement is 94.88 ± 0.03% at 25% coverage, 97.13 ± 0.06% at 50%, 97.23 ± 0.07% at 75%, and 97.93 ± 0.08% at 100%. The seed-0 sweep in Figure 5 shows 55.10% agreement at zero planes, 94.87% at 32 planes, 97.14% at 64 planes, and 97.93% at 128 planes. Because each count recomputes its coordinates, this is not a nested sequence of constraints. FID is 22.18 at zero planes, 18.15 at 32 planes, and 20.24 at 128 planes; KID, porosity, and tortuosity are also non-monotonic across the sweep. The GT phase-0 pore-percolating fraction is 99.751% on every axis. Pore-percolation error is 0.081 pp at zero planes and is 0.368, 0.118, and 0.150 pp at 32, 64, and 128 planes, respectively; across all counts it ranges from 0.015 to 0.368 pp and is non-monotonic with coverage. In every evaluated volume, one pore component spans all three axes, so the three axis-specific fractions are equal.
 
 <p align="center">
-  <img src="assets/paper/06-anchor-sweep-metrics.png" alt="Whole-volume accuracy, KID, porosity, and tortuosity versus supplied axis-0 planes" width="780">
+  <img src="assets/paper/06-anchor-sweep-metrics.png" alt="Voxel accuracy, KID, FID, porosity, tortuosity, and pore-percolation error versus supplied axis-0 planes" width="780">
 </p>
-<p align="center"><em>Figure 5. Fixed-seed controlled-reference diagnostic for 0–128 supplied axis-0 planes. (a) Accuracy is measured over the complete 128³ volume. (b) KID compares all generated axis-0 sections with synthetic-GT sections and is not directly comparable with Table 1; its unbiased finite-sample estimate can be slightly negative. Dashed lines in (c,d) show GT porosity and tortuosity. The symmetric-log x-axis separates low anchor counts; no across-volume uncertainty is shown because the seed is fixed.</em></p>
+<p align="center"><em>Figure 5. Fixed-seed controlled-reference diagnostic for 0–128 supplied axis-0 planes. (a) Voxel accuracy is measured over the complete 128³ volume. (b) KID and (c) FID compare all 128 generated axis-0 sections with all 128 synthetic-GT sections and are not directly comparable with Table 1; the unbiased KID estimate may be slightly negative. Dashed lines in (d,e) show GT porosity and tortuosity. (f) Pore-percolation error is the three-axis mean absolute prediction–GT difference in the fraction of phase-0 voxels belonging to 6-connected components that span opposing faces; connectivity is non-periodic and the dashed line marks the ideal value zero. The symmetric-log x-axis separates low anchor counts; no across-volume uncertainty is shown because the seed is fixed.</em></p>
 
 ### 5.3 Anchored scale-up
 
-The shared-state sampler expands the 128³ base to 384³. In the illustrated seed-0 center plane, the complete 128 × 128 anchor retains 16,173 of 16,384 voxels (98.71%) after scale-up. The 120 × 120 full-strength conditioning interior retains 14,385 of 14,400 voxels (99.90%), and the corresponding 120³ base interior retains 1,727,536 of 1,728,000 voxels (99.97%). These are conditioning outcomes rather than exact constraints or post-generation replacement. Across four samples, the mean local pore-continuation difference at tile boundaries is −0.36 ± 0.26 percentage points. The sample mean does not indicate reduced adjacent-pore continuation, but no equivalence test was performed and this metric does not establish topological or transport continuity.
+The shared-state sampler expands the 128³ base to 384³. In the illustrated seed-0 center plane, the complete 128 × 128 anchor retains 15,911 of 16,384 voxels (97.11%) after scale-up. The 120 × 120 full-strength conditioning interior retains 14,134 of 14,400 voxels (98.15%), and the corresponding 120³ base interior retains 1,727,254 of 1,728,000 voxels (99.96%). Across four samples, local pore continuation at tile boundaries is lower than in the interior by 0.68 ± 0.02 percentage points on average.
 
 <p align="center">
   <img src="assets/paper/05-scale-up.png" alt="Anchor, scaled center section, and cutaway of a 384 cubed volume" width="780">
@@ -234,15 +244,15 @@ The shared-state sampler expands the 128³ base to 384³. In the illustrated see
 
 ### 5.4 Overlap ablation
 
-Table 2 isolates one tile boundary in a 256 × 128 × 128 unanchored scale-up and reports mean ± sample standard deviation over five seeds. Without overlap, the exact-boundary phase-change rate is 6.85 ± 0.24 times the interior rate, transition TV is 0.369 ± 0.015, and continuation delta is 0.488 ± 0.041. Four voxels remove most of the discrepancy. Eight voxels further lower transition TV from 0.106 to 0.067 while leaving continuation delta essentially unchanged (0.038 versus 0.039); 12 voxels gives the lowest mean TV and continuation delta at additional cost, whereas 16 gives no consistent improvement. The exact seam ratio at eight voxels is below one, indicating a slightly smoother exact boundary than the median interior pair for this diagnostic.
+Table 2 isolates one tile boundary in a 256 × 128 × 128 unanchored scale-up and reports mean ± sample standard deviation over five seeds. At overlaps of 0, 4, 8, 12, and 16 voxels, the exact seam ratios are 6.90, 1.08, 1.02, 0.97, and 0.94; transition TV values are 0.380, 0.051, 0.055, 0.044, and 0.046; and continuation deltas are 0.567, 0.042, 0.034, 0.024, and 0.019. Mean elapsed time increases from 1.83 s at zero overlap to 3.273 s at 16 voxels, and peak allocated memory increases from 0.859 to 1.588 GiB. The sampler configuration uses eight-voxel overlap.
 
 | Overlap per side | Exact seam-change ratio | Transition TV | Continuation delta | Time | Peak GPU memory |
 |---:|---:|---:|---:|---:|---:|
-| 0 | 6.85 ± 0.24 | 0.369 ± 0.015 | 0.488 ± 0.041 | 1.80 ± 0.23 s | 0.859 ± 0.000 GiB |
-| 4 | 1.10 ± 0.15 | 0.106 ± 0.032 | 0.038 ± 0.009 | 2.04 ± 0.03 s | 1.013 ± 0.000 GiB |
-| 8 | 0.82 ± 0.08 | 0.067 ± 0.038 | 0.039 ± 0.017 | 2.385 ± 0.004 s | 1.184 ± 0.000 GiB |
-| 12 | 0.98 ± 0.11 | 0.052 ± 0.035 | 0.032 ± 0.012 | 2.789 ± 0.006 s | 1.374 ± 0.000 GiB |
-| 16 | 1.02 ± 0.15 | 0.073 ± 0.034 | 0.045 ± 0.011 | 3.236 ± 0.008 s | 1.588 ± 0.000 GiB |
+| 0 | 6.90 ± 0.52 | 0.380 ± 0.031 | 0.567 ± 0.057 | 1.83 ± 0.24 s | 0.859 ± 0.000 GiB |
+| 4 | 1.08 ± 0.04 | 0.051 ± 0.013 | 0.042 ± 0.018 | 2.07 ± 0.04 s | 1.014 ± 0.000 GiB |
+| 8 | 1.02 ± 0.04 | 0.055 ± 0.026 | 0.034 ± 0.016 | 2.416 ± 0.008 s | 1.184 ± 0.000 GiB |
+| 12 | 0.97 ± 0.06 | 0.044 ± 0.033 | 0.024 ± 0.011 | 2.818 ± 0.005 s | 1.374 ± 0.000 GiB |
+| 16 | 0.94 ± 0.07 | 0.046 ± 0.035 | 0.019 ± 0.009 | 3.273 ± 0.007 s | 1.588 ± 0.000 GiB |
 
 <p align="center">
   <img src="assets/paper/07-overlap-ablation.png" alt="Scale-up overlap ablation showing boundary quality, time, and memory" width="780">
@@ -251,23 +261,23 @@ Table 2 isolates one tile boundary in a 256 × 128 × 128 unanchored scale-up an
 
 ## 6. Discussion
 
-Plane anchors change the direct-sampling task from statistical synthesis to coordinate-aware conditional synthesis. In the controlled same-model experiment, higher evenly spaced coverage is associated with greater whole-volume agreement even though KID is not monotonic. The coordinate sets are not nested, however, and the target is sampled from the same generator, so the sweep does not establish reconstruction of an unseen experimental volume. KID asks whether an unordered set of sections has a similar feature distribution, whereas voxel agreement asks whether this synthetic target appears at the same coordinates.
+The controlled same-model sweep gives whole-volume accuracies of 55.10%, 94.87%, 97.14%, and 97.93% at 0, 32, 64, and 128 supplied planes. FID at the same counts is 22.18, 18.15, 18.48, and 20.24. KID, porosity, and tortuosity are shown for all nine counts in Figure 5. Coordinates are recomputed for each count rather than nested across counts.
 
-The morphology metrics reveal a second distinction. Porosity depends only on phase count and is relatively stable; tortuosity depends on connected transport paths and varies more under sparse anchoring. Full coverage reproduces the controlled reference exactly because every voxel is clamped, while partial coverage does not move aggregate properties monotonically toward it. The single oracle phase-fraction test also fails to improve porosity error, KID, or tortuosity. These results support spatial conditioning in the controlled setting, but not general composition control or physical-property recovery.
+The GT pore-percolating fraction is 99.751% on axes 0, 1, and 2. For anchor counts 0, 1, 2, 4, 8, 16, 32, 64, and 128, pore-percolation errors are 0.081, 0.056, 0.015, 0.092, 0.115, 0.204, 0.368, 0.118, and 0.150 pp. In each evaluated volume, the three axis-specific fractions are equal and one pore component spans all three axes.
 
-Joint tiled denoising produces a 27-fold increase in voxel count while keeping a supplied base highly represented without copying it into the result. The sample mean is negative, so no reduction in adjacent-pore continuation is observed in this statistic for the four tested samples; this remains neither an equivalence test nor a topology result. In the two-tile unanchored ablation, overlap provides the spatial communication that a shared latent vector and global storage do not provide at zero overlap. Eight voxels are retained as a pragmatic default: 12 gives somewhat lower mean discrepancy at higher cost, while increasing from 8 to 16 raises elapsed time by 36% and peak allocated memory by 34% without a consistent quality gain. This tradeoff is specific to the tested model, boundary, periodic outer context, and hardware.
+The tiled sampler expands a 128³ base to 384³, or 27 times the voxel count. Across four samples, the mean local pore-continuation drop at tile boundaries is 0.68 ± 0.02 pp. In the two-tile overlap ablation, increasing overlap from 8 to 16 changes transition TV from 0.055 to 0.046, continuation delta from 0.034 to 0.019, elapsed time from 2.416 to 3.273 s, and peak allocated memory from 1.184 to 1.588 GiB.
 
 ## 7. Limitations
 
 The synthetic GT is sampled from the trained model and therefore lies within its learned distribution. It tests controlled coordinate agreement, not reconstruction of unseen experimental 3D material. The real crop baseline, training data, and single-plane anchor all come from the same 2D image, with no held-out specimen. The image's material provenance, imaging and segmentation history, physical scale, and external license are unavailable.
 
-The anchor study verifies exact supplied labels and whole-volume agreement, but it does not measure continuity normal to anchor planes, compare with a slice-conditioned baseline, or ablate the anchor input, anchor loss, or connectivity critic. Because the connectivity critic's reference triplets are themselves unconditioned model samples, its contribution to physical connectivity cannot be inferred from the present results. Exact full-coverage agreement is an algorithmic consequence of clamping, not evidence for the learned regularizer.
+The anchor study measures supplied-plane and whole-volume agreement but provides no exact label guarantee, comparison with a slice-conditioned baseline, or ablation of the anchor input, anchor loss, connectivity critic, normal-transition loss, or scale-consistency loss. Pore percolation is aggregated over the complete volume and does not isolate topology specifically around anchor planes. Because the connectivity targets are unconditioned model triplets rather than measured 3D neighborhoods, their contribution to physical connectivity cannot be inferred from the present results.
 
-The principal quantitative comparisons use only four seeded replicates, one binary image, an isotropy assumption, and axis-0 anchors and tortuosity. The phase-fraction study uses one oracle target. The overlap sweep uses five seeds but isolates one axis and one boundary, and the sampler assumes periodic outer context; runtime and memory values are hardware-specific. Multi-axis or intersecting-anchor evaluation, anisotropic and multiphase media, independent training runs, and experimental volumes remain untested. Voxel accuracy is phase-imbalance sensitive, while KID uses natural-image features and may miss material-specific morphology. Finally, local pore continuation measures only adjacent-voxel agreement; connected components, percolation, permeability, and direct anchor-neighborhood metrics are needed for stronger physical validation.
+The quantitative evaluation uses one binary image, four seeded replicates for Table 1, one oracle phase-fraction target, one fixed-seed 128³ anchor sweep, and five seeds for the two-tile overlap sweep. Pore percolation reports the fraction of phase-0 voxels in non-periodic 6-connected components that span opposite faces. Conductivity and permeability are not calculated by this metric. KID and FID use Inception-v3 features, and runtime and memory are measured on the reported hardware.
 
 ## 8. Conclusion
 
-This work integrates exact full-strength anchors for direct base-size sampling with shared-state tiled diffusion in a 2D-supervised categorical 3D generator. In the same-model controlled experiment, 25% axis-0 coverage yields 95.48 ± 0.03% whole-volume agreement; the 100% endpoint is exact by construction. Tiled sampling expands the volume 27-fold, lets a supplied base adapt, and yields a mean local continuation difference of −0.36 ± 0.26 percentage points across four samples. A two-tile ablation supports eight-voxel overlap as a practical quality–cost choice for this 128³-core model, not as a universal optimum. The method is a proof of concept for retaining specified 2D phase information inside larger stochastic volumes. Held-out experimental data, direct anchor-neighborhood validation, component baselines, and a complete reproducibility archive are required before making reconstruction or physical-fidelity claims.
+This work combines plane-anchor conditioning with shared-state tiled diffusion in a 2D-supervised categorical 3D generator. In the same-model controlled experiment, 25% and 100% axis-0 coverage yield 94.88 ± 0.03% and 97.93 ± 0.08% whole-volume agreement. The 128-plane pore-percolation error is 0.150 pp. Tiled sampling expands the volume from 128³ to 384³ and gives a mean local pore-continuation drop of 0.68 ± 0.02 pp across four samples. The overlap ablation reports results at 0, 4, 8, 12, and 16 voxels per side; the sampler configuration uses eight voxels.
 
 ## References
 
@@ -308,3 +318,5 @@ This work integrates exact full-strength anchors for direct base-size sampling w
 [18] M. Bińkowski, D. J. Sutherland, M. Arbel, and A. Gretton, “Demystifying MMD GANs,” in *International Conference on Learning Representations*, 2018.
 
 [19] S. J. Cooper, A. Bertei, P. R. Shearing, J. A. Kilner, and N. P. Brandon, “TauFactor: An open-source application for calculating tortuosity factors from tomographic data,” *SoftwareX*, vol. 5, pp. 203–210, 2016.
+
+[20] M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter, “GANs trained by a two time-scale update rule converge to a local Nash equilibrium,” in *Advances in Neural Information Processing Systems*, vol. 30, 2017.

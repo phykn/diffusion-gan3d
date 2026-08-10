@@ -1,5 +1,3 @@
-"""Generate the fixed center-anchor example used in PAPER.md."""
-
 import argparse
 import json
 import sys

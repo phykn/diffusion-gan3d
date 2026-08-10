@@ -1,5 +1,3 @@
-"""Regenerate the fixed 128³ synthetic reference used by PAPER.md."""
-
 import argparse
 import hashlib
 import json

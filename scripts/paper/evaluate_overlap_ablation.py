@@ -1,5 +1,3 @@
-"""Evaluate scale-up overlap and render the ablation used by PAPER.md."""
-
 import argparse
 import csv
 import importlib

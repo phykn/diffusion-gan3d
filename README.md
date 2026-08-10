@@ -133,6 +133,9 @@ under `checkpoints/step_XXXXXXXX/`, so intermediate weights are not overwritten.
 - `src/train/engine.py` owns one optimization step and its losses;
   `src/train/runner.py` owns progress reporting, TensorBoard output, and
   checkpoint cadence.
+- `src/evaluate/` contains reusable label, adjacent-section transition,
+  Inception-distribution (KID/FID), connectivity, and transport metrics shared
+  by diagnostics and paper evaluation.
 - `scripts/` contains user diagnostics, while `scripts/paper/` contains
   provenance-checked evaluation and figure generation.
 - `tests/` contains the tracked regression suite.

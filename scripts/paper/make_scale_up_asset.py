@@ -1,5 +1,3 @@
-"""Generate the anchored 3x3x3 scale-up example used in PAPER.md."""
-
 import argparse
 import json
 import sys

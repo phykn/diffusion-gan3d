@@ -1,5 +1,3 @@
-"""Training lifecycle, progress reporting, metrics, and checkpoint output."""
-
 from pathlib import Path
 
 from torch.utils.tensorboard import SummaryWriter

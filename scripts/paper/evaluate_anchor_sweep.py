@@ -1,5 +1,3 @@
-"""Generate and evaluate the axis-0 anchor coverage sweep for PAPER.md."""
-
 import argparse
 import csv
 import json
@@ -9,10 +7,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import taufactor as tau
 import tifffile
 import torch
-from torchmetrics.image.kid import KernelInceptionDistance
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -28,6 +24,18 @@ from provenance import (
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
+from src.evaluate import (
+    fid_score,
+    kid_score,
+    make_fid_metric,
+    make_kid_metric,
+    percolating_fractions,
+    percolation_error,
+    percolation_errors,
+    phase_fraction,
+    tortuosity,
+    voxel_accuracy,
+)
 
 REFERENCE_PATH = PROJECT_ROOT / "scripts" / "gt_128.tiff"
 TEMP_DIR = PROJECT_ROOT / "temp"
@@ -37,6 +45,10 @@ AXIS = 0
 PORE_PHASE = 0
 SEED = 0
 TAUFACTOR_CONVERGENCE = 1e-3
+
+FEATURE_DIMENSIONS = 2048
+KID_SUBSETS = 100
+KID_SUBSET_SIZE = 50
 
 
 def main() -> None:
@@ -81,55 +93,121 @@ def main() -> None:
     )
 
     if args.reuse:
-        validate_manifest(
+        reuse_keys = (
+            "weights",
+            "weight_sha256",
+            "train_config",
+            "train_config_sha256",
+            "guidance_scale",
+            "reference",
+            "reference_sha256",
+            "additional_inputs",
+        )
+        reuse_provenance = {key: provenance[key] for key in reuse_keys}
+        cached_manifest = validate_manifest(
             MANIFEST_PATH,
-            provenance,
+            reuse_provenance,
             label="anchor sweep reuse",
             cached_paths=cached_paths,
         )
+        cached_generation = cached_manifest.get("generation")
+        if not isinstance(cached_generation, dict) or any(
+            cached_generation.get(key) != value
+            for key, value in generation.items()
+        ):
+            raise ValueError(
+                "anchor sweep reuse manifest generation does not match current inputs."
+            )
     else:
         generate_volumes(reference, weights, args.guidance_scale, provenance)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    kid = KernelInceptionDistance(
-        feature=2048,
-        subsets=100,
-        subset_size=50,
-        reset_real_features=False,
-        normalize=False,
-    ).to(device)
-    kid.update(metric_images(get_slices(reference, AXIS), device), real=True)
-    reference_porosity = porosity(reference)
-    reference_tortuosity = tortuosity(reference, AXIS, device)
+    reference_slices = get_slices(reference, AXIS)
+    kid = make_kid_metric(
+        reference_slices,
+        device,
+        subsets=KID_SUBSETS,
+        subset_size=KID_SUBSET_SIZE,
+        feature=FEATURE_DIMENSIONS,
+    )
+    fid = make_fid_metric(
+        reference_slices,
+        device,
+        feature=FEATURE_DIMENSIONS,
+    )
+    distribution_scores: dict[int, tuple[float, float, float]] = {}
+    for count in COUNTS:
+        volume = load_volume(volume_path(count))
+        slices = get_slices(volume, AXIS)
+        kid_mean, kid_std = kid_score(kid, slices, device, seed=SEED)
+        distribution_scores[count] = (
+            kid_mean,
+            kid_std,
+            fid_score(fid, slices, device),
+        )
+    del kid, fid
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    reference_porosity = phase_fraction(reference, PORE_PHASE)
+    reference_tortuosity = tortuosity(
+        reference,
+        phase=PORE_PHASE,
+        axis=AXIS,
+        device=device,
+        convergence=TAUFACTOR_CONVERGENCE,
+    )
+    reference_pore_percolation = percolating_fractions(reference, PORE_PHASE)
     rows = []
     for count in COUNTS:
         path = volume_path(count)
         volume = load_volume(path)
         accuracy = voxel_accuracy(volume, reference)
-        kid.update(metric_images(get_slices(volume, AXIS), device), real=False)
-        torch.manual_seed(SEED)
-        if device.type == "cuda":
-            torch.cuda.manual_seed_all(SEED)
-        kid_mean, kid_std = kid.compute()
+        kid_mean, kid_std, fid_value = distribution_scores[count]
+        pore_percolation = percolating_fractions(volume, PORE_PHASE)
+        pore_errors = percolation_errors(
+            pore_percolation, reference_pore_percolation
+        )
         row = {
             "anchor_count": count,
             "coverage": count / reference.shape[AXIS],
             "guidance_scale": args.guidance_scale,
-            "kid": float(kid_mean.cpu()),
-            "kid_std": float(kid_std.cpu()),
-            "porosity": porosity(volume),
-            "tortuosity_axis0": tortuosity(volume, AXIS, device),
+            "kid": kid_mean,
+            "kid_std": kid_std,
+            "fid": fid_value,
+            "porosity": phase_fraction(volume, PORE_PHASE),
+            "tortuosity_axis0": tortuosity(
+                volume,
+                phase=PORE_PHASE,
+                axis=AXIS,
+                device=device,
+                convergence=TAUFACTOR_CONVERGENCE,
+            ),
             "voxel_accuracy": accuracy,
+            "gt_pore_percolation_axis0": reference_pore_percolation[0],
+            "gt_pore_percolation_axis1": reference_pore_percolation[1],
+            "gt_pore_percolation_axis2": reference_pore_percolation[2],
+            "pred_pore_percolation_axis0": pore_percolation[0],
+            "pred_pore_percolation_axis1": pore_percolation[1],
+            "pred_pore_percolation_axis2": pore_percolation[2],
+            "pore_percolation_error_axis0": pore_errors[0],
+            "pore_percolation_error_axis1": pore_errors[1],
+            "pore_percolation_error_axis2": pore_errors[2],
+            "pore_percolation_error": percolation_error(
+                pore_percolation,
+                reference_pore_percolation,
+            ),
             "tiff": path.name,
         }
         rows.append(row)
-        kid.reset()
         score = f"{accuracy:.4%}"
         print(
             f"count={count:2d} coverage={row['coverage']:.2%} "
             f"KID={row['kid']:.6f}±{row['kid_std']:.6f} "
+            f"FID={row['fid']:.4f} "
             f"porosity={row['porosity']:.4f} "
-            f"tortuosity={row['tortuosity_axis0']:.4f} accuracy={score}"
+            f"tortuosity={row['tortuosity_axis0']:.4f} accuracy={score} "
+            f"pore_error={100 * row['pore_percolation_error']:.3f} pp"
         )
 
     write_csv(rows, csv_path)
@@ -146,6 +224,7 @@ def main() -> None:
         reference=reference,
         reference_porosity=reference_porosity,
         reference_tortuosity=reference_tortuosity,
+        reference_pore_percolation=reference_pore_percolation,
         output=MANIFEST_PATH,
     )
     print(f"Metrics : {csv_path.resolve()}")
@@ -222,34 +301,6 @@ def get_slices(volume: np.ndarray, axis: int) -> np.ndarray:
     return np.moveaxis(volume, axis, 0)
 
 
-def porosity(volume: np.ndarray) -> float:
-    return float(np.mean(volume == PORE_PHASE))
-
-
-def voxel_accuracy(
-    volume: np.ndarray,
-    reference: np.ndarray,
-) -> float:
-    """Fraction of all generated voxels equal to the reference volume."""
-    return float(np.mean(volume == reference))
-
-
-def tortuosity(volume: np.ndarray, axis: int, device: torch.device) -> float:
-    """Return TauFactor's diffusion-based tortuosity factor along ``axis``."""
-    # TauFactor solves along the first dimension and expects conductive voxels
-    # to equal 1, so phase-0 pores are converted to its conductive mask.
-    conductive = np.moveaxis(volume == PORE_PHASE, axis, 0).astype(np.uint8)
-    solver = tau.Solver(conductive, device=device.type)
-    value = solver.solve(verbose=False, conv_crit=TAUFACTOR_CONVERGENCE)
-    return float(np.asarray(value).reshape(-1)[0])
-
-
-def metric_images(slices: np.ndarray, device: torch.device) -> torch.Tensor:
-    """Convert binary slices to TorchMetrics' uint8 RGB image input."""
-    images = torch.from_numpy(slices.copy()).to(torch.uint8).mul_(255)
-    return images[:, None].repeat(1, 3, 1, 1).to(device)
-
-
 def write_csv(rows: list[dict], output: Path) -> None:
     with output.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=tuple(rows[0]))
@@ -264,6 +315,7 @@ def write_manifest(
     reference: np.ndarray,
     reference_porosity: float,
     reference_tortuosity: float,
+    reference_pore_percolation: tuple[float, float, float],
     output: Path,
 ) -> None:
     data = {
@@ -283,12 +335,43 @@ def write_manifest(
             "implementation": "torchmetrics.image.kid.KernelInceptionDistance",
             "package_version": version("torchmetrics"),
             "feature_extractor": "torch-fidelity Inception-v3 pool 3",
-            "feature_dimensions": 2048,
-            "subsets": 100,
-            "subset_size": 50,
+            "feature_dimensions": FEATURE_DIMENSIONS,
+            "subsets": KID_SUBSETS,
+            "subset_size": KID_SUBSET_SIZE,
             "polynomial_kernel_degree": 3,
             "input": "uint8 RGB, phase 0 = 0 and phase 1 = 255",
             "axis": AXIS,
+        },
+        "fid": {
+            "reference_slices": reference.shape[0],
+            "generated_slices": reference.shape[0],
+            "implementation": "torchmetrics.image.fid.FrechetInceptionDistance",
+            "package_version": version("torchmetrics"),
+            "feature_extractor": "torch-fidelity Inception-v3 pool 3",
+            "feature_dimensions": FEATURE_DIMENSIONS,
+            "input": "uint8 RGB, phase 0 = 0 and phase 1 = 255",
+            "axis": AXIS,
+        },
+        "pore_percolation": {
+            "phase": PORE_PHASE,
+            "connectivity": 6,
+            "adjacency": "face-sharing voxels only",
+            "periodic": False,
+            "axes": [0, 1, 2],
+            "percolating_component": (
+                "a connected component touching both opposing faces normal to "
+                "the evaluated axis"
+            ),
+            "numerator": "phase-0 pore voxels in all percolating components",
+            "denominator": "all phase-0 pore voxels in the volume",
+            "reference_fractions_axis0_axis1_axis2": list(
+                reference_pore_percolation
+            ),
+            "axis_error": "absolute prediction-reference fraction difference",
+            "aggregation": "mean of the three axis-specific absolute errors",
+            "phase_absent": "undefined; evaluation raises ValueError",
+            "csv_unit": "fraction",
+            "chart_unit": "percentage points",
         },
         "tortuosity": {
             "method": "TauFactor steady-state diffusion Solver (classical tortuosity factor)",
@@ -310,33 +393,43 @@ def render_chart(
     output: Path,
 ) -> None:
     positions = np.asarray([row["anchor_count"] for row in rows], dtype=float)
-    figure, panels = plt.subplots(2, 2, figsize=(11, 7.3), facecolor="white")
+    figure, panels = plt.subplots(2, 3, figsize=(14.5, 7.3), facecolor="white")
     figure.subplots_adjust(
-        left=0.08,
-        right=0.97,
+        left=0.065,
+        right=0.985,
         bottom=0.12,
         top=0.97,
         hspace=0.30,
         wspace=0.28,
     )
     specs = (
-        ("voxel_accuracy", None, "Voxel accuracy"),
-        ("kid", None, "KID"),
-        ("porosity", reference_porosity, "Porosity"),
+        ("voxel_accuracy", None, "Voxel accuracy", 1.0, None),
+        ("kid", None, "KID", 1.0, None),
+        ("fid", None, "FID", 1.0, None),
+        ("porosity", reference_porosity, "Porosity", 1.0, "GT"),
         (
             "tortuosity_axis0",
             reference_tortuosity,
             "Tortuosity",
+            1.0,
+            "GT",
+        ),
+        (
+            "pore_percolation_error",
+            0.0,
+            "Pore percolation error (pp)",
+            100.0,
+            "Ideal",
         ),
     )
-    for panel, letter, (key, reference, ylabel) in zip(
+    for panel, letter, (key, reference, ylabel, scale, reference_label) in zip(
         panels.ravel(),
-        "abcd",
+        "abcdef",
         specs,
         strict=True,
     ):
         values = np.asarray(
-            [np.nan if row[key] is None else row[key] for row in rows],
+            [np.nan if row[key] is None else scale * row[key] for row in rows],
             dtype=float,
         )
         panel.plot(
@@ -348,12 +441,13 @@ def render_chart(
             markersize=5.5,
         )
         if reference is not None and np.isfinite(reference):
+            reference_value = scale * reference
             panel.axhline(
-                reference,
+                reference_value,
                 color="#64748b",
                 linewidth=1.2,
                 linestyle="--",
-                label=f"GT: {reference:.3f}",
+                label=f"{reference_label}: {reference_value:.3f}",
             )
             panel.legend(frameon=False, fontsize=9, loc="best")
         panel.set_ylabel(ylabel, fontsize=10)
@@ -376,7 +470,7 @@ def render_chart(
         panel.spines[["top", "right"]].set_visible(False)
         panel.spines[["left", "bottom"]].set_color("#94a3b8")
         panel.tick_params(colors="#475569")
-    panels[0, 0].set_ylim(0.5, 1)
+    panels[0, 0].set_ylim(0, 1)
     figure.supxlabel("Number of supplied axis-0 anchor planes", fontsize=11, y=0.025)
     figure.savefig(
         output,

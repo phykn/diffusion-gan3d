@@ -1,5 +1,3 @@
-"""Show random crops from each training axis."""
-
 import argparse
 import sys
 from pathlib import Path

@@ -1,5 +1,3 @@
-"""Check evenly distributed learned conditional anchors from a reference volume."""
-
 import argparse
 import sys
 from dataclasses import dataclass
@@ -17,6 +15,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
+from src.evaluate import (
+    continuation_delta,
+    phase_change_rate,
+    phase_iou,
+    phase_recall,
+    transition_counts,
+    transition_tv,
+    voxel_accuracy,
+)
 
 AXIS = 0
 
@@ -113,12 +120,12 @@ def main() -> None:
     )
     print("Status   : complete", flush=True)
     gen_slices = get_slices(gen, AXIS)
-    vol_acc = float((gen == target).to(torch.float32).mean())
+    vol_acc = voxel_accuracy(gen, target)
     if indices:
         selected = torch.tensor(indices, dtype=torch.long)
         target_sel = target_slices.index_select(0, selected)
         gen_sel = gen_slices.index_select(0, selected)
-        anchor_acc = float((gen_sel == target_sel).to(torch.float32).mean())
+        anchor_acc = voxel_accuracy(gen_sel, target_sel)
         score_gen = gen_sel
         score_ref = target_sel
     else:
@@ -129,12 +136,9 @@ def main() -> None:
     target_plane = target_slices[index]
     gen_plane = gen_slices[index]
     mismatch = gen_plane != target_plane
-    slice_acc = float((~mismatch).to(torch.float32).mean())
-    iou, recall = get_scores(
-        score_gen,
-        score_ref,
-        num_phases=generator.num_phases,
-    )
+    slice_acc = voxel_accuracy(gen_plane, target_plane)
+    iou = phase_iou(score_gen, score_ref, generator.num_phases)
+    recall = phase_recall(score_gen, score_ref, generator.num_phases)
     boundary = measure_boundaries(
         gen,
         indices,
@@ -227,7 +231,7 @@ def print_quality(
     print(f"Continuation delta : {format_value(boundary.continuation_delta)}")
 
 
-def format_scores(values: list[float]) -> str:
+def format_scores(values: tuple[float, ...]) -> str:
     return "  ".join(
         f"phase {phase}: {value:.2%}" for phase, value in enumerate(values)
     )
@@ -262,53 +266,28 @@ def measure_boundaries(
     if not boundary_indices or not ordinary_indices:
         return BoundaryQuality(None, None, None, None, None)
 
-    boundary_counts = count_transitions(slices, boundary_indices, num_phases)
-    ordinary_counts = count_transitions(slices, ordinary_indices, num_phases)
-    boundary_change = get_change_rate(boundary_counts)
-    ordinary_change = get_change_rate(ordinary_counts)
-    ratio = None if ordinary_change == 0.0 else boundary_change / ordinary_change
-    boundary_dist = boundary_counts / boundary_counts.sum()
-    ordinary_dist = ordinary_counts / ordinary_counts.sum()
-    transition_tv = float(0.5 * (boundary_dist - ordinary_dist).abs().sum())
-    continuation_delta = float(
-        (get_continuation(boundary_counts) - get_continuation(ordinary_counts))
-        .abs()
-        .max()
+    boundary_counts = transition_counts(
+        slices[boundary_indices],
+        slices[[index + 1 for index in boundary_indices]],
+        num_phases,
     )
+    ordinary_counts = transition_counts(
+        slices[ordinary_indices],
+        slices[[index + 1 for index in ordinary_indices]],
+        num_phases,
+    )
+    boundary_change = phase_change_rate(boundary_counts)
+    ordinary_change = phase_change_rate(ordinary_counts)
+    ratio = None if ordinary_change == 0.0 else boundary_change / ordinary_change
+    tv_value = transition_tv(boundary_counts, ordinary_counts)
+    continuation_value = continuation_delta(boundary_counts, ordinary_counts)
     return BoundaryQuality(
         boundary_change,
         ordinary_change,
         ratio,
-        transition_tv,
-        continuation_delta,
+        tv_value,
+        continuation_value,
     )
-
-
-def count_transitions(
-    slices: torch.Tensor,
-    indices: list[int],
-    num_phases: int,
-) -> torch.Tensor:
-    prev = slices[indices].to(torch.long)
-    curr = slices[[index + 1 for index in indices]].to(torch.long)
-    pairs = prev * num_phases + curr
-    return (
-        torch.bincount(
-            pairs.flatten(),
-            minlength=num_phases * num_phases,
-        )
-        .to(torch.float64)
-        .reshape(num_phases, num_phases)
-    )
-
-
-def get_change_rate(counts: torch.Tensor) -> float:
-    unchanged = counts.diagonal().sum()
-    return float((counts.sum() - unchanged) / counts.sum())
-
-
-def get_continuation(counts: torch.Tensor) -> torch.Tensor:
-    return counts.diagonal() / counts.sum(dim=1).clamp_min(1.0)
 
 
 def show_result(
@@ -401,7 +380,9 @@ def show_result(
     anchor_map.set_title("9. Anchor positions (red)")
     anchor_map.axis("off")
 
-    mode = "Distributed learned conditional anchors" if indices else "Unanchored baseline"
+    mode = (
+        "Distributed learned conditional anchors" if indices else "Unanchored baseline"
+    )
     score_label = "anchor" if indices else "reference center"
     fig.suptitle(
         f"{mode} · {score_label} {100 * accuracy:.1f}% matched\n"
@@ -446,26 +427,6 @@ def get_slices(vol: torch.Tensor, axis: int) -> torch.Tensor:
     if axis not in (0, 1, 2):
         raise ValueError("axis must be 0, 1, or 2.")
     return vol.movedim(axis, 0)
-
-
-def get_scores(
-    gen: torch.Tensor,
-    target: torch.Tensor,
-    num_phases: int,
-) -> tuple[list[float], list[float]]:
-    if gen.shape != target.shape:
-        raise ValueError("generated and target volumes must have the same shape.")
-    iou = []
-    recall = []
-    for phase in range(num_phases):
-        pred = gen == phase
-        expected = target == phase
-        intersection = int((pred & expected).sum())
-        union = int((pred | expected).sum())
-        support = int(expected.sum())
-        iou.append(1.0 if union == 0 else intersection / union)
-        recall.append(1.0 if support == 0 else intersection / support)
-    return iou, recall
 
 
 def show_napari(vol: torch.Tensor) -> None:

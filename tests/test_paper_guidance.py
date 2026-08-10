@@ -9,6 +9,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from src.evaluate import image as evaluate_image
+from src.evaluate import (
+    percolating_fractions,
+    percolation_error,
+    percolation_errors,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 PAPER_DIR = ROOT / "scripts" / "paper"
 PAPER_SCRIPTS = (
@@ -60,6 +67,42 @@ def _keywords(call: ast.Call) -> dict[str, ast.expr]:
         for keyword in call.keywords
         if keyword.arg is not None
     }
+
+
+def test_anchor_sweep_pore_percolation_uses_shared_axiswise_error() -> None:
+    module = _load_script("evaluate_anchor_sweep.py")
+    predicted = (1.0, 0.0, 0.0)
+    target = (0.0, 1.0, 0.0)
+
+    assert module.PORE_PHASE == 0
+    assert module.percolating_fractions is percolating_fractions
+    assert module.percolation_errors is percolation_errors
+    assert module.percolation_error is percolation_error
+    assert module.percolation_errors(predicted, target) == (1.0, 1.0, 0.0)
+    assert module.percolation_error(predicted, target) == pytest.approx(2 / 3)
+
+
+def test_anchor_sweep_pore_output_contract() -> None:
+    source = (PAPER_DIR / "evaluate_anchor_sweep.py").read_text(encoding="utf-8")
+
+    fields = (
+        "gt_pore_percolation_axis0",
+        "gt_pore_percolation_axis1",
+        "gt_pore_percolation_axis2",
+        "pred_pore_percolation_axis0",
+        "pred_pore_percolation_axis1",
+        "pred_pore_percolation_axis2",
+        "pore_percolation_error_axis0",
+        "pore_percolation_error_axis1",
+        "pore_percolation_error_axis2",
+        "pore_percolation_error",
+    )
+
+    for field in fields:
+        assert f'"{field}"' in source
+    assert '"pore_percolation": {' in source
+    assert '"Pore percolation error (pp)"' in source
+    assert "particle" not in source.lower()
 
 
 def test_paper_metrics_reuses_real_kid_features_and_resets_fake(
@@ -115,8 +158,12 @@ def test_paper_metrics_reuses_real_kid_features_and_resets_fake(
             type(self).resets += 1
             self.fake_features.clear()
 
-    monkeypatch.setattr(module, "KernelInceptionDistance", FakeKid)
-    monkeypatch.setattr(module, "metric_images", lambda values, _device: values)
+    monkeypatch.setattr(evaluate_image, "KernelInceptionDistance", FakeKid)
+    monkeypatch.setattr(
+        evaluate_image,
+        "metric_images",
+        lambda values, _device: values,
+    )
     monkeypatch.setattr(module, "REAL_EVALUATION_SEEDS", (10,))
     monkeypatch.setattr(module, "CONDITIONS", ("Real 2D crops", "Generated"))
     monkeypatch.setattr(module, "SEEDS", (20, 21))
@@ -140,7 +187,7 @@ def test_paper_metrics_reuses_real_kid_features_and_resets_fake(
         "select_metric_slices",
         lambda volume, **_kwargs: volume,
     )
-    monkeypatch.setattr(module, "porosity", lambda _values: 0.5)
+    monkeypatch.setattr(module, "phase_fraction", lambda *_args: 0.5)
     monkeypatch.setattr(
         module,
         "tortuosity",

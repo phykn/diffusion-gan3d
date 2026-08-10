@@ -1,5 +1,3 @@
-"""Compute the quantitative comparison table used in PAPER.md."""
-
 import argparse
 import csv
 import json
@@ -8,12 +6,10 @@ from importlib.metadata import version
 from pathlib import Path
 
 import numpy as np
-import taufactor as tau
 import tifffile
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from torchmetrics.image.kid import KernelInceptionDistance
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -32,6 +28,13 @@ from provenance import (
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
+from src.evaluate import (
+    kid_score,
+    make_kid_metric,
+    phase_fraction,
+    tortuosity,
+    voxel_accuracy,
+)
 from src.scale import DEFAULT_SCALE_OVERLAP, ScaledGenerator
 
 REFERENCE_PATH = PROJECT_ROOT / "scripts" / "gt_128.tiff"
@@ -88,7 +91,7 @@ def main() -> None:
         raise ValueError("paper reference changed while it was being loaded.")
     if sha256_file(SAMPLE_PATH) != training_image_digest:
         raise ValueError("training image changed while it was being loaded.")
-    target_porosity = porosity(reference)
+    target_porosity = phase_fraction(reference, PORE_PHASE)
 
     VOLUME_DIR.mkdir(parents=True, exist_ok=True)
     weights = args.weight.resolve()
@@ -145,7 +148,13 @@ def main() -> None:
     )
 
     # KID's Inception model is released before TauFactor allocates its solver fields.
-    reference_tortuosity = tortuosity(reference, AXIS, device)
+    reference_tortuosity = tortuosity(
+        reference,
+        phase=PORE_PHASE,
+        axis=AXIS,
+        device=device,
+        convergence=TAUFACTOR_CONVERGENCE,
+    )
     for condition in CONDITIONS[1:]:
         for seed in SEEDS:
             volume = load_volume(volume_path(condition, seed))
@@ -164,8 +173,14 @@ def main() -> None:
                     guidance_scale=args.guidance_scale,
                     kid=kid_mean,
                     kid_subset_std=kid_subset_std,
-                    porosity_value=porosity(volume),
-                    tortuosity_value=tortuosity(volume, AXIS, device),
+                    porosity_value=phase_fraction(volume, PORE_PHASE),
+                    tortuosity_value=tortuosity(
+                        volume,
+                        phase=PORE_PHASE,
+                        axis=AXIS,
+                        device=device,
+                        convergence=TAUFACTOR_CONVERGENCE,
+                    ),
                     voxel_accuracy_value=accuracy,
                     seam_connectivity_drop_value=seam_drop,
                 )
@@ -323,7 +338,7 @@ def compute_kid_scores(
                     seed=seed,
                     kid=kid_mean,
                     kid_subset_std=kid_subset_std,
-                    porosity_value=porosity(crops),
+                    porosity_value=phase_fraction(crops, PORE_PHASE),
                 )
             )
 
@@ -347,44 +362,6 @@ def compute_kid_scores(
         if device.type == "cuda":
             torch.cuda.empty_cache()
     return real_rows, generated_scores
-
-
-def make_kid_metric(
-    real: np.ndarray,
-    device: torch.device,
-) -> KernelInceptionDistance:
-    metric = KernelInceptionDistance(
-        feature=2048,
-        subsets=KID_SUBSETS,
-        subset_size=KID_SUBSET_SIZE,
-        reset_real_features=False,
-        normalize=False,
-    ).to(device)
-    metric.update(metric_images(real, device), real=True)
-    return metric
-
-
-def kid_score(
-    metric: KernelInceptionDistance,
-    generated: np.ndarray,
-    device: torch.device,
-) -> tuple[float, float]:
-    metric.update(metric_images(generated, device), real=False)
-    try:
-        torch.manual_seed(0)
-        if device.type == "cuda":
-            torch.cuda.manual_seed_all(0)
-        mean, std = metric.compute()
-        return float(mean.cpu()), float(std.cpu())
-    finally:
-        # reset_real_features=False preserves the shared real features while
-        # discarding every fake feature before the next comparison.
-        metric.reset()
-
-
-def metric_images(slices: np.ndarray, device: torch.device) -> torch.Tensor:
-    images = torch.from_numpy(slices.copy()).to(torch.uint8).mul_(255)
-    return images[:, None].repeat(1, 3, 1, 1).to(device)
 
 
 def select_metric_slices(
@@ -416,23 +393,6 @@ def select_indices(size: int, count: int) -> tuple[int, ...]:
     if count < 1 or count > size:
         raise ValueError("count must be between one and the axis size.")
     return tuple((2 * index + 1) * size // (2 * count) for index in range(count))
-
-
-def tortuosity(volume: np.ndarray, axis: int, device: torch.device) -> float:
-    conductive = np.moveaxis(volume == PORE_PHASE, axis, 0).astype(np.uint8)
-    solver = tau.Solver(conductive, device=device.type)
-    value = solver.solve(verbose=False, conv_crit=TAUFACTOR_CONVERGENCE)
-    return float(np.asarray(value).reshape(-1)[0])
-
-
-def porosity(values: np.ndarray) -> float:
-    return float(np.mean(values == PORE_PHASE))
-
-
-def voxel_accuracy(volume: np.ndarray, reference: np.ndarray) -> float:
-    if volume.shape != reference.shape:
-        raise ValueError("voxel accuracy requires equal volume shapes.")
-    return float(np.mean(volume == reference))
 
 
 def scale_seams(

@@ -1,5 +1,3 @@
-"""Generate and inspect a jointly denoised tiled volume."""
-
 import argparse
 import sys
 from dataclasses import dataclass
@@ -19,6 +17,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
+from src.evaluate import (
+    continuation_delta,
+    phase_change_rate,
+    phase_fractions,
+    transition_counts,
+    transition_tv,
+    voxel_accuracy,
+)
 from src.scale import DEFAULT_SCALE_OVERLAP, ScaledGenerator, ScalePlan
 
 AXIS = 0
@@ -168,7 +174,7 @@ def main() -> None:
         generator.num_phases,
     )
 
-    vfs = get_vf(vol, generator.num_phases)
+    vfs = phase_fractions(vol, generator.num_phases)
     scaled_acc = None
     base_match = None
     base_interior_match = None
@@ -313,21 +319,6 @@ def format_bytes(size: int) -> str:
     raise RuntimeError("unreachable")
 
 
-def get_vf(vol: torch.Tensor, num_phases: int) -> torch.Tensor:
-    counts = torch.zeros(num_phases, dtype=torch.long)
-    plane_voxels = int(np.prod(vol.shape[1:]))
-    chunk_size = max(1, 16_000_000 // plane_voxels)
-    for chunk in vol.split(chunk_size):
-        counts.add_(
-            torch.bincount(
-                chunk.to(torch.long).flatten(),
-                minlength=num_phases,
-            )
-        )
-    vf = counts.to(torch.float64)
-    return vf / vf.sum()
-
-
 def load_volume(path: Path, patch_size: int, num_phases: int) -> torch.Tensor:
     if not path.is_file():
         raise FileNotFoundError(f"anchor volume was not found: {path}")
@@ -375,7 +366,7 @@ def get_accuracy(
     idx = torch.tensor(indices, dtype=torch.long)
     actual = vol.movedim(axis, 0).index_select(0, idx)
     expected = target.movedim(axis, 0).index_select(0, idx)
-    return float((actual == expected).to(torch.float32).mean())
+    return voxel_accuracy(actual, expected)
 
 
 def measure_seams(
@@ -426,8 +417,8 @@ def measure_seams(
             stride = max(1, int(np.ceil(max(prev.shape) / 512)))
             prev = prev[::stride, ::stride]
             curr = curr[::stride, ::stride]
-            rate = float((prev != curr).to(torch.float32).mean())
-            counts = count_transitions(prev, curr, num_phases)
+            counts = transition_counts(prev, curr, num_phases)
+            rate = phase_change_rate(counts)
             if idx in band_set:
                 band_rates[idx] = rate
                 band_counts[idx] = counts
@@ -447,16 +438,12 @@ def measure_seams(
         else:
             changes.append(None)
 
-        inner_dist = inner_counts / inner_counts.sum()
-        inner_cont = get_continuation(inner_counts)
         axis_tv = []
         axis_delta = []
         for idx in band_idx:
             seam_counts = band_counts[idx]
-            seam_dist = seam_counts / seam_counts.sum()
-            axis_tv.append(float(0.5 * (seam_dist - inner_dist).abs().sum()))
-            seam_cont = get_continuation(seam_counts)
-            axis_delta.append(float((seam_cont - inner_cont).abs().max()))
+            axis_tv.append(transition_tv(seam_counts, inner_counts))
+            axis_delta.append(continuation_delta(seam_counts, inner_counts))
         tvs.append(max(axis_tv))
         deltas.append(max(axis_delta))
     return SeamQuality(
@@ -464,27 +451,6 @@ def measure_seams(
         transition_tv=tuple(tvs),
         continuation_delta=tuple(deltas),
     )
-
-
-def count_transitions(
-    prev: torch.Tensor,
-    curr: torch.Tensor,
-    num_phases: int,
-) -> torch.Tensor:
-    pairs = prev.to(torch.long) * num_phases + curr.to(torch.long)
-    return (
-        torch.bincount(
-            pairs.flatten(),
-            minlength=num_phases * num_phases,
-        )
-        .to(torch.float64)
-        .reshape(num_phases, num_phases)
-    )
-
-
-def get_continuation(counts: torch.Tensor) -> torch.Tensor:
-    totals = counts.sum(dim=1)
-    return counts.diagonal() / totals.clamp_min(1.0)
 
 
 def show_slices(

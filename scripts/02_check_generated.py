@@ -1,5 +1,3 @@
-"""Generate and inspect one unconditioned volume without output replacement."""
-
 import argparse
 import sys
 from pathlib import Path

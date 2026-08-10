@@ -1,5 +1,3 @@
-"""Render paper figures from the fixed generated reference volume."""
-
 from pathlib import Path
 
 import matplotlib.pyplot as plt

@@ -3,6 +3,7 @@ napari[all]
 numpy
 Pillow
 PyYAML
+scipy
 tensorboard
 torch
 torch-fidelity

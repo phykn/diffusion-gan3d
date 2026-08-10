@@ -1,5 +1,3 @@
-"""Training configuration contracts shared by build and tooling code."""
-
 from pathlib import Path
 
 

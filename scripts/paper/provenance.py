@@ -1,5 +1,3 @@
-"""Shared, read-only provenance helpers for paper generation artifacts."""
-
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
