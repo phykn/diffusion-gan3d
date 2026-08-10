@@ -70,6 +70,11 @@ def main() -> None:
         help="classifier-free guidance scale (default: 1)",
     )
     parser.add_argument(
+        "--out",
+        type=Path,
+        help="optional output path for the generated TIFF volume",
+    )
+    parser.add_argument(
         "--napari",
         action="store_true",
         help="show the complete generated phase volume in Napari",
@@ -119,6 +124,8 @@ def main() -> None:
         guidance_scale=args.guidance_scale,
     )
     print("Status   : complete", flush=True)
+    if args.out is not None:
+        save_volume(gen, args.out)
     gen_slices = get_slices(gen, AXIS)
     vol_acc = voxel_accuracy(gen, target)
     if indices:
@@ -436,6 +443,12 @@ def show_napari(vol: torch.Tensor) -> None:
     viewer.add_labels(vol.numpy(), name="generated phases")
     viewer.dims.ndisplay = 3
     napari.run()
+
+def save_volume(vol: torch.Tensor, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tifffile.imwrite(path, vol.detach().cpu().to(torch.uint8).numpy())
+    print(f"Output   : {path.resolve()}", flush=True)
+
 
 
 if __name__ == "__main__":

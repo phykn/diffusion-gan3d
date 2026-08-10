@@ -2,6 +2,7 @@ import importlib
 from pathlib import Path
 
 import pytest
+import tifffile
 import torch
 
 from src.scale import ScalePlan
@@ -63,6 +64,7 @@ def test_main_prints_plan_before_scaled_generation(
     module = importlib.import_module("scripts.04_check_scale_up")
     plan = make_plan()
     events = []
+    output_path = tmp_path / "nested" / "scaled.tiff"
 
     class FakeGenerator:
         patch_size = 4
@@ -107,10 +109,14 @@ def test_main_prints_plan_before_scaled_generation(
             "2",
             "--overlap",
             "1",
+            "--out",
+            str(output_path),
         ],
     )
 
     module.main()
+    assert output_path.is_file()
+    assert tifffile.imread(output_path).shape == plan.shape
 
     output = capsys.readouterr().out
     assert events == [

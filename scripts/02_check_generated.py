@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import tifffile
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,11 @@ def main() -> None:
         type=float,
         default=1.0,
         help="classifier-free guidance scale (default: 1)",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        help="optional output path for the generated TIFF volume",
     )
     parser.add_argument(
         "--napari",
@@ -51,6 +57,8 @@ def main() -> None:
         guidance_scale=args.guidance_scale,
     )
     print("Status  : complete", flush=True)
+    if args.out is not None:
+        save_volume(vol, args.out)
     if args.napari:
         show_napari(vol)
     else:
@@ -91,6 +99,12 @@ def show_napari(vol: torch.Tensor) -> None:
     viewer.add_labels(vol.numpy(), name="generated phases")
     viewer.dims.ndisplay = 3
     napari.run()
+
+def save_volume(vol: torch.Tensor, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tifffile.imwrite(path, vol.detach().cpu().to(torch.uint8).numpy())
+    print(f"Output  : {path.resolve()}", flush=True)
+
 
 
 if __name__ == "__main__":

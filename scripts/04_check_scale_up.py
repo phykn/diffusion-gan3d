@@ -82,6 +82,11 @@ def main() -> None:
         help="classifier-free guidance scale (default: 1)",
     )
     parser.add_argument(
+        "--out",
+        type=Path,
+        help="optional output path for the generated TIFF volume",
+    )
+    parser.add_argument(
         "--napari",
         action="store_true",
         help="show the complete scaled phase volume in Napari",
@@ -167,6 +172,8 @@ def main() -> None:
     assert stats is not None
     elapsed = perf_counter() - start
     print("Status     : complete", flush=True)
+    if args.out is not None:
+        save_volume(vol, args.out)
     quality = measure_seams(
         vol,
         stats.seams,
@@ -269,6 +276,12 @@ def main() -> None:
             )
     else:
         show_slices(vol, generator.num_phases)
+
+
+def save_volume(vol: torch.Tensor, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tifffile.imwrite(path, vol.detach().cpu().to(torch.uint8).numpy())
+    print(f"Output     : {path.resolve()}", flush=True)
 
 
 def positive_int(value: str) -> int:

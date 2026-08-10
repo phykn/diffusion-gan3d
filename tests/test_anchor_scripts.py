@@ -27,6 +27,7 @@ def test_anchor_check_script_runs_with_fixed_volume(
     capsys,
 ) -> None:
     volume_path = tmp_path / "volume_000.tiff"
+    output_path = tmp_path / f"generated_{count}.tiff"
     volume = (np.indices((10, 12, 14)).sum(axis=0) % 3).astype(np.uint8)
     tifffile.imwrite(volume_path, volume)
 
@@ -52,12 +53,16 @@ def test_anchor_check_script_runs_with_fixed_volume(
             str(volume_path),
             "--count",
             str(count),
+            "--out",
+            str(output_path),
         ],
     )
     monkeypatch.setattr(plt, "show", lambda: None)
 
     module.main()
     plt.close("all")
+    assert output_path.is_file()
+    assert tifffile.imread(output_path).shape == (8, 8, 8)
 
     output = capsys.readouterr().out
     assert "Shape    : 8 × 8 × 8" in output
@@ -155,6 +160,7 @@ def test_unconditioned_check_routes_guidance_scale(
 ) -> None:
     module = _load_script("02_check_generated.py")
     calls = []
+    output_path = tmp_path / "nested" / "generated.tiff"
 
     class FakeGenerator:
         patch_size = 4
@@ -174,11 +180,15 @@ def test_unconditioned_check_routes_guidance_scale(
             "02_check_generated.py",
             "--weight",
             str(tmp_path / "generator.pt"),
+            "--out",
+            str(output_path),
             *extra_args,
         ],
     )
 
     module.main()
+    assert output_path.is_file()
+    assert tifffile.imread(output_path).shape == (4, 4, 4)
 
     assert calls == [(None, expected)]
 
