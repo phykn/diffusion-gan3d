@@ -3,11 +3,9 @@ import torch
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.kid import KernelInceptionDistance
 
-ImageArray = np.ndarray | torch.Tensor
-
 
 def metric_images(
-    images: ImageArray,
+    images,
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
     """Convert grayscale or RGB images to TorchMetrics' uint8 RGB format."""
@@ -46,7 +44,7 @@ def metric_images(
 
 
 def make_kid_metric(
-    real: ImageArray,
+    real,
     device: torch.device | str,
     *,
     feature: int = 2048,
@@ -67,7 +65,7 @@ def make_kid_metric(
 
 def kid_score(
     metric: KernelInceptionDistance,
-    generated: ImageArray,
+    generated,
     device: torch.device | str,
     *,
     seed: int = 0,
@@ -88,7 +86,7 @@ def kid_score(
 
 
 def make_fid_metric(
-    real: ImageArray,
+    real,
     device: torch.device | str,
     *,
     feature: int = 2048,
@@ -105,7 +103,7 @@ def make_fid_metric(
 
 def fid_score(
     metric: FrechetInceptionDistance,
-    generated: ImageArray,
+    generated,
     device: torch.device | str,
 ) -> float:
     """Score generated images and clear only the cached generated features."""

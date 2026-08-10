@@ -1,17 +1,14 @@
-import numpy as np
 import torch
 
-LabelArray = np.ndarray | torch.Tensor
 
-
-def phase_fraction(values: LabelArray, phase: int = 0) -> float:
+def phase_fraction(values, phase: int = 0) -> float:
     """Return the fraction of labels equal to ``phase``."""
     labels = _labels(values, "values")
     _phase(phase)
     return float((labels == phase).to(torch.float64).mean())
 
 
-def phase_fractions(values: LabelArray, num_phases: int) -> torch.Tensor:
+def phase_fractions(values, num_phases: int) -> torch.Tensor:
     """Return one fraction per phase as a float64 tensor."""
     labels = _labels(values, "values")
     _num_phases(num_phases)
@@ -30,15 +27,15 @@ def phase_fractions(values: LabelArray, num_phases: int) -> torch.Tensor:
     return fractions / fractions.sum()
 
 
-def voxel_accuracy(actual: LabelArray, expected: LabelArray) -> float:
+def voxel_accuracy(actual, expected) -> float:
     """Return the fraction of labels that match at identical coordinates."""
     actual_labels, expected_labels = _label_pair(actual, expected)
     return float((actual_labels == expected_labels).to(torch.float64).mean())
 
 
 def phase_iou(
-    actual: LabelArray,
-    expected: LabelArray,
+    actual,
+    expected,
     num_phases: int,
 ) -> tuple[float, ...]:
     """Return intersection over union for every phase."""
@@ -52,8 +49,8 @@ def phase_iou(
 
 
 def phase_recall(
-    actual: LabelArray,
-    expected: LabelArray,
+    actual,
+    expected,
     num_phases: int,
 ) -> tuple[float, ...]:
     """Return the recovered fraction of every expected phase."""
@@ -83,8 +80,8 @@ def _overlap_score(
 
 
 def _label_pair(
-    actual: LabelArray,
-    expected: LabelArray,
+    actual,
+    expected,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     actual_labels = _labels(actual, "actual")
     expected_labels = _labels(expected, "expected")
@@ -106,7 +103,7 @@ def _validate_phases(
         )
 
 
-def _labels(values: LabelArray, name: str) -> torch.Tensor:
+def _labels(values, name: str) -> torch.Tensor:
     labels = torch.as_tensor(values)
     if labels.numel() == 0:
         raise ValueError(f"{name} must not be empty.")

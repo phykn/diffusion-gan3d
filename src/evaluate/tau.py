@@ -4,11 +4,9 @@ import numpy as np
 import taufactor as tau
 import torch
 
-VolumeArray = np.ndarray | torch.Tensor
-
 
 def tortuosity(
-    volume: VolumeArray,
+    volume,
     phase: int = 0,
     axis: int = 0,
     device: torch.device | str | None = None,

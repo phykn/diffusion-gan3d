@@ -2,16 +2,12 @@ import numpy as np
 import scipy.ndimage as ndi
 import torch
 
-LabelArray = np.ndarray | torch.Tensor
-MetricArray = np.ndarray | torch.Tensor
-PercolationVector = np.ndarray | torch.Tensor | tuple[float, float, float]
-
 _SIX_CONNECTIVITY = ndi.generate_binary_structure(3, 1)
 
 
 def transition_counts(
-    previous: LabelArray,
-    current: LabelArray,
+    previous,
+    current,
     num_phases: int,
 ) -> torch.Tensor:
     """Count every ``previous phase -> current phase`` transition."""
@@ -43,14 +39,14 @@ def transition_counts(
     return counts.to(torch.float64).reshape(num_phases, num_phases)
 
 
-def phase_change_rate(counts: MetricArray) -> float:
+def phase_change_rate(counts) -> float:
     """Return the fraction of transitions whose phase changes."""
     matrix = _counts(counts)
     total = matrix.sum()
     return float((total - matrix.diagonal().sum()) / total)
 
 
-def transition_tv(first: MetricArray, second: MetricArray) -> float:
+def transition_tv(first, second) -> float:
     """Return total-variation distance between two transition distributions."""
     first_counts, second_counts = _count_pair(first, second)
     first_dist = first_counts / first_counts.sum()
@@ -58,7 +54,7 @@ def transition_tv(first: MetricArray, second: MetricArray) -> float:
     return float(0.5 * (first_dist - second_dist).abs().sum())
 
 
-def phase_continuation(counts: MetricArray) -> torch.Tensor:
+def phase_continuation(counts) -> torch.Tensor:
     """Return ``P(next phase = k | current phase = k)`` for every phase."""
     matrix = _counts(counts, allow_empty=True)
     totals = matrix.sum(dim=1)
@@ -71,7 +67,7 @@ def phase_continuation(counts: MetricArray) -> torch.Tensor:
     return matrix.diagonal() / totals
 
 
-def continuation_delta(first: MetricArray, second: MetricArray) -> float:
+def continuation_delta(first, second) -> float:
     """Return the largest difference among phases supported in both inputs."""
     first_counts, second_counts = _count_pair(first, second)
     first_totals = first_counts.sum(dim=1)
@@ -87,8 +83,8 @@ def continuation_delta(first: MetricArray, second: MetricArray) -> float:
 
 
 def continuation_error(
-    predicted: MetricArray,
-    target: MetricArray,
+    predicted,
+    target,
     phase: int,
 ) -> float:
     """Return the absolute continuation error for one phase as a fraction."""
@@ -103,7 +99,7 @@ def continuation_error(
 
 
 def percolating_fraction(
-    volume: LabelArray,
+    volume,
     phase: int = 1,
     axis: int = 0,
 ) -> float:
@@ -113,7 +109,7 @@ def percolating_fraction(
 
 
 def percolating_fractions(
-    volume: LabelArray,
+    volume,
     phase: int = 1,
 ) -> tuple[float, float, float]:
     """Return non-periodic 6-connected spanning fractions for all three axes."""
@@ -121,8 +117,8 @@ def percolating_fractions(
 
 
 def percolation_errors(
-    predicted: PercolationVector,
-    target: PercolationVector,
+    predicted,
+    target,
 ) -> tuple[float, float, float]:
     """Return absolute predicted-target percolating-fraction errors by axis."""
     predicted_values = _percolation_values(predicted, "predicted")
@@ -135,14 +131,14 @@ def percolation_errors(
 
 
 def percolation_error(
-    predicted: PercolationVector, target: PercolationVector
+    predicted, target
 ) -> float:
     """Return the mean absolute percolating-fraction error over three axes."""
     errors = percolation_errors(predicted, target)
     return sum(errors) / len(errors)
 
 
-def _phase_mask(volume: LabelArray, phase: int) -> np.ndarray:
+def _phase_mask(volume, phase: int) -> np.ndarray:
     _phase(phase)
     labels = _labels(volume, "volume")
     if labels.ndim != 3:
@@ -187,7 +183,7 @@ def _percolating_fractions(mask: np.ndarray) -> tuple[float, float, float]:
 
 
 def _percolation_values(
-    values: PercolationVector,
+    values,
     name: str,
     *,
     device: torch.device | None = None,
@@ -208,8 +204,8 @@ def _axis(axis: int) -> None:
 
 
 def _count_pair(
-    first: MetricArray,
-    second: MetricArray,
+    first,
+    second,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     first_counts = _counts(first)
     second_counts = _counts(second, device=first_counts.device)
@@ -219,7 +215,7 @@ def _count_pair(
 
 
 def _counts(
-    values: MetricArray,
+    values,
     *,
     allow_empty: bool = False,
     device: torch.device | None = None,
@@ -235,7 +231,7 @@ def _counts(
 
 
 def _continuations(
-    values: MetricArray,
+    values,
     name: str,
     *,
     device: torch.device | None = None,
@@ -248,7 +244,7 @@ def _continuations(
     return result
 
 
-def _labels(values: LabelArray, name: str) -> torch.Tensor:
+def _labels(values, name: str) -> torch.Tensor:
     labels = torch.as_tensor(values)
     if labels.numel() == 0:
         raise ValueError(f"{name} must not be empty.")
