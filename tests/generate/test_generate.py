@@ -147,7 +147,7 @@ def test_build_trainer_rejects_teacher_bank_smaller_than_one_largest_entry(
 ) -> None:
     cfg = _config(tmp_path)
     cfg["anchor"]["training_probability"] = 1.0
-    cfg["train"]["volume_sizes"] = (128,)
+    cfg["data"]["input_size"] = 128
 
     with pytest.raises(ValueError, match="one largest teacher volume"):
         build_trainer(cfg, torch.device("cpu"))
@@ -156,8 +156,8 @@ def test_build_trainer_rejects_teacher_bank_smaller_than_one_largest_entry(
 def test_anchor_capacity_accepts_one_largest_teacher_entry(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     cfg["anchor"]["training_probability"] = 1.0
-    cfg["anchor"]["teacher_bank_size_mib"] = 2.01
-    cfg["train"]["volume_sizes"] = (128,)
+    cfg["anchor"]["teacher_bank_size_mib"] = 2.02
+    cfg["data"]["input_size"] = 128
 
     validate_anchor_capacity(
         data=cfg["data"],
@@ -323,13 +323,17 @@ def test_guidance_scale_routes_direct_and_scaled_predictions() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_amp_guidance_runs_direct_and_scaled_with_float32_diffusion_state() -> None:
     device = torch.device("cuda")
-    model = Denoiser3D(
-        num_phases=3,
-        base_channels=4,
-        channel_multipliers=(1, 2),
-        embedding_channels=8,
-        latent_channels=4,
-    ).eval().to(device)
+    model = (
+        Denoiser3D(
+            num_phases=3,
+            base_channels=4,
+            channel_multipliers=(1, 2),
+            embedding_channels=8,
+            latent_channels=4,
+        )
+        .eval()
+        .to(device)
+    )
     generator = _generator(
         model,
         Diffusion(2).to(device),
@@ -376,7 +380,10 @@ def test_guided_sampling_uses_anchor_as_a_condition() -> None:
 
     assert volume.shape == (4, 4, 4)
     assert model.guidance_scales == [1.5, 1.5]
-    assert all(call.kwargs["anchor_image"] is not None for call in predict_guided.call_args_list)
+    assert all(
+        call.kwargs["anchor_image"] is not None
+        for call in predict_guided.call_args_list
+    )
     assert all(
         int(call.kwargs["anchor_mask"].sum()) == 16
         for call in predict_guided.call_args_list
@@ -494,8 +501,8 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
     assert diffusion.sample_calls == 0
     assert [call.transition for call in diffusion.calls] == [2, 2, 1, 1]
     assert [call.current_shape for call in diffusion.calls] == [
-        (1, 3, 4, 4, 4),
-        (1, 3, 2, 4, 4),
+        (1, 3, 3, 4, 4),
+        (1, 3, 3, 4, 4),
     ] * 2
     assert all(call.current_dtype == torch.float32 for call in diffusion.calls)
     assert events == [
@@ -519,7 +526,7 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
         assert left.timestep is right.timestep
         assert left.latent is right.latent
         assert left.current.shape == (1, 3, 4, 4, 4)
-        assert right.current.shape == (1, 3, 2, 4, 4)
+        assert right.current.shape == (1, 3, 4, 4, 4)
 
 
 def test_parallel_anchors_use_one_combined_prediction_per_step() -> None:
@@ -683,16 +690,40 @@ def test_scaled_generator_returns_probabilities_and_categorical_volume() -> None
     assert scaled.stats is not None
 
 
-def test_scaled_generator_uses_default_overlap() -> None:
-    scaled = ScaledGenerator(_generator(_ControlledModel(), Diffusion(1)))
+def test_blocks_define_fixed_tiles_and_margin_reduced_output() -> None:
+    scaled = ScaledGenerator(_generator(_ControlledModel(), Diffusion(1), patch_size=8))
 
-    plan = scaled.plan(shape=(6, 4, 4))
-    probs = scaled.generate_probs(shape=(6, 4, 4), progress=False)
-    vol = scaled.generate(shape=(6, 4, 4), progress=False)
+    volume = scaled.generate(
+        blocks=(3, 2, 1),
+        overlap=2,
+        progress=False,
+    )
+    plan = scaled.stats
+
+    assert plan is not None
+    assert volume.shape == plan.shape == (16, 12, 8)
+    assert plan.grid == (3, 2, 1)
+    assert plan.tile_size == 8
+    assert plan.stride == 4
+    assert plan.seams == ((6, 10), (6,), ())
+    assert all(
+        tuple(region.stop - region.start for region in tile.source) == (8, 8, 8)
+        for tile in scaled.make_tiles(plan)
+    )
+
+
+def test_scaled_generator_uses_default_overlap() -> None:
+    scaled = ScaledGenerator(
+        _generator(_ControlledModel(), Diffusion(1), patch_size=32)
+    )
+
+    plan = scaled.plan(shape=(48, 32, 32))
+    probs = scaled.generate_probs(shape=(48, 32, 32), progress=False)
+    vol = scaled.generate(shape=(48, 32, 32), progress=False)
 
     assert plan.overlap == DEFAULT_SCALE_OVERLAP == 8
-    assert probs.shape == (3, 6, 4, 4)
-    assert vol.shape == (6, 4, 4)
+    assert probs.shape == (3, 48, 32, 32)
+    assert vol.shape == (48, 32, 32)
     assert scaled.stats is not None
     assert scaled.stats.overlap == DEFAULT_SCALE_OVERLAP
 
@@ -702,18 +733,15 @@ def test_overlapping_tiles_read_the_same_unchanged_global_state() -> None:
 
     ScaledGenerator(_generator(model, _TraceDiffusion(timesteps=2))).generate(
         shape=(6, 4, 4),
-        overlap=2,
+        overlap=1,
         progress=False,
     )
 
     assert len(model.calls) == 4
     first, second = model.calls[:2]
-    assert first.current.shape == (1, 3, 6, 4, 4)
+    assert first.current.shape == (1, 3, 4, 4, 4)
     assert second.current.shape == (1, 3, 4, 4, 4)
-    assert torch.equal(
-        first.current[:, :, 2:6],
-        second.current[:, :, :4],
-    )
+    assert torch.equal(first.current[:, :, 2:4], second.current[:, :, :2])
 
 
 def test_posterior_receives_clean_prediction_before_state_quantization() -> None:
@@ -739,8 +767,8 @@ def test_overlap_fuses_clean_predictions_before_posterior() -> None:
     )
     diffusion = _TraceDiffusion(timesteps=2)
 
-    ScaledGenerator(_generator(model, diffusion)).generate_probs(
-        shape=(8, 4, 4),
+    ScaledGenerator(_generator(model, diffusion, patch_size=8)).generate_probs(
+        shape=(12, 8, 8),
         overlap=2,
         progress=False,
     )
@@ -750,15 +778,15 @@ def test_overlap_fuses_clean_predictions_before_posterior() -> None:
     probs = (clean + 1.0) * 0.5
     expected = torch.tensor(
         (
-            (0.8, 0.8, 0.8, 0.6, 0.4, 0.2, 0.2, 0.2),
-            (0.2, 0.2, 0.2, 0.4, 0.6, 0.8, 0.8, 0.8),
-            (0.0,) * 8,
+            (0.8, 0.8, 0.8, 0.8, 0.8, 0.6, 0.4, 0.2, 0.2, 0.2, 0.2, 0.2),
+            (0.2, 0.2, 0.2, 0.2, 0.2, 0.4, 0.6, 0.8, 0.8, 0.8, 0.8, 0.8),
+            (0.0,) * 12,
         ),
-    ).view(1, 3, 8, 1, 1)
+    ).view(1, 3, 12, 1, 1)
 
     torch.testing.assert_close(probs, expected.expand_as(probs))
-    assert sum(math.prod(call.current_shape) for call in calls) == 3 * 8 * 4 * 4
-    assert sum(math.prod(call.noise_shape or ()) for call in calls) == 3 * 8 * 4 * 4
+    assert sum(math.prod(call.current_shape) for call in calls) == 3 * 12 * 8 * 8
+    assert sum(math.prod(call.noise_shape or ()) for call in calls) == 3 * 12 * 8 * 8
 
 
 def test_final_labels_use_the_fused_prediction() -> None:
@@ -767,14 +795,14 @@ def test_final_labels_use_the_fused_prediction() -> None:
         _generator(_TileProbabilityModel(predictions), Diffusion(1))
     ).generate_probs(
         shape=(8, 4, 4),
-        overlap=2,
+        overlap=1,
         progress=False,
     )
     vol = ScaledGenerator(
         _generator(_TileProbabilityModel(predictions), Diffusion(1))
     ).generate(
         shape=(8, 4, 4),
-        overlap=2,
+        overlap=1,
         progress=False,
     )
 
@@ -795,7 +823,7 @@ def test_boundary_tiles_use_only_real_volume_values(
     monkeypatch.setattr(scaled, "fill_noise", fill_ones)
     probs = scaled.generate_probs(
         shape=(9, 7, 5),
-        overlap=2,
+        overlap=1,
         progress=False,
     )
 
@@ -817,7 +845,7 @@ def test_real_denoiser_accepts_one_sided_boundary_tiles() -> None:
 
     volume = scaled.generate(
         shape=8,
-        overlap=2,
+        overlap=1,
         progress=False,
     )
 
@@ -845,20 +873,20 @@ def test_cpu_and_cuda_storage_use_the_same_fusion() -> None:
             device=device,
         )
     )
-    required = cuda_scaled.plan((8, 4, 4), overlap=2).cuda_bytes
+    required = cuda_scaled.plan((8, 4, 4), overlap=1).cuda_bytes
     free, _ = torch.cuda.mem_get_info(device)
     if required > free:
         pytest.skip("CUDA does not have enough free memory for the planned workspace")
 
     cpu_vol = cpu_scaled.generate(
         shape=(8, 4, 4),
-        overlap=2,
+        overlap=1,
         storage="cpu",
         progress=False,
     )
     cuda_vol = cuda_scaled.generate(
         shape=(8, 4, 4),
-        overlap=2,
+        overlap=1,
         storage="cuda",
         progress=False,
     )
@@ -891,12 +919,13 @@ def test_scale_plan_calculates_2048_layout_without_allocating(
 
     assert plan.shape == (2048, 2048, 2048)
     assert plan.overlap == 16
-    assert plan.core_size == 224
-    assert plan.grid == (10, 10, 10)
-    assert plan.tile_count == 1000
+    assert plan.tile_size == 224
+    assert plan.stride == 192
+    assert plan.grid == (11, 11, 11)
+    assert plan.tile_count == 1331
     assert plan.states_bytes == 96 * 1024**3
     assert plan.fusion_bytes == 128 * 1024**3
-    assert plan.tile_bytes == 192 * 1024**2
+    assert plan.tile_bytes == 3 * 224**3 * 4
     assert plan.cuda_bytes == (
         plan.states_bytes + plan.fusion_bytes + plan.workspace_bytes
     )
@@ -1007,7 +1036,7 @@ def test_default_scale_workspace_does_not_force_small_outputs_to_cpu() -> None:
 
     plan = scaled.plan(128, overlap=16)
 
-    assert plan.workspace_bytes == 648 * 1024**2
+    assert plan.workspace_bytes == 192 * 1024**2
 
 
 def test_cpu_generation_returns_cpu_uint8_without_creating_files(
@@ -1080,7 +1109,7 @@ def test_cpu_generation_checks_memory_before_allocating(
 def test_model_input_matches_each_bounded_tile_source() -> None:
     model = _OverlapTraceModel()
     scaled = ScaledGenerator(_generator(model, Diffusion(2)))
-    plan = scaled.plan((9, 7, 5), overlap=2)
+    plan = scaled.plan((9, 7, 5), overlap=1)
     tiles = scaled.make_tiles(plan)
 
     scaled.generate(
@@ -1108,22 +1137,22 @@ def test_generate_probs_rejects_large_streaming_volume_before_allocation() -> No
 
 def test_tile_targets_cover_non_divisible_shape_exactly_once() -> None:
     scaled = ScaledGenerator(_generator(_OverlapTraceModel(), Diffusion(1)))
-    plan = scaled.plan((9, 7, 5), overlap=2)
+    plan = scaled.plan((9, 7, 5), overlap=1)
     tiles = scaled.make_tiles(plan)
     coverage = torch.zeros(plan.shape, dtype=torch.int32)
 
     for tile in tiles:
         coverage[tile.target].add_(1)
         source_shape = tuple(region.stop - region.start for region in tile.source)
-        valid_shape = tuple(region.stop - region.start for region in tile.valid)
-        assert valid_shape == source_shape
+        assert source_shape == (4, 4, 4)
 
-    assert tiles[0].halos == ((0, 2), (0, 2), (0, 1))
-    assert tiles[-1].halos == ((2, 0), (2, 0), (2, 0))
+    assert tiles[0].margins == ((0, 1), (0, 1), (0, 1))
+    assert tiles[-1].margins == ((1, 0), (1, 0), (1, 0))
 
-    assert plan.tile_size == 8
-    assert plan.grid == (3, 2, 2)
-    assert len(tiles) == plan.tile_count == 12
+    assert plan.tile_size == 4
+    assert plan.stride == 2
+    assert plan.grid == (4, 3, 2)
+    assert len(tiles) == plan.tile_count == 24
     assert torch.equal(coverage, torch.ones_like(coverage))
 
 
@@ -1136,11 +1165,11 @@ def test_scale_plan_uses_configured_overlap_and_patch_core() -> None:
     )
 
     assert plan.overlap == 16
-    assert plan.tile_size == 96
-    assert plan.core_size == 64
+    assert plan.tile_size == 64
+    assert plan.stride == 32
     assert plan.base_shell == 8
-    assert plan.grid == (2, 2, 2)
-    assert plan.tile_count == 8
+    assert plan.grid == (3, 3, 3)
+    assert plan.tile_count == 27
 
 
 def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
@@ -1180,7 +1209,7 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
 def test_boundary_tile_reads_only_bounded_context() -> None:
     model = _OverlapTraceModel()
     scaled = ScaledGenerator(_generator(model, Diffusion(1)))
-    plan = scaled.plan((12, 12, 12), overlap=2)
+    plan = scaled.plan((12, 12, 12), overlap=1)
     tiles = scaled.make_tiles(plan)
     tile = tiles[0]
     current = VolumeState(3, plan.shape, torch.device("cpu"))
@@ -1208,8 +1237,8 @@ def test_boundary_tile_reads_only_bounded_context() -> None:
     expected = coordinates[tile.source]
     observed = model.calls[0].current[0, 0]
 
-    assert tile.halos == ((0, 2), (0, 2), (0, 2))
-    assert observed.shape == (6, 6, 6)
+    assert tile.margins == ((0, 1), (0, 1), (0, 1))
+    assert observed.shape == (4, 4, 4)
     assert torch.equal(observed, expected)
 
 
@@ -1246,7 +1275,7 @@ def test_scaled_generation_supports_anisotropic_shape() -> None:
     assert int(vol.max()) < 3
     assert stats is not None
     assert stats.tile_count == 4
-    assert stats.seams == ((4,), (), (4,))
+    assert stats.seams == ((3,), (), (4,))
 
 
 def test_scaled_generation_does_not_force_the_base_into_the_output() -> None:
@@ -1279,7 +1308,7 @@ def test_zero_overlap_keeps_the_complete_base_active() -> None:
 
 def test_base_uses_cosine_transition_only_on_expanded_axes() -> None:
     scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1), patch_size=8))
-    plan = scaled.plan((12, 8, 8), overlap=4)
+    plan = scaled.plan((12, 8, 8), overlap=2)
 
     condition = scaled.prepare_base(
         torch.zeros((8, 8, 8), dtype=torch.uint8),
@@ -1287,14 +1316,14 @@ def test_base_uses_cosine_transition_only_on_expanded_axes() -> None:
     )
 
     assert condition is not None
-    expected = torch.tensor((0.25, 0.75, 1.0, 1.0, 1.0, 1.0, 0.75, 0.25))
+    expected = torch.tensor((0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5))
     torch.testing.assert_close(condition.weight[0, 0, :, 4, 4], expected)
     assert torch.all(condition.weight[0, 0, 4] == 1.0)
 
 
 def test_base_condition_blends_the_transition() -> None:
     scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1), patch_size=8))
-    plan = scaled.plan((12, 8, 8), overlap=4)
+    plan = scaled.plan((12, 8, 8), overlap=2)
     condition = scaled.prepare_base(
         torch.zeros((8, 8, 8), dtype=torch.uint8),
         plan,
@@ -1319,13 +1348,13 @@ def test_scaled_generation_allows_the_complete_base_to_adapt() -> None:
 
     probs = scaled.generate_probs(
         shape=(12, 8, 8),
-        overlap=4,
+        overlap=2,
         base=base,
         progress=False,
     )
     vol = scaled.generate(
         shape=(12, 8, 8),
-        overlap=4,
+        overlap=2,
         base=base,
         progress=False,
     )
@@ -1942,13 +1971,6 @@ def _config(root: Path) -> dict:
         "vf": {
             "loss_weight": 1.0,
         },
-        "scale_consistency": {
-            "overlap": 4,
-            "probability": 0.0,
-            "start_step": 0,
-            "ramp_steps": 0,
-            "loss_weight": 0.0,
-        },
         "optim": {
             "denoiser_lr": 1e-3,
             "critic_lr": 1e-3,
@@ -1961,7 +1983,6 @@ def _config(root: Path) -> dict:
         "train": {
             "total_steps": 10,
             "volume_batch_size": 1,
-            "volume_sizes": (8,),
             "slice_pairs_per_axis": 2,
             "mixed_precision": False,
             "ema_decay": 0.9,

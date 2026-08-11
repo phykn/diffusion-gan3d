@@ -1,5 +1,4 @@
 import math
-from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Literal
@@ -25,10 +24,6 @@ from .loss import (
     get_critic_loss,
     get_critic_r1,
     get_generator_loss,
-)
-from .scale_consistency import (
-    make_adjacent_view_plan,
-    weighted_probability_mse,
 )
 
 
@@ -75,17 +70,6 @@ class Metrics:
         0.0,
     )
     normal_transition_loss: float = 0.0
-    scale_consistency_loss: float = 0.0
-    scale_consistency_contribution: float = 0.0
-    scale_consistency_ramp: float = 0.0
-    scale_consistency_active: bool = False
-
-
-@dataclass(frozen=True)
-class ScaleConsistencyResult:
-    loss: torch.Tensor
-    ramp: float
-    active: bool
 
 
 @dataclass(frozen=True)
@@ -99,10 +83,6 @@ class DenoiserUpdate:
     anchor: float
     anchor_accuracy: float
     vf: float
-    scale_consistency: float
-    scale_contribution: float
-    scale_ramp: float
-    scale_active: bool
 
 
 @dataclass(frozen=True)
@@ -117,9 +97,6 @@ class DenoiserBatch:
     anchor_ramp: float
     target_vf: torch.Tensor
     vf_present: torch.Tensor
-    current: torch.Tensor
-    model_conditions: dict[str, torch.Tensor]
-    step: int
 
 
 @dataclass(frozen=True)
@@ -185,7 +162,6 @@ class TrainerComponents:
 @dataclass(frozen=True)
 class TrainerSettings:
     volume_batch_size: int
-    volume_sizes: Sequence[int]
     num_phases: int
     patch_size: int
     slice_pairs_per_axis: int
@@ -210,32 +186,11 @@ class TrainerSettings:
     vf_loss_weight: float
     cfg_drop_each_probability: float
     cfg_single_drop_probability: float
-    scale_consistency_overlap: int
-    scale_consistency_probability: float
-    scale_consistency_start_step: int
-    scale_consistency_ramp_steps: int
-    scale_consistency_weight: float
     latent_channels: int
     amp_enabled: bool
 
     def __post_init__(self) -> None:
-        volume_sizes = tuple(self.volume_sizes)
-        object.__setattr__(self, "volume_sizes", volume_sizes)
-        if not volume_sizes:
-            raise ValueError("volume_sizes must not be empty.")
         self._validate_positive_integers()
-        if self.scale_consistency_overlap < 2:
-            raise ValueError("scale_consistency_overlap must be at least two.")
-        if any(
-            not isinstance(size, int)
-            or isinstance(size, bool)
-            or size < max(self.patch_size, 3)
-            for size in volume_sizes
-        ):
-            raise ValueError(
-                "volume_sizes must contain integers at least as large as patch_size "
-                "and three."
-            )
         self._validate_non_negative_integers()
         self._validate_probabilities()
         if 3.0 * self.cfg_drop_each_probability > 1.0:
@@ -261,10 +216,6 @@ class TrainerSettings:
         if not isinstance(self.amp_enabled, bool):
             raise TypeError("amp_enabled must be a boolean.")
 
-    @property
-    def scale_tile_size(self) -> int:
-        return self.patch_size + 2 * self.scale_consistency_overlap
-
     def validate_denoiser(self, denoiser: Denoiser3D) -> None:
         downsample_factor = getattr(denoiser, "downsample_factor", None)
         if (
@@ -273,18 +224,9 @@ class TrainerSettings:
             or downsample_factor < 1
         ):
             raise ValueError("denoiser.downsample_factor must be a positive integer.")
-        if self.scale_tile_size % downsample_factor:
+        if self.patch_size % downsample_factor:
             raise ValueError(
-                "scale consistency tile size must be divisible by the denoiser "
-                "downsample factor."
-            )
-        if (
-            self.scale_consistency_weight > 0.0
-            and self.scale_consistency_probability > 0.0
-            and not any(size >= self.scale_tile_size for size in self.volume_sizes)
-        ):
-            raise ValueError(
-                "at least one volume size must cover the scale consistency tile."
+                "patch_size must be divisible by the denoiser downsample factor."
             )
 
     def _validate_positive_integers(self) -> None:
@@ -304,7 +246,6 @@ class TrainerSettings:
                 self.connectivity_max_triplets_per_step
             ),
             "anchor_min_spacing": self.anchor_min_spacing,
-            "scale_consistency_overlap": self.scale_consistency_overlap,
             "latent_channels": self.latent_channels,
         }
         for name, value in values.items():
@@ -315,8 +256,6 @@ class TrainerSettings:
         values = {
             "anchor_start_step": self.anchor_start_step,
             "anchor_ramp_steps": self.anchor_ramp_steps,
-            "scale_consistency_start_step": self.scale_consistency_start_step,
-            "scale_consistency_ramp_steps": self.scale_consistency_ramp_steps,
         }
         for name, value in values.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -327,7 +266,6 @@ class TrainerSettings:
             "anchor_training_probability": self.anchor_training_probability,
             "cfg_drop_each_probability": self.cfg_drop_each_probability,
             "cfg_single_drop_probability": self.cfg_single_drop_probability,
-            "scale_consistency_probability": self.scale_consistency_probability,
             "anchor_multi_probability": self.anchor_multi_probability,
             "anchor_mixed_axis_probability": self.anchor_mixed_axis_probability,
         }
@@ -348,7 +286,6 @@ class TrainerSettings:
             "connectivity_weight": self.connectivity_weight,
             "normal_transition_weight": self.normal_transition_weight,
             "vf_loss_weight": self.vf_loss_weight,
-            "scale_consistency_weight": self.scale_consistency_weight,
         }
         for name, value in values.items():
             if (
@@ -379,7 +316,6 @@ class Trainer:
         self.scaler = components.scaler
         self.device = components.device
         self.volume_batch_size = settings.volume_batch_size
-        self.volume_sizes = settings.volume_sizes
         self.num_phases = settings.num_phases
         self.patch_size = settings.patch_size
         self.slice_pairs_per_axis = settings.slice_pairs_per_axis
@@ -412,14 +348,6 @@ class Trainer:
         self.vf_loss_weight = settings.vf_loss_weight
         self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
         self.cfg_single_drop_probability = float(settings.cfg_single_drop_probability)
-        self.scale_consistency_overlap = settings.scale_consistency_overlap
-        self.scale_consistency_tile_size = settings.scale_tile_size
-        self.scale_consistency_probability = float(
-            settings.scale_consistency_probability
-        )
-        self.scale_consistency_start_step = settings.scale_consistency_start_step
-        self.scale_consistency_ramp_steps = settings.scale_consistency_ramp_steps
-        self.scale_consistency_weight = settings.scale_consistency_weight
         self.latent_channels = settings.latent_channels
         self.amp_enabled = settings.amp_enabled
         self.critic_augment = (
@@ -447,7 +375,7 @@ class Trainer:
             or not 0 <= transition < self.diffusion.timesteps
         ):
             raise ValueError("transition is outside the diffusion schedule.")
-        volume_size = self.sample_volume_size()
+        volume_size = self.patch_size
         batches = self.get_batches()
         real = {
             axis: self.crop_images(images, self.patch_size)
@@ -533,9 +461,6 @@ class Trainer:
                 anchor_ramp=ramp,
                 target_vf=target_vf,
                 vf_present=presence.vf,
-                current=current,
-                model_conditions=model_conditions,
-                step=step,
             )
         )
         target_values, soft_values, hard_values, hard_mae = self.summarize_vfs(
@@ -585,10 +510,6 @@ class Trainer:
             vf_active_fraction=float(presence.vf.to(torch.float32).mean()),
             condition_state_fractions=presence.fractions(),
             normal_transition_loss=denoiser_update.normal_transition,
-            scale_consistency_loss=denoiser_update.scale_consistency,
-            scale_consistency_contribution=denoiser_update.scale_contribution,
-            scale_consistency_ramp=denoiser_update.scale_ramp,
-            scale_consistency_active=denoiser_update.scale_active,
         )
 
     def resolve_target_vf(
@@ -662,10 +583,6 @@ class Trainer:
         if self.diffusion.timesteps == 1 or bool(torch.rand(()) < 0.25):
             return 0
         return int(torch.randint(1, self.diffusion.timesteps, ()).item())
-
-    def sample_volume_size(self) -> int:
-        index = int(torch.randint(len(self.volume_sizes), ()).item())
-        return self.volume_sizes[index]
 
     def get_batches(self) -> dict[int, torch.Tensor]:
         return {
@@ -1217,17 +1134,6 @@ class Trainer:
                     + self.vf_loss_weight * vf_loss
                 )
             self.scaler.scale(total).backward()
-            scale = self.compute_scale_consistency(
-                batch.current,
-                batch.transition,
-                batch.model_conditions,
-                batch.step,
-            )
-            scale_contribution_tensor = (
-                self.scale_consistency_weight * scale.ramp * scale.loss
-            )
-            if scale.active:
-                self.scaler.scale(scale_contribution_tensor).backward()
             self.scaler.step(self.denoiser_optim)
             self.scaler.update()
         finally:
@@ -1236,7 +1142,7 @@ class Trainer:
             self.connectivity_critic.requires_grad_(True)
         return DenoiserUpdate(
             adversarial=float(adversarial_loss.detach()),
-            total=float(total.detach() + scale_contribution_tensor.detach()),
+            total=float(total.detach()),
             global_loss=float(global_loss.detach()),
             local_loss=float(local_loss.detach()),
             connectivity=float(connectivity_loss.detach()),
@@ -1244,107 +1150,7 @@ class Trainer:
             anchor=float(anchor_loss.detach()),
             anchor_accuracy=float(anchor_accuracy.detach()),
             vf=float(vf_loss.detach()),
-            scale_consistency=float(scale.loss.detach()),
-            scale_contribution=float(scale_contribution_tensor.detach()),
-            scale_ramp=scale.ramp,
-            scale_active=scale.active,
         )
-
-    def get_scale_consistency_ramp(self, step: int) -> float:
-        if step < self.scale_consistency_start_step:
-            return 0.0
-        if self.scale_consistency_ramp_steps == 0:
-            return 1.0
-        return min(
-            (step - self.scale_consistency_start_step + 1)
-            / self.scale_consistency_ramp_steps,
-            1.0,
-        )
-
-    def compute_scale_consistency(
-        self,
-        current: torch.Tensor,
-        transition: int,
-        model_conditions: dict[str, torch.Tensor],
-        step: int,
-    ) -> ScaleConsistencyResult:
-        ramp = self.get_scale_consistency_ramp(step)
-        zero = current.sum() * 0.0
-        if (
-            self.scale_consistency_weight == 0.0
-            or self.scale_consistency_probability == 0.0
-            or ramp == 0.0
-            or min(current.shape[-3:]) < self.scale_consistency_tile_size
-            or bool(torch.rand(()) >= self.scale_consistency_probability)
-        ):
-            return ScaleConsistencyResult(zero, ramp, False)
-
-        axis = int(torch.randint(3, ()).item())
-        origin = tuple(
-            int(torch.randint(size, ()).item()) for size in current.shape[-3:]
-        )
-        plan = make_adjacent_view_plan(
-            origin,
-            axis,
-            self.patch_size,
-            self.scale_consistency_overlap,
-        )
-        first_current, second_current = plan.crop_views(current)
-        first_conditions: dict[str, torch.Tensor] = {}
-        second_conditions: dict[str, torch.Tensor] = {}
-        for name, values in model_conditions.items():
-            if name in {"anchor_image", "anchor_mask"}:
-                first, second = plan.crop_views(values)
-                first_conditions[name] = first
-                second_conditions[name] = second
-            else:
-                first_conditions[name] = values
-                second_conditions[name] = values
-
-        time = self.make_time(transition, current.shape[0])
-        latent = self.sample_latent(current.shape[0], current.dtype)
-        teacher_first = bool(torch.rand(()) < 0.5)
-        teacher_current = first_current if teacher_first else second_current
-        student_current = second_current if teacher_first else first_current
-        teacher_conditions = first_conditions if teacher_first else second_conditions
-        student_conditions = second_conditions if teacher_first else first_conditions
-        with torch.no_grad(), self.autocast():
-            teacher_prediction = self.ema_denoiser(
-                teacher_current,
-                time,
-                latent,
-                **teacher_conditions,
-            )
-        teacher_values = teacher_prediction[
-            (..., *(plan.first_band if teacher_first else plan.second_band))
-        ]
-        teacher_band = ((teacher_values.to(torch.float32) + 1.0) * 0.5).clamp(
-            0.0,
-            1.0,
-        )
-        del teacher_prediction, teacher_values
-        with self.autocast():
-            student_prediction = self.denoiser(
-                student_current,
-                time,
-                latent,
-                **student_conditions,
-            )
-        student_values = student_prediction[
-            (..., *(plan.second_band if teacher_first else plan.first_band))
-        ]
-        student_band = ((student_values.to(torch.float32) + 1.0) * 0.5).clamp(
-            0.0,
-            1.0,
-        )
-
-        loss = weighted_probability_mse(
-            student_band,
-            teacher_band,
-            axis=axis,
-            overlap=self.scale_consistency_overlap,
-        )
-        return ScaleConsistencyResult(loss, ramp, True)
 
     @staticmethod
     def summarize_vfs(

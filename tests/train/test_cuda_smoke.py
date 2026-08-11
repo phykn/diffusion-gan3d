@@ -69,7 +69,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
         "train": {
             "total_steps": 1,
             "volume_batch_size": 1,
-            "volume_sizes": (64,),
             "slice_pairs_per_axis": 8,
             "mixed_precision": True,
             "ema_decay": 0.999,
@@ -112,7 +111,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
         ),
         settings=TrainerSettings(
             volume_batch_size=train["volume_batch_size"],
-            volume_sizes=train["volume_sizes"],
             num_phases=data["num_phases"],
             patch_size=data["input_size"],
             slice_pairs_per_axis=train["slice_pairs_per_axis"],
@@ -145,11 +143,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             vf_loss_weight=cfg["vf"]["loss_weight"],
             cfg_drop_each_probability=0.0,
             cfg_single_drop_probability=0.1,
-            scale_consistency_overlap=4,
-            scale_consistency_probability=0.0,
-            scale_consistency_start_step=0,
-            scale_consistency_ramp_steps=0,
-            scale_consistency_weight=0.0,
             latent_channels=model["latent_channels"],
             amp_enabled=True,
         ),

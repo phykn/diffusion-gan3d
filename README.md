@@ -39,17 +39,10 @@ conditions available, the anchor-null, VF-null, and joint-null states each use
 from individual real crops instead of averaging the full axis batch, and the
 loss measures total-variation distance from the raw predicted clean probabilities.
 
-Two auxiliary terms target the failure modes exposed by scale-up. The
-anchor-normal term matches center-to-neighbor phase transitions to matched
-unconditional replay triplets. Scale consistency uses the EMA model as a stop-gradient teacher
-and matches the predicted clean probabilities in the 16-voxel region shared by
-adjacent 128-core, 8-halo views. Its 30% sampling probability starts after 1,000
-steps and ramps for 4,000 steps. This probability is conditional on a sampled
-training volume being large enough for the 144-voxel consistency view; with the
-default 128- and 144-voxel volume sizes, one of two is eligible, so the
-steady-state rate remains 15% of all steps. The configured `0.10` normal-transition weight
-and `1.0` scale-consistency weight are conservative starting values, not
-universal constants; compare seeded ablations before choosing final weights.
+The anchor-normal auxiliary term matches center-to-neighbor phase transitions
+to matched unconditional replay triplets. The configured `0.10` weight is a
+conservative starting value; compare seeded ablations before choosing a final
+weight.
 
 Generate a 3D volume around a known section and extend it to `3 × 3 × 3` blocks:
 
@@ -70,9 +63,13 @@ volume = ScaledGenerator(generator).generate(
 )
 ```
 
-Overlap is used only on faces shared by adjacent tiles. Outer volume faces do
-not receive a synthetic halo or wrap to the opposite face; boundary tiles use
-only the context that exists inside the requested volume.
+Every block is a fixed `128³` model input. An overlap value of eight reserves
+an eight-voxel margin inside each block on every shared face, so adjacent blocks
+start `128 - 2 × 8 = 112` voxels apart and share a 16-voxel fusion band.
+Outermost faces have no margin, padding, or periodic wrap. For block count
+`b`, the output length along one axis is
+`128 + (b - 1) × (128 - 2 × overlap)`; three blocks with overlap eight
+therefore produce 352 voxels per axis.
 
 At the default `anchor_strength=1`, known sections are supplied to the denoiser
 as learned conditions at full mask strength. Values between zero and one scale

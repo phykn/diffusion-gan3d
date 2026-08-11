@@ -111,15 +111,12 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "loss/r1_raw": metrics.r1,
         "loss/vf": metrics.vf_loss,
         "loss/normal_transition": metrics.normal_transition_loss,
-        "loss/scale_consistency": metrics.scale_consistency_loss,
-        "loss/scale_consistency_contribution": (metrics.scale_consistency_contribution),
         "train/transition": metrics.transition,
         "train/volume_size": metrics.volume_size,
         "train/connectivity_triplets": metrics.connectivity_triplets,
         "train/connectivity_replay": metrics.connectivity_replay,
         "train/teacher_volumes": metrics.teacher_volumes,
         "train/teacher_mebibytes": metrics.teacher_mebibytes,
-        "train/scale_consistency_active": float(metrics.scale_consistency_active),
         "conditioning/anchor_planes": metrics.anchor_planes,
         "conditioning/anchor_ramp": metrics.anchor_ramp,
         "conditioning/anchor_input_active_fraction": (
@@ -129,7 +126,6 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "conditioning/vf_active": float(metrics.vf_active),
         "conditioning/vf_active_fraction": metrics.vf_active_fraction,
         "conditioning/vf_target_resample_rate": metrics.vf_target_resample_rate,
-        "conditioning/scale_consistency_ramp": metrics.scale_consistency_ramp,
         "conditioning/vf_hard_mae": metrics.hard_vf_mae,
     }
     for tag, value in scalars.items():

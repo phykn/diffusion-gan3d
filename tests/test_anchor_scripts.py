@@ -308,13 +308,6 @@ def _config(root: Path) -> dict:
         "vf": {
             "loss_weight": 1.0,
         },
-        "scale_consistency": {
-            "overlap": 2,
-            "probability": 0.0,
-            "start_step": 0,
-            "ramp_steps": 0,
-            "loss_weight": 0.0,
-        },
         "optim": {
             "denoiser_lr": 1e-3,
             "critic_lr": 1e-3,
@@ -327,7 +320,6 @@ def _config(root: Path) -> dict:
         "train": {
             "total_steps": 1,
             "volume_batch_size": 1,
-            "volume_sizes": (8,),
             "slice_pairs_per_axis": 2,
             "mixed_precision": False,
             "ema_decay": 0.9,

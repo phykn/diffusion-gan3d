@@ -87,7 +87,6 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
     assert "conditioning/anchor_teacher" in tags
     assert "loss/vf" in tags
     assert "loss/normal_transition" in tags
-    assert "loss/scale_consistency" in tags
     assert "conditioning/state_joint_null_fraction" in tags
     assert "train/volume_size" in tags
     assert "conditioning/vf_active" in tags
@@ -169,13 +168,6 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
             "vf": {
                 "loss_weight": 1.0,
             },
-            "scale_consistency": {
-                "overlap": 4,
-                "probability": 0.0,
-                "start_step": 0,
-                "ramp_steps": 0,
-                "loss_weight": 0.0,
-            },
             "optim": {
                 "denoiser_lr": 0.001,
                 "critic_lr": 0.001,
@@ -188,7 +180,6 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
             "train": {
                 "total_steps": 1,
                 "volume_batch_size": 1,
-                "volume_sizes": [8],
                 "slice_pairs_per_axis": 2,
                 "mixed_precision": False,
                 "ema_decay": 0.9,

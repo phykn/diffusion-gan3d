@@ -217,15 +217,10 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     connectivity = cfg["connectivity"]
     conditioning = cfg["conditioning"]["cfg_dropout"]
     vf = cfg["vf"]
-    scale_consistency = cfg["scale_consistency"]
     optim = cfg["optim"]
     anchor_start_step, anchor_ramp_steps = get_schedule_steps(
         anchor,
         "anchor",
-    )
-    scale_start_step, scale_ramp_steps = get_schedule_steps(
-        scale_consistency,
-        "scale_consistency",
     )
     validate_anchor_capacity(
         data=data,
@@ -277,7 +272,6 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         ),
         settings=TrainerSettings(
             volume_batch_size=train["volume_batch_size"],
-            volume_sizes=train["volume_sizes"],
             num_phases=data["num_phases"],
             patch_size=data["input_size"],
             slice_pairs_per_axis=train["slice_pairs_per_axis"],
@@ -306,11 +300,6 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             vf_loss_weight=vf["loss_weight"],
             cfg_drop_each_probability=conditioning["drop_each_prob"],
             cfg_single_drop_probability=conditioning["single_condition_drop_prob"],
-            scale_consistency_overlap=scale_consistency["overlap"],
-            scale_consistency_probability=scale_consistency["probability"],
-            scale_consistency_start_step=scale_start_step,
-            scale_consistency_ramp_steps=scale_ramp_steps,
-            scale_consistency_weight=scale_consistency["loss_weight"],
             latent_channels=model["latent_channels"],
             amp_enabled=use_amp,
         ),
@@ -338,8 +327,9 @@ def validate_anchor_capacity(
     if anchor["multi_anchor_prob"] <= 0.0:
         return
 
-    largest = max(train["volume_sizes"])
-    entry_bytes = largest**3 + data["input_size"] ** 2 + 4 * data["num_phases"]
+    entry_bytes = (
+        data["input_size"] ** 3 + data["input_size"] ** 2 + 4 * data["num_phases"]
+    )
     required_bytes = entry_bytes
     budget_bytes = round(anchor["teacher_bank_size_mib"] * 1024**2)
     if budget_bytes < required_bytes:

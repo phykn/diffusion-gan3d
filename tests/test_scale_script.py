@@ -13,7 +13,7 @@ def make_plan() -> ScalePlan:
         shape=(8, 8, 8),
         tile_size=6,
         overlap=1,
-        core_size=4,
+        stride=4,
         grid=(2, 2, 2),
         tile_count=8,
         states_bytes=6144,

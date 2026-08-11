@@ -80,18 +80,6 @@ def ConditioningConfig(**values):
     return Config(cfg_dropout=dropout)
 
 
-def ScaleConsistencyConfig(**values):
-    cfg = Config(
-        overlap=2,
-        probability=0.0,
-        start_step=0,
-        ramp_steps=0,
-        loss_weight=0.0,
-    )
-    cfg.update(values)
-    return cfg
-
-
 def get_vf_pool(batches, num_phases):
     trainer = object.__new__(Trainer)
     trainer.num_phases = num_phases
@@ -586,12 +574,11 @@ def test_generate_pair_keeps_initial_noise_and_posterior_unprojected() -> None:
     assert not torch.equal(prediction[mask], clean[mask])
 
 
-def test_volume_size_can_exceed_source_crop_while_critic_keeps_patch_size() -> None:
+def test_training_volume_and_critic_use_patch_size() -> None:
     trainer, denoiser, streams = _conditioning_trainer(
         anchored=True,
         crop_size=8,
         patch_size=8,
-        volume_sizes=(8, 12),
     )
     shapes = []
     hooks = [
@@ -603,61 +590,24 @@ def test_volume_size_can_exceed_source_crop_while_critic_keeps_patch_size() -> N
         for critic in trainer.critics.values()
     ]
     try:
-        with (
-            patch.object(trainer, "sample_volume_size", return_value=12),
-            patch.object(
-                denoiser,
-                "predict_logits",
-                wraps=denoiser.predict_logits,
-            ) as predict_logits,
-        ):
+        with patch.object(
+            denoiser,
+            "predict_logits",
+            wraps=denoiser.predict_logits,
+        ) as predict_logits:
             metrics = trainer.step(0, transition=0)
     finally:
         for hook in hooks:
             hook.remove()
 
-    assert metrics.volume_size == 12
+    assert metrics.volume_size == 8
     assert all(stream.calls == 1 for stream in streams.values())
     assert shapes
     assert all(previous[-2:] == current[-2:] == (8, 8) for previous, current in shapes)
     assert all(
-        call.kwargs["anchor_image"].shape[-3:] == (12, 12, 12)
+        call.kwargs["anchor_image"].shape[-3:] == (8, 8, 8)
         for call in predict_logits.call_args_list
     )
-
-
-def test_active_scale_consistency_is_added_to_the_optimizer_objective() -> None:
-    weight = 0.25
-    trainer, _, _ = _conditioning_trainer(
-        anchored=False,
-        volume_sizes=(12,),
-        scale_consistency_overlap=2,
-        scale_consistency_probability=1.0,
-        scale_consistency_weight=weight,
-    )
-
-    with patch.object(
-        trainer.scaler,
-        "scale",
-        wraps=trainer.scaler.scale,
-    ) as scale:
-        metrics = trainer.step(0, transition=0)
-
-    assert metrics.scale_consistency_active
-    assert metrics.scale_consistency_ramp == 1.0
-    assert math.isfinite(metrics.scale_consistency_loss)
-    assert math.isclose(
-        metrics.scale_consistency_contribution,
-        weight * metrics.scale_consistency_loss,
-        rel_tol=1e-6,
-        abs_tol=1e-9,
-    )
-    assert math.isclose(
-        metrics.generator_total,
-        metrics.generator + metrics.vf_loss + metrics.scale_consistency_contribution,
-        rel_tol=1e-5,
-    )
-    assert scale.call_count == 5
 
 
 def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
@@ -957,7 +907,6 @@ def _conditioning_trainer(
     anchored: bool,
     crop_size: int = 8,
     patch_size: int = 8,
-    volume_sizes: tuple[int, ...] | None = None,
     anchor_start_step: int = 0,
     anchor_ramp_steps: int = 0,
     multi_probability: float = 0.0,
@@ -965,11 +914,6 @@ def _conditioning_trainer(
     normal_transition_weight: float = 0.0,
     cfg_drop_each_probability: float = 0.0,
     cfg_single_drop_probability: float = 0.0,
-    scale_consistency_overlap: int = 2,
-    scale_consistency_probability: float = 0.0,
-    scale_consistency_start_step: int = 0,
-    scale_consistency_ramp_steps: int = 0,
-    scale_consistency_weight: float = 0.0,
 ) -> tuple[Trainer, nn.Module, dict[int, _ConstantStream]]:
     data = DataConfig(
         folders={0: ".", 1: ".", 2: "."},
@@ -1014,14 +958,6 @@ def _conditioning_trainer(
             drop_each_prob=cfg_drop_each_probability,
             single_condition_drop_prob=cfg_single_drop_probability,
         ),
-        scale_consistency=ScaleConsistencyConfig(
-            overlap=scale_consistency_overlap,
-            probability=scale_consistency_probability,
-            start_step=scale_consistency_start_step,
-            ramp_steps=scale_consistency_ramp_steps,
-            loss_weight=scale_consistency_weight,
-        ),
-        volume_sizes=volume_sizes,
     )
     denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
@@ -1087,7 +1023,6 @@ def _make_trainer(
         ),
         settings=TrainerSettings(
             volume_batch_size=cfg.train.volume_batch_size,
-            volume_sizes=cfg.train.volume_sizes,
             num_phases=cfg.data.num_phases,
             patch_size=cfg.data.input_size,
             slice_pairs_per_axis=cfg.train.slice_pairs_per_axis,
@@ -1118,11 +1053,6 @@ def _make_trainer(
             cfg_single_drop_probability=(
                 cfg.conditioning.cfg_dropout.single_condition_drop_prob
             ),
-            scale_consistency_overlap=cfg.scale_consistency.overlap,
-            scale_consistency_probability=cfg.scale_consistency.probability,
-            scale_consistency_start_step=cfg.scale_consistency.start_step,
-            scale_consistency_ramp_steps=cfg.scale_consistency.ramp_steps,
-            scale_consistency_weight=cfg.scale_consistency.loss_weight,
             latent_channels=cfg.model.latent_channels,
             amp_enabled=use_amp,
         ),
@@ -1138,8 +1068,6 @@ def _config(
     connectivity: Config | None = None,
     vf: VfConfig | None = None,
     conditioning: Config | None = None,
-    scale_consistency: Config | None = None,
-    volume_sizes: tuple[int, ...] | None = None,
 ) -> TrainConfig:
     return TrainConfig(
         data=data,
@@ -1159,14 +1087,10 @@ def _config(
             if vf is None
             else vf
         ),
-        scale_consistency=(
-            ScaleConsistencyConfig() if scale_consistency is None else scale_consistency
-        ),
         optim=optim,
         train=LoopConfig(
             total_steps=1,
             volume_batch_size=1,
-            volume_sizes=((data.input_size,) if volume_sizes is None else volume_sizes),
             slice_pairs_per_axis=2,
             mixed_precision=False,
             ema_decay=0.9,

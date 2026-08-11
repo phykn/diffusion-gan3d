@@ -3,7 +3,7 @@ import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from itertools import product
+from itertools import pairwise, product
 
 import torch
 import torch.nn.functional as F
@@ -20,7 +20,7 @@ class ScalePlan:
     shape: tuple[int, int, int]
     tile_size: int
     overlap: int
-    core_size: int
+    stride: int
     grid: tuple[int, int, int]
     tile_count: int
     states_bytes: int
@@ -35,15 +35,14 @@ class ScalePlan:
 
     @property
     def base_shell(self) -> int:
-        return min(self.overlap // 2, (self.core_size - 1) // 2)
+        return min(self.overlap // 2, (self.stride - 1) // 2)
 
 
 @dataclass(frozen=True)
 class Tile:
     source: tuple[slice, slice, slice]
     target: tuple[slice, slice, slice]
-    valid: tuple[slice, slice, slice]
-    halos: tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
+    margins: tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
 
 
 @dataclass(frozen=True)
@@ -187,14 +186,19 @@ class ScaledGenerator:
         factor = self.get_downsample_factor()
         if not isinstance(overlap, int) or isinstance(overlap, bool) or overlap < 0:
             raise ValueError("overlap must be a non-negative integer.")
-        core_size = self.generator.patch_size
-        tile_size = core_size + 2 * overlap
-        if core_size % factor or tile_size % factor:
+        tile_size = self.generator.patch_size
+        if 2 * overlap >= tile_size:
+            raise ValueError("twice overlap must be smaller than patch_size.")
+        stride = tile_size - 2 * overlap
+        if tile_size % factor:
             raise ValueError(
-                "patch_size and the resulting tile size must be divisible by the denoiser "
+                "patch_size must be divisible by the denoiser "
                 f"downsample factor ({factor})."
             )
-        grid = tuple(math.ceil(size / core_size) for size in shape)
+        if any(size < tile_size for size in shape):
+            raise ValueError("shape must not be smaller than patch_size.")
+        starts = tuple(self.axis_starts(size, tile_size, stride) for size in shape)
+        grid = tuple(len(axis) for axis in starts)
         voxels = math.prod(shape)
         tile_voxels = tile_size**3
         tile_bytes = self.generator.num_phases * tile_voxels * 4
@@ -207,12 +211,15 @@ class ScaledGenerator:
         fusion_bytes = (self.generator.num_phases + 1) * voxels * 4
         output_bytes = voxels
         cpu_workspace = workspace_bytes if self.generator.device.type == "cpu" else 0
-        seams = tuple(tuple(range(core_size, size, core_size)) for size in shape)
+        seams = tuple(
+            tuple((left + tile_size + right) // 2 for left, right in pairwise(axis))
+            for axis in starts
+        )
         return ScalePlan(
             shape=shape,
             tile_size=tile_size,
             overlap=overlap,
-            core_size=core_size,
+            stride=stride,
             grid=grid,
             tile_count=math.prod(grid),
             states_bytes=states_bytes,
@@ -332,7 +339,7 @@ class ScaledGenerator:
         else:
             if shape is not None:
                 raise ValueError("blocks and shape cannot be provided together.")
-            output_shape = self.shape_from_blocks(blocks)
+            output_shape = self.shape_from_blocks(blocks, overlap)
         plan = self._account_guidance_memory(
             self.plan(output_shape, overlap),
             guidance_scale,
@@ -362,9 +369,25 @@ class ScaledGenerator:
     def shape_from_blocks(
         self,
         blocks: int | Sequence[int],
+        overlap: int = DEFAULT_SCALE_OVERLAP,
     ) -> tuple[int, int, int]:
         counts = self.parse_shape(blocks)
-        return tuple(self.generator.patch_size * count for count in counts)
+        patch_size = self.generator.patch_size
+        if not isinstance(overlap, int) or isinstance(overlap, bool) or overlap < 0:
+            raise ValueError("overlap must be a non-negative integer.")
+        if 2 * overlap >= patch_size:
+            raise ValueError("twice overlap must be smaller than patch_size.")
+        stride = patch_size - 2 * overlap
+        return tuple(patch_size + (count - 1) * stride for count in counts)
+
+    @staticmethod
+    def axis_starts(size: int, tile_size: int, stride: int) -> tuple[int, ...]:
+        if size == tile_size:
+            return (0,)
+        count = math.ceil((size - tile_size) / stride) + 1
+        starts = [index * stride for index in range(count - 1)]
+        starts.append(size - tile_size)
+        return tuple(starts)
 
     @staticmethod
     def parse_shape(value: int | Sequence[int]) -> tuple[int, int, int]:
@@ -396,29 +419,37 @@ class ScaledGenerator:
     def make_tiles(
         plan: ScalePlan,
     ) -> tuple[Tile, ...]:
+        starts = tuple(
+            ScaledGenerator.axis_starts(size, plan.tile_size, plan.stride)
+            for size in plan.shape
+        )
         tiles = []
         for idx in product(*(range(count) for count in plan.grid)):
             source = []
             target = []
-            valid = []
-            halos = []
+            margins = []
             for axis, tile_idx in enumerate(idx):
-                target_start = tile_idx * plan.core_size
-                target_stop = min(target_start + plan.core_size, plan.shape[axis])
-                left_halo = min(plan.overlap, target_start)
-                right_halo = min(plan.overlap, plan.shape[axis] - target_stop)
-                source_start = target_start - left_halo
-                source_stop = target_stop + right_halo
+                source_start = starts[axis][tile_idx]
+                source_stop = source_start + plan.tile_size
+                target_start = 0 if tile_idx == 0 else plan.seams[axis][tile_idx - 1]
+                target_stop = (
+                    plan.shape[axis]
+                    if tile_idx + 1 == plan.grid[axis]
+                    else plan.seams[axis][tile_idx]
+                )
                 source.append(slice(source_start, source_stop))
                 target.append(slice(target_start, target_stop))
-                valid.append(slice(0, source_stop - source_start))
-                halos.append((left_halo, right_halo))
+                margins.append(
+                    (
+                        plan.overlap if tile_idx > 0 else 0,
+                        plan.overlap if tile_idx + 1 < plan.grid[axis] else 0,
+                    )
+                )
             tiles.append(
                 Tile(
                     source=tuple(source),
                     target=tuple(target),
-                    valid=tuple(valid),
-                    halos=tuple(halos),
+                    margins=tuple(margins),
                 )
             )
         return tuple(tiles)
@@ -659,19 +690,19 @@ class ScaledGenerator:
         cache: dict[tuple[int, int, int], torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         windows = []
-        for region, (left_halo, right_halo) in zip(
+        for region, (left_margin, right_margin) in zip(
             tile.source,
-            tile.halos,
+            tile.margins,
             strict=True,
         ):
             length = region.stop - region.start
-            key = (length, left_halo, right_halo)
+            key = (length, left_margin, right_margin)
             if key not in cache:
                 cache[key] = cls.make_axis_window(
                     length,
                     overlap,
-                    left_halo,
-                    right_halo,
+                    left_margin,
+                    right_margin,
                     device,
                 )
             windows.append(cache[key])
@@ -681,8 +712,8 @@ class ScaledGenerator:
     def make_axis_window(
         length: int,
         overlap: int,
-        left_halo: int,
-        right_halo: int,
+        left_margin: int,
+        right_margin: int,
         device: torch.device,
     ) -> torch.Tensor:
         axis = torch.ones(length, device=device, dtype=torch.float32)
@@ -690,10 +721,10 @@ class ScaledGenerator:
             return axis
         positions = torch.arange(overlap, device=device, dtype=torch.float32)
         ramp = torch.sin(positions.mul(math.pi / (2 * overlap))).square()
-        if left_halo:
-            axis[:left_halo] = ramp[-left_halo:]
-        if right_halo:
-            axis[-right_halo:] = ramp.flip(0)[:right_halo]
+        if left_margin:
+            axis[:left_margin] = ramp[-left_margin:]
+        if right_margin:
+            axis[-right_margin:] = ramp.flip(0)[:right_margin]
         return axis
 
     @staticmethod
@@ -846,8 +877,7 @@ class ScaledGenerator:
         overlap: int,
     ) -> None:
         global_region = (slice(None), slice(None), *tile.source)
-        tile_region = (slice(None), slice(None), *tile.valid)
-        weighted = pred[tile_region].float().clone()
+        weighted = pred.float().clone()
         axes = ScaledGenerator.get_axis_windows(
             tile,
             overlap,
