@@ -43,6 +43,7 @@ class Tile:
     source: tuple[slice, slice, slice]
     target: tuple[slice, slice, slice]
     valid: tuple[slice, slice, slice]
+    halos: tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,7 @@ class Base:
 
 @dataclass(frozen=True)
 class Fusion:
-    window: torch.Tensor
+    axis_windows: dict[tuple[int, int, int], torch.Tensor]
     weight_sum: torch.Tensor
     pred_sum: torch.Tensor
 
@@ -101,15 +102,16 @@ class TileBuffer:
         self.upload: torch.Tensor | None = None
         self.download: torch.Tensor | None = None
         self.workspace: torch.Tensor | None = None
+        self.capacity = num_phases * tile_size**3
         if enabled:
             try:
                 self.upload = torch.empty(
-                    num_phases * tile_size**3,
+                    self.capacity,
                     dtype=torch.float32,
                     pin_memory=True,
                 )
                 self.download = torch.empty(
-                    num_phases * tile_size**3,
+                    self.capacity,
                     dtype=torch.float32,
                     pin_memory=True,
                 )
@@ -117,38 +119,31 @@ class TileBuffer:
                 self.upload = None
                 self.download = None
 
-    def read_periodic(
+    def read(
         self,
         state: VolumeState,
-        start: tuple[int, int, int],
-        tile_size: int,
+        region: tuple[slice, slice, slice],
         device: torch.device,
     ) -> torch.Tensor:
-        shape = (1, state.values.shape[1], tile_size, tile_size, tile_size)
+        source = state.read(region)
+        shape = source.shape
         numel = math.prod(shape)
         if state.values.device != device and self.upload is not None:
             values = self.upload[:numel].view(shape)
         else:
             if (
                 self.workspace is None
-                or self.workspace.shape != shape
                 or self.workspace.device != state.values.device
+                or self.workspace.numel() < numel
             ):
                 self.workspace = torch.empty(
-                    shape,
+                    max(self.capacity, numel),
                     device=state.values.device,
                     dtype=torch.float32,
                 )
-            values = self.workspace
+            values = self.workspace[:numel].view(shape)
 
-        segments = tuple(
-            self.periodic_segments(offset, tile_size, size)
-            for offset, size in zip(start, state.values.shape[-3:], strict=True)
-        )
-        for blocks in product(*segments):
-            target = tuple(block[0] for block in blocks)
-            source = tuple(block[1] for block in blocks)
-            values[(slice(None), slice(None), *target)].copy_(state.read(source))
+        values.copy_(source)
 
         if values.device == device:
             return values
@@ -157,27 +152,6 @@ class TileBuffer:
             dtype=torch.float32,
             non_blocking=self.upload is not None,
         )
-
-    @staticmethod
-    def periodic_segments(
-        start: int,
-        length: int,
-        size: int,
-    ) -> tuple[tuple[slice, slice], ...]:
-        segments = []
-        target_start = 0
-        source_start = start % size
-        while target_start < length:
-            count = min(size - source_start, length - target_start)
-            segments.append(
-                (
-                    slice(target_start, target_start + count),
-                    slice(source_start, source_start + count),
-                )
-            )
-            target_start += count
-            source_start = 0
-        return tuple(segments)
 
     def stage(self, values: torch.Tensor, device: torch.device) -> torch.Tensor:
         if values.device == device:
@@ -426,24 +400,25 @@ class ScaledGenerator:
         for idx in product(*(range(count) for count in plan.grid)):
             source = []
             target = []
-            pads = []
+            valid = []
+            halos = []
             for axis, tile_idx in enumerate(idx):
                 target_start = tile_idx * plan.core_size
                 target_stop = min(target_start + plan.core_size, plan.shape[axis])
-                input_start = target_start - plan.overlap
-                input_stop = target_start + plan.core_size + plan.overlap
-                source_start = max(input_start, 0)
-                source_stop = min(input_stop, plan.shape[axis])
+                left_halo = min(plan.overlap, target_start)
+                right_halo = min(plan.overlap, plan.shape[axis] - target_stop)
+                source_start = target_start - left_halo
+                source_stop = target_stop + right_halo
                 source.append(slice(source_start, source_stop))
                 target.append(slice(target_start, target_stop))
-                pads.append((source_start - input_start, input_stop - source_stop))
+                valid.append(slice(0, source_stop - source_start))
+                halos.append((left_halo, right_halo))
             tiles.append(
                 Tile(
                     source=tuple(source),
                     target=tuple(target),
-                    valid=tuple(
-                        slice(left, plan.tile_size - right) for left, right in pads
-                    ),
+                    valid=tuple(valid),
+                    halos=tuple(halos),
                 )
             )
         return tuple(tiles)
@@ -642,11 +617,7 @@ class ScaledGenerator:
         tiles: tuple[Tile, ...],
         device: torch.device,
     ) -> Fusion:
-        window = self.make_window(
-            plan.tile_size,
-            plan.overlap,
-            self.generator.device,
-        )
+        axis_windows: dict[tuple[int, int, int], torch.Tensor] = {}
         weight_sum = torch.zeros(
             (1, 1, *plan.shape),
             device=device,
@@ -654,8 +625,18 @@ class ScaledGenerator:
         )
         for tile in tiles:
             global_region = (slice(None), slice(None), *tile.source)
-            tile_region = (slice(None), slice(None), *tile.valid)
-            weight_sum[global_region].add_(window[tile_region].to(device))
+            axes = self.get_axis_windows(
+                tile,
+                plan.overlap,
+                self.generator.device,
+                axis_windows,
+            )
+            window = (
+                axes[0].view(1, 1, -1, 1, 1)
+                * axes[1].view(1, 1, 1, -1, 1)
+                * axes[2].view(1, 1, 1, 1, -1)
+            )
+            weight_sum[global_region].add_(window.to(device))
         if not bool((weight_sum > 0).all().item()):
             raise RuntimeError("blend weights must cover the complete output volume.")
         pred_sum = torch.zeros(
@@ -664,10 +645,56 @@ class ScaledGenerator:
             dtype=torch.float32,
         )
         return Fusion(
-            window=window,
+            axis_windows=axis_windows,
             weight_sum=weight_sum,
             pred_sum=pred_sum,
         )
+
+    @classmethod
+    def get_axis_windows(
+        cls,
+        tile: Tile,
+        overlap: int,
+        device: torch.device,
+        cache: dict[tuple[int, int, int], torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        windows = []
+        for region, (left_halo, right_halo) in zip(
+            tile.source,
+            tile.halos,
+            strict=True,
+        ):
+            length = region.stop - region.start
+            key = (length, left_halo, right_halo)
+            if key not in cache:
+                cache[key] = cls.make_axis_window(
+                    length,
+                    overlap,
+                    left_halo,
+                    right_halo,
+                    device,
+                )
+            windows.append(cache[key])
+        return tuple(windows)
+
+    @staticmethod
+    def make_axis_window(
+        length: int,
+        overlap: int,
+        left_halo: int,
+        right_halo: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        axis = torch.ones(length, device=device, dtype=torch.float32)
+        if not overlap:
+            return axis
+        positions = torch.arange(overlap, device=device, dtype=torch.float32)
+        ramp = torch.sin(positions.mul(math.pi / (2 * overlap))).square()
+        if left_halo:
+            axis[:left_halo] = ramp[-left_halo:]
+        if right_halo:
+            axis[-right_halo:] = ramp.flip(0)[:right_halo]
+        return axis
 
     @staticmethod
     def make_window(
@@ -675,16 +702,13 @@ class ScaledGenerator:
         overlap: int,
         device: torch.device,
     ) -> torch.Tensor:
-        axis = torch.ones(tile_size, device=device, dtype=torch.float32)
-        if overlap:
-            positions = torch.arange(
-                overlap,
-                device=device,
-                dtype=torch.float32,
-            )
-            ramp = torch.sin(positions.mul(math.pi / (2 * overlap))).square()
-            axis[:overlap] = ramp
-            axis[-overlap:] = ramp.flip(0)
+        axis = ScaledGenerator.make_axis_window(
+            tile_size,
+            overlap,
+            overlap,
+            overlap,
+            device,
+        )
         return (
             axis.view(1, 1, -1, 1, 1)
             * axis.view(1, 1, 1, -1, 1)
@@ -781,19 +805,10 @@ class ScaledGenerator:
                 current.values.device.type == "cpu" and generator.device.type == "cuda",
             )
         fusion.pred_sum.zero_()
-        expected = (
-            1,
-            generator.num_phases,
-            plan.tile_size,
-            plan.tile_size,
-            plan.tile_size,
-        )
         for tile in tiles:
-            start = tuple(region.start - plan.overlap for region in tile.target)
-            values = tile_buffer.read_periodic(
+            values = tile_buffer.read(
                 current,
-                start,
-                plan.tile_size,
+                tile.source,
                 generator.device,
             )
             with torch.autocast(
@@ -808,9 +823,10 @@ class ScaledGenerator:
                     guidance_scale=guidance_scale,
                     vf=vf,
                 )
+            expected = (1, generator.num_phases, *values.shape[-3:])
             if pred.shape != expected:
                 raise ValueError(f"model prediction must have shape {expected}.")
-            self.add_prediction(fusion, tile, pred, tile_buffer)
+            self.add_prediction(fusion, tile, pred, tile_buffer, plan.overlap)
 
         self.update_state(
             current,
@@ -827,10 +843,21 @@ class ScaledGenerator:
         tile: Tile,
         pred: torch.Tensor,
         tile_buffer: TileBuffer,
+        overlap: int,
     ) -> None:
         global_region = (slice(None), slice(None), *tile.source)
         tile_region = (slice(None), slice(None), *tile.valid)
-        weighted = pred[tile_region].float() * fusion.window[tile_region]
+        weighted = pred[tile_region].float().clone()
+        axes = ScaledGenerator.get_axis_windows(
+            tile,
+            overlap,
+            pred.device,
+            fusion.axis_windows,
+        )
+        for spatial_axis, axis in enumerate(axes, 2):
+            shape = [1, 1, 1, 1, 1]
+            shape[spatial_axis] = axis.numel()
+            weighted.mul_(axis.view(shape))
         staged = tile_buffer.stage(weighted, fusion.pred_sum.device)
         fusion.pred_sum[global_region].add_(staged)
 

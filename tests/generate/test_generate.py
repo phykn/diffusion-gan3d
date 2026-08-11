@@ -518,7 +518,8 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
         assert left.transition == right.transition == transition
         assert left.timestep is right.timestep
         assert left.latent is right.latent
-        assert left.current.shape == right.current.shape == (1, 3, 4, 4, 4)
+        assert left.current.shape == (1, 3, 4, 4, 4)
+        assert right.current.shape == (1, 3, 2, 4, 4)
 
 
 def test_parallel_anchors_use_one_combined_prediction_per_step() -> None:
@@ -707,10 +708,11 @@ def test_overlapping_tiles_read_the_same_unchanged_global_state() -> None:
 
     assert len(model.calls) == 4
     first, second = model.calls[:2]
-    assert first.current.shape == second.current.shape == (1, 3, 8, 8, 8)
+    assert first.current.shape == (1, 3, 6, 4, 4)
+    assert second.current.shape == (1, 3, 4, 4, 4)
     assert torch.equal(
-        first.current[:, :, 4:8, 2:6, 2:6],
-        second.current[:, :, :4, 2:6, 2:6],
+        first.current[:, :, 2:6],
+        second.current[:, :, :4],
     )
 
 
@@ -781,7 +783,7 @@ def test_final_labels_use_the_fused_prediction() -> None:
     assert torch.all(vol[3] == 1)
 
 
-def test_padded_edges_only_use_valid_predictions(
+def test_boundary_tiles_use_only_real_volume_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scaled = ScaledGenerator(_generator(_PaddingModel(), Diffusion(1)))
@@ -801,6 +803,26 @@ def test_padded_edges_only_use_valid_predictions(
     assert torch.allclose(probs.sum(dim=0), torch.ones(9, 7, 5))
     assert torch.all(probs[0] == 1.0)
     assert torch.all(probs[1:] == 0.0)
+
+
+def test_real_denoiser_accepts_one_sided_boundary_tiles() -> None:
+    model = Denoiser3D(
+        num_phases=3,
+        base_channels=4,
+        channel_multipliers=(1, 2),
+        embedding_channels=8,
+        latent_channels=4,
+    ).eval()
+    scaled = ScaledGenerator(_generator(model, Diffusion(1)))
+
+    volume = scaled.generate(
+        shape=8,
+        overlap=2,
+        progress=False,
+    )
+
+    assert volume.shape == (8, 8, 8)
+    assert volume.dtype == torch.uint8
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
@@ -1055,18 +1077,26 @@ def test_cpu_generation_checks_memory_before_allocating(
         )
 
 
-def test_model_input_never_exceeds_planned_tile() -> None:
+def test_model_input_matches_each_bounded_tile_source() -> None:
     model = _OverlapTraceModel()
+    scaled = ScaledGenerator(_generator(model, Diffusion(2)))
+    plan = scaled.plan((9, 7, 5), overlap=2)
+    tiles = scaled.make_tiles(plan)
 
-    ScaledGenerator(_generator(model, Diffusion(2))).generate(
-        shape=(9, 7, 5),
-        overlap=2,
+    scaled.generate(
+        shape=plan.shape,
+        overlap=plan.overlap,
         storage="cpu",
         progress=False,
     )
 
-    assert model.calls
-    assert all(call.current.shape == (1, 3, 8, 8, 8) for call in model.calls)
+    expected = [
+        tuple(region.stop - region.start for region in tile.source) for tile in tiles
+    ]
+    observed = [tuple(call.current.shape[-3:]) for call in model.calls[: len(tiles)]]
+
+    assert observed == expected
+    assert all(max(shape) <= plan.tile_size for shape in observed)
 
 
 def test_generate_probs_rejects_large_streaming_volume_before_allocation() -> None:
@@ -1087,6 +1117,9 @@ def test_tile_targets_cover_non_divisible_shape_exactly_once() -> None:
         source_shape = tuple(region.stop - region.start for region in tile.source)
         valid_shape = tuple(region.stop - region.start for region in tile.valid)
         assert valid_shape == source_shape
+
+    assert tiles[0].halos == ((0, 2), (0, 2), (0, 1))
+    assert tiles[-1].halos == ((2, 0), (2, 0), (2, 0))
 
     assert plan.tile_size == 8
     assert plan.grid == (3, 2, 2)
@@ -1110,10 +1143,10 @@ def test_scale_plan_uses_configured_overlap_and_patch_core() -> None:
     assert plan.tile_count == 8
 
 
-def test_tile_core_prediction_matches_full_periodic_prediction() -> None:
+def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
     model = _LocalModel()
     scaled = ScaledGenerator(_generator(model, Diffusion(1)))
-    plan = scaled.plan((7, 6, 5), overlap=1)
+    plan = scaled.plan((7, 6, 6), overlap=1)
     tiles = scaled.make_tiles(plan)
     current = VolumeState(3, plan.shape, torch.device("cpu"))
     next_state = VolumeState(3, plan.shape, torch.device("cpu"))
@@ -1137,17 +1170,19 @@ def test_tile_core_prediction_matches_full_periodic_prediction() -> None:
         None,
         fusion,
     )
-    periodic = F.pad(current.values.float(), (1, 1, 1, 1, 1, 1), mode="circular")
-    expected = F.avg_pool3d(periodic, kernel_size=3, stride=1).half().float()
+    expected = (
+        F.avg_pool3d(current.values.float(), 3, stride=1, padding=1).half().float()
+    )
 
     assert torch.equal(next_state.values.float(), expected)
 
 
-def test_boundary_tile_reads_periodic_context_from_opposite_faces() -> None:
+def test_boundary_tile_reads_only_bounded_context() -> None:
     model = _OverlapTraceModel()
     scaled = ScaledGenerator(_generator(model, Diffusion(1)))
-    plan = scaled.plan((6, 7, 5), overlap=2)
+    plan = scaled.plan((12, 12, 12), overlap=2)
     tiles = scaled.make_tiles(plan)
+    tile = tiles[0]
     current = VolumeState(3, plan.shape, torch.device("cpu"))
     next_state = VolumeState(3, plan.shape, torch.device("cpu"))
     coordinates = torch.arange(math.prod(plan.shape), dtype=torch.float32).reshape(
@@ -1170,26 +1205,31 @@ def test_boundary_tile_reads_periodic_context_from_opposite_faces() -> None:
         fusion,
     )
 
-    indices = tuple(
-        torch.arange(-plan.overlap, plan.core_size + plan.overlap).remainder(size)
-        for size in plan.shape
-    )
-    expected = coordinates
-    for axis, index in enumerate(indices):
-        expected = expected.index_select(axis, index)
+    expected = coordinates[tile.source]
     observed = model.calls[0].current[0, 0]
 
+    assert tile.halos == ((0, 2), (0, 2), (0, 2))
+    assert observed.shape == (6, 6, 6)
     assert torch.equal(observed, expected)
 
 
-def test_periodic_tile_reads_reuse_the_workspace() -> None:
+def test_bounded_tile_reads_reuse_the_workspace() -> None:
     state = VolumeState(3, (6, 7, 5), torch.device("cpu"))
+    values = torch.arange(state.values.numel(), dtype=torch.float32)
+    state.values.copy_(values.reshape_as(state.values))
     buffer = TileBuffer(3, 8, enabled=False)
+    first_region = (slice(0, 6), slice(0, 7), slice(0, 5))
+    second_region = (
+        slice(1, 5),
+        slice(2, 7),
+        slice(0, 5),
+    )
 
-    first = buffer.read_periodic(state, (-1, -1, -1), 8, torch.device("cpu"))
-    second = buffer.read_periodic(state, (1, 2, 3), 8, torch.device("cpu"))
+    first = buffer.read(state, first_region, torch.device("cpu"))
+    second = buffer.read(state, second_region, torch.device("cpu"))
 
     assert first.data_ptr() == second.data_ptr()
+    assert torch.equal(second, state.read(second_region).float())
 
 
 def test_scaled_generation_supports_anisotropic_shape() -> None:

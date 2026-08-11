@@ -70,6 +70,10 @@ volume = ScaledGenerator(generator).generate(
 )
 ```
 
+Overlap is used only on faces shared by adjacent tiles. Outer volume faces do
+not receive a synthetic halo or wrap to the opposite face; boundary tiles use
+only the context that exists inside the requested volume.
+
 At the default `anchor_strength=1`, known sections are supplied to the denoiser
 as learned conditions at full mask strength. Values between zero and one scale
 that condition mask; zero leaves the unconditioned sampling path unchanged.

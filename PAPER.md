@@ -119,7 +119,7 @@ $$
 {\sum_k w_k(v)}.
 $$
 
-The reverse posterior updates the shared global state only after fusion, so adjacent tiles exchange information throughout denoising rather than being stitched after generation. Halo reads that extend beyond the outer output boundary wrap periodically to the opposite side; the method therefore imposes a periodic outer-context assumption. The default halo width is eight voxels per side, giving a 144³ model input around each 128³ core.
+The reverse posterior updates the shared global state only after fusion, so adjacent tiles exchange information throughout denoising rather than being stitched after generation. A halo is present only on a face shared with another tile; outer output faces use no external halo or wrap-around context. The default halo width is eight voxels per shared side, giving a 144³ input for interior tiles and smaller one-sided inputs for boundary tiles.
 
 To train for overlapping inference, $\mathcal{L}_{\mathrm{scale}}$ is sampled with probability 0.30 only on 144³ training volumes. It forms two periodic 144³ views around adjacent 128³ cores with the same reverse transition, latent vector, and conditions. One EMA prediction is randomly assigned as a detached teacher and the online denoiser predicts the other view; a cosine-weighted probability mean-squared error is evaluated over their aligned 16-voxel overlap band. This term uses an eight-voxel halo and trains local agreement between tiled contexts without imposing equality on final categorical samples.
 
