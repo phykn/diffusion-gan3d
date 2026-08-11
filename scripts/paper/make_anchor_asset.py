@@ -43,6 +43,7 @@ def main() -> None:
         type=Path,
         required=True,
     )
+    parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -53,6 +54,7 @@ def main() -> None:
         args.guidance_scale,
         generation={
             "seed": SEED,
+            "domain": args.domain,
             "axis": AXIS,
             "source_roi_left_top": list(ROI_POSITIONS[1]),
             "source_crop_size": CROP_SIZE,
@@ -79,6 +81,7 @@ def main() -> None:
     volume = generator.generate(
         anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=index),),
         guidance_scale=args.guidance_scale,
+        domain=args.domain,
     )
     generated = volume.select(AXIS, index)
     matches = int((generated == anchor).sum())

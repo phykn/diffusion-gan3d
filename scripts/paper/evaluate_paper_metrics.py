@@ -73,6 +73,7 @@ CONDITIONS = (
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weight", type=Path, required=True)
+    parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     parser.add_argument(
         "--reuse",
@@ -98,6 +99,7 @@ def main() -> None:
     weights = args.weight.resolve()
     generation = {
         "conditions": list(CONDITIONS[1:]),
+        "domain": args.domain,
         "volume_seeds": list(SEEDS),
         "axis": AXIS,
         "anchor_counts": list(ANCHOR_COUNTS),
@@ -140,6 +142,7 @@ def main() -> None:
             target_porosity,
             weights,
             args.guidance_scale,
+            args.domain,
             provenance,
         )
 
@@ -217,6 +220,7 @@ def generate_volumes(
     target_porosity: float,
     weights: Path,
     guidance_scale: float,
+    domain: int,
     provenance: dict[str, object],
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -246,11 +250,13 @@ def generate_volumes(
                 volume = generator.generate(
                     vf=None,
                     guidance_scale=guidance_scale,
+                    domain=domain,
                 )
             elif condition == "3D (phase-fraction conditioned)":
                 volume = generator.generate(
                     vf=(target_porosity, 1.0 - target_porosity),
                     guidance_scale=guidance_scale,
+                    domain=domain,
                 )
             elif condition in anchor_map:
                 count = anchor_map[condition]
@@ -265,6 +271,7 @@ def generate_volumes(
                 volume = generator.generate(
                     anchors=anchors,
                     guidance_scale=guidance_scale,
+                    domain=domain,
                 )
             elif condition == "3D (scale-up)":
                 base = generator.generate(
@@ -276,6 +283,7 @@ def generate_volumes(
                         ),
                     ),
                     guidance_scale=guidance_scale,
+                    domain=domain,
                 )
                 scaled = ScaledGenerator(generator)
                 volume = scaled.generate(
@@ -284,6 +292,7 @@ def generate_volumes(
                     base=base,
                     progress=False,
                     guidance_scale=guidance_scale,
+                    domain=domain,
                 )
                 expected_shape = scaled.shape_from_blocks(SCALE_BLOCKS, SCALE_OVERLAP)
                 if tuple(volume.shape) != expected_shape:

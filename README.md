@@ -127,7 +127,8 @@ python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3
 ```
 
-These generation CLIs accept `--domain`. `--guidance-scale` defaults to
+All diagnostic and generator-invoking paper CLIs default `--domain` to `0`.
+`--guidance-scale` defaults to
 `1.0`. Generator-invoking paper CLIs also require an explicit `--weight`;
 they never select the newest run implicitly, so cached metrics and assets
 remain tied to a known checkpoint.

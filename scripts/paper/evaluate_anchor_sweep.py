@@ -54,6 +54,7 @@ KID_SUBSET_SIZE = 50
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weight", type=Path, required=True)
+    parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     parser.add_argument(
         "--reuse",
@@ -71,6 +72,7 @@ def main() -> None:
     weights = args.weight.resolve()
     generation = {
         "seed": SEED,
+        "domain": args.domain,
         "axis": AXIS,
         "anchor_counts": list(COUNTS),
         "reference_shape": list(reference.shape),
@@ -119,7 +121,7 @@ def main() -> None:
                 "anchor sweep reuse manifest generation does not match current inputs."
             )
     else:
-        generate_volumes(reference, weights, args.guidance_scale, provenance)
+        generate_volumes(reference, weights, args.guidance_scale, args.domain, provenance)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     reference_slices = get_slices(reference, AXIS)
@@ -236,6 +238,7 @@ def generate_volumes(
     reference: np.ndarray,
     weights: Path,
     guidance_scale: float,
+    domain: int,
     provenance: dict[str, object],
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -271,6 +274,7 @@ def generate_volumes(
         volume = generator.generate(
             anchors=anchors,
             guidance_scale=guidance_scale,
+            domain=domain,
         )
         path = volume_path(count)
         tifffile.imwrite(path, volume.numpy())

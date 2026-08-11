@@ -31,6 +31,7 @@ def main() -> None:
         type=Path,
         required=True,
     )
+    parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -38,7 +39,11 @@ def main() -> None:
     provenance = build_provenance(
         weights,
         args.guidance_scale,
-        generation={"seed": SEED, "output_size": REFERENCE_SIZE},
+        generation={
+            "seed": SEED,
+            "domain": args.domain,
+            "output_size": REFERENCE_SIZE,
+        },
     )
     validate_output_paths(provenance, (OUTPUT, MANIFEST))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,6 +60,7 @@ def main() -> None:
     volume = (
         generator.generate(
             guidance_scale=args.guidance_scale,
+            domain=args.domain,
         )
         .to(torch.uint8)
         .numpy()

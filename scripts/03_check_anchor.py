@@ -48,7 +48,8 @@ def main() -> None:
     parser.add_argument(
         "--domain",
         type=int,
-        help="numeric domain ID (required for multi-domain weights)",
+        default=0,
+        help="numeric domain ID (default: 0)",
     )
     parser.add_argument(
         "--gt",

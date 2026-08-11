@@ -41,6 +41,7 @@ def main() -> None:
         type=Path,
         required=True,
     )
+    parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     args = parser.parse_args()
     weights = args.weight.resolve()
@@ -49,6 +50,7 @@ def main() -> None:
         args.guidance_scale,
         generation={
             "seeds": list(SEEDS),
+            "domain": args.domain,
             "overlaps": list(OVERLAPS),
             "blocks": list(BLOCKS),
             "scale_geometry": "fixed_blocks_inward_margins",
@@ -87,6 +89,7 @@ def main() -> None:
                 overlap=overlap,
                 progress=False,
                 guidance_scale=args.guidance_scale,
+                domain=args.domain,
             )
             if device.type == "cuda":
                 torch.cuda.synchronize(device)

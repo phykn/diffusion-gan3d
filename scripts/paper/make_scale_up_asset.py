@@ -68,6 +68,7 @@ def main() -> None:
         type=Path,
         required=True,
     )
+    parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -78,6 +79,7 @@ def main() -> None:
         args.guidance_scale,
         generation={
             "seed": SEED,
+            "domain": args.domain,
             "axis": AXIS,
             "blocks": list(BLOCKS),
             "scale_geometry": "fixed_blocks_inward_margins",
@@ -108,6 +110,7 @@ def main() -> None:
     base = generator.generate(
         anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=anchor_index),),
         guidance_scale=args.guidance_scale,
+        domain=args.domain,
     )
 
     scaled = ScaledGenerator(generator)
@@ -123,6 +126,7 @@ def main() -> None:
         base=base,
         progress=False,
         guidance_scale=args.guidance_scale,
+        domain=args.domain,
     )
     elapsed = perf_counter() - start_time
     print(f"Status  : complete ({elapsed:.1f} s)")

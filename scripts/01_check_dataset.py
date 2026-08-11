@@ -19,6 +19,12 @@ SAMPLES = 4
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--domain",
+        type=int,
+        default=0,
+        help="numeric domain ID (default: 0)",
+    )
     args = parser.parse_args()
     cfg = load_yaml(args.config)
     datasets = build_datasets(cfg)
@@ -29,7 +35,7 @@ def main() -> None:
         figsize=(3 * SAMPLES, 8),
     )
     for row, axis in enumerate(AXES):
-        ds = datasets[axis]
+        ds = datasets[args.domain][axis]
         for col in range(SAMPLES):
             img = ds[np.random.randint(len(ds))].numpy()
             panels[row, col].imshow(
