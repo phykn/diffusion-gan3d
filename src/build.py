@@ -3,11 +3,11 @@ from pathlib import Path
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import DataLoader
 
 from . import AXES
 from .config import find_train_config, get_schedule_steps
-from .dataset import BatchStream, SliceDataset
+from .dataset import BatchStream, FolderBatchSampler, SliceDataset
 from .diffusion import Diffusion
 from .generate import Generator
 from .model.critic import ConnectivityCritic2D, PairCritic2D
@@ -40,9 +40,9 @@ def get_domains(
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
 
 
-def find_slices(
+def find_slice_groups(
     folders: dict[int, Sequence[str | Path]],
-) -> dict[int, tuple[Path, ...]]:
+) -> dict[int, tuple[tuple[Path, ...], ...]]:
     if set(folders) != set(AXES):
         raise ValueError("axis folders must contain exactly axes 0, 1, and 2.")
 
@@ -57,7 +57,7 @@ def find_slices(
         if len({folder.resolve() for folder in axis_folders}) != len(axis_folders):
             raise ValueError(f"axis {axis} folders must not contain duplicates.")
 
-        paths = []
+        groups = []
         for folder in axis_folders:
             if not folder.is_dir():
                 raise FileNotFoundError(f"axis {axis} folder does not exist: {folder}")
@@ -68,22 +68,32 @@ def find_slices(
             )
             if not found:
                 raise ValueError(f"axis {axis} folder contains no images: {folder}")
-            paths.extend(found)
-        grouped[axis] = tuple(paths)
+            groups.append(tuple(found))
+        grouped[axis] = tuple(groups)
     return grouped
+
+
+def find_slices(
+    folders: dict[int, Sequence[str | Path]],
+) -> dict[int, tuple[Path, ...]]:
+    groups = find_slice_groups(folders)
+    return {
+        axis: tuple(path for group in path_groups for path in group)
+        for axis, path_groups in groups.items()
+    }
 
 
 def build_datasets(cfg: dict) -> dict[int, dict[int, SliceDataset]]:
     data = cfg["data"]
     return {
         domain_id: {
-            axis: SliceDataset(
-                paths,
+            axis: SliceDataset.from_path_groups(
+                path_groups,
                 crop_size=data["crop_size"],
                 patch_size=data["input_size"],
                 allow_partial_crop=data.get("allow_partial_crop", False),
             )
-            for axis, paths in find_slices(folders).items()
+            for axis, path_groups in find_slice_groups(folders).items()
         }
         for domain_id, folders in get_domains(data).items()
     }
@@ -95,18 +105,11 @@ def build_stream(
     num_workers: int,
     pin_memory: bool,
 ) -> BatchStream:
-    sampler = RandomSampler(
-        dataset,
-        replacement=True,
-        num_samples=max(len(dataset), batch_size),
-    )
     loader = DataLoader(
         dataset,
-        batch_size=batch_size,
-        sampler=sampler,
+        batch_sampler=FolderBatchSampler(dataset, batch_size),
         num_workers=num_workers,
         pin_memory=pin_memory,
-        drop_last=True,
         persistent_workers=num_workers > 0,
     )
     return BatchStream(loader)

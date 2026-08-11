@@ -102,6 +102,20 @@ class DenoiserBatch:
 
 
 @dataclass(frozen=True)
+class StepPreparation:
+    transition: int
+    domain: int
+    real: dict[int, torch.Tensor]
+    selection: "AnchorSelection | None"
+    anchor: AnchorCondition | None
+    target_vf: torch.Tensor
+    presence: "ConditionPresence"
+    model_conditions: dict[str, torch.Tensor]
+    anchor_ramp: float
+    vf_target_resample_rate: float
+
+
+@dataclass(frozen=True)
 class AnchorSelection:
     condition: AnchorCondition
     source: Literal["real", "teacher"]
@@ -370,43 +384,15 @@ class Trainer:
         step: int,
         transition: int | None = None,
     ) -> Metrics:
-        if not isinstance(step, int) or isinstance(step, bool) or step < 0:
-            raise ValueError("step must be a non-negative integer.")
-        self.denoiser.train()
-        self.critics.train()
-        self.connectivity_critic.train()
-        if transition is not None and (
-            not isinstance(transition, int)
-            or isinstance(transition, bool)
-            or not 0 <= transition < self.diffusion.timesteps
-        ):
-            raise ValueError("transition is outside the diffusion schedule.")
+        prepared = self.prepare_step(step, transition)
         volume_size = self.patch_size
-        domain = int(torch.randint(self.num_domains, ()).item())
-        batches = self.get_batches(domain)
-        real = batches
-        vf_pool = self.get_vf_pool(batches)
-        ramp = self.get_anchor_ramp(step)
-        selection = (
-            None
-            if ramp == 0.0
-            else self.sample_anchor(batches, volume_size, step, domain)
-        )
-        anchor = None if selection is None else selection.condition
-        target_vf, vf_target_resample_rate = self.resolve_target_vf(
-            selection,
-            vf_pool,
-            anchor,
-        )
-        presence = self.sample_condition_presence(anchor is not None)
-        model_conditions = self.make_model_conditions(
-            anchor,
-            target_vf,
-            presence,
-            self.make_domain(domain, self.volume_batch_size),
-        )
-        if transition is None:
-            transition = self.sample_transition(anchor is not None)
+        transition = prepared.transition
+        domain = prepared.domain
+        real = prepared.real
+        anchor = prepared.anchor
+        target_vf = prepared.target_vf
+        presence = prepared.presence
+        ramp = prepared.anchor_ramp
         (
             previous,
             current,
@@ -414,7 +400,7 @@ class Trainer:
             prediction,
         ) = self.generate_pair(
             transition,
-            model_conditions,
+            prepared.model_conditions,
             volume_size,
         )
         clean_probs = (prediction + 1.0) * 0.5
@@ -475,22 +461,112 @@ class Trainer:
                 vf_present=presence.vf,
             )
         )
+        return self.finish_step(
+            prepared=prepared,
+            denoiser_update=denoiser_update,
+            critic_vals=critic_vals,
+            r1=r1,
+            critic_global=critic_global,
+            critic_local=critic_local,
+            critic_connectivity=critic_connectivity,
+            connectivity_r1=connectivity_r1,
+            connectivity_fake=connectivity_fake,
+            clean_probs=clean_probs,
+            prediction=prediction,
+        )
+
+    def prepare_step(
+        self,
+        step: int,
+        transition: int | None,
+    ) -> StepPreparation:
+        if not isinstance(step, int) or isinstance(step, bool) or step < 0:
+            raise ValueError("step must be a non-negative integer.")
+        self.denoiser.train()
+        self.critics.train()
+        self.connectivity_critic.train()
+        if transition is not None and (
+            not isinstance(transition, int)
+            or isinstance(transition, bool)
+            or not 0 <= transition < self.diffusion.timesteps
+        ):
+            raise ValueError("transition is outside the diffusion schedule.")
+
+        domain = int(torch.randint(self.num_domains, ()).item())
+        batches = self.get_batches(domain)
+        vf_pool = self.get_vf_pool(batches)
+        ramp = self.get_anchor_ramp(step)
+        selection = (
+            None
+            if ramp == 0.0
+            else self.sample_anchor(batches, self.patch_size, step, domain)
+        )
+        anchor = None if selection is None else selection.condition
+        target_vf, resample_rate = self.resolve_target_vf(
+            selection,
+            vf_pool,
+            anchor,
+        )
+        presence = self.sample_condition_presence(anchor is not None)
+        model_conditions = self.make_model_conditions(
+            anchor,
+            target_vf,
+            presence,
+            self.make_domain(domain, self.volume_batch_size),
+        )
+        if transition is None:
+            transition = self.sample_transition(anchor is not None)
+        return StepPreparation(
+            transition=transition,
+            domain=domain,
+            real=batches,
+            selection=selection,
+            anchor=anchor,
+            target_vf=target_vf,
+            presence=presence,
+            model_conditions=model_conditions,
+            anchor_ramp=ramp,
+            vf_target_resample_rate=resample_rate,
+        )
+
+    def finish_step(
+        self,
+        *,
+        prepared: StepPreparation,
+        denoiser_update: DenoiserUpdate,
+        critic_vals: list[float],
+        r1: float,
+        critic_global: float,
+        critic_local: float,
+        critic_connectivity: float,
+        connectivity_r1: float,
+        connectivity_fake: TripletBatch,
+        clean_probs: torch.Tensor,
+        prediction: torch.Tensor,
+    ) -> Metrics:
         target_values, soft_values, hard_values, hard_mae = self.summarize_vfs(
             clean_probs,
-            target_vf,
-            presence.vf,
+            prepared.target_vf,
+            prepared.presence.vf,
         )
-        target_stds = self.update_target_stats(target_vf)
-        self.record_connectivity_prediction(prediction, selection, transition, domain)
+        target_stds = self.update_target_stats(prepared.target_vf)
+        self.record_connectivity_prediction(
+            prediction,
+            prepared.selection,
+            prepared.transition,
+            prepared.domain,
+        )
         update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
+        anchor = prepared.anchor
+        presence = prepared.presence
         return Metrics(
             generator=denoiser_update.adversarial,
             generator_total=denoiser_update.total,
             critic=sum(critic_vals),
             r1=r1,
-            transition=transition,
-            volume_size=volume_size,
-            domain=domain,
+            transition=prepared.transition,
+            volume_size=self.patch_size,
+            domain=prepared.domain,
             critic_axes=tuple(critic_vals),
             anchor_planes=0 if anchor is None else anchor.planes,
             anchor_conflict_rate=0.0 if anchor is None else anchor.conflict_rate,
@@ -499,10 +575,13 @@ class Trainer:
             generator_connectivity=denoiser_update.connectivity,
             critic_connectivity=critic_connectivity,
             connectivity_r1=connectivity_r1,
-            anchor_ramp=ramp,
+            anchor_ramp=prepared.anchor_ramp,
             connectivity_triplets=len(connectivity_fake),
             connectivity_replay=self.connect.replay_size,
-            anchor_teacher=(selection is not None and selection.source == "teacher"),
+            anchor_teacher=(
+                prepared.selection is not None
+                and prepared.selection.source == "teacher"
+            ),
             teacher_volumes=self.connect.teacher_count,
             teacher_mebibytes=self.connect.teacher_storage_bytes / 1024**2,
             generator_global=denoiser_update.global_loss,
@@ -516,7 +595,7 @@ class Trainer:
             soft_vfs=soft_values,
             hard_vfs=hard_values,
             hard_vf_mae=hard_mae,
-            vf_target_resample_rate=vf_target_resample_rate,
+            vf_target_resample_rate=prepared.vf_target_resample_rate,
             anchor_input_active_fraction=float(
                 presence.anchor.to(torch.float32).mean()
             ),

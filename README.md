@@ -40,9 +40,11 @@ Set `data.allow_partial_crop: true` to train from a section whose height or
 width is smaller than `crop_size`. Each available dimension is cropped to at
 most `crop_size` and resized with the common `input_size / crop_size` scale, so
 the aspect ratio and physical voxel scale are preserved. The critic compares a
-generated section window with the same rectangular shape. Omitting the option,
-or setting it to `false`, keeps the strict error for undersized images. Images
-pooled under one domain and axis must produce the same shape for batching.
+generated section window with the same rectangular shape. Each batch uses one
+axis folder, selected with weight `log(1 + image_count)`, so folders under the
+same domain and axis may use different shapes. Omitting the option, or setting
+it to `false`, keeps the strict error for
+undersized images.
 Physical resolution must remain consistent across the dataset.
 
 ```bash

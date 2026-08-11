@@ -4,7 +4,6 @@ import json
 import sys
 from importlib.metadata import version
 from pathlib import Path
-from time import perf_counter
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,6 +17,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
+from evaluation_io import (
+    load_binary_volume as load_volume,
+)
+from evaluation_io import (
+    start_generation_timer,
+    stop_generation_timer,
+    write_csv,
+)
 from make_anchor_asset import AXIS, load_center_roi
 from make_assets import CROP_SIZE, OUTPUT_DIR, ROI_COLOR, SAMPLE_PATH
 from provenance import (
@@ -248,9 +255,7 @@ def generate_volumes(
         for seed in SEEDS:
             set_seed(seed, device)
             print(f"Generating {condition}, seed={seed}...", flush=True)
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-            start = perf_counter()
+            start = start_generation_timer(device)
             if condition == "3D":
                 volume = generator.generate(
                     vf=None,
@@ -304,9 +309,7 @@ def generate_volumes(
                     raise RuntimeError("scale-up output does not match its block plan.")
             else:
                 raise RuntimeError(f"unsupported condition: {condition}")
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-            elapsed = perf_counter() - start
+            elapsed = stop_generation_timer(device, start)
             elapsed_times[(condition, seed)] = elapsed
             path = volume_path(condition, seed)
             tifffile.imwrite(path, volume.to(torch.uint8).numpy())
@@ -514,13 +517,6 @@ def summarize(
             )
         summary.append(result)
     return summary
-
-
-def write_csv(rows: list[dict[str, object]], output: Path) -> None:
-    with output.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=tuple(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def load_generation_times(path: Path) -> dict[tuple[str, int], float]:
@@ -738,15 +734,6 @@ def volume_path(condition: str, seed: int) -> Path:
         .replace(" ", "_")
     )
     return VOLUME_DIR / f"{slug}_seed_{seed}.tiff"
-
-
-def load_volume(path: Path) -> np.ndarray:
-    volume = np.asarray(tifffile.imread(path))
-    if volume.ndim != 3 or volume.dtype != np.uint8 or volume.size == 0:
-        raise ValueError(f"volume must be a non-empty 3D uint8 array: {path}")
-    if int(volume.max()) > 1:
-        raise ValueError(f"volume contains a phase outside 0 and 1: {path}")
-    return volume
 
 
 def set_seed(seed: int, device: torch.device) -> None:

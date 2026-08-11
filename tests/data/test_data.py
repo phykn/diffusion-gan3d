@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 
 from src.build import build_datasets, build_stream, find_slices, get_domains
-from src.dataset import SliceDataset
+from src.dataset import FolderBatchSampler, SliceDataset, folder_weights
 from src.train.engine import Trainer
 
 
@@ -318,6 +318,61 @@ class DomainDataTest(unittest.TestCase):
 
         self.assertTrue(datasets[0][0].allow_partial_crop)
         self.assertEqual(sample.shape, torch.Size([2, 4]))
+
+    def test_partial_crop_stream_builds_each_batch_from_one_folder(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folders = {}
+            for axis in range(3):
+                thin = root / str(axis) / "thin"
+                square = root / str(axis) / "square"
+                thin.mkdir(parents=True)
+                square.mkdir()
+                for index in range(2):
+                    _save_image(
+                        thin / f"thin_{index}.png",
+                        np.full((2, 4), 1, dtype=np.uint8),
+                    )
+                for index in range(4):
+                    _save_image(
+                        square / f"square_{index}.png",
+                        np.full((4, 4), 2, dtype=np.uint8),
+                    )
+                folders[axis] = [thin, square]
+            cfg = {
+                "data": {
+                    "domains": {0: folders},
+                    "crop_size": 4,
+                    "input_size": 4,
+                    "allow_partial_crop": True,
+                }
+            }
+
+            dataset = build_datasets(cfg)[0][0]
+            sampler = FolderBatchSampler(dataset, batch_size=3)
+            torch.testing.assert_close(
+                folder_weights((2, 4)),
+                torch.log1p(torch.tensor((2.0, 4.0), dtype=torch.float64)),
+            )
+            with (
+                patch("torch.multinomial", return_value=torch.tensor([1])),
+                patch("torch.randint", return_value=torch.tensor([0, 1, 2])),
+            ):
+                indices = next(iter(sampler))
+            stream = build_stream(
+                dataset,
+                batch_size=3,
+                num_workers=0,
+                pin_memory=False,
+            )
+            batch = stream.next()
+
+        self.assertEqual(dataset.batch_groups, ((0, 1), (2, 3, 4, 5)))
+        self.assertEqual(indices, [2, 3, 4])
+        self.assertIn(
+            batch.shape,
+            (torch.Size([3, 2, 4]), torch.Size([3, 4, 4])),
+        )
 
 
 if __name__ == "__main__":

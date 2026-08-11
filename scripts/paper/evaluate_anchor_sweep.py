@@ -4,7 +4,6 @@ import json
 import sys
 from importlib.metadata import version
 from pathlib import Path
-from time import perf_counter
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,7 +12,14 @@ import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
-
+from evaluation_io import (
+    load_binary_volume as load_volume,
+)
+from evaluation_io import (
+    start_generation_timer,
+    stop_generation_timer,
+    write_csv,
+)
 from make_assets import OUTPUT_DIR, ROI_COLOR
 from provenance import (
     build_provenance,
@@ -241,17 +247,13 @@ def generate_volumes(
             f"coverage={count / reference.shape[AXIS]:.2%}...",
             flush=True,
         )
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        start = perf_counter()
+        start = start_generation_timer(device)
         volume = generator.generate(
             anchors=anchors,
             guidance_scale=guidance_scale,
             domain=domain,
         )
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        elapsed = perf_counter() - start
+        elapsed = stop_generation_timer(device, start)
         elapsed_times[count] = elapsed
         path = volume_path(count)
         tifffile.imwrite(path, volume.numpy())
@@ -270,24 +272,8 @@ def volume_path(count: int) -> Path:
     return TEMP_DIR / f"anchor_axis0_count_{count:02d}.tiff"
 
 
-def load_volume(path: Path) -> np.ndarray:
-    volume = np.asarray(tifffile.imread(path))
-    if volume.ndim != 3 or volume.dtype != np.uint8 or volume.size == 0:
-        raise ValueError(f"volume must be a non-empty 3D uint8 array: {path}")
-    if int(volume.max()) > 1:
-        raise ValueError(f"volume contains a phase outside 0 and 1: {path}")
-    return volume
-
-
 def get_slices(volume: np.ndarray, axis: int) -> np.ndarray:
     return np.moveaxis(volume, axis, 0)
-
-
-def write_csv(rows: list[dict], output: Path) -> None:
-    with output.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=tuple(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def load_generation_times(path: Path) -> dict[int, float]:

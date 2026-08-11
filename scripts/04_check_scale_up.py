@@ -37,7 +37,26 @@ class SeamQuality:
     continuation_delta: tuple[float | None, float | None, float | None]
 
 
-def main() -> None:
+@dataclass(frozen=True)
+class BaseResult:
+    volume: torch.Tensor | None
+    target: torch.Tensor | None
+    indices: tuple[int, ...]
+    accuracy: float | None
+
+
+@dataclass(frozen=True)
+class ScaleAssessment:
+    quality: SeamQuality
+    phase_fractions: torch.Tensor
+    center: torch.Tensor | None
+    base_match: float | None
+    base_interior_match: float | None
+    scaled_accuracy: float | None
+    interior_quality: SeamQuality | None
+
+
+def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | None]:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--weight",
@@ -107,6 +126,131 @@ def main() -> None:
         parser.error(
             "--gt requires active anchors (--count > 0 and --anchor-strength > 0)."
         )
+    return parser, args, anchor_count
+
+
+def generate_base(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    generator,
+    anchor_count: int | None,
+) -> BaseResult:
+    if anchor_count is not None and anchor_count > generator.patch_size:
+        parser.error(f"--count must be at most {generator.patch_size}.")
+    if anchor_count is None:
+        print("Base       : none")
+        return BaseResult(None, None, (), None)
+    if anchor_count == 0:
+        print("Base       : unanchored")
+        print("Status     : generating base...", flush=True)
+        base = generator.generate(
+            guidance_scale=args.guidance_scale,
+            domain=args.domain,
+        )
+        return BaseResult(base, None, (), None)
+
+    assert args.gt is not None
+    target = load_volume(
+        args.gt,
+        generator.patch_size,
+        generator.num_phases,
+    )
+    slices = target.movedim(AXIS, 0)
+    indices = select_indices(slices.shape[0], anchor_count)
+    anchors = tuple(
+        PlaneAnchor(image=slices[index], axis=AXIS, index=index) for index in indices
+    )
+    print(f"Base       : {len(indices)} anchor planes")
+    print(f"GT         : {args.gt.resolve()}")
+    print("Status     : generating base...", flush=True)
+    base = generator.generate(
+        anchors=anchors,
+        anchor_strength=args.anchor_strength,
+        guidance_scale=args.guidance_scale,
+        domain=args.domain,
+    )
+    return BaseResult(
+        base,
+        target,
+        indices,
+        get_accuracy(base, target, indices, AXIS),
+    )
+
+
+def assess_result(
+    volume: torch.Tensor,
+    base_result: BaseResult,
+    stats: ScalePlan,
+    patch_size: int,
+    num_phases: int,
+) -> ScaleAssessment:
+    quality = measure_seams(
+        volume,
+        stats.seams,
+        stats.overlap,
+        num_phases,
+    )
+    vfs = phase_fractions(volume, num_phases)
+    base = base_result.volume
+    if base is None:
+        return ScaleAssessment(quality, vfs, None, None, None, None, None)
+
+    start = tuple((size - patch_size) // 2 for size in volume.shape)
+    region = tuple(slice(index, index + patch_size) for index in start)
+    center = volume[region]
+    base_match = float((center == base).to(torch.float32).mean())
+    shell = stats.base_shell
+    interior = tuple(
+        slice(shell, -shell)
+        if volume.shape[axis] > patch_size and shell
+        else slice(None)
+        for axis in range(3)
+    )
+    base_interior_match = float(
+        (center[interior] == base[interior]).to(torch.float32).mean()
+    )
+    scaled_accuracy = None
+    if base_result.target is not None:
+        scaled_accuracy = get_accuracy(
+            center,
+            base_result.target,
+            base_result.indices,
+            AXIS,
+        )
+    boundaries = tuple(
+        (
+            tuple(
+                index
+                for index in (
+                    start[axis] + shell,
+                    region[axis].stop - shell,
+                )
+                if 0 < index < volume.shape[axis]
+            )
+            if volume.shape[axis] > patch_size
+            else ()
+        )
+        for axis in range(3)
+    )
+    interior_quality = measure_seams(
+        volume,
+        boundaries,
+        stats.overlap,
+        num_phases,
+    )
+    return ScaleAssessment(
+        quality,
+        vfs,
+        center,
+        base_match,
+        base_interior_match,
+        scaled_accuracy,
+        interior_quality,
+    )
+
+
+def main() -> None:
+    parser, args, anchor_count = parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight = args.weight
@@ -119,46 +263,14 @@ def main() -> None:
     generator = load_generator(weight, device=device)
     overlap = args.overlap
     shape = tuple(generator.patch_size * count for count in args.blocks)
-    if anchor_count is not None and anchor_count > generator.patch_size:
-        parser.error(f"--count must be at most {generator.patch_size}.")
     scaled = ScaledGenerator(generator)
     plan = scaled.plan(shape, overlap)
     print_plan(plan, device)
-    base = None
-    target = None
-    indices = ()
-    base_acc = None
-    if anchor_count is None:
-        print("Base       : none")
-    elif anchor_count == 0:
-        print("Base       : unanchored")
-        print("Status     : generating base...", flush=True)
-        base = generator.generate(
-            guidance_scale=args.guidance_scale,
-            domain=args.domain,
-        )
-    else:
-        assert args.gt is not None
-        target = load_volume(
-            args.gt,
-            generator.patch_size,
-            generator.num_phases,
-        )
-        slices = target.movedim(AXIS, 0)
-        indices = select_indices(slices.shape[0], anchor_count)
-        anchors = tuple(
-            PlaneAnchor(image=slices[idx], axis=AXIS, index=idx) for idx in indices
-        )
-        print(f"Base       : {len(indices)} anchor planes")
-        print(f"GT         : {args.gt.resolve()}")
-        print("Status     : generating base...", flush=True)
-        base = generator.generate(
-            anchors=anchors,
-            anchor_strength=args.anchor_strength,
-            guidance_scale=args.guidance_scale,
-            domain=args.domain,
-        )
-        base_acc = get_accuracy(base, target, indices, AXIS)
+    base_result = generate_base(parser, args, generator, anchor_count)
+    base = base_result.volume
+    target = base_result.target
+    indices = base_result.indices
+    base_acc = base_result.accuracy
 
     conditioning = "soft base" if base is not None else "none"
     print(f"Conditioning : {conditioning}")
@@ -185,57 +297,20 @@ def main() -> None:
     print("Status     : complete", flush=True)
     if args.out is not None:
         save_volume(vol, args.out)
-    quality = measure_seams(
+    assessment = assess_result(
         vol,
-        stats.seams,
-        stats.overlap,
+        base_result,
+        stats,
+        generator.patch_size,
         generator.num_phases,
     )
-
-    vfs = phase_fractions(vol, generator.num_phases)
-    scaled_acc = None
-    base_match = None
-    base_interior_match = None
-    interior_quality = None
-    center = None
-    if base is not None:
-        start = tuple((size - generator.patch_size) // 2 for size in vol.shape)
-        region = tuple(slice(idx, idx + generator.patch_size) for idx in start)
-        center = vol[region]
-        base_match = float((center == base).to(torch.float32).mean())
-        shell = stats.base_shell
-        interior = tuple(
-            slice(shell, -shell)
-            if vol.shape[axis] > generator.patch_size and shell
-            else slice(None)
-            for axis in range(3)
-        )
-        base_interior_match = float(
-            (center[interior] == base[interior]).to(torch.float32).mean()
-        )
-        if target is not None:
-            scaled_acc = get_accuracy(center, target, indices, AXIS)
-        boundaries = tuple(
-            (
-                tuple(
-                    idx
-                    for idx in (
-                        start[axis] + shell,
-                        region[axis].stop - shell,
-                    )
-                    if 0 < idx < vol.shape[axis]
-                )
-                if vol.shape[axis] > generator.patch_size
-                else ()
-            )
-            for axis in range(3)
-        )
-        interior_quality = measure_seams(
-            vol,
-            boundaries,
-            stats.overlap,
-            generator.num_phases,
-        )
+    quality = assessment.quality
+    vfs = assessment.phase_fractions
+    scaled_acc = assessment.scaled_accuracy
+    base_match = assessment.base_match
+    base_interior_match = assessment.base_interior_match
+    interior_quality = assessment.interior_quality
+    center = assessment.center
     print("\nQuality")
     print("-------")
     print(f"Phase VF    : {format_phases(vfs)}")
