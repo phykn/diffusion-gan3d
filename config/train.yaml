@@ -7,10 +7,11 @@
 #   directional    Preserve axis identities; allow flips and 180-degree rotations.
 
 data:
-  folders:
-    0: [data]
-    1: [data]
-    2: [data]
+  domains:
+    0:
+      0: [data]
+      1: [data]
+      2: [data]
   num_phases: 2
   crop_size: 128
   input_size: 128

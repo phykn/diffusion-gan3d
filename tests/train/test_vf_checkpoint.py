@@ -26,9 +26,10 @@ def test_vf_adapter_state_loads_strictly_and_supports_both_paths() -> None:
     time = torch.zeros(1, dtype=torch.long)
     latent = torch.randn(1, 4)
     vf = torch.tensor([[0.5, 0.1, 0.4]])
+    domain = torch.zeros(1, dtype=torch.long)
     with torch.no_grad():
-        unconditional = restored(current, time, latent, vf=None)
-        conditional = restored(current, time, latent, vf=vf)
+        unconditional = restored(current, time, latent, domain, vf=None)
+        conditional = restored(current, time, latent, domain, vf=vf)
 
     assert unconditional.shape == current.shape
     assert conditional.shape == current.shape
@@ -43,4 +44,5 @@ def _denoiser() -> Denoiser3D:
         channel_multipliers=(1, 2),
         embedding_channels=8,
         latent_channels=4,
+        num_domains=1,
     )

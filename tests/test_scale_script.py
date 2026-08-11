@@ -84,6 +84,7 @@ def test_main_prints_plan_before_scaled_generation(
                     kwargs["blocks"],
                     kwargs["overlap"],
                     kwargs["guidance_scale"],
+                    kwargs["domain"],
                 )
             )
             assert "output" not in kwargs
@@ -103,6 +104,8 @@ def test_main_prints_plan_before_scaled_generation(
             "04_check_scale_up.py",
             "--weight",
             str(weights),
+            "--domain",
+            "1",
             "--blocks",
             "2",
             "2",
@@ -121,7 +124,7 @@ def test_main_prints_plan_before_scaled_generation(
     output = capsys.readouterr().out
     assert events == [
         ("plan", (8, 8, 8), 1),
-        ("generate", (2, 2, 2), 1, 1.0),
+        ("generate", (2, 2, 2), 1, 1.0, 1),
     ]
     assert output.index("State memory") < output.index("Status     : scaling")
     assert "Fusion memory: 8.00 KiB" in output
@@ -143,8 +146,8 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
         patch_size = 4
         num_phases = 3
 
-        def generate(self, *, guidance_scale):
-            events.append(("base", guidance_scale))
+        def generate(self, *, guidance_scale, domain):
+            events.append(("base", guidance_scale, domain))
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     class FakeScaled:
@@ -161,6 +164,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
                     kwargs["overlap"],
                     kwargs["base"] is not None,
                     kwargs["guidance_scale"],
+                    kwargs["domain"],
                 )
             )
             self.stats = plan
@@ -181,6 +185,8 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
             "04_check_scale_up.py",
             "--weight",
             str(tmp_path / "generator.pt"),
+            "--domain",
+            "2",
             "--count",
             "3",
             "--anchor-strength",
@@ -195,8 +201,8 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
     output = capsys.readouterr().out
     assert events == [
         ("plan", 8),
-        ("base", 1.75),
-        ("scaled", 8, True, 1.75),
+        ("base", 1.75, 2),
+        ("scaled", 8, True, 1.75, 2),
     ]
     assert "Base       : unanchored" in output
     assert "anchor planes" not in output

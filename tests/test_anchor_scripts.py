@@ -110,8 +110,8 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
         patch_size = 4
         num_phases = 3
 
-        def generate(self, *, anchors, anchor_strength, guidance_scale):
-            calls.append((anchors, anchor_strength, guidance_scale))
+        def generate(self, *, anchors, anchor_strength, guidance_scale, domain):
+            calls.append((anchors, anchor_strength, guidance_scale, domain))
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
@@ -129,6 +129,8 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
             "03_check_anchor.py",
             "--weight",
             str(tmp_path / "generator.pt"),
+            "--domain",
+            "1",
             "--gt",
             str(tmp_path / "gt.tiff"),
             "--count",
@@ -143,18 +145,19 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     module.main()
 
     output = capsys.readouterr().out
-    assert calls == [((), 0.0, 1.75)]
+    assert calls == [((), 0.0, 1.75, 1)]
     assert "Anchors  : 0 planes" in output
     assert "Conditioning : none" in output
 
 
 @pytest.mark.parametrize(
-    ("extra_args", "expected"),
-    (((), 1.0), (("--guidance-scale", "1.5"), 1.5)),
+    ("extra_args", "expected", "domain"),
+    (((), 1.0, None), (("--guidance-scale", "1.5", "--domain", "2"), 1.5, 2)),
 )
 def test_unconditioned_check_routes_guidance_scale(
     extra_args: tuple[str, ...],
     expected: float,
+    domain: int | None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -166,8 +169,8 @@ def test_unconditioned_check_routes_guidance_scale(
         patch_size = 4
         num_phases = 3
 
-        def generate(self, *, vf, guidance_scale):
-            calls.append((vf, guidance_scale))
+        def generate(self, *, vf, guidance_scale, domain):
+            calls.append((vf, guidance_scale, domain))
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
@@ -190,7 +193,7 @@ def test_unconditioned_check_routes_guidance_scale(
     assert output_path.is_file()
     assert tifffile.imread(output_path).shape == (4, 4, 4)
 
-    assert calls == [(None, expected)]
+    assert calls == [(None, expected, domain)]
 
 
 def test_unconditioned_check_propagates_generator_guidance_validation(
@@ -262,7 +265,7 @@ def _load_script(filename: str):
 def _config(root: Path) -> dict:
     return {
         "data": {
-            "folders": {axis: (root / str(axis),) for axis in (0, 1, 2)},
+            "domains": {0: {axis: (root / str(axis),) for axis in (0, 1, 2)}},
             "crop_size": 16,
             "input_size": 8,
             "num_phases": 3,

@@ -22,7 +22,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
     device = torch.device("cuda")
     cfg = {
         "data": {
-            "folders": {0: ".", 1: ".", 2: "."},
+            "domains": {0: {0: ".", 1: ".", 2: "."}},
             "crop_size": 64,
             "input_size": 64,
             "num_phases": 3,
@@ -101,7 +101,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             ema_denoiser=ema,
             critics=critics,
             connectivity_critic=connectivity_critic,
-            streams={axis: CudaStream(images) for axis in (0, 1, 2)},
+            streams={0: {axis: CudaStream(images) for axis in (0, 1, 2)}},
             diffusion=Diffusion(11, beta_min=0.1, beta_max=20.0).to(device),
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,

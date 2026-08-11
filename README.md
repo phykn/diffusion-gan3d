@@ -18,6 +18,24 @@ pip install -r requirements.txt
 
 Set the 2D section folders and training options in [`config/train.yaml`](config/train.yaml), then train the model:
 
+Each numeric domain contains its own folders for axes 0, 1, and 2:
+
+~~~yaml
+data:
+  domains:
+    0:
+      0: [data/domain_0/axis_0]
+      1: [data/domain_0/axis_1]
+      2: [data/domain_0/axis_2]
+    1:
+      0: [data/domain_1/axis_0]
+      1: [data/domain_1/axis_1]
+      2: [data/domain_1/axis_2]
+~~~
+
+Folders listed under one axis are pooled within that domain. Training uniformly
+samples one domain per step and takes all three axis batches from it.
+
 ```bash
 python run_train.py --device cuda
 # Or choose the exact output directory (it must not already exist):
@@ -31,9 +49,7 @@ real and generated slices. Use `isotropic` when all three axes are equivalent,
 or `false` to disable it. The configuration file keeps the same choices in a
 comment above the data section.
 
-Training configuration schema `2` intentionally starts a new run rather than
-loading pre-schema checkpoints. Anchor-task sampling is separate from
-classifier-free condition dropout: with both anchor and volume-fraction (VF)
+Anchor-task sampling is separate from classifier-free condition dropout: with both anchor and volume-fraction (VF)
 conditions available, the anchor-null, VF-null, and joint-null states each use
 5% of samples; a lone VF condition is dropped on 10%. VF targets are sampled
 from individual real crops instead of averaging the full axis batch, and the
@@ -54,14 +70,20 @@ from src.scale import ScaledGenerator
 generator = load_generator(generator_path, device)
 
 anchor = PlaneAnchor(image, axis=0, index=32)
-base = generator.generate(anchors=(anchor,))
+base = generator.generate(anchors=(anchor,), domain=0)
 
 volume = ScaledGenerator(generator).generate(
     blocks=(3, 3, 3),
     overlap=8,
     base=base,
+    domain=0,
 )
 ```
+
+Single-domain weights use domain 0 automatically when it is omitted.
+Multi-domain weights require a domain ID. Direct and scaled generation retain
+that domain through every denoising step; classifier-free guidance does not
+remove it from the baseline pass.
 
 Every block is a fixed `128³` model input. An overlap value of eight reserves
 an eight-voxel margin inside each block on every shared face, so adjacent blocks
@@ -98,15 +120,15 @@ and `--anchor-strength` is nonzero:
 
 ```bash
 python scripts/01_check_dataset.py
-python scripts/02_check_generated.py --weight run/<run-id>/generator.pt
-python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --gt scripts/gt_128.tiff --count 3
-python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --gt scripts/gt_128.tiff --count 3 --anchor-strength 0.65
-python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt
-python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --gt scripts/gt_128.tiff --count 3
+python scripts/02_check_generated.py --weight run/<run-id>/generator.pt --domain 0
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3 --anchor-strength 0.65
+python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0
+python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3
 ```
 
-These generation and evaluation CLIs accept `--guidance-scale` with a default
-of `1.0`. Generator-invoking paper CLIs also require an explicit `--weight`;
+These generation CLIs accept `--domain`. `--guidance-scale` defaults to
+`1.0`. Generator-invoking paper CLIs also require an explicit `--weight`;
 they never select the newest run implicitly, so cached metrics and assets
 remain tied to a known checkpoint.
 

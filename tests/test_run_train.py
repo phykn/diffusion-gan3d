@@ -38,6 +38,7 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         r1=0.0,
         transition=1,
         volume_size=8,
+        domain=2,
         critic_axes=(0.5, 0.7, 0.8),
         anchor_planes=3,
         anchor_conflict_rate=0.02,
@@ -89,6 +90,7 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
     assert "loss/normal_transition" in tags
     assert "conditioning/state_joint_null_fraction" in tags
     assert "train/volume_size" in tags
+    assert "train/domain" in tags
     assert "conditioning/vf_active" in tags
     assert "conditioning/vf_hard_mae" in tags
     assert "conditioning/vf_target_0" in tags
@@ -118,7 +120,7 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
         config,
         {
             "data": {
-                "folders": folders,
+                "domains": {0: folders},
                 "crop_size": 8,
                 "input_size": 8,
                 "augment": "directional",

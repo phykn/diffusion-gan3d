@@ -17,7 +17,7 @@ def test_straight_through_uses_raw_prediction_at_anchor_and_backpropagates() -> 
         replay_triplets_per_axis=1,
         max_triplets_per_step=2,
     )
-    connect.record_unconditional(_constant_prediction(0, 3, 5))
+    connect.record_unconditional(_constant_prediction(0, 3, 5), 0)
     seed = PlaneAnchor(
         torch.ones(5, 5, dtype=torch.uint8),
         axis=0,
@@ -26,7 +26,7 @@ def test_straight_through_uses_raw_prediction_at_anchor_and_backpropagates() -> 
     condition = _condition((seed,), num_phases=3, volume_size=5)
     prediction = _constant_prediction(2, 3, 5, requires_grad=True)
 
-    real, fake = connect.match_anchor(prediction, condition)
+    real, fake = connect.match_anchor(prediction, condition, 0)
 
     assert len(fake) == len(real) == 1
     assert set(fake.values.detach().unique().tolist()) == {-1.0, 1.0}
@@ -51,14 +51,14 @@ def test_endpoint_anchors_use_only_real_consecutive_slices() -> None:
         replay_triplets_per_axis=1,
         max_triplets_per_step=4,
     )
-    connect.record_unconditional(prediction)
+    connect.record_unconditional(prediction, 0)
     seeds = (
         PlaneAnchor(labels[0, 0].to(torch.uint8), axis=0, index=0),
         PlaneAnchor(labels[0, -1].to(torch.uint8), axis=0, index=size - 1),
     )
     condition = _condition(seeds, num_phases=size, volume_size=size)
 
-    real, fake = connect.match_anchor(prediction, condition)
+    real, fake = connect.match_anchor(prediction, condition, 0)
     hard = fake.values.argmax(dim=2)
 
     assert fake.axes.tolist() == [0, 0]
@@ -75,15 +75,15 @@ def test_online_reference_replay_is_cpu_float16_axis_matched_fifo() -> None:
         replay_triplets_per_axis=1,
         replay_capacity_per_axis=2,
     )
-    connect.record_unconditional(_constant_prediction(0, 2, 4))
+    connect.record_unconditional(_constant_prediction(0, 2, 4), 0)
     source = _constant_prediction(1, 2, 4, requires_grad=True)
-    connect.record_unconditional(source)
-    connect.record_unconditional(source)
+    connect.record_unconditional(source, 0)
+    connect.record_unconditional(source, 0)
     source.data.fill_(-9.0)
 
     assert connect.replay_size == 6
     for axis in (0, 1, 2):
-        entries = connect._replay._items[axis]
+        entries = connect._replays[0]._items[axis]
         assert len(entries) == 2
         for entry in entries:
             assert entry.values.device.type == "cpu"
@@ -100,10 +100,30 @@ def test_online_reference_replay_is_cpu_float16_axis_matched_fifo() -> None:
     real, fake = connect.match_anchor(
         _constant_prediction(1, 2, 4),
         condition,
+        0,
     )
 
     assert fake.axes.tolist() == [2]
     assert bool((real.values[:, :, 1] == 1.0).all())
+
+
+def test_replay_and_teachers_are_isolated_by_domain() -> None:
+    connect = _connectivity(num_phases=2, patch_size=4, num_domains=2)
+    prediction = _constant_prediction(1, 2, 4)
+    seed = PlaneAnchor(
+        torch.ones(4, 4, dtype=torch.uint8),
+        axis=0,
+        index=1,
+    )
+    condition = _condition((seed,), num_phases=2, volume_size=4)
+
+    connect.record_unconditional(prediction, 0)
+    real, fake = connect.match_anchor(prediction, condition, 1)
+    connect.record_seeded(prediction, (seed,), 0)
+
+    assert len(real) == len(fake) == 0
+    assert connect.teacher_count_for(4, 0) == 1
+    assert connect.teacher_count_for(4, 1) == 0
 
 
 def test_unconditional_replay_categorizes_only_sampled_triplets() -> None:
@@ -119,7 +139,7 @@ def test_unconditional_replay_categorizes_only_sampled_triplets() -> None:
         "_hard_labels",
         side_effect=AssertionError("full-volume conversion must not run"),
     ):
-        connect.record_unconditional(prediction)
+        connect.record_unconditional(prediction, 0)
 
     assert connect.replay_size == 3
 
@@ -135,11 +155,11 @@ def test_online_reference_matching_never_crosses_axes() -> None:
         replay_triplets_per_axis=1,
         replay_capacity_per_axis=1,
     )
-    connect.record_unconditional(prediction)
+    connect.record_unconditional(prediction, 0)
     seed = PlaneAnchor(labels[0, 2].to(torch.uint8), axis=0, index=2)
     condition = _condition((seed,), num_phases=3, volume_size=size)
 
-    real, fake = connect.match_anchor(prediction, condition)
+    real, fake = connect.match_anchor(prediction, condition, 0)
     phases = real.values.argmax(dim=2)[0, :, 0, 0]
 
     assert fake.axes.tolist() == [0]
@@ -153,12 +173,12 @@ def test_teacher_storage_keeps_raw_predicted_labels_without_seed_overlay() -> No
     seed_image = torch.ones(4, 4, dtype=torch.uint8)
     seed = PlaneAnchor(seed_image, axis=0, index=0)
 
-    connect.record_seeded(prediction, (seed,))
+    connect.record_seeded(prediction, (seed,), 0)
     prediction.data.fill_(-7.0)
     seed_image.zero_()
 
     assert connect.teacher_count == 1
-    entry = connect._teachers._items[0]
+    entry = connect._teachers[0]._items[0]
     assert entry.labels.device.type == "cpu"
     assert entry.labels.dtype == torch.uint8
     assert entry.labels.is_contiguous()
@@ -177,15 +197,15 @@ def test_teacher_bank_uses_one_global_fifo_byte_budget_across_volume_sizes() -> 
         teacher_bank_bytes=85,
     )
     _record_constant_teacher(connect, phase=0, volume_size=3)
-    assert connect.teacher_count_for(3) == 1
+    assert connect.teacher_count_for(3, 0) == 1
 
     _record_constant_teacher(connect, phase=2, volume_size=4)
 
     assert connect.teacher_storage_bytes == 85
     assert connect.teacher_count == 1
-    assert connect.teacher_count_for(3) == 0
-    assert connect.teacher_count_for(4) == 1
-    assert bool((connect._teachers._items[0].labels[1:] == 2).all())
+    assert connect.teacher_count_for(3, 0) == 0
+    assert connect.teacher_count_for(4, 0) == 1
+    assert bool((connect._teachers[0]._items[0].labels[1:] == 2).all())
 
 
 def test_record_seeded_splits_prediction_batch_into_independent_teachers() -> None:
@@ -207,10 +227,10 @@ def test_record_seeded_splits_prediction_batch_into_independent_teachers() -> No
         PlaneAnchor(image, axis=0, index=0, position=(0, 0)) for image in seed_images
     )
 
-    connect.record_seeded(prediction, seeds)
+    connect.record_seeded(prediction, seeds, 0)
 
     assert connect.teacher_count == 2
-    first, second = connect._teachers._items
+    first, second = connect._teachers[0]._items
     assert first.labels.shape == second.labels.shape == (4, 4, 4)
     assert bool((first.labels == 0).all())
     assert bool((second.labels == 2).all())
@@ -242,15 +262,15 @@ def test_teacher_sampling_supports_more_than_four_mixed_axis_strict_anchors() ->
 
     counts = torch.bincount(labels.flatten(), minlength=3).to(torch.float32)
     assert torch.allclose(teacher.target_vf[0], counts / counts.sum())
-    assert connect.teacher_count_for(8) == 1
+    assert connect.teacher_count_for(8, 0) == 1
 
 
 def test_connectivity_triplet_work_stays_bounded_for_many_mixed_anchors() -> None:
     connect, labels, teacher = _mixed_teacher(max_triplets_per_step=2)
     prediction = _prediction_from_labels(labels, num_phases=3, requires_grad=True)
-    connect.record_unconditional(prediction.detach())
+    connect.record_unconditional(prediction.detach(), 0)
 
-    real, fake = connect.match_anchor(prediction, teacher.condition)
+    real, fake = connect.match_anchor(prediction, teacher.condition, 0)
 
     assert teacher.condition.planes > 4
     assert len(fake) == len(real) == 2
@@ -416,14 +436,16 @@ def test_connectivity_critic_is_multiphase_and_exactly_reversal_invariant(
         num_phases=num_phases,
         channels=(4, 8),
         embedding_channels=8,
+        num_domains=2,
         reversal_invariant=True,
         gradient_checkpointing=False,
     )
     triplets = torch.randn(3, 3, num_phases, 15, 17, requires_grad=True)
     axes = torch.tensor((0, 1, 2))
+    domains = torch.zeros(3, dtype=torch.long)
 
-    forward = critic(triplets, axes)
-    reverse = critic(triplets.flip(1), axes)
+    forward = critic(triplets, axes, domains)
+    reverse = critic(triplets.flip(1), axes, domains)
 
     assert forward.logits_global.shape == (3,)
     assert forward.logits_local.shape[0] == 3
@@ -439,14 +461,20 @@ def test_connectivity_critic_rejects_invalid_axes() -> None:
         num_phases=2,
         channels=(4, 8),
         embedding_channels=8,
+        num_domains=2,
     )
     with pytest.raises(ValueError, match="only 0, 1, or 2"):
-        critic(torch.randn(1, 3, 2, 8, 8), torch.tensor((3,)))
+        critic(
+            torch.randn(1, 3, 2, 8, 8),
+            torch.tensor((3,)),
+            torch.zeros(1, dtype=torch.long),
+        )
 
 
 def _connectivity(
     *,
     num_phases: int = 3,
+    num_domains: int = 2,
     patch_size: int = 4,
     replay_triplets_per_axis: int = 2,
     replay_capacity_per_axis: int = 4,
@@ -459,6 +487,7 @@ def _connectivity(
 ) -> Connectivity:
     return Connectivity(
         num_phases=num_phases,
+        num_domains=num_domains,
         patch_size=patch_size,
         replay_triplets_per_axis=replay_triplets_per_axis,
         replay_capacity_per_axis=replay_capacity_per_axis,
@@ -535,7 +564,7 @@ def _record_constant_teacher(
         dtype=torch.uint8,
     )
     seed = PlaneAnchor(seed_image, axis=0, index=0, position=(0, 0))
-    connect.record_seeded(prediction, (seed,))
+    connect.record_seeded(prediction, (seed,), 0)
 
 
 def _mixed_teacher(*, max_triplets_per_step: int):
@@ -557,9 +586,10 @@ def _mixed_teacher(*, max_triplets_per_step: int):
         index=0,
         position=(0, 0),
     )
-    connect.record_seeded(prediction, (seed,))
+    connect.record_seeded(prediction, (seed,), 0)
     with patch.object(connect, "_sample_plane_count", return_value=8):
         teacher = connect.sample_teacher(
+            domain=0,
             volume_size=size,
             batch_size=1,
             device=torch.device("cpu"),

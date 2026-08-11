@@ -400,6 +400,17 @@ def test_overlap_metrics_report_degenerate_outputs_without_crashing() -> None:
     assert math.isnan(module.optional_float(None))
 
 
+def test_paper_metrics_uses_fixed_block_geometry() -> None:
+    module = _load_script("evaluate_paper_metrics.py")
+
+    assert module.scale_output_shape(128) == (352, 352, 352)
+    assert module.scale_seams((352, 352, 352), 128, 8) == (
+        (120, 232),
+        (120, 232),
+        (120, 232),
+    )
+
+
 @pytest.mark.parametrize(
     "filename",
     ("evaluate_anchor_sweep.py", "evaluate_paper_metrics.py"),
@@ -508,10 +519,22 @@ def test_scale_asset_writes_generation_sidecar(
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     class FakeScaled:
+        def shape_from_blocks(self, blocks, overlap):
+            assert blocks == module.BLOCKS
+            assert overlap == module.OVERLAP
+            return (12, 12, 12)
+
         def plan(self, shape, overlap):
             assert shape == (12, 12, 12)
             assert overlap == module.OVERLAP
-            return SimpleNamespace(tile_count=27, base_shell=0)
+            return SimpleNamespace(
+                tile_count=27,
+                base_shell=0,
+                tile_size=4,
+                stride=4,
+                shape=shape,
+                seams=((4, 8), (4, 8), (4, 8)),
+            )
 
         def generate(self, **kwargs):
             assert kwargs["guidance_scale"] == 1.75

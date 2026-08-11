@@ -132,6 +132,7 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
         torch.zeros(1, 2, 3, 3, 3),
         Mock(),
         transition=0,
+        domain=0,
     )
 
     assert augmented_real.center_slots.tolist() == [1, 1]
@@ -273,9 +274,27 @@ class _ConstantStream:
         return self.images.clone()
 
 
+def test_get_batches_uses_one_domain_for_all_axes() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.device = torch.device("cpu")
+    streams = {
+        domain: {
+            axis: _ConstantStream(torch.full((1, 2, 2), domain)) for axis in (0, 1, 2)
+        }
+        for domain in (0, 1)
+    }
+    trainer.streams = streams
+
+    batches = trainer.get_batches(1)
+
+    assert all(bool((batch == 1).all()) for batch in batches.values())
+    assert all(stream.calls == 0 for stream in streams[0].values())
+    assert all(stream.calls == 1 for stream in streams[1].values())
+
+
 def test_training_step_updates_denoiser_and_all_critics() -> None:
     data = DataConfig(
-        folders={0: ".", 1: ".", 2: "."},
+        domains={0: {0: ".", 1: ".", 2: "."}},
         crop_size=8,
         input_size=8,
         num_phases=3,
@@ -376,7 +395,7 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
 
 def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
     data = DataConfig(
-        folders={0: ".", 1: ".", 2: "."},
+        domains={0: {0: ".", 1: ".", 2: "."}},
         crop_size=8,
         input_size=8,
         num_phases=3,
@@ -530,7 +549,7 @@ def test_generate_pair_keeps_initial_noise_and_posterior_unprojected() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
     )
-    batches = trainer.get_batches()
+    batches = trainer.get_batches(0)
     selection = trainer.sample_real_anchor(batches, volume_size=8)
     presence = ConditionPresence(
         anchor=torch.tensor((False,)),
@@ -540,6 +559,7 @@ def test_generate_pair_keeps_initial_noise_and_posterior_unprojected() -> None:
         selection.condition,
         torch.tensor(((0.3, 0.3, 0.4),)),
         presence,
+        trainer.make_domain(0, 1),
     )
     trainer.diffusion = Diffusion(1)
 
@@ -696,7 +716,7 @@ def test_anchor_input_can_drop_while_raw_anchor_loss_stays_active() -> None:
 
 def test_vf_total_variation_uses_raw_prediction() -> None:
     trainer, _, _ = _conditioning_trainer(anchored=True)
-    batches = trainer.get_batches()
+    batches = trainer.get_batches(0)
     selection = trainer.sample_real_anchor(batches, volume_size=8)
     condition = selection.condition
     prediction = torch.full((1, 3, 8, 8, 8), -1.0)
@@ -859,6 +879,7 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
             r1=0.0,
             transition=0,
             volume_size=8,
+            domain=0,
             critic_axes=(1.0, 1.0, 1.0),
             anchor_planes=0,
             anchor_conflict_rate=0.0,
@@ -916,7 +937,7 @@ def _conditioning_trainer(
     cfg_single_drop_probability: float = 0.0,
 ) -> tuple[Trainer, nn.Module, dict[int, _ConstantStream]]:
     data = DataConfig(
-        folders={0: ".", 1: ".", 2: "."},
+        domains={0: {0: ".", 1: ".", 2: "."}},
         crop_size=crop_size,
         input_size=patch_size,
         num_phases=3,
@@ -1013,7 +1034,7 @@ def _make_trainer(
             ema_denoiser=ema_denoiser,
             critics=critics,
             connectivity_critic=connectivity_critic,
-            streams=streams,
+            streams={0: streams},
             diffusion=diffusion,
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,

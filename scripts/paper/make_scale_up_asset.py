@@ -80,6 +80,7 @@ def main() -> None:
             "seed": SEED,
             "axis": AXIS,
             "blocks": list(BLOCKS),
+            "scale_geometry": "fixed_blocks_inward_margins",
             "overlap": OVERLAP,
             "source_roi_left_top": list(ROI_POSITIONS[1]),
             "source_crop_size": CROP_SIZE,
@@ -110,7 +111,7 @@ def main() -> None:
     )
 
     scaled = ScaledGenerator(generator)
-    shape = tuple(generator.patch_size * count for count in BLOCKS)
+    shape = scaled.shape_from_blocks(BLOCKS, OVERLAP)
     plan = scaled.plan(shape, OVERLAP)
     print(f"Shape   : {shape}")
     print(f"Tiles   : {plan.tile_count}")
@@ -150,6 +151,10 @@ def main() -> None:
                 "scale_plan": {
                     "blocks": list(BLOCKS),
                     "overlap": OVERLAP,
+                    "block_size": plan.tile_size,
+                    "stride": plan.stride,
+                    "shape": list(plan.shape),
+                    "seams": [list(axis) for axis in plan.seams],
                     "tile_count": plan.tile_count,
                     "base_shell": assessment.shell,
                 },

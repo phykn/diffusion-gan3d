@@ -273,6 +273,7 @@ class ScaledGenerator:
         vf: Sequence[float] | None = None,
         progress: bool = True,
         guidance_scale: float = 1.0,
+        domain: int | None = None,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
@@ -292,6 +293,7 @@ class ScaledGenerator:
         storage = self.select_storage(plan, "auto", output_bytes)
         tiles = self.make_tiles(plan)
         vf = self.prepare_vf(vf)
+        domain = self.generator.prepare_domain(domain)
         base = self.prepare_base(base, plan)
         current, next_state = self.make_states(plan, storage)
         self.fill_noise(current, tiles)
@@ -302,6 +304,7 @@ class ScaledGenerator:
             plan,
             base,
             vf,
+            domain,
             labels=None,
             progress=progress,
             guidance_scale=guidance_scale,
@@ -327,6 +330,7 @@ class ScaledGenerator:
         *,
         shape: int | Sequence[int] | None = None,
         guidance_scale: float = 1.0,
+        domain: int | None = None,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
@@ -348,6 +352,7 @@ class ScaledGenerator:
         selected = self.select_storage(plan, storage)
         tiles = self.make_tiles(plan)
         vf = self.prepare_vf(vf)
+        domain = self.generator.prepare_domain(domain)
         base = self.prepare_base(base, plan)
         current, next_state = self.make_states(plan, selected)
         labels = torch.empty(plan.shape, dtype=torch.uint8)
@@ -359,6 +364,7 @@ class ScaledGenerator:
             plan,
             base,
             vf,
+            domain,
             labels=labels,
             progress=progress,
             guidance_scale=guidance_scale,
@@ -754,6 +760,7 @@ class ScaledGenerator:
         plan: ScalePlan,
         base: Base | None,
         vf: torch.Tensor | None,
+        domain: torch.Tensor,
         labels: torch.Tensor | None,
         progress: bool,
         guidance_scale: float = 1.0,
@@ -799,6 +806,7 @@ class ScaledGenerator:
                     time,
                     latent,
                     vf,
+                    domain,
                     transition,
                     plan,
                     final_labels,
@@ -821,6 +829,7 @@ class ScaledGenerator:
         time: torch.Tensor,
         latent: torch.Tensor,
         vf: torch.Tensor | None,
+        domain: torch.Tensor,
         transition: int,
         plan: ScalePlan,
         labels: torch.Tensor | None,
@@ -852,6 +861,7 @@ class ScaledGenerator:
                     time,
                     latent,
                     guidance_scale=guidance_scale,
+                    domain=domain,
                     vf=vf,
                 )
             expected = (1, generator.num_phases, *values.shape[-3:])

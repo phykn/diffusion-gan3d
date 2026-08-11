@@ -40,6 +40,7 @@ class Denoiser3D(nn.Module):
         channel_multipliers: Sequence[int],
         embedding_channels: int,
         latent_channels: int,
+        num_domains: int,
         gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
@@ -61,6 +62,8 @@ class Denoiser3D(nn.Module):
             nn.SiLU(),
             nn.Linear(embedding_channels, embedding_channels),
         )
+        self.num_domains = num_domains
+        self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv3d(num_phases, channels[0], 3, padding=1)
         self.anchor_input = nn.Conv3d(
             num_phases + 1,
@@ -130,6 +133,7 @@ class Denoiser3D(nn.Module):
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         vf_present: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
@@ -139,6 +143,7 @@ class Denoiser3D(nn.Module):
             x_current,
             time,
             latent,
+            domain,
             vf=vf,
             vf_present=vf_present,
             anchor_image=anchor_image,
@@ -151,12 +156,13 @@ class Denoiser3D(nn.Module):
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         vf_present: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        emb = self.embed(x_current, time, latent, vf, vf_present)
+        emb = self.embed(x_current, time, latent, domain, vf, vf_present)
         x = self.input(x_current)
         anchor_feat = self.encode_anchor(
             x_current,
@@ -197,6 +203,7 @@ class Denoiser3D(nn.Module):
         time: torch.Tensor,
         latent: torch.Tensor,
         guidance_scale: float,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         vf_present: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
@@ -212,18 +219,20 @@ class Denoiser3D(nn.Module):
                 x_current,
                 time,
                 latent,
+                domain,
                 vf=vf,
                 vf_present=vf_present,
                 anchor_image=anchor_image,
                 anchor_mask=anchor_mask,
             )
-        unconditional = self.predict_logits(x_current, time, latent)
+        unconditional = self.predict_logits(x_current, time, latent, domain)
         if guidance_scale == 0.0:
             return self.decode(unconditional)
         conditional = self.predict_logits(
             x_current,
             time,
             latent,
+            domain,
             vf=vf,
             vf_present=vf_present,
             anchor_image=anchor_image,
@@ -243,6 +252,7 @@ class Denoiser3D(nn.Module):
         inputs: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
+        domain: torch.Tensor,
         vf: torch.Tensor | None,
         vf_present: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -252,6 +262,8 @@ class Denoiser3D(nn.Module):
         time_emb = self.time_mlp(self.time_emb(time).to(dtype=inputs.dtype))
         latent_emb = self.latent_mlp(latent)
         emb = (time_emb + latent_emb) * INV_SQRT_TWO
+        domain_emb = self.domain_embedding(domain.to(inputs.device)).to(inputs.dtype)
+        emb = (emb + domain_emb) * INV_SQRT_TWO
         if vf is not None:
             vf = vf.to(device=inputs.device, dtype=inputs.dtype)
             vf_emb = self.vf_mlp(vf)

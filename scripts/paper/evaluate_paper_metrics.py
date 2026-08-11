@@ -3,6 +3,7 @@ import csv
 import json
 import sys
 from importlib.metadata import version
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -100,8 +101,10 @@ def main() -> None:
         "volume_seeds": list(SEEDS),
         "axis": AXIS,
         "anchor_counts": list(ANCHOR_COUNTS),
+        "scale_geometry": "fixed_blocks_inward_margins",
         "scale_blocks": list(SCALE_BLOCKS),
         "scale_overlap": SCALE_OVERLAP,
+        "scale_output_shape": list(scale_output_shape(patch_size)),
         "reference_shape": list(reference.shape),
         "phase_fraction_target": [target_porosity, 1.0 - target_porosity],
     }
@@ -163,7 +166,7 @@ def main() -> None:
             if condition.startswith("3D (anchored"):
                 accuracy = voxel_accuracy(volume, reference)
             if condition == "3D (scale-up)":
-                seams = scale_seams(volume.shape, patch_size)
+                seams = scale_seams(volume.shape, patch_size, SCALE_OVERLAP)
                 seam_drop = seam_connectivity_drop(volume, seams)
             kid_mean, kid_subset_std = kid_scores[(condition, seed)]
             raw_rows.append(
@@ -274,13 +277,17 @@ def generate_volumes(
                     ),
                     guidance_scale=guidance_scale,
                 )
-                volume = ScaledGenerator(generator).generate(
+                scaled = ScaledGenerator(generator)
+                volume = scaled.generate(
                     blocks=SCALE_BLOCKS,
                     overlap=SCALE_OVERLAP,
                     base=base,
                     progress=False,
                     guidance_scale=guidance_scale,
                 )
+                expected_shape = scaled.shape_from_blocks(SCALE_BLOCKS, SCALE_OVERLAP)
+                if tuple(volume.shape) != expected_shape:
+                    raise RuntimeError("scale-up output does not match its block plan.")
             else:
                 raise RuntimeError(f"unsupported condition: {condition}")
             path = volume_path(condition, seed)
@@ -395,11 +402,26 @@ def select_indices(size: int, count: int) -> tuple[int, ...]:
     return tuple((2 * index + 1) * size // (2 * count) for index in range(count))
 
 
+def scale_output_shape(patch_size: int) -> tuple[int, int, int]:
+    stride = patch_size - 2 * SCALE_OVERLAP
+    return tuple(patch_size + (count - 1) * stride for count in SCALE_BLOCKS)
+
+
 def scale_seams(
     shape: tuple[int, ...],
     patch_size: int,
+    overlap: int,
 ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    return tuple(tuple(range(patch_size, size, patch_size)) for size in shape)  # type: ignore[return-value]
+    if 2 * overlap >= patch_size:
+        raise ValueError("twice overlap must be smaller than patch_size.")
+    stride = patch_size - 2 * overlap
+    starts = tuple(
+        ScaledGenerator.axis_starts(size, patch_size, stride) for size in shape
+    )
+    return tuple(  # type: ignore[return-value]
+        tuple((left + patch_size + right) // 2 for left, right in pairwise(axis))
+        for axis in starts
+    )
 
 
 def seam_connectivity_drop(
@@ -566,8 +588,18 @@ def write_manifest(
             1.0 - reference_porosity,
         ],
         "anchor_counts": list(ANCHOR_COUNTS),
+        "scale_geometry": "fixed_blocks_inward_margins",
         "scale_blocks": list(SCALE_BLOCKS),
         "scale_overlap": SCALE_OVERLAP,
+        "scale_output_shape": list(scale_output_shape(reference.shape[0])),
+        "scale_seams": [
+            list(axis)
+            for axis in scale_seams(
+                scale_output_shape(reference.shape[0]),
+                reference.shape[0],
+                SCALE_OVERLAP,
+            )
+        ],
         "reference_porosity": reference_porosity,
         "reference_tortuosity_axis0": reference_tortuosity,
         "kid": {

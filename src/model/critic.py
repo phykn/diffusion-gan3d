@@ -7,6 +7,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .blocks import (
+    INV_SQRT_TWO,
     AdaptiveResBlock2D,
     SinusoidalTimeEmbedding,
     choose_groups,
@@ -25,6 +26,7 @@ class _Critic2D(nn.Module):
         input_channels: int,
         channels: Sequence[int],
         embedding_channels: int,
+        num_domains: int,
         gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
@@ -33,6 +35,7 @@ class _Critic2D(nn.Module):
             raise ValueError("channels must contain at least two levels.")
 
         self.gradient_checkpointing = gradient_checkpointing
+        self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv2d(input_channels, widths[0], 3, padding=1)
         self.blocks = nn.ModuleList(
             AdaptiveResBlock2D(ch, ch, embedding_channels) for ch in widths
@@ -62,7 +65,10 @@ class _Critic2D(nn.Module):
         self,
         inputs: torch.Tensor,
         embedding: torch.Tensor,
+        domain: torch.Tensor,
     ) -> CriticScores:
+        domain_emb = self.domain_embedding(domain.to(inputs.device)).to(inputs.dtype)
+        embedding = (embedding + domain_emb) * INV_SQRT_TWO
         x = self.input(inputs)
         for idx, block in enumerate(self.blocks):
             x = self.run_block(block, x, embedding)
@@ -100,12 +106,14 @@ class PairCritic2D(_Critic2D):
         num_phases: int,
         channels: Sequence[int],
         embedding_channels: int,
+        num_domains: int,
         gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__(
             input_channels=2 * num_phases,
             channels=channels,
             embedding_channels=embedding_channels,
+            num_domains=num_domains,
             gradient_checkpointing=gradient_checkpointing,
         )
         self.time_embedding = SinusoidalTimeEmbedding(embedding_channels)
@@ -120,13 +128,14 @@ class PairCritic2D(_Critic2D):
         x_previous: torch.Tensor,
         x_current: torch.Tensor,
         time: torch.Tensor,
+        domain: torch.Tensor,
     ) -> CriticScores:
         embedding = self.time_mlp(
             self.time_embedding(time.to(device=x_previous.device)).to(
                 dtype=x_previous.dtype
             )
         )
-        return self.score(torch.cat((x_previous, x_current), dim=1), embedding)
+        return self.score(torch.cat((x_previous, x_current), dim=1), embedding, domain)
 
 
 class ConnectivityCritic2D(_Critic2D):
@@ -135,6 +144,7 @@ class ConnectivityCritic2D(_Critic2D):
         num_phases: int,
         channels: Sequence[int],
         embedding_channels: int,
+        num_domains: int,
         reversal_invariant: bool = True,
         gradient_checkpointing: bool = False,
     ) -> None:
@@ -142,6 +152,7 @@ class ConnectivityCritic2D(_Critic2D):
             input_channels=3 * num_phases,
             channels=channels,
             embedding_channels=embedding_channels,
+            num_domains=num_domains,
             gradient_checkpointing=gradient_checkpointing,
         )
         if not isinstance(reversal_invariant, bool):
@@ -159,6 +170,7 @@ class ConnectivityCritic2D(_Critic2D):
         self,
         triplets: torch.Tensor,
         axes: torch.Tensor,
+        domain: torch.Tensor,
     ) -> CriticScores:
         if triplets.ndim != 5 or triplets.shape[1] != 3:
             raise ValueError("triplets must have shape [B, 3, C, H, W].")
@@ -168,10 +180,10 @@ class ConnectivityCritic2D(_Critic2D):
         if axes.numel() and (int(axes.min()) < 0 or int(axes.max()) > 2):
             raise ValueError("axes must contain only 0, 1, or 2.")
 
-        forward = self.score_once(triplets, axes)
+        forward = self.score_once(triplets, axes, domain)
         if not self.reversal_invariant:
             return forward
-        reverse = self.score_once(triplets.flip(1), axes)
+        reverse = self.score_once(triplets.flip(1), axes, domain)
         return CriticScores(
             logits_global=(forward.logits_global + reverse.logits_global) * 0.5,
             logits_local=(forward.logits_local + reverse.logits_local) * 0.5,
@@ -181,6 +193,7 @@ class ConnectivityCritic2D(_Critic2D):
         self,
         triplets: torch.Tensor,
         axes: torch.Tensor,
+        domain: torch.Tensor,
     ) -> CriticScores:
         embedding = self.axis_mlp(self.axis_embedding(axes)).to(dtype=triplets.dtype)
-        return self.score(triplets.flatten(1, 2), embedding)
+        return self.score(triplets.flatten(1, 2), embedding, domain)

@@ -21,6 +21,11 @@ def main() -> None:
         help="generator weight to load",
     )
     parser.add_argument(
+        "--domain",
+        type=int,
+        help="numeric domain ID (required for multi-domain weights)",
+    )
+    parser.add_argument(
         "--guidance-scale",
         type=float,
         default=1.0,
@@ -55,6 +60,7 @@ def main() -> None:
     vol = generator.generate(
         vf=None,
         guidance_scale=args.guidance_scale,
+        domain=args.domain,
     )
     print("Status  : complete", flush=True)
     if args.out is not None:
@@ -100,11 +106,11 @@ def show_napari(vol: torch.Tensor) -> None:
     viewer.dims.ndisplay = 3
     napari.run()
 
+
 def save_volume(vol: torch.Tensor, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tifffile.imwrite(path, vol.detach().cpu().to(torch.uint8).numpy())
     print(f"Output  : {path.resolve()}", flush=True)
-
 
 
 if __name__ == "__main__":

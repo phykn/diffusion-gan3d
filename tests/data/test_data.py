@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from src.build import build_stream, find_slices
+from src.build import build_datasets, build_stream, find_slices, get_domains
 from src.dataset import SliceDataset
 from src.train.engine import Trainer
 
@@ -157,6 +157,49 @@ class AxisDataTest(unittest.TestCase):
                         torch.full_like(previous_slices, 10_000.0),
                     )
                 )
+
+
+class DomainDataTest(unittest.TestCase):
+    def test_domain_datasets_keep_axis_folders_separate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            domains = {}
+            for domain in range(2):
+                axes = {}
+                for axis in range(3):
+                    folder = root / str(domain) / str(axis)
+                    folder.mkdir(parents=True)
+                    value = 3 * domain + axis
+                    _save_image(
+                        folder / "sample.png",
+                        np.full((4, 4), value, dtype=np.uint8),
+                    )
+                    axes[axis] = [folder]
+                domains[domain] = axes
+            cfg = {
+                "data": {
+                    "domains": domains,
+                    "crop_size": 4,
+                    "input_size": 4,
+                }
+            }
+
+            datasets = build_datasets(cfg)
+            samples = {
+                (domain, axis): datasets[domain][axis][0]
+                for domain in range(2)
+                for axis in range(3)
+            }
+
+        self.assertEqual(set(datasets), {0, 1})
+        for domain in range(2):
+            for axis in range(3):
+                expected = 3 * domain + axis
+                self.assertTrue(bool((samples[domain, axis] == expected).all()))
+
+    def test_domain_ids_are_contiguous_and_start_at_zero(self):
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            get_domains({"domains": {1: {}}})
 
 
 if __name__ == "__main__":

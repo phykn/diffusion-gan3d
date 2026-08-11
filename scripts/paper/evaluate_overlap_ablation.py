@@ -51,6 +51,7 @@ def main() -> None:
             "seeds": list(SEEDS),
             "overlaps": list(OVERLAPS),
             "blocks": list(BLOCKS),
+            "scale_geometry": "fixed_blocks_inward_margins",
             "default_overlap": DEFAULT_SCALE_OVERLAP,
             "seam_exclusion_radius": SEAM_EXCLUSION_RADIUS,
         },
@@ -79,6 +80,7 @@ def main() -> None:
             if device.type == "cuda":
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats(device)
+                torch.cuda.synchronize(device)
             start = perf_counter()
             volume = scaled.generate(
                 blocks=BLOCKS,
@@ -90,19 +92,24 @@ def main() -> None:
                 torch.cuda.synchronize(device)
             elapsed = perf_counter() - start
             assert scaled.stats is not None
+            plan = scaled.stats
+            if len(plan.seams[0]) != 1 or plan.seams[1:] != ((), ()):
+                raise RuntimeError("two-block ablation must produce one axis-0 seam.")
             quality = diagnostic.measure_seams(
                 volume,
-                scaled.stats.seams,
+                plan.seams,
                 overlap,
                 generator.num_phases,
             )
             exact_ratio = exact_seam_change_ratio(
                 volume,
-                generator.patch_size,
+                plan.seams[0][0],
             )
             row: dict[str, float | int] = {
                 "seed": seed,
                 "overlap": overlap,
+                "output_axis0": plan.shape[0],
+                "seam_axis0": plan.seams[0][0],
                 "guidance_scale": args.guidance_scale,
                 "exact_seam_change_ratio": exact_ratio,
                 "band_change_ratio": optional_float(quality.change_ratio[0]),
@@ -132,7 +139,10 @@ def main() -> None:
                 "overlaps": list(OVERLAPS),
                 "default_overlap": DEFAULT_SCALE_OVERLAP,
                 "blocks": list(BLOCKS),
-                "output_shape": [generator.patch_size * count for count in BLOCKS],
+                "output_shapes": {
+                    str(overlap): list(scaled.shape_from_blocks(BLOCKS, overlap))
+                    for overlap in OVERLAPS
+                },
                 "seam_exclusion_radius": SEAM_EXCLUSION_RADIUS,
                 "exact_seam_change_ratio": (
                     "phase-change rate at the exact tile boundary divided by "
@@ -197,8 +207,14 @@ def summarize(
     summary = []
     for overlap in OVERLAPS:
         selected = [row for row in rows if row["overlap"] == overlap]
+        output_sizes = {int(row["output_axis0"]) for row in selected}
+        seam_positions = {int(row["seam_axis0"]) for row in selected}
+        if len(output_sizes) != 1 or len(seam_positions) != 1:
+            raise ValueError("geometry must be constant across seeds.")
         result: dict[str, float | int] = {
             "overlap": overlap,
+            "output_axis0": output_sizes.pop(),
+            "seam_axis0": seam_positions.pop(),
             "guidance_scale": guidance_scale,
             "samples": len(selected),
         }

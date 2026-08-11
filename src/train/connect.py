@@ -343,6 +343,7 @@ class Connectivity:
         self,
         *,
         num_phases: int,
+        num_domains: int,
         patch_size: int,
         replay_triplets_per_axis: int,
         replay_capacity_per_axis: int,
@@ -355,6 +356,7 @@ class Connectivity:
     ) -> None:
         for name, value in (
             ("num_phases", num_phases),
+            ("num_domains", num_domains),
             ("patch_size", patch_size),
             ("replay_triplets_per_axis", replay_triplets_per_axis),
             ("max_triplets_per_step", max_triplets_per_step),
@@ -388,27 +390,31 @@ class Connectivity:
         self.max_density = float(max_density)
         self.min_spacing = min_spacing
         self.mixed_axis_probability = float(mixed_axis_probability)
-        self._replay = _TripletReplay(replay_capacity_per_axis)
-        self._teachers = _TeacherBank(teacher_bank_bytes)
+        self._replays = tuple(
+            _TripletReplay(replay_capacity_per_axis) for _ in range(num_domains)
+        )
+        self._teachers = tuple(
+            _TeacherBank(teacher_bank_bytes) for _ in range(num_domains)
+        )
 
     @property
     def replay_size(self) -> int:
-        return len(self._replay)
+        return sum(map(len, self._replays))
 
     @property
     def teacher_count(self) -> int:
-        return len(self._teachers)
+        return sum(map(len, self._teachers))
 
     @property
     def teacher_storage_bytes(self) -> int:
-        return self._teachers.storage_bytes
+        return sum(bank.storage_bytes for bank in self._teachers)
 
-    def teacher_count_for(self, volume_size: int) -> int:
-        return self._teachers.count_for(volume_size)
+    def teacher_count_for(self, volume_size: int, domain: int) -> int:
+        return self._teachers[domain].count_for(volume_size)
 
-    def record_unconditional(self, prediction: torch.Tensor) -> None:
+    def record_unconditional(self, prediction: torch.Tensor, domain: int) -> None:
         for axis in AXES:
-            self._replay.add(
+            self._replays[domain].add(
                 self._sample_unconditional_triplets(
                     prediction,
                     axis,
@@ -420,33 +426,36 @@ class Connectivity:
         self,
         prediction: torch.Tensor,
         seeds: Sequence[PlaneAnchor],
+        domain: int,
     ) -> None:
         labels = self._hard_labels(prediction)
-        self._teachers.add(labels, seeds, self.num_phases)
+        self._teachers[domain].add(labels, seeds, self.num_phases)
 
     def match_anchor(
         self,
         prediction: torch.Tensor,
         condition: AnchorCondition,
+        domain: int,
     ) -> tuple[TripletBatch, TripletBatch]:
         categorical = self._straight_through(prediction)
         candidates = self._sample_anchor_triplets(categorical, condition)
         candidates = self._limit_triplets(candidates)
-        real, matched = self._replay.sample_matched(candidates)
+        real, matched = self._replays[domain].sample_matched(candidates)
         return real, candidates.index_select(matched)
 
     def sample_teacher(
         self,
         *,
+        domain: int,
         volume_size: int,
         batch_size: int,
         device: torch.device,
         dtype: torch.dtype,
         generator: torch.Generator | None = None,
     ) -> TeacherAnchor | None:
-        if self.teacher_count_for(volume_size) < self.teacher_min_entries:
+        if self.teacher_count_for(volume_size, domain) < self.teacher_min_entries:
             return None
-        entries = self._teachers.sample(
+        entries = self._teachers[domain].sample(
             volume_size,
             batch_size,
             generator=generator,

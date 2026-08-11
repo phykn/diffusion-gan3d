@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import torch
@@ -17,6 +17,25 @@ from .train.ema import build_ema
 from .train.engine import Trainer, TrainerComponents, TrainerSettings
 from .train.weights import load_weights
 from .utils import load_yaml
+
+
+def get_domains(
+    data: Mapping[str, object],
+) -> dict[int, dict[int, Sequence[str | Path]]]:
+    domains = data["domains"]
+    if not isinstance(domains, Mapping):
+        raise TypeError("data.domains must be a mapping.")
+    if not domains:
+        raise ValueError("data.domains must not be empty.")
+    if set(domains) != set(range(len(domains))):
+        raise ValueError("domain IDs must be contiguous and start at zero.")
+    parsed = {}
+    for domain, folders in domains.items():
+        if not isinstance(folders, Mapping):
+            raise TypeError(f"domain {domain} must map axes to folders.")
+        parsed[domain] = dict(folders)
+    return parsed
+
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
 
@@ -54,16 +73,18 @@ def find_slices(
     return grouped
 
 
-def build_datasets(cfg: dict) -> dict[int, SliceDataset]:
+def build_datasets(cfg: dict) -> dict[int, dict[int, SliceDataset]]:
     data = cfg["data"]
-    grouped = find_slices(data["folders"])
     return {
-        axis: SliceDataset(
-            grouped[axis],
-            crop_size=data["crop_size"],
-            patch_size=data["input_size"],
-        )
-        for axis in AXES
+        domain_id: {
+            axis: SliceDataset(
+                paths,
+                crop_size=data["crop_size"],
+                patch_size=data["input_size"],
+            )
+            for axis, paths in find_slices(folders).items()
+        }
+        for domain_id, folders in get_domains(data).items()
     }
 
 
@@ -96,6 +117,7 @@ def build_denoiser(
 ) -> Denoiser3D:
     data = cfg["data"]
     model = cfg["model"]
+    num_domains = len(get_domains(data))
     checkpointing = (
         model["gradient_checkpointing"] if checkpointing is None else checkpointing
     )
@@ -105,6 +127,7 @@ def build_denoiser(
         channel_multipliers=model["channel_multipliers"],
         embedding_channels=model["embedding_channels"],
         latent_channels=model["latent_channels"],
+        num_domains=num_domains,
         gradient_checkpointing=checkpointing,
     )
 
@@ -115,6 +138,7 @@ def build_models(
     data = cfg["data"]
     model = cfg["model"]
     connectivity = cfg["connectivity"]
+    num_domains = len(get_domains(data))
     denoiser = build_denoiser(cfg)
     critics = nn.ModuleDict(
         {
@@ -122,6 +146,7 @@ def build_models(
                 num_phases=data["num_phases"],
                 channels=model["critic_channels"],
                 embedding_channels=model["embedding_channels"],
+                num_domains=num_domains,
                 gradient_checkpointing=model["gradient_checkpointing"],
             )
             for axis in AXES
@@ -131,6 +156,7 @@ def build_models(
         num_phases=data["num_phases"],
         channels=model["critic_channels"],
         embedding_channels=model["embedding_channels"],
+        num_domains=num_domains,
         reversal_invariant=connectivity["reversal_invariant"],
         gradient_checkpointing=model["gradient_checkpointing"],
     )
@@ -246,13 +272,16 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     use_amp = train["mixed_precision"] and device.type == "cuda"
     datasets = build_datasets(cfg)
     streams = {
-        axis: build_stream(
-            datasets[axis],
-            batch_size=data["batch_size"],
-            num_workers=data["num_workers"],
-            pin_memory=device.type == "cuda",
-        )
-        for axis in AXES
+        domain_id: {
+            axis: build_stream(
+                dataset,
+                batch_size=data["batch_size"],
+                num_workers=data["num_workers"],
+                pin_memory=device.type == "cuda",
+            )
+            for axis, dataset in axes.items()
+        }
+        for domain_id, axes in datasets.items()
     }
 
     return Trainer(

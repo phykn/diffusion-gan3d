@@ -38,7 +38,7 @@ def test_find_train_config_walks_from_numbered_checkpoint(tmp_path: Path) -> Non
 
 def test_yaml_config_remains_a_plain_mapping(tmp_path: Path) -> None:
     cfg = {
-        "data": {"folders": {0: ["data/0"]}, "input_size": 64},
+        "data": {"domains": {0: {0: ["data/0"]}}, "input_size": 64},
         "train": {"volume_batch_size": 1},
     }
     path = tmp_path / "train.yaml"

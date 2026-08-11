@@ -113,6 +113,7 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "loss/normal_transition": metrics.normal_transition_loss,
         "train/transition": metrics.transition,
         "train/volume_size": metrics.volume_size,
+        "train/domain": metrics.domain,
         "train/connectivity_triplets": metrics.connectivity_triplets,
         "train/connectivity_replay": metrics.connectivity_replay,
         "train/teacher_volumes": metrics.teacher_volumes,

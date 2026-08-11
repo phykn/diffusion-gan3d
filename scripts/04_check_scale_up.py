@@ -46,6 +46,11 @@ def main() -> None:
         help="generator weight to load",
     )
     parser.add_argument(
+        "--domain",
+        type=int,
+        help="numeric domain ID (required for multi-domain weights)",
+    )
+    parser.add_argument(
         "--gt",
         type=Path,
         help="ground-truth TIFF volume used to build anchors",
@@ -127,7 +132,10 @@ def main() -> None:
     elif anchor_count == 0:
         print("Base       : unanchored")
         print("Status     : generating base...", flush=True)
-        base = generator.generate(guidance_scale=args.guidance_scale)
+        base = generator.generate(
+            guidance_scale=args.guidance_scale,
+            domain=args.domain,
+        )
     else:
         assert args.gt is not None
         target = load_volume(
@@ -147,6 +155,7 @@ def main() -> None:
             anchors=anchors,
             anchor_strength=args.anchor_strength,
             guidance_scale=args.guidance_scale,
+            domain=args.domain,
         )
         base_acc = get_accuracy(base, target, indices, AXIS)
 
@@ -167,6 +176,7 @@ def main() -> None:
         base=base,
         vf=None,
         guidance_scale=args.guidance_scale,
+        domain=args.domain,
     )
     stats = scaled.stats
     assert stats is not None

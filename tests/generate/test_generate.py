@@ -180,6 +180,30 @@ def test_generator_prepares_vf_on_its_device() -> None:
     assert generator.prepare_vf(None) is None
 
 
+def test_generator_requires_and_reuses_multi_domain() -> None:
+    model = _TraceModel()
+    model.num_domains = 2
+    generator = _generator(model, Diffusion(3))
+
+    with pytest.raises(ValueError, match="domain is required"):
+        generator.generate_probs()
+
+    generator.generate_probs(domain=1)
+
+    assert [call.domain.tolist() for call in model.calls] == [[1], [1], [1]]
+    assert all(call.domain is model.calls[0].domain for call in model.calls)
+
+
+@pytest.mark.parametrize("domain", (-1, 2, True))
+def test_generator_rejects_invalid_domain(domain: object) -> None:
+    model = _TraceModel()
+    model.num_domains = 2
+    generator = _generator(model, Diffusion(1))
+
+    with pytest.raises(ValueError, match="domain"):
+        generator.generate_probs(domain=domain)
+
+
 @pytest.mark.parametrize(
     "vf",
     (
@@ -242,6 +266,23 @@ def test_regular_sampling_keeps_unconditional_reverse_steps_unconditioned() -> N
 
     assert [call.transition for call in model.calls] == [2, 1, 0]
     assert all(call.vf is None for call in model.calls)
+
+
+def test_scaled_sampling_reuses_domain_for_every_tile_and_step() -> None:
+    model = _TraceModel()
+    model.num_domains = 2
+    scaled = ScaledGenerator(_generator(model, Diffusion(2)))
+
+    scaled.generate(
+        shape=(6, 4, 4),
+        overlap=0,
+        progress=False,
+        domain=1,
+    )
+
+    assert model.calls
+    assert all(call.domain.tolist() == [1] for call in model.calls)
+    assert all(call.domain is model.calls[0].domain for call in model.calls)
 
 
 def test_guidance_scale_one_preserves_default_rng_path() -> None:
@@ -330,6 +371,7 @@ def test_amp_guidance_runs_direct_and_scaled_with_float32_diffusion_state() -> N
             channel_multipliers=(1, 2),
             embedding_channels=8,
             latent_channels=4,
+            num_domains=1,
         )
         .eval()
         .to(device)
@@ -439,6 +481,7 @@ def test_base_only_guidance_is_a_no_op() -> None:
         channel_multipliers=(1, 2),
         embedding_channels=8,
         latent_channels=4,
+        num_domains=1,
     ).eval()
     scaled = ScaledGenerator(_generator(model, Diffusion(2)))
     base = torch.randint(0, 3, (4, 4, 4), dtype=torch.uint8)
@@ -840,6 +883,7 @@ def test_real_denoiser_accepts_one_sided_boundary_tiles() -> None:
         channel_multipliers=(1, 2),
         embedding_channels=8,
         latent_channels=4,
+        num_domains=1,
     ).eval()
     scaled = ScaledGenerator(_generator(model, Diffusion(1)))
 
@@ -1031,6 +1075,7 @@ def test_default_scale_workspace_does_not_force_small_outputs_to_cpu() -> None:
         channel_multipliers=(1, 2, 4, 4),
         embedding_channels=32,
         latent_channels=8,
+        num_domains=1,
     )
     scaled = ScaledGenerator(_generator(model, Diffusion(1), patch_size=64))
 
@@ -1194,6 +1239,7 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
         time,
         latent,
         None,
+        torch.zeros(1, dtype=torch.long),
         0,
         plan,
         None,
@@ -1228,6 +1274,7 @@ def test_boundary_tile_reads_only_bounded_context() -> None:
         torch.zeros(1, dtype=torch.long),
         torch.zeros(1, 4),
         None,
+        torch.zeros(1, dtype=torch.long),
         0,
         plan,
         None,
@@ -1549,6 +1596,7 @@ class _ModelCall:
     latent: torch.Tensor
     current: torch.Tensor
     current_ptr: int
+    domain: torch.Tensor
     vf: torch.Tensor | None
 
 
@@ -1594,6 +1642,7 @@ class _TraceModel(torch.nn.Module):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         transition = int(timestep.item())
@@ -1605,6 +1654,7 @@ class _TraceModel(torch.nn.Module):
                 timestep=timestep,
                 latent=latent,
                 current=current.detach().clone(),
+                domain=domain,
                 current_ptr=current.untyped_storage().data_ptr(),
                 vf=vf,
             )
@@ -1628,6 +1678,7 @@ class _AnchorTraceModel(torch.nn.Module):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         anchor_image: torch.Tensor,
         anchor_mask: torch.Tensor,
         vf: torch.Tensor | None = None,
@@ -1659,6 +1710,7 @@ class _PhaseModel(torch.nn.Module):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del timestep, latent, vf
@@ -1675,12 +1727,13 @@ class _OptionalAnchorPhaseModel(_PhaseModel):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del anchor_image, anchor_mask
-        return super().forward(current, timestep, latent, vf=vf)
+        return super().forward(current, timestep, latent, domain=domain, vf=vf)
 
 
 class _LocalModel(torch.nn.Module):
@@ -1692,6 +1745,7 @@ class _LocalModel(torch.nn.Module):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del timestep, latent, vf
@@ -1711,6 +1765,7 @@ class _FailModel(torch.nn.Module):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del current, timestep, latent, vf
@@ -1726,6 +1781,7 @@ class _PreciseModel(torch.nn.Module):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del timestep, latent, vf
@@ -1744,6 +1800,7 @@ class _TileProbabilityModel(torch.nn.Module):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del timestep, latent, vf
@@ -1764,6 +1821,7 @@ class _PaddingModel(torch.nn.Module):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del timestep, latent, vf
@@ -1781,6 +1839,7 @@ class _ControlledModel(torch.nn.Module):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         shape = (current.shape[0], 1, 1, 1, 1)
@@ -1813,6 +1872,7 @@ class _GuidanceTraceModel(_ControlledModel):
         timestep: torch.Tensor,
         latent: torch.Tensor,
         guidance_scale: float,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
@@ -1820,7 +1880,7 @@ class _GuidanceTraceModel(_ControlledModel):
         del anchor_image, anchor_mask
         self.guidance_scales.append(guidance_scale)
         self.guidance_inputs.append((current, timestep, latent, vf))
-        return self.forward(current, timestep, latent, vf=vf)
+        return self.forward(current, timestep, latent, domain=domain, vf=vf)
 
 
 class _TraceDiffusion(Diffusion):
@@ -1913,6 +1973,8 @@ def _generator(
     use_amp: bool = False,
 ) -> Generator:
     device = torch.device("cpu") if device is None else device
+    if not hasattr(model, "num_domains"):
+        model.num_domains = 1
     return Generator(
         model,
         diffusion,
@@ -1927,7 +1989,7 @@ def _generator(
 def _config(root: Path) -> dict:
     return {
         "data": {
-            "folders": {axis: root / str(axis) for axis in (0, 1, 2)},
+            "domains": {0: {axis: [root / str(axis)] for axis in (0, 1, 2)}},
             "crop_size": 8,
             "input_size": 8,
             "num_phases": 3,

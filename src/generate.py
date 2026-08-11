@@ -19,6 +19,7 @@ class _GuidedDenoiser:
         time: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
@@ -28,6 +29,7 @@ class _GuidedDenoiser:
             time,
             latent,
             guidance_scale=self.guidance_scale,
+            domain=domain,
             vf=vf,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
@@ -46,6 +48,7 @@ class Generator:
         use_amp: bool,
     ) -> None:
         self.model = model
+        self.num_domains = model.num_domains
         self.diffusion = diffusion
         self.device = device
         self.patch_size = patch_size
@@ -59,13 +62,14 @@ class Generator:
         time: torch.Tensor,
         latent: torch.Tensor,
         *,
+        domain: torch.Tensor,
         guidance_scale: float = 1.0,
         vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         guidance_scale = validate_guidance_scale(guidance_scale)
-        conditions = {}
+        conditions = {"domain": domain}
         if vf is not None:
             conditions["vf"] = vf
         if anchor_image is not None:
@@ -80,6 +84,25 @@ class Generator:
             latent,
             guidance_scale,
             **conditions,
+        )
+
+    def prepare_domain(self, domain: int | None) -> torch.Tensor:
+        if domain is None:
+            if self.num_domains != 1:
+                raise ValueError("domain is required for a multi-domain model.")
+            domain = 0
+        if (
+            not isinstance(domain, int)
+            or isinstance(domain, bool)
+            or not 0 <= domain < self.num_domains
+        ):
+            raise ValueError(
+                f"domain must be an integer from 0 to {self.num_domains - 1}."
+            )
+        return torch.tensor(
+            (domain,),
+            device=self.device,
+            dtype=torch.long,
         )
 
     def prepare_vf(
@@ -114,6 +137,7 @@ class Generator:
         size: int | None = None,
         anchor_strength: float = 1.0,
         guidance_scale: float = 1.0,
+        domain: int | None = None,
     ) -> torch.Tensor:
         size = self.patch_size if size is None else size
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
@@ -147,7 +171,7 @@ class Generator:
                 device=self.device,
                 dtype=initial_noise.dtype,
             )
-        conditions = {}
+        conditions = {"domain": self.prepare_domain(domain)}
         if anchor is not None:
             anchor_mask = anchor.mask
             if anchor_strength != 1.0:
@@ -185,6 +209,7 @@ class Generator:
         size: int | None = None,
         anchor_strength: float = 1.0,
         guidance_scale: float = 1.0,
+        domain: int | None = None,
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,
@@ -192,6 +217,7 @@ class Generator:
             size=size,
             anchor_strength=anchor_strength,
             guidance_scale=guidance_scale,
+            domain=domain,
         )
         probs = (clean.float() + 1.0).mul_(0.5).clamp_(0.0, 1.0)
         probs.div_(
@@ -206,6 +232,7 @@ class Generator:
         size: int | None = None,
         anchor_strength: float = 1.0,
         guidance_scale: float = 1.0,
+        domain: int | None = None,
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,
@@ -213,6 +240,7 @@ class Generator:
             size=size,
             anchor_strength=anchor_strength,
             guidance_scale=guidance_scale,
+            domain=domain,
         )
         probs = clean.float()
         probs.add_(1.0).mul_(0.5).clamp_(0.0, 1.0)

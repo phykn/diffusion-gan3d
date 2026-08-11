@@ -31,6 +31,27 @@
       3
     ],
     "overlap": 8,
+    "block_size": 128,
+    "stride": 112,
+    "shape": [
+      352,
+      352,
+      352
+    ],
+    "seams": [
+      [
+        120,
+        232
+      ],
+      [
+        120,
+        232
+      ],
+      [
+        120,
+        232
+      ]
+    ],
     "tile_count": 27,
     "base_shell": 4
   },
@@ -52,22 +73,22 @@
   },
   "output": {
     "path": "D:\\code\\diffusion-gan3d\\assets\\paper\\05-scale-up.png",
-    "sha256": "c85c9fb5a96ae1a5887622d2936a61f6d9c8b887b0f632ed6a2bb609246ab918",
+    "sha256": "9779b096bc994e617f0e7da4be2780f36897c539084e5bc62f34af596a113789",
     "shape": [
-      384,
-      384,
-      384
+      352,
+      352,
+      352
     ],
     "dtype": "torch.uint8",
-    "elapsed_seconds": 33.0353141999999
+    "elapsed_seconds": 23.39937900000041
   },
   "quality": {
-    "anchor_matched_voxels": 15911,
+    "anchor_matched_voxels": 15916,
     "anchor_total_voxels": 16384,
-    "anchor_accuracy": 0.97113037109375,
-    "plane_core_matched_voxels": 14134,
+    "anchor_accuracy": 0.971435546875,
+    "plane_core_matched_voxels": 14136,
     "plane_core_total_voxels": 14400,
-    "base_core_matched_voxels": 1727254,
+    "base_core_matched_voxels": 1727293,
     "base_core_total_voxels": 1728000
   }
 }
