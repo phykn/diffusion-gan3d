@@ -16,6 +16,7 @@ class SliceDataset(Dataset[torch.Tensor]):
         paths: Sequence[str | Path],
         crop_size: int = 64,
         patch_size: int = 64,
+        allow_partial_crop: bool = False,
     ) -> None:
         self.paths = tuple(Path(path) for path in paths)
         if not self.paths:
@@ -25,8 +26,11 @@ class SliceDataset(Dataset[torch.Tensor]):
             for size in (crop_size, patch_size)
         ):
             raise ValueError("crop and patch sizes must be positive integers.")
+        if not isinstance(allow_partial_crop, bool):
+            raise TypeError("allow_partial_crop must be a boolean.")
         self.crop_size = crop_size
         self.patch_size = patch_size
+        self.allow_partial_crop = allow_partial_crop
         self._cache: OrderedDict[Path, np.ndarray] = OrderedDict()
         self._cache_bytes = 0
 
@@ -62,19 +66,27 @@ class SliceDataset(Dataset[torch.Tensor]):
     def crop(self, img: np.ndarray) -> np.ndarray:
         self.check_image(img)
         h, w = img.shape
-        if self.crop_size > min(h, w):
+        if not self.allow_partial_crop and self.crop_size > min(h, w):
             raise ValueError("crop size must fit inside the image.")
-        top = int(np.random.randint(0, h - self.crop_size + 1))
-        left = int(np.random.randint(0, w - self.crop_size + 1))
-        return img[top : top + self.crop_size, left : left + self.crop_size]
+        crop_h = min(h, self.crop_size) if self.allow_partial_crop else self.crop_size
+        crop_w = min(w, self.crop_size) if self.allow_partial_crop else self.crop_size
+        top = int(np.random.randint(0, h - crop_h + 1))
+        left = int(np.random.randint(0, w - crop_w + 1))
+        return img[top : top + crop_h, left : left + crop_w]
 
     def resize(self, img: np.ndarray) -> np.ndarray:
         self.check_image(img)
-        if img.shape == (self.patch_size, self.patch_size):
+        if self.allow_partial_crop:
+            h, w = img.shape
+            output_h = max(1, round(h * self.patch_size / self.crop_size))
+            output_w = max(1, round(w * self.patch_size / self.crop_size))
+        else:
+            output_h = output_w = self.patch_size
+        if img.shape == (output_h, output_w):
             return img
         return np.asarray(
             Image.fromarray(img).resize(
-                (self.patch_size, self.patch_size),
+                (output_w, output_h),
                 resample=Image.Resampling.NEAREST,
             ),
             dtype=np.uint8,

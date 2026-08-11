@@ -81,6 +81,7 @@ def build_datasets(cfg: dict) -> dict[int, dict[int, SliceDataset]]:
                 paths,
                 crop_size=data["crop_size"],
                 patch_size=data["input_size"],
+                allow_partial_crop=data.get("allow_partial_crop", False),
             )
             for axis, paths in find_slices(folders).items()
         }

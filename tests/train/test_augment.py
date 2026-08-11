@@ -115,3 +115,56 @@ def test_zero_probability_returns_original_tensors() -> None:
 
     assert actual[0] is first
     assert actual[1] is second
+
+
+def test_rectangular_inputs_use_only_shape_preserving_transforms() -> None:
+    inputs = torch.arange(24, dtype=torch.float32).reshape(2, 1, 3, 4)
+    augment = CriticAugment("isotropic", 1.0)
+
+    with patch("torch.randint", return_value=torch.tensor([1, 3])):
+        transforms = augment.sample_transforms(
+            torch.tensor([0, 2]),
+            square=False,
+        )
+
+    assert all(int(index) in AXIS_PRESERVING_TRANSFORMS for index in transforms)
+    actual = augment.apply_transforms(inputs, transforms)
+    assert actual.shape == inputs.shape
+
+
+def test_rectangular_inputs_reject_quarter_turns() -> None:
+    inputs = torch.arange(24, dtype=torch.float32).reshape(2, 1, 3, 4)
+    augment = CriticAugment("isotropic", 1.0)
+
+    with pytest.raises(ValueError, match="shape-preserving"):
+        augment.apply_transforms(
+            inputs,
+            torch.tensor([1, 0]),
+        )
+
+
+def test_rectangular_pair_preserves_shape_and_gradients() -> None:
+    previous = torch.arange(24, dtype=torch.float32).reshape(2, 1, 3, 4)
+    previous.requires_grad_()
+    current = previous + 100.0
+    augment = CriticAugment("directional", 1.0)
+
+    with patch.object(
+        augment,
+        "sample_transforms",
+        return_value=torch.tensor([2, 6]),
+    ):
+        transformed_previous, transformed_current = augment.apply_pair(
+            previous,
+            current,
+            axis=0,
+        )
+
+    assert transformed_previous.shape == previous.shape
+    assert torch.equal(
+        transformed_current - transformed_previous,
+        torch.full_like(transformed_previous, 100.0),
+    )
+    transformed_previous.sum().backward()
+    assert previous.grad is not None
+    assert torch.equal(previous.grad, torch.ones_like(previous))

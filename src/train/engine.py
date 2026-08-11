@@ -384,10 +384,7 @@ class Trainer:
         volume_size = self.patch_size
         domain = int(torch.randint(self.num_domains, ()).item())
         batches = self.get_batches(domain)
-        real = {
-            axis: self.crop_images(images, self.patch_size)
-            for axis, images in batches.items()
-        }
+        real = batches
         vf_pool = self.get_vf_pool(batches)
         ramp = self.get_anchor_ramp(step)
         selection = (
@@ -428,6 +425,7 @@ class Trainer:
                     current,
                     axis,
                     axis_masks=None if anchor is None else anchor.axis_masks,
+                    crop_shape=tuple(real[axis].shape[-2:]),
                 ),
                 axis,
             )
@@ -624,30 +622,43 @@ class Trainer:
     @staticmethod
     def crop_images(
         images: torch.Tensor,
-        size: int,
+        size: int | tuple[int, int],
         centers: list[tuple[int, int]] | None = None,
     ) -> torch.Tensor:
         if images.ndim not in (3, 4):
             raise ValueError("images must have shape [B, H, W] or [B, C, H, W].")
-        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+        if isinstance(size, int) and not isinstance(size, bool):
+            crop_h = crop_w = size
+        elif (
+            isinstance(size, tuple)
+            and len(size) == 2
+            and all(
+                isinstance(value, int) and not isinstance(value, bool) and value > 0
+                for value in size
+            )
+        ):
+            crop_h, crop_w = size
+        else:
+            raise ValueError("crop size must be a positive integer.")
+        if crop_h < 1 or crop_w < 1:
             raise ValueError("crop size must be a positive integer.")
         height, width = images.shape[-2:]
-        if size > min(height, width):
+        if crop_h > height or crop_w > width:
             raise ValueError("crop size must fit inside the images.")
-        if (height, width) == (size, size):
+        if (height, width) == (crop_h, crop_w):
             return images
 
-        top = torch.randint(height - size + 1, (images.shape[0],)).tolist()
-        left = torch.randint(width - size + 1, (images.shape[0],)).tolist()
+        top = torch.randint(height - crop_h + 1, (images.shape[0],)).tolist()
+        left = torch.randint(width - crop_w + 1, (images.shape[0],)).tolist()
         if centers is not None:
             if len(centers) > images.shape[0]:
                 raise ValueError("centers must not outnumber images.")
             for index, (row, col) in enumerate(centers):
-                top[index] = min(max(row - size // 2, 0), height - size)
-                left[index] = min(max(col - size // 2, 0), width - size)
+                top[index] = min(max(row - crop_h // 2, 0), height - crop_h)
+                left[index] = min(max(col - crop_w // 2, 0), width - crop_w)
         return torch.stack(
             [
-                image[..., row : row + size, col : col + size]
+                image[..., row : row + crop_h, col : col + crop_w]
                 for image, row, col in zip(images, top, left, strict=True)
             ]
         )
@@ -852,10 +863,10 @@ class Trainer:
             device=images.device,
         )[: self.volume_batch_size]
         selected = images.index_select(0, batch_indices)
-        size = min(volume_size, *selected.shape[-2:])
-        selected = self.crop_images(selected, size)
+        shape = tuple(min(volume_size, size) for size in selected.shape[-2:])
+        selected = self.crop_images(selected, shape)
         position = tuple(
-            int(torch.randint(volume_size - size + 1, ()).item()) for _ in range(2)
+            int(torch.randint(volume_size - size + 1, ()).item()) for size in shape
         )
         plane_index = int(torch.randint(volume_size, ()).item())
         plane = PlaneAnchor(
@@ -945,6 +956,7 @@ class Trainer:
         current: torch.Tensor,
         axis: int,
         axis_masks: torch.Tensor | None = None,
+        crop_shape: int | tuple[int, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if previous.shape != current.shape:
             raise ValueError("previous and current volumes must have the same shape.")
@@ -994,9 +1006,10 @@ class Trainer:
         previous = previous[batch_indices, :, plane_indices]
         current = current[batch_indices, :, plane_indices]
         channels = previous.shape[1]
+        crop_shape = self.patch_size if crop_shape is None else crop_shape
         pairs = self.crop_images(
             torch.cat((previous, current), dim=1),
-            self.patch_size,
+            crop_shape,
             centers,
         )
         return pairs[:, :channels], pairs[:, channels:]

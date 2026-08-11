@@ -93,11 +93,12 @@ def sample_pairs(
     count,
     patch_size,
     axis_masks=None,
+    crop_shape=None,
 ):
     trainer = object.__new__(Trainer)
     trainer.slice_pairs_per_axis = count
     trainer.patch_size = patch_size
-    return trainer.sample_pairs(previous, current, axis, axis_masks)
+    return trainer.sample_pairs(previous, current, axis, axis_masks, crop_shape)
 
 
 def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
@@ -240,6 +241,27 @@ def test_sample_pairs_centers_half_the_patches_on_focus() -> None:
         axis_masks=axis_masks,
     )
 
+    assert torch.equal(selected[:2].amax(dim=(1, 2, 3)), torch.ones(2))
+
+
+def test_sample_pairs_centers_rectangular_patches_on_focus() -> None:
+    previous = torch.zeros(1, 1, 8, 8, 8)
+    previous[0, 0, 2, 5, 6] = 1.0
+    current = previous.clone()
+    axis_masks = torch.zeros(1, 3, 8, 8, 8, dtype=torch.bool)
+    axis_masks[0, 1, 2, 5, 6] = True
+
+    selected, _ = sample_pairs(
+        previous,
+        current,
+        axis=0,
+        count=4,
+        patch_size=8,
+        axis_masks=axis_masks,
+        crop_shape=(2, 4),
+    )
+
+    assert selected.shape[-2:] == (2, 4)
     assert torch.equal(selected[:2].amax(dim=(1, 2, 3)), torch.ones(2))
 
 
@@ -495,20 +517,20 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         anchored=True,
     )
     vf_batch_ids = []
-    crop_batch_ids = []
-    original_crop = trainer.crop_images
+    critic_batch_ids = []
+    original_update_critics = trainer.update_critics
 
     def track_vfs(batches):
         vf_batch_ids.extend(id(batches[axis]) for axis in (0, 1, 2))
         return get_vf_pool(batches, trainer.num_phases)
 
-    def track_crop(images, *args, **kwargs):
-        crop_batch_ids.append(id(images))
-        return original_crop(images, *args, **kwargs)
+    def track_critics(transition, fake, batches, step, domain):
+        critic_batch_ids.extend(id(batches[axis]) for axis in (0, 1, 2))
+        return original_update_critics(transition, fake, batches, step, domain)
 
     with (
         patch.object(trainer, "get_vf_pool", side_effect=track_vfs),
-        patch.object(trainer, "crop_images", side_effect=track_crop),
+        patch.object(trainer, "update_critics", side_effect=track_critics),
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
             denoiser,
@@ -537,7 +559,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         3,
     )
     assert any(torch.allclose(vfs[0][0], target) for target in expected_pool)
-    assert vf_batch_ids == crop_batch_ids[:3]
+    assert vf_batch_ids == critic_batch_ids
 
     gradient = denoiser.vf_mlp[-1].weight.grad
     assert gradient is not None
@@ -628,6 +650,50 @@ def test_training_volume_and_critic_use_patch_size() -> None:
         call.kwargs["anchor_image"].shape[-3:] == (8, 8, 8)
         for call in predict_logits.call_args_list
     )
+
+
+def test_training_critics_match_each_axis_rectangular_real_shape() -> None:
+    trainer, _, streams = _conditioning_trainer(anchored=True)
+    shapes = {
+        0: (8, 8),
+        1: (4, 8),
+        2: (8, 6),
+    }
+    trainer.r1_gamma = 0.01
+    trainer.r1_interval = 1
+    for axis, shape in shapes.items():
+        streams[axis].images = torch.randint(0, 3, (2, *shape))
+
+    observed = {axis: [] for axis in (0, 1, 2)}
+    hooks = [
+        trainer.critics[str(axis)].register_forward_pre_hook(
+            lambda _module, args, axis=axis: observed[axis].append(
+                tuple(args[0].shape[-2:])
+            )
+        )
+        for axis in (0, 1, 2)
+    ]
+    try:
+        metrics = trainer.step(0, transition=0)
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    assert math.isfinite(metrics.r1)
+    assert all(observed[axis] for axis in (0, 1, 2))
+    assert all(
+        all(actual == shapes[axis] for actual in observed[axis]) for axis in (0, 1, 2)
+    )
+
+
+def test_real_anchor_preserves_a_rectangular_observation() -> None:
+    trainer, _, _ = _conditioning_trainer(anchored=True)
+    batches = {axis: torch.randint(0, 3, (2, 4, 8)) for axis in (0, 1, 2)}
+
+    selection = trainer.sample_real_anchor(batches, volume_size=8)
+
+    assert selection.seeds[0].image.shape == (4, 8)
+    assert int(selection.condition.mask.sum()) == 4 * 8
 
 
 def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:

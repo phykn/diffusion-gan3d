@@ -4,6 +4,7 @@ import json
 import sys
 from importlib.metadata import version
 from pathlib import Path
+from time import perf_counter
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,12 +27,8 @@ from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.evaluate import (
     fid_score,
-    kid_score,
     make_fid_metric,
-    make_kid_metric,
     percolating_fractions,
-    percolation_error,
-    percolation_errors,
     phase_fraction,
     tortuosity,
     voxel_accuracy,
@@ -47,8 +44,6 @@ SEED = 0
 TAUFACTOR_CONVERGENCE = 1e-3
 
 FEATURE_DIMENSIONS = 2048
-KID_SUBSETS = 100
-KID_SUBSET_SIZE = 50
 
 
 def main() -> None:
@@ -114,40 +109,30 @@ def main() -> None:
         )
         cached_generation = cached_manifest.get("generation")
         if not isinstance(cached_generation, dict) or any(
-            cached_generation.get(key) != value
-            for key, value in generation.items()
+            cached_generation.get(key) != value for key, value in generation.items()
         ):
             raise ValueError(
                 "anchor sweep reuse manifest generation does not match current inputs."
             )
+        generation_times = load_generation_times(csv_path)
     else:
-        generate_volumes(reference, weights, args.guidance_scale, args.domain, provenance)
+        generation_times = generate_volumes(
+            reference, weights, args.guidance_scale, args.domain
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     reference_slices = get_slices(reference, AXIS)
-    kid = make_kid_metric(
-        reference_slices,
-        device,
-        subsets=KID_SUBSETS,
-        subset_size=KID_SUBSET_SIZE,
-        feature=FEATURE_DIMENSIONS,
-    )
     fid = make_fid_metric(
         reference_slices,
         device,
         feature=FEATURE_DIMENSIONS,
     )
-    distribution_scores: dict[int, tuple[float, float, float]] = {}
+    distribution_scores: dict[int, float] = {}
     for count in COUNTS:
         volume = load_volume(volume_path(count))
         slices = get_slices(volume, AXIS)
-        kid_mean, kid_std = kid_score(kid, slices, device, seed=SEED)
-        distribution_scores[count] = (
-            kid_mean,
-            kid_std,
-            fid_score(fid, slices, device),
-        )
-    del kid, fid
+        distribution_scores[count] = fid_score(fid, slices, device)
+    del fid
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
@@ -159,23 +144,18 @@ def main() -> None:
         device=device,
         convergence=TAUFACTOR_CONVERGENCE,
     )
-    reference_pore_percolation = percolating_fractions(reference, PORE_PHASE)
+    reference_percolation = float(np.mean(percolating_fractions(reference, PORE_PHASE)))
     rows = []
     for count in COUNTS:
         path = volume_path(count)
         volume = load_volume(path)
         accuracy = voxel_accuracy(volume, reference)
-        kid_mean, kid_std, fid_value = distribution_scores[count]
-        pore_percolation = percolating_fractions(volume, PORE_PHASE)
-        pore_errors = percolation_errors(
-            pore_percolation, reference_pore_percolation
-        )
+        fid_value = distribution_scores[count]
+        percolation = float(np.mean(percolating_fractions(volume, PORE_PHASE)))
         row = {
             "anchor_count": count,
             "coverage": count / reference.shape[AXIS],
             "guidance_scale": args.guidance_scale,
-            "kid": kid_mean,
-            "kid_std": kid_std,
             "fid": fid_value,
             "porosity": phase_fraction(volume, PORE_PHASE),
             "tortuosity_axis0": tortuosity(
@@ -186,30 +166,19 @@ def main() -> None:
                 convergence=TAUFACTOR_CONVERGENCE,
             ),
             "voxel_accuracy": accuracy,
-            "gt_pore_percolation_axis0": reference_pore_percolation[0],
-            "gt_pore_percolation_axis1": reference_pore_percolation[1],
-            "gt_pore_percolation_axis2": reference_pore_percolation[2],
-            "pred_pore_percolation_axis0": pore_percolation[0],
-            "pred_pore_percolation_axis1": pore_percolation[1],
-            "pred_pore_percolation_axis2": pore_percolation[2],
-            "pore_percolation_error_axis0": pore_errors[0],
-            "pore_percolation_error_axis1": pore_errors[1],
-            "pore_percolation_error_axis2": pore_errors[2],
-            "pore_percolation_error": percolation_error(
-                pore_percolation,
-                reference_pore_percolation,
-            ),
+            "percolation": percolation,
+            "generation_seconds": generation_times[count],
             "tiff": path.name,
         }
         rows.append(row)
         score = f"{accuracy:.4%}"
         print(
             f"count={count:2d} coverage={row['coverage']:.2%} "
-            f"KID={row['kid']:.6f}±{row['kid_std']:.6f} "
             f"FID={row['fid']:.4f} "
             f"porosity={row['porosity']:.4f} "
             f"tortuosity={row['tortuosity_axis0']:.4f} accuracy={score} "
-            f"pore_error={100 * row['pore_percolation_error']:.3f} pp"
+            f"percolation={row['percolation']:.4f} "
+            f"time={row['generation_seconds']:.3f}s"
         )
 
     write_csv(rows, csv_path)
@@ -217,6 +186,7 @@ def main() -> None:
         rows,
         reference_porosity=reference_porosity,
         reference_tortuosity=reference_tortuosity,
+        reference_percolation=reference_percolation,
         output=figure_path,
     )
     write_manifest(
@@ -226,7 +196,7 @@ def main() -> None:
         reference=reference,
         reference_porosity=reference_porosity,
         reference_tortuosity=reference_tortuosity,
-        reference_pore_percolation=reference_pore_percolation,
+        reference_percolation=reference_percolation,
         output=MANIFEST_PATH,
     )
     print(f"Metrics : {csv_path.resolve()}")
@@ -239,8 +209,7 @@ def generate_volumes(
     weights: Path,
     guidance_scale: float,
     domain: int,
-    provenance: dict[str, object],
-) -> None:
+) -> dict[int, float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
     if (
@@ -257,6 +226,7 @@ def generate_volumes(
     print(f"Reference: {REFERENCE_PATH.resolve()}")
     print(f"Device  : {device}")
     print(f"Guidance: {guidance_scale}")
+    elapsed_times = {}
     for count in COUNTS:
         indices = select_indices(reference.shape[AXIS], count)
         anchors = tuple(
@@ -271,14 +241,22 @@ def generate_volumes(
             f"coverage={count / reference.shape[AXIS]:.2%}...",
             flush=True,
         )
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        start = perf_counter()
         volume = generator.generate(
             anchors=anchors,
             guidance_scale=guidance_scale,
             domain=domain,
         )
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elapsed = perf_counter() - start
+        elapsed_times[count] = elapsed
         path = volume_path(count)
         tifffile.imwrite(path, volume.numpy())
-        print(f"Output  : {path.resolve()}")
+        print(f"Output  : {path.resolve()} ({elapsed:.3f} s)")
+    return elapsed_times
 
 
 def select_indices(size: int, count: int) -> tuple[int, ...]:
@@ -312,6 +290,20 @@ def write_csv(rows: list[dict], output: Path) -> None:
         writer.writerows(rows)
 
 
+def load_generation_times(path: Path) -> dict[int, float]:
+    if not path.is_file():
+        raise FileNotFoundError(f"generation times were not found: {path}")
+    values = {}
+    with path.open(newline="", encoding="utf-8") as file:
+        for row in csv.DictReader(file):
+            raw = row.get("generation_seconds")
+            if raw:
+                values[int(row["anchor_count"])] = float(raw)
+    if set(values) != set(COUNTS):
+        raise ValueError("cached generation times do not match the anchor sweep.")
+    return values
+
+
 def write_manifest(
     provenance: dict[str, object],
     cached_paths: list[Path],
@@ -319,7 +311,7 @@ def write_manifest(
     reference: np.ndarray,
     reference_porosity: float,
     reference_tortuosity: float,
-    reference_pore_percolation: tuple[float, float, float],
+    reference_percolation: float,
     output: Path,
 ) -> None:
     data = {
@@ -333,19 +325,7 @@ def write_manifest(
         "anchor_counts": list(COUNTS),
         "reference_porosity": reference_porosity,
         "reference_tortuosity_axis0": reference_tortuosity,
-        "kid": {
-            "reference_slices": reference.shape[0],
-            "generated_slices": reference.shape[0],
-            "implementation": "torchmetrics.image.kid.KernelInceptionDistance",
-            "package_version": version("torchmetrics"),
-            "feature_extractor": "torch-fidelity Inception-v3 pool 3",
-            "feature_dimensions": FEATURE_DIMENSIONS,
-            "subsets": KID_SUBSETS,
-            "subset_size": KID_SUBSET_SIZE,
-            "polynomial_kernel_degree": 3,
-            "input": "uint8 RGB, phase 0 = 0 and phase 1 = 255",
-            "axis": AXIS,
-        },
+        "reference_percolation": reference_percolation,
         "fid": {
             "reference_slices": reference.shape[0],
             "generated_slices": reference.shape[0],
@@ -368,14 +348,18 @@ def write_manifest(
             ),
             "numerator": "phase-0 pore voxels in all percolating components",
             "denominator": "all phase-0 pore voxels in the volume",
-            "reference_fractions_axis0_axis1_axis2": list(
-                reference_pore_percolation
-            ),
-            "axis_error": "absolute prediction-reference fraction difference",
-            "aggregation": "mean of the three axis-specific absolute errors",
+            "reference_mean": reference_percolation,
+            "aggregation": ("mean fraction across the three volume axes"),
             "phase_absent": "undefined; evaluation raises ValueError",
             "csv_unit": "fraction",
-            "chart_unit": "percentage points",
+            "chart_unit": "percent",
+        },
+        "generation_time": {
+            "clock": "time.perf_counter",
+            "cuda_synchronized": True,
+            "includes": "sampling",
+            "excludes": "TIFF serialization and metric calculation",
+            "unit": "seconds",
         },
         "tortuosity": {
             "method": "TauFactor steady-state diffusion Solver (classical tortuosity factor)",
@@ -394,6 +378,7 @@ def render_chart(
     rows: list[dict],
     reference_porosity: float,
     reference_tortuosity: float,
+    reference_percolation: float,
     output: Path,
 ) -> None:
     positions = np.asarray([row["anchor_count"] for row in rows], dtype=float)
@@ -407,10 +392,8 @@ def render_chart(
         wspace=0.28,
     )
     specs = (
-        ("voxel_accuracy", None, "Voxel accuracy", 1.0, None),
-        ("kid", None, "KID", 1.0, None),
+        ("voxel_accuracy", None, "Voxel accuracy (%)", 100.0, None),
         ("fid", None, "FID", 1.0, None),
-        ("porosity", reference_porosity, "Porosity", 1.0, "GT"),
         (
             "tortuosity_axis0",
             reference_tortuosity,
@@ -418,13 +401,15 @@ def render_chart(
             1.0,
             "GT",
         ),
+        ("porosity", reference_porosity, "Porosity, phase 0 (%)", 100.0, "GT"),
         (
-            "pore_percolation_error",
-            0.0,
-            "Pore percolation error (pp)",
+            "percolation",
+            reference_percolation,
+            "Percolation, phase 0 (%)",
             100.0,
-            "Ideal",
+            "GT",
         ),
+        ("generation_seconds", None, "Generation time (s)", 1.0, None),
     )
     for panel, letter, (key, reference, ylabel, scale, reference_label) in zip(
         panels.ravel(),
@@ -474,7 +459,7 @@ def render_chart(
         panel.spines[["top", "right"]].set_visible(False)
         panel.spines[["left", "bottom"]].set_color("#94a3b8")
         panel.tick_params(colors="#475569")
-    panels[0, 0].set_ylim(0, 1)
+    panels[0, 0].set_ylim(0, 100)
     figure.supxlabel("Number of supplied axis-0 anchor planes", fontsize=11, y=0.025)
     figure.savefig(
         output,

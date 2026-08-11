@@ -152,12 +152,12 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
 
 @pytest.mark.parametrize(
     ("extra_args", "expected", "domain"),
-    (((), 1.0, None), (("--guidance-scale", "1.5", "--domain", "2"), 1.5, 2)),
+    (((), 1.0, 0), (("--guidance-scale", "1.5", "--domain", "2"), 1.5, 2)),
 )
 def test_unconditioned_check_routes_guidance_scale(
     extra_args: tuple[str, ...],
     expected: float,
-    domain: int | None,
+    domain: int,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:

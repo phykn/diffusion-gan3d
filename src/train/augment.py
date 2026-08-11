@@ -26,7 +26,7 @@ AXIS_PRESERVING_TRANSFORMS = (0, 2, 4, 6)
 
 
 class CriticAugment:
-    """Apply differentiable, axis-aware square symmetries to critic inputs."""
+    """Apply differentiable, axis-aware symmetries to critic inputs."""
 
     def __init__(
         self,
@@ -48,7 +48,7 @@ class CriticAugment:
             self.axis_swap_axes = (int(self.mode[-1]),)
         else:
             self.axis_swap_axes = ()
-        self._index_cache: dict[tuple[torch.device, int], torch.Tensor] = {}
+        self._index_cache: dict[tuple[torch.device, int, int], torch.Tensor] = {}
 
     @staticmethod
     def parse_mode(mode: bool | str) -> AugmentMode | None:
@@ -109,13 +109,20 @@ class CriticAugment:
             return tensors
 
         axes = self.prepare_axes(axis, first.shape[0], first.device)
-        transforms = self.sample_transforms(axes)
+        transforms = self.sample_transforms(
+            axes,
+            square=first.shape[-2] == first.shape[-1],
+        )
         return tuple(self.apply_transforms(tensor, transforms) for tensor in tensors)
 
-    def sample_transforms(self, axes: torch.Tensor) -> torch.Tensor:
+    def sample_transforms(
+        self, axes: torch.Tensor, square: bool = True
+    ) -> torch.Tensor:
         batch = axes.shape[0]
         device = axes.device
-        if len(self.axis_swap_axes) == len(AXES):
+        if not square:
+            selected = torch.randint(4, (batch,), device=device).mul_(2)
+        elif len(self.axis_swap_axes) == len(AXES):
             selected = torch.randint(8, (batch,), device=device)
         elif not self.axis_swap_axes:
             selected = torch.randint(4, (batch,), device=device).mul_(2)
@@ -136,18 +143,26 @@ class CriticAugment:
             raise ValueError("transforms must have one value per batch item.")
         if transforms.device != inputs.device:
             raise ValueError("transforms must be on the input device.")
-        size = inputs.shape[-1]
-        maps = self.get_index_maps(inputs.device, size)
+        height, width = inputs.shape[-2:]
+        if height != width and bool((transforms.remainder(2) != 0).any()):
+            raise ValueError("rectangular inputs require shape-preserving transforms.")
+        maps = self.get_index_maps(inputs.device, height, width)
         indices = maps.index_select(0, transforms.to(torch.long))
-        flattened = inputs.reshape(inputs.shape[0], -1, size * size)
+        flattened = inputs.reshape(inputs.shape[0], -1, height * width)
         indices = indices.unsqueeze(1).expand(-1, flattened.shape[1], -1)
         return flattened.gather(2, indices).reshape_as(inputs)
 
-    def get_index_maps(self, device: torch.device, size: int) -> torch.Tensor:
-        key = (device, size)
+    def get_index_maps(
+        self,
+        device: torch.device,
+        height: int,
+        width: int | None = None,
+    ) -> torch.Tensor:
+        width = height if width is None else width
+        key = (device, height, width)
         maps = self._index_cache.get(key)
         if maps is None:
-            source = torch.arange(size * size, device=device).reshape(size, size)
+            source = torch.arange(height * width, device=device).reshape(height, width)
             maps = torch.stack(
                 [self.transform(source, index).reshape(-1) for index in range(8)]
             )
@@ -191,5 +206,3 @@ class CriticAugment:
             raise ValueError(
                 "augmentation inputs need batch, channel, and spatial dimensions."
             )
-        if inputs.shape[-2] != inputs.shape[-1]:
-            raise ValueError("augmentation inputs must be square.")

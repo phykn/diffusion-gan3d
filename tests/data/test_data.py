@@ -51,6 +51,83 @@ class LabelTransformTest(unittest.TestCase):
         )
         np.testing.assert_array_equal(actual.numpy(), expected)
 
+    def test_default_resize_keeps_the_existing_square_output(self):
+        image = np.arange(32, dtype=np.uint8).reshape(4, 8)
+        dataset = SliceDataset(["unused"], crop_size=8, patch_size=2)
+
+        actual = dataset.resize(image)
+
+        expected = np.asarray(
+            Image.fromarray(image).resize(
+                (2, 2),
+                resample=Image.Resampling.NEAREST,
+            )
+        )
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_partial_crop_preserves_aspect_ratio_at_the_configured_scale(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "image.png"
+            img = np.arange(32, dtype=np.uint8).reshape(4, 8)
+            _save_image(path, img)
+            dataset = SliceDataset(
+                [path],
+                crop_size=8,
+                patch_size=4,
+                allow_partial_crop=True,
+            )
+
+            actual = dataset[0]
+
+        expected = np.asarray(
+            Image.fromarray(img).resize(
+                (4, 2),
+                resample=Image.Resampling.NEAREST,
+            )
+        )
+        self.assertEqual(actual.shape, torch.Size([2, 4]))
+        np.testing.assert_array_equal(actual.numpy(), expected)
+
+    def test_partial_crop_is_rejected_by_default(self):
+        image = np.zeros((3, 8), dtype=np.uint8)
+        dataset = SliceDataset(["unused"], crop_size=4, patch_size=4)
+
+        with self.assertRaisesRegex(ValueError, "crop size must fit"):
+            dataset.crop(image)
+
+    def test_partial_crop_flag_requires_a_boolean(self):
+        with self.assertRaisesRegex(TypeError, "must be a boolean"):
+            SliceDataset(["unused"], allow_partial_crop=1)
+
+    def test_partial_crop_uses_a_random_window_on_the_long_axis(self):
+        image = np.arange(48, dtype=np.uint8).reshape(4, 12)
+        dataset = SliceDataset(
+            ["unused"],
+            crop_size=8,
+            patch_size=8,
+            allow_partial_crop=True,
+        )
+
+        with patch("numpy.random.randint", side_effect=(0, 3)):
+            cropped = dataset.crop(image)
+
+        np.testing.assert_array_equal(cropped, image[:, 3:11])
+
+    def test_partial_crop_keeps_an_extremely_thin_image_nonempty(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "image.png"
+            _save_image(path, np.arange(2, dtype=np.uint8).reshape(1, 2))
+            dataset = SliceDataset(
+                [path],
+                crop_size=8,
+                patch_size=2,
+                allow_partial_crop=True,
+            )
+
+            actual = dataset[0]
+
+        self.assertEqual(actual.shape, torch.Size([1, 1]))
+
     def test_dataset_reuses_decoded_images_across_random_crops(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "image.png"
@@ -131,6 +208,23 @@ class AxisDataTest(unittest.TestCase):
                 tuple(path.name for path in paths[axis]), ("a.png", "b.tif")
             )
 
+    def test_tensor_crop_uses_rectangular_shape_and_random_coordinates(self):
+        images = torch.arange(2 * 5 * 7).reshape(2, 5, 7)
+
+        with patch(
+            "torch.randint",
+            side_effect=(torch.tensor([1, 2]), torch.tensor([3, 1])),
+        ):
+            actual = Trainer.crop_images(images, (3, 4))
+
+        expected = torch.stack(
+            (
+                images[0, 1:4, 3:7],
+                images[1, 2:5, 1:5],
+            )
+        )
+        self.assertTrue(torch.equal(actual, expected))
+
     def test_volume_pairs_always_use_matching_volume_and_plane_coordinates(self):
         previous = torch.arange(
             2 * 3 * 4 * 4 * 4,
@@ -200,6 +294,30 @@ class DomainDataTest(unittest.TestCase):
     def test_domain_ids_are_contiguous_and_start_at_zero(self):
         with self.assertRaisesRegex(ValueError, "contiguous"):
             get_domains({"domains": {1: {}}})
+
+    def test_build_datasets_passes_partial_crop_setting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folders = {}
+            for axis in range(3):
+                folder = root / str(axis)
+                folder.mkdir()
+                _save_image(folder / "sample.png", np.zeros((2, 4), dtype=np.uint8))
+                folders[axis] = [folder]
+            cfg = {
+                "data": {
+                    "domains": {0: folders},
+                    "crop_size": 4,
+                    "input_size": 4,
+                    "allow_partial_crop": True,
+                }
+            }
+
+            datasets = build_datasets(cfg)
+            sample = datasets[0][0][0]
+
+        self.assertTrue(datasets[0][0].allow_partial_crop)
+        self.assertEqual(sample.shape, torch.Size([2, 4]))
 
 
 if __name__ == "__main__":

@@ -3,9 +3,10 @@ import csv
 import json
 import sys
 from importlib.metadata import version
-from itertools import pairwise
 from pathlib import Path
+from time import perf_counter
 
+import matplotlib.pyplot as plt
 import numpy as np
 import tifffile
 import torch
@@ -18,7 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from make_anchor_asset import AXIS, load_center_roi
-from make_assets import CROP_SIZE, SAMPLE_PATH
+from make_assets import CROP_SIZE, OUTPUT_DIR, ROI_COLOR, SAMPLE_PATH
 from provenance import (
     build_provenance,
     describe_files,
@@ -30,8 +31,9 @@ from provenance import (
 from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.evaluate import (
-    kid_score,
-    make_kid_metric,
+    fid_score,
+    make_fid_metric,
+    percolating_fractions,
     phase_fraction,
     tortuosity,
     voxel_accuracy,
@@ -44,6 +46,7 @@ VOLUME_DIR = TEMP_DIR / "paper_metrics"
 RAW_CSV = TEMP_DIR / "paper_metrics_raw.csv"
 SUMMARY_CSV = TEMP_DIR / "paper_metrics_summary.csv"
 MANIFEST_PATH = TEMP_DIR / "paper_metrics_manifest.json"
+FIGURE_PATH = OUTPUT_DIR / "08-paper-metrics.png"
 
 SEEDS = (0, 1, 2, 3)
 ANCHOR_COUNTS = (32, 64, 96, 128)
@@ -51,12 +54,9 @@ PORE_PHASE = 0
 REAL_CROP_COUNT = 64
 REAL_REFERENCE_SEED = 10_000
 REAL_EVALUATION_SEEDS = (20_000, 20_001, 20_002, 20_003)
-KID_SUBSETS = 100
-KID_SUBSET_SIZE = 50
 TAUFACTOR_CONVERGENCE = 1e-3
 SCALE_BLOCKS = (3, 3, 3)
 SCALE_OVERLAP = DEFAULT_SCALE_OVERLAP
-SEAM_EXCLUSION_RADIUS = 4
 
 CONDITIONS = (
     "Real 2D crops",
@@ -127,7 +127,7 @@ def main() -> None:
     ]
     validate_output_paths(
         provenance,
-        (*cached_paths, RAW_CSV, SUMMARY_CSV, MANIFEST_PATH),
+        (*cached_paths, RAW_CSV, SUMMARY_CSV, MANIFEST_PATH, FIGURE_PATH),
     )
     if args.reuse:
         validate_manifest(
@@ -136,24 +136,24 @@ def main() -> None:
             label="paper metrics reuse",
             cached_paths=cached_paths,
         )
+        generation_times = load_generation_times(RAW_CSV)
     else:
-        generate_volumes(
+        generation_times = generate_volumes(
             reference,
             target_porosity,
             weights,
             args.guidance_scale,
             args.domain,
-            provenance,
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    raw_rows, kid_scores = compute_kid_scores(
+    raw_rows, reference_fid, fid_scores = compute_fid_scores(
         real_reference,
+        reference,
         patch_size,
         device,
     )
 
-    # KID's Inception model is released before TauFactor allocates its solver fields.
     reference_tortuosity = tortuosity(
         reference,
         phase=PORE_PHASE,
@@ -161,24 +161,19 @@ def main() -> None:
         device=device,
         convergence=TAUFACTOR_CONVERGENCE,
     )
+    reference_percolation = mean_percolation(reference)
     for condition in CONDITIONS[1:]:
         for seed in SEEDS:
             volume = load_volume(volume_path(condition, seed))
             accuracy = None
-            seam_drop = None
             if condition.startswith("3D (anchored"):
                 accuracy = voxel_accuracy(volume, reference)
-            if condition == "3D (scale-up)":
-                seams = scale_seams(volume.shape, patch_size, SCALE_OVERLAP)
-                seam_drop = seam_connectivity_drop(volume, seams)
-            kid_mean, kid_subset_std = kid_scores[(condition, seed)]
             raw_rows.append(
                 make_row(
                     condition=condition,
                     seed=seed,
                     guidance_scale=args.guidance_scale,
-                    kid=kid_mean,
-                    kid_subset_std=kid_subset_std,
+                    fid=fid_scores[(condition, seed)],
                     porosity_value=phase_fraction(volume, PORE_PHASE),
                     tortuosity_value=tortuosity(
                         volume,
@@ -188,7 +183,8 @@ def main() -> None:
                         convergence=TAUFACTOR_CONVERGENCE,
                     ),
                     voxel_accuracy_value=accuracy,
-                    seam_connectivity_drop_value=seam_drop,
+                    percolation_value=mean_percolation(volume),
+                    generation_seconds=generation_times[(condition, seed)],
                 )
             )
             print_row(raw_rows[-1])
@@ -196,22 +192,28 @@ def main() -> None:
     write_csv(raw_rows, RAW_CSV)
     summary_rows = summarize(
         raw_rows,
+        reference_fid=reference_fid,
         reference_porosity=target_porosity,
         reference_tortuosity=reference_tortuosity,
+        reference_percolation=reference_percolation,
         guidance_scale=args.guidance_scale,
     )
     write_csv(summary_rows, SUMMARY_CSV)
+    render_summary_chart(summary_rows, FIGURE_PATH)
     write_manifest(
         provenance=provenance,
         cached_paths=cached_paths,
-        derived_outputs=(RAW_CSV, SUMMARY_CSV),
+        derived_outputs=(RAW_CSV, SUMMARY_CSV, FIGURE_PATH),
         reference=reference,
+        reference_fid=reference_fid,
         reference_porosity=target_porosity,
         reference_tortuosity=reference_tortuosity,
+        reference_percolation=reference_percolation,
         output=MANIFEST_PATH,
     )
     print(f"Raw metrics : {RAW_CSV.resolve()}")
     print(f"Summary     : {SUMMARY_CSV.resolve()}")
+    print(f"Figure      : {FIGURE_PATH.resolve()}")
     print(f"Manifest    : {MANIFEST_PATH.resolve()}")
 
 
@@ -221,8 +223,7 @@ def generate_volumes(
     weights: Path,
     guidance_scale: float,
     domain: int,
-    provenance: dict[str, object],
-) -> None:
+) -> dict[tuple[str, int], float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
     patch_size = generator.patch_size
@@ -242,10 +243,14 @@ def generate_volumes(
     print(f"Weights : {weights.resolve()}")
     print(f"Device  : {device}")
     print(f"Guidance: {guidance_scale}")
+    elapsed_times = {}
     for condition in CONDITIONS[1:]:
         for seed in SEEDS:
             set_seed(seed, device)
             print(f"Generating {condition}, seed={seed}...", flush=True)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            start = perf_counter()
             if condition == "3D":
                 volume = generator.generate(
                     vf=None,
@@ -299,13 +304,18 @@ def generate_volumes(
                     raise RuntimeError("scale-up output does not match its block plan.")
             else:
                 raise RuntimeError(f"unsupported condition: {condition}")
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            elapsed = perf_counter() - start
+            elapsed_times[(condition, seed)] = elapsed
             path = volume_path(condition, seed)
             tifffile.imwrite(path, volume.to(torch.uint8).numpy())
-            print(f"Saved      {path.resolve()}")
+            print(f"Saved      {path.resolve()} ({elapsed:.3f} s)")
 
     del generator
     if device.type == "cuda":
         torch.cuda.empty_cache()
+    return elapsed_times
 
 
 def sample_real_crops(seed: int, output_size: int) -> np.ndarray:
@@ -333,30 +343,39 @@ def sample_real_crops(seed: int, output_size: int) -> np.ndarray:
     return np.stack(crops)
 
 
-def compute_kid_scores(
+def compute_fid_scores(
     real: np.ndarray,
+    reference: np.ndarray,
     patch_size: int,
     device: torch.device,
 ) -> tuple[
     list[dict[str, object]],
-    dict[tuple[str, int], tuple[float, float]],
+    float,
+    dict[tuple[str, int], float],
 ]:
-    metric = make_kid_metric(real, device)
+    metric = make_fid_metric(real, device)
     real_rows: list[dict[str, object]] = []
-    generated_scores: dict[tuple[str, int], tuple[float, float]] = {}
+    generated_scores: dict[tuple[str, int], float] = {}
     try:
         for seed in REAL_EVALUATION_SEEDS:
             crops = sample_real_crops(seed, patch_size)
-            kid_mean, kid_subset_std = kid_score(metric, crops, device)
             real_rows.append(
                 make_row(
                     condition="Real 2D crops",
                     seed=seed,
-                    kid=kid_mean,
-                    kid_subset_std=kid_subset_std,
+                    fid=fid_score(metric, crops, device),
                     porosity_value=phase_fraction(crops, PORE_PHASE),
                 )
             )
+
+        reference_slices = select_metric_slices(
+            reference,
+            axis=AXIS,
+            count=REAL_CROP_COUNT,
+            output_size=patch_size,
+            seed=REAL_REFERENCE_SEED,
+        )
+        reference_fid = fid_score(metric, reference_slices, device)
 
         for condition in CONDITIONS[1:]:
             for seed in SEEDS:
@@ -368,16 +387,12 @@ def compute_kid_scores(
                     output_size=patch_size,
                     seed=seed,
                 )
-                generated_scores[(condition, seed)] = kid_score(
-                    metric,
-                    slices,
-                    device,
-                )
+                generated_scores[(condition, seed)] = fid_score(metric, slices, device)
     finally:
         del metric
         if device.type == "cuda":
             torch.cuda.empty_cache()
-    return real_rows, generated_scores
+    return real_rows, reference_fid, generated_scores
 
 
 def select_metric_slices(
@@ -389,14 +404,14 @@ def select_metric_slices(
 ) -> np.ndarray:
     slices = np.moveaxis(volume, axis, 0)
     if count > slices.shape[0]:
-        raise ValueError("requested more KID sections than the volume contains.")
+        raise ValueError("requested more FID sections than the volume contains.")
     rng = np.random.default_rng(30_000 + seed)
     indices = np.sort(rng.choice(slices.shape[0], size=count, replace=False))
     selected = slices[np.asarray(indices)]
     if selected.shape[1:] == (output_size, output_size):
         return selected
     if selected.shape[1] < output_size or selected.shape[2] < output_size:
-        raise ValueError("generated sections are smaller than the KID field of view.")
+        raise ValueError("generated sections are smaller than the FID field of view.")
     crops = []
     for section in selected:
         top = int(rng.integers(0, section.shape[0] - output_size + 1))
@@ -416,89 +431,40 @@ def scale_output_shape(patch_size: int) -> tuple[int, int, int]:
     return tuple(patch_size + (count - 1) * stride for count in SCALE_BLOCKS)
 
 
-def scale_seams(
-    shape: tuple[int, ...],
-    patch_size: int,
-    overlap: int,
-) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    if 2 * overlap >= patch_size:
-        raise ValueError("twice overlap must be smaller than patch_size.")
-    stride = patch_size - 2 * overlap
-    starts = tuple(
-        ScaledGenerator.axis_starts(size, patch_size, stride) for size in shape
-    )
-    return tuple(  # type: ignore[return-value]
-        tuple((left + patch_size + right) // 2 for left, right in pairwise(axis))
-        for axis in starts
-    )
-
-
-def seam_connectivity_drop(
-    volume: np.ndarray,
-    seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
-) -> float:
-    """Interior pore continuation minus continuation at exact tile seams."""
-    drops = []
-    for axis, positions in enumerate(seams):
-        seam_pairs = {position - 1 for position in positions}
-        excluded = {
-            index
-            for seam_index in seam_pairs
-            for index in range(
-                max(0, seam_index - SEAM_EXCLUSION_RADIUS),
-                min(volume.shape[axis] - 1, seam_index + SEAM_EXCLUSION_RADIUS + 1),
-            )
-        }
-        seam_same = seam_total = interior_same = interior_total = 0
-        for index in range(volume.shape[axis] - 1):
-            previous = np.take(volume, index, axis=axis) == PORE_PHASE
-            current = np.take(volume, index + 1, axis=axis) == PORE_PHASE
-            total = int(previous.sum())
-            same = int(np.logical_and(previous, current).sum())
-            if index in seam_pairs:
-                seam_same += same
-                seam_total += total
-            elif index not in excluded:
-                interior_same += same
-                interior_total += total
-        if seam_total == 0 or interior_total == 0:
-            raise ValueError(
-                "cannot calculate seam connectivity with an empty pore set."
-            )
-        seam_connectivity = seam_same / seam_total
-        interior_connectivity = interior_same / interior_total
-        drops.append(interior_connectivity - seam_connectivity)
-    return float(np.mean(drops))
+def mean_percolation(volume: np.ndarray) -> float:
+    return float(np.mean(percolating_fractions(volume, PORE_PHASE)))
 
 
 def make_row(
     condition: str,
     seed: int,
     guidance_scale: float | None = None,
-    kid: float | None = None,
-    kid_subset_std: float | None = None,
+    fid: float | None = None,
     porosity_value: float | None = None,
     tortuosity_value: float | None = None,
     voxel_accuracy_value: float | None = None,
-    seam_connectivity_drop_value: float | None = None,
+    percolation_value: float | None = None,
+    generation_seconds: float | None = None,
 ) -> dict[str, object]:
     return {
         "condition": condition,
         "seed": seed,
         "guidance_scale": guidance_scale,
-        "kid": kid,
-        "kid_subset_std": kid_subset_std,
+        "fid": fid,
         "porosity": porosity_value,
         "tortuosity_axis0": tortuosity_value,
         "voxel_accuracy": voxel_accuracy_value,
-        "seam_connectivity_drop": seam_connectivity_drop_value,
+        "percolation": percolation_value,
+        "generation_seconds": generation_seconds,
     }
 
 
 def summarize(
     raw_rows: list[dict[str, object]],
+    reference_fid: float,
     reference_porosity: float,
     reference_tortuosity: float,
+    reference_percolation: float,
     guidance_scale: float,
 ) -> list[dict[str, object]]:
     summary = [
@@ -506,16 +472,18 @@ def summarize(
             "condition": "GT reference volume",
             "guidance_scale": None,
             "samples": 1,
-            "kid_mean": None,
-            "kid_std": None,
+            "fid_mean": reference_fid,
+            "fid_std": None,
             "porosity_mean": reference_porosity,
             "porosity_std": None,
             "tortuosity_mean": reference_tortuosity,
             "tortuosity_std": None,
             "voxel_accuracy_mean": None,
             "voxel_accuracy_std": None,
-            "seam_connectivity_drop_mean": None,
-            "seam_connectivity_drop_std": None,
+            "percolation_mean": reference_percolation,
+            "percolation_std": None,
+            "generation_seconds_mean": None,
+            "generation_seconds_std": None,
         }
     ]
     for condition in CONDITIONS:
@@ -527,27 +495,13 @@ def summarize(
             ),
             "samples": len(rows),
         }
-        kid_values = np.asarray(
-            [row["kid"] for row in rows if row["kid"] is not None],
-            dtype=float,
-        )
-        kid_subset_stds = np.asarray(
-            [
-                row["kid_subset_std"]
-                for row in rows
-                if row["kid_subset_std"] is not None
-            ],
-            dtype=float,
-        )
-        result["kid_mean"] = float(kid_values.mean()) if kid_values.size else None
-        result["kid_std"] = (
-            float(kid_subset_stds.mean()) if kid_subset_stds.size else None
-        )
         for metric in (
+            "fid",
             "porosity",
             "tortuosity_axis0",
             "voxel_accuracy",
-            "seam_connectivity_drop",
+            "percolation",
+            "generation_seconds",
         ):
             values = np.asarray(
                 [row[metric] for row in rows if row[metric] is not None],
@@ -569,13 +523,131 @@ def write_csv(rows: list[dict[str, object]], output: Path) -> None:
         writer.writerows(rows)
 
 
+def load_generation_times(path: Path) -> dict[tuple[str, int], float]:
+    if not path.is_file():
+        raise FileNotFoundError(f"generation times were not found: {path}")
+    values = {}
+    with path.open(newline="", encoding="utf-8") as file:
+        for row in csv.DictReader(file):
+            condition = row["condition"]
+            raw = row.get("generation_seconds")
+            if condition in CONDITIONS[1:] and raw:
+                values[(condition, int(row["seed"]))] = float(raw)
+    expected = {(condition, seed) for condition in CONDITIONS[1:] for seed in SEEDS}
+    if set(values) != expected:
+        raise ValueError("cached generation times do not match the evaluation set.")
+    return values
+
+
+def render_summary_chart(
+    rows: list[dict[str, object]],
+    output: Path,
+) -> None:
+    labels = {
+        "GT reference volume": "GT",
+        "Real 2D crops": "Real crops",
+        "3D": "3D",
+        "3D (phase-fraction conditioned)": "VF conditioned",
+        "3D (anchored, 25%)": "Anchored 25%",
+        "3D (anchored, 50%)": "Anchored 50%",
+        "3D (anchored, 75%)": "Anchored 75%",
+        "3D (anchored, 100%)": "Anchored 100%",
+        "3D (scale-up)": "Scale-up",
+    }
+    specs = (
+        ("fid", "FID ↓", 1.0, None),
+        ("voxel_accuracy", "Voxel accuracy ↑ (%)", 100.0, None),
+        ("tortuosity", "Tortuosity", 1.0, "tortuosity"),
+        ("porosity", "Porosity, phase 0 (%)", 100.0, "porosity"),
+        ("percolation", "Percolation, phase 0 (%)", 100.0, "percolation"),
+        ("generation_seconds", "Generation time ↓ (s)", 1.0, None),
+    )
+    references = {
+        key: next(
+            (
+                float(row[f"{key}_mean"])
+                for row in rows
+                if row["condition"] == "GT reference volume"
+                and row[f"{key}_mean"] is not None
+            ),
+            None,
+        )
+        for key in ("tortuosity", "porosity", "percolation")
+    }
+    figure, panels = plt.subplots(2, 3, figsize=(15, 10), facecolor="white")
+    figure.subplots_adjust(
+        left=0.11,
+        right=0.985,
+        bottom=0.07,
+        top=0.96,
+        hspace=0.32,
+        wspace=0.38,
+    )
+    for panel, letter, (key, title, scale, reference_key) in zip(
+        panels.ravel(),
+        "abcdef",
+        specs,
+        strict=True,
+    ):
+        selected = [row for row in rows if row[f"{key}_mean"] is not None]
+        names = [labels[str(row["condition"])] for row in selected]
+        means = [scale * float(row[f"{key}_mean"]) for row in selected]
+        errors = [
+            0.0 if row[f"{key}_std"] is None else scale * float(row[f"{key}_std"])
+            for row in selected
+        ]
+        colors = [
+            "#64748b"
+            if row["condition"] == "GT reference volume"
+            else "#0ea5e9"
+            if row["condition"] == "Real 2D crops"
+            else ROI_COLOR
+            for row in selected
+        ]
+        bars = panel.barh(
+            names,
+            means,
+            xerr=errors,
+            color=colors,
+            alpha=0.9,
+            capsize=3,
+        )
+        panel.bar_label(
+            bars,
+            labels=[f"{value:.2f}" for value in means],
+            padding=3,
+            fontsize=8,
+        )
+        if reference_key is not None and references[reference_key] is not None:
+            reference = scale * float(references[reference_key])
+            panel.axvline(
+                reference,
+                color="#334155",
+                linewidth=1.2,
+                linestyle="--",
+                label=f"GT: {reference:.2f}",
+            )
+            panel.legend(frameon=False, fontsize=8, loc="best")
+        panel.set_title(f"({letter}) {title}", loc="left", fontsize=11)
+        panel.invert_yaxis()
+        panel.grid(axis="x", color="#cbd5e1", linewidth=0.7, alpha=0.65)
+        panel.spines[["top", "right"]].set_visible(False)
+        panel.tick_params(labelsize=8, colors="#475569")
+        panel.margins(x=0.18)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output, dpi=180, bbox_inches="tight", pad_inches=0.08)
+    plt.close(figure)
+
+
 def write_manifest(
     provenance: dict[str, object],
     cached_paths: list[Path],
     derived_outputs: tuple[Path, ...],
     reference: np.ndarray,
+    reference_fid: float,
     reference_porosity: float,
     reference_tortuosity: float,
+    reference_percolation: float,
     output: Path,
 ) -> None:
     data = {
@@ -601,22 +673,14 @@ def write_manifest(
         "scale_blocks": list(SCALE_BLOCKS),
         "scale_overlap": SCALE_OVERLAP,
         "scale_output_shape": list(scale_output_shape(reference.shape[0])),
-        "scale_seams": [
-            list(axis)
-            for axis in scale_seams(
-                scale_output_shape(reference.shape[0]),
-                reference.shape[0],
-                SCALE_OVERLAP,
-            )
-        ],
+        "reference_fid": reference_fid,
         "reference_porosity": reference_porosity,
         "reference_tortuosity_axis0": reference_tortuosity,
-        "kid": {
-            "implementation": "torchmetrics.image.kid.KernelInceptionDistance",
+        "reference_percolation": reference_percolation,
+        "fid": {
+            "implementation": "torchmetrics.image.fid.FrechetInceptionDistance",
             "torchmetrics_version": version("torchmetrics"),
             "feature_dimensions": 2048,
-            "subsets": KID_SUBSETS,
-            "subset_size": KID_SUBSET_SIZE,
             "real_images": REAL_CROP_COUNT,
             "generated_axis0_slices": REAL_CROP_COUNT,
             "field_of_view": [reference.shape[0], reference.shape[0]],
@@ -628,10 +692,8 @@ def write_manifest(
                 f"one deterministic {reference.shape[0]} x {reference.shape[0]} crop "
                 "from each sampled scale-up section"
             ),
-            "mean_aggregation": "arithmetic mean of four per-seed KID estimates",
-            "reported_std": (
-                "mean standard deviation across 100 KID subsets over four seeds"
-            ),
+            "aggregation": "mean of four per-seed FID estimates",
+            "reported_std": "between-seed sample standard deviation",
         },
         "tortuosity": {
             "implementation": "TauFactor steady-state diffusion Solver",
@@ -640,9 +702,23 @@ def write_manifest(
             "axis": AXIS,
             "convergence_criterion": TAUFACTOR_CONVERGENCE,
         },
-        "seam_connectivity_drop": {
-            "definition": "mean_axis(interior pore continuation - exact seam pore continuation)",
-            "interior_exclusion_radius": SEAM_EXCLUSION_RADIUS,
+        "percolation": {
+            "phase": PORE_PHASE,
+            "connectivity": 6,
+            "periodic": False,
+            "axes": [0, 1, 2],
+            "value": (
+                "mean fraction across axes of phase-0 voxels belonging to "
+                "components spanning opposing faces"
+            ),
+        },
+        "generation_time": {
+            "clock": "time.perf_counter",
+            "cuda_synchronized": True,
+            "includes": "sampling, including anchored base sampling for scale-up",
+            "excludes": "TIFF serialization and metric calculation",
+            "reported_std": "between-seed sample standard deviation",
+            "unit": "seconds",
         },
     }
     output.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -682,11 +758,12 @@ def set_seed(seed: int, device: torch.device) -> None:
 def print_row(row: dict[str, object]) -> None:
     values = []
     for key in (
-        "kid",
+        "fid",
         "porosity",
         "tortuosity_axis0",
         "voxel_accuracy",
-        "seam_connectivity_drop",
+        "percolation",
+        "generation_seconds",
     ):
         value = row[key]
         values.append(f"{key}={value:.6f}" if isinstance(value, float) else f"{key}=-")

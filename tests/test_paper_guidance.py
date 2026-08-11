@@ -6,15 +6,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
-from src.evaluate import image as evaluate_image
-from src.evaluate import (
-    percolating_fractions,
-    percolation_error,
-    percolation_errors,
-)
+from src.evaluate import percolating_fractions
 
 ROOT = Path(__file__).resolve().parents[1]
 PAPER_DIR = ROOT / "scripts" / "paper"
@@ -69,108 +65,58 @@ def _keywords(call: ast.Call) -> dict[str, ast.expr]:
     }
 
 
-def test_anchor_sweep_pore_percolation_uses_shared_axiswise_error() -> None:
-    module = _load_script("evaluate_anchor_sweep.py")
-    predicted = (1.0, 0.0, 0.0)
-    target = (0.0, 1.0, 0.0)
+def test_paper_metrics_reports_mean_pore_percolation() -> None:
+    module = _load_script("evaluate_paper_metrics.py")
+    volume = np.zeros((4, 4, 4), dtype=np.uint8)
 
+    expected = float(np.mean(percolating_fractions(volume, 0)))
     assert module.PORE_PHASE == 0
     assert module.percolating_fractions is percolating_fractions
-    assert module.percolation_errors is percolation_errors
-    assert module.percolation_error is percolation_error
-    assert module.percolation_errors(predicted, target) == (1.0, 1.0, 0.0)
-    assert module.percolation_error(predicted, target) == pytest.approx(2 / 3)
+    assert module.mean_percolation(volume) == pytest.approx(expected)
 
 
 def test_anchor_sweep_pore_output_contract() -> None:
     source = (PAPER_DIR / "evaluate_anchor_sweep.py").read_text(encoding="utf-8")
 
-    fields = (
-        "gt_pore_percolation_axis0",
-        "gt_pore_percolation_axis1",
-        "gt_pore_percolation_axis2",
-        "pred_pore_percolation_axis0",
-        "pred_pore_percolation_axis1",
-        "pred_pore_percolation_axis2",
-        "pore_percolation_error_axis0",
-        "pore_percolation_error_axis1",
-        "pore_percolation_error_axis2",
-        "pore_percolation_error",
-    )
-
-    for field in fields:
+    for field in ("percolation", "generation_seconds"):
         assert f'"{field}"' in source
     assert '"pore_percolation": {' in source
-    assert '"Pore percolation error (pp)"' in source
-    assert "particle" not in source.lower()
+    assert '"Percolation, phase 0 (%)"' in source
+    assert "percolation_error" not in source
 
 
-def test_paper_metrics_reuses_real_kid_features_and_resets_fake(
+def test_paper_metrics_reuses_real_fid_features(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_script("evaluate_paper_metrics.py")
+    metric = object()
+    scored: list[np.ndarray] = []
 
-    class FakeKid:
-        constructions = 0
-        real_updates = 0
-        fake_updates = 0
-        compute_fake_counts: tuple[int, ...] = ()
-        compute_seeds: tuple[int, ...] = ()
-        resets = 0
-        destroyed = False
+    def fake_make_fid_metric(real: np.ndarray, device: torch.device):
+        assert np.array_equal(real, np.asarray([-1.0]))
+        assert device.type == "cpu"
+        return metric
 
-        def __init__(self, **kwargs) -> None:
-            assert kwargs == {
-                "feature": 2048,
-                "subsets": module.KID_SUBSETS,
-                "subset_size": module.KID_SUBSET_SIZE,
-                "reset_real_features": False,
-                "normalize": False,
-            }
-            type(self).constructions += 1
-            self.real_features: list[torch.Tensor] = []
-            self.fake_features: list[torch.Tensor] = []
+    def fake_fid_score(
+        received: object,
+        values: np.ndarray,
+        device: torch.device,
+    ) -> float:
+        assert received is metric
+        assert device.type == "cpu"
+        values = np.asarray(values)
+        scored.append(values)
+        return float(values.mean())
 
-        def __del__(self) -> None:
-            type(self).destroyed = True
-
-        def to(self, device: torch.device):
-            assert device.type == "cpu"
-            return self
-
-        def update(self, images: torch.Tensor, *, real: bool) -> None:
-            if real:
-                type(self).real_updates += 1
-                self.real_features.append(images)
-            else:
-                assert not self.fake_features
-                type(self).fake_updates += 1
-                self.fake_features.append(images)
-
-        def compute(self) -> tuple[torch.Tensor, torch.Tensor]:
-            assert len(self.real_features) == 1
-            type(self).compute_fake_counts += (len(self.fake_features),)
-            type(self).compute_seeds += (torch.initial_seed(),)
-            value = self.fake_features[0].to(torch.float32).mean()
-            return value, value / 10.0
-
-        def reset(self) -> None:
-            type(self).resets += 1
-            self.fake_features.clear()
-
-    monkeypatch.setattr(evaluate_image, "KernelInceptionDistance", FakeKid)
-    monkeypatch.setattr(
-        evaluate_image,
-        "metric_images",
-        lambda values, _device: values,
-    )
+    monkeypatch.setattr(module, "make_fid_metric", fake_make_fid_metric)
+    monkeypatch.setattr(module, "fid_score", fake_fid_score)
     monkeypatch.setattr(module, "REAL_EVALUATION_SEEDS", (10,))
     monkeypatch.setattr(module, "CONDITIONS", ("Real 2D crops", "Generated"))
     monkeypatch.setattr(module, "SEEDS", (20, 21))
     monkeypatch.setattr(
         module,
         "sample_real_crops",
-        lambda seed, _output_size: torch.tensor([float(seed)]),
+        lambda seed, _output_size: np.asarray([float(seed)]),
     )
     monkeypatch.setattr(
         module,
@@ -180,7 +126,7 @@ def test_paper_metrics_reuses_real_kid_features_and_resets_fake(
     monkeypatch.setattr(
         module,
         "load_volume",
-        lambda path: torch.tensor([float(path[1])]),
+        lambda path: np.asarray([float(path[1])]),
     )
     monkeypatch.setattr(
         module,
@@ -188,30 +134,25 @@ def test_paper_metrics_reuses_real_kid_features_and_resets_fake(
         lambda volume, **_kwargs: volume,
     )
     monkeypatch.setattr(module, "phase_fraction", lambda *_args: 0.5)
-    monkeypatch.setattr(
-        module,
-        "tortuosity",
-        lambda *_args, **_kwargs: pytest.fail("TauFactor overlapped the KID pass"),
+
+    real_rows, reference_fid, generated = module.compute_fid_scores(
+        np.asarray([-1.0]),
+        np.asarray([99.0]),
+        patch_size=4,
+        device=torch.device("cpu"),
     )
 
-    with torch.random.fork_rng():
-        real_rows, generated = module.compute_kid_scores(
-            torch.tensor([-1.0]),
-            patch_size=4,
-            device=torch.device("cpu"),
-        )
-
-    assert FakeKid.constructions == 1
-    assert FakeKid.real_updates == 1
-    assert FakeKid.fake_updates == 3
-    assert FakeKid.compute_fake_counts == (1, 1, 1)
-    assert FakeKid.compute_seeds == (0, 0, 0)
-    assert FakeKid.resets == 3
-    assert FakeKid.destroyed
-    assert real_rows[0]["kid"] == 10.0
+    assert [values.tolist() for values in scored] == [
+        [10.0],
+        [99.0],
+        [20.0],
+        [21.0],
+    ]
+    assert real_rows[0]["fid"] == 10.0
+    assert reference_fid == 99.0
     assert set(generated) == {("Generated", 20), ("Generated", 21)}
-    assert generated[("Generated", 20)] == pytest.approx((20.0, 2.0))
-    assert generated[("Generated", 21)] == pytest.approx((21.0, 2.1))
+    assert generated[("Generated", 20)] == pytest.approx(20.0)
+    assert generated[("Generated", 21)] == pytest.approx(21.0)
 
 
 @pytest.mark.parametrize("filename", PAPER_SCRIPTS)
@@ -404,11 +345,6 @@ def test_paper_metrics_uses_fixed_block_geometry() -> None:
     module = _load_script("evaluate_paper_metrics.py")
 
     assert module.scale_output_shape(128) == (352, 352, 352)
-    assert module.scale_seams((352, 352, 352), 128, 8) == (
-        (120, 232),
-        (120, 232),
-        (120, 232),
-    )
 
 
 @pytest.mark.parametrize(
@@ -447,9 +383,10 @@ def test_anchor_asset_writes_generation_sidecar(
     class FakeGenerator:
         patch_size = 4
 
-        def generate(self, *, anchors, guidance_scale):
+        def generate(self, *, anchors, guidance_scale, domain):
             assert len(anchors) == 1
             assert guidance_scale == 1.5
+            assert domain == 0
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "OUTPUT_DIR", tmp_path)
@@ -490,6 +427,7 @@ def test_anchor_asset_writes_generation_sidecar(
     assert len(metadata["reference_sha256"]) == 64
     assert len(metadata["generation_signature"]) == 64
     assert metadata["seed"] == module.SEED
+    assert metadata["generation"]["domain"] == 0
     assert metadata["anchor"]["axis"] == module.AXIS
     assert metadata["output"]["shape"] == [4, 4, 4]
 
@@ -513,9 +451,10 @@ def test_scale_asset_writes_generation_sidecar(
     class FakeGenerator:
         patch_size = 4
 
-        def generate(self, *, anchors, guidance_scale):
+        def generate(self, *, anchors, guidance_scale, domain):
             assert len(anchors) == 1
             assert guidance_scale == 1.75
+            assert domain == 0
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     class FakeScaled:
@@ -538,6 +477,7 @@ def test_scale_asset_writes_generation_sidecar(
 
         def generate(self, **kwargs):
             assert kwargs["guidance_scale"] == 1.75
+            assert kwargs["domain"] == 0
             return torch.zeros((12, 12, 12), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "OUTPUT_DIR", tmp_path)
@@ -578,5 +518,6 @@ def test_scale_asset_writes_generation_sidecar(
     assert len(metadata["generation_signature"]) == 64
     assert metadata["seed"] == module.SEED
     assert metadata["generation"]["blocks"] == [3, 3, 3]
+    assert metadata["generation"]["domain"] == 0
     assert metadata["scale_plan"]["tile_count"] == 27
     assert metadata["output"]["shape"] == [12, 12, 12]

@@ -1,14 +1,15 @@
 {
-  "weights": "D:\\code\\diffusion-gan3d\\run\\08092042\\checkpoints\\step_00020000\\generator.pt",
-  "weight_sha256": "939377b61f3768cb075b0725c77880f1ebac189bcbd8a7d60ab8331ec17c78a0",
-  "train_config": "D:\\code\\diffusion-gan3d\\run\\08092042\\train.yaml",
-  "train_config_sha256": "734a13b427afe1930512b1c5afd4a85a0a56ebaefd3a43e149c28bef65c87ba6",
+  "weights": "D:\\code\\diffusion-gan3d\\run\\08111303\\checkpoints\\step_00020000\\generator.pt",
+  "weight_sha256": "d1621f07242d78da841b94fa6c1aab23c2bc7754671c890a03689150ab871aa7",
+  "train_config": "D:\\code\\diffusion-gan3d\\run\\08111303\\train.yaml",
+  "train_config_sha256": "3237de4579dd7164c2fc007237f64ce0f34617b9c44669fecb22f2dd031e8552",
   "guidance_scale": 1.0,
   "reference": "D:\\code\\diffusion-gan3d\\data\\sample.png",
   "reference_sha256": "fd3c6b68573e74c9d01f96c28a2fe60025e3493e981bb8d7408c1740a16f8094",
   "additional_inputs": {},
   "generation": {
     "axis": 0,
+    "domain": 0,
     "seed": 0,
     "source_crop_size": 128,
     "source_roi_left_top": [
@@ -16,7 +17,7 @@
       58
     ]
   },
-  "generation_signature": "f0d1b02674014bff6f04f8b60806a9688a5103f22223a86b416daddf94354c67",
+  "generation_signature": "1cd0ecab44e29003a0ccde634b2f5f5230ec326a243e610b8628e993ebf94234",
   "seed": 0,
   "anchor": {
     "axis": 0,
@@ -34,7 +35,7 @@
   },
   "output": {
     "path": "D:\\code\\diffusion-gan3d\\assets\\paper\\04-anchor-conditioning.png",
-    "sha256": "037c5996c31b44a80ffab945860884401991ce754088703a1f57b6c25b2f1d06",
+    "sha256": "f68797eecbaeb4775567297599af9a486e9826976c40c04b59d5eafd129f4ef2",
     "shape": [
       128,
       128,
@@ -43,8 +44,8 @@
     "dtype": "torch.uint8"
   },
   "anchor_match": {
-    "matched_voxels": 16097,
+    "matched_voxels": 16235,
     "total_voxels": 16384,
-    "accuracy": 0.98248291015625
+    "accuracy": 0.99090576171875
   }
 }

@@ -101,6 +101,11 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
 
 def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
     folders = {}
+    shapes = {
+        0: (8, 8),
+        1: (4, 8),
+        2: (8, 6),
+    }
     for axis in (0, 1, 2):
         folder = tmp_path / "slices" / str(axis)
         folder.mkdir(parents=True)
@@ -108,7 +113,7 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
             np.random.randint(
                 0,
                 3,
-                size=(8, 8),
+                size=shapes[axis],
                 dtype=np.uint8,
             )
         ).save(folder / "sample.png")
@@ -123,6 +128,7 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
                 "domains": {0: folders},
                 "crop_size": 8,
                 "input_size": 8,
+                "allow_partial_crop": True,
                 "augment": "directional",
                 "augment_prob": 1.0,
                 "num_phases": 3,
