@@ -31,6 +31,7 @@ from provenance import (
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
+from src.config import load_generation_settings
 from src.evaluate import (
     fid_score,
     make_fid_metric,
@@ -56,7 +57,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weight", type=Path, required=True)
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance-scale", type=float, default=1.0)
+    parser.add_argument("--guidance-scale", type=float)
     parser.add_argument(
         "--reuse",
         action="store_true",
@@ -71,6 +72,10 @@ def main() -> None:
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     weights = args.weight.resolve()
+    settings = load_generation_settings(weights)
+    guidance_scale = (
+        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
+    )
     generation = {
         "seed": SEED,
         "domain": args.domain,
@@ -81,7 +86,7 @@ def main() -> None:
     }
     provenance = build_provenance(
         weights,
-        args.guidance_scale,
+        guidance_scale,
         generation=generation,
         reference=REFERENCE_PATH,
     )
@@ -123,7 +128,7 @@ def main() -> None:
         generation_times = load_generation_times(csv_path)
     else:
         generation_times = generate_volumes(
-            reference, weights, args.guidance_scale, args.domain
+            reference, weights, guidance_scale, args.domain
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -161,7 +166,7 @@ def main() -> None:
         row = {
             "anchor_count": count,
             "coverage": count / reference.shape[AXIS],
-            "guidance_scale": args.guidance_scale,
+            "guidance_scale": guidance_scale,
             "fid": fid_value,
             "porosity": phase_fraction(volume, PORE_PHASE),
             "tortuosity_axis0": tortuosity(

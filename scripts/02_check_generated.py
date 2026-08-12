@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.build import load_generator
+from src.config import load_generation_settings
 
 
 def main() -> None:
@@ -29,8 +30,7 @@ def main() -> None:
     parser.add_argument(
         "--guidance-scale",
         type=float,
-        default=1.0,
-        help="classifier-free guidance scale (default: 1)",
+        help="classifier-free guidance scale (default: train.yaml)",
     )
     parser.add_argument(
         "--out",
@@ -51,6 +51,10 @@ def main() -> None:
     print(f"Weight  : {weight.resolve()}", flush=True)
 
     generator = load_generator(weight, device=device)
+    settings = load_generation_settings(weight)
+    guidance_scale = (
+        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
+    )
     shape = (generator.patch_size,) * 3
     print(f"Shape   : {' × '.join(map(str, shape))}")
     print(f"Device  : {device}")
@@ -60,7 +64,7 @@ def main() -> None:
 
     vol = generator.generate(
         vf=None,
-        guidance_scale=args.guidance_scale,
+        guidance_scale=guidance_scale,
         domain=args.domain,
     )
     print("Status  : complete", flush=True)

@@ -17,6 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
+from src.config import load_generation_settings
 from src.evaluate import (
     continuation_delta,
     phase_change_rate,
@@ -25,7 +26,7 @@ from src.evaluate import (
     transition_tv,
     voxel_accuracy,
 )
-from src.scale import DEFAULT_SCALE_OVERLAP, ScaledGenerator, ScalePlan
+from src.scale import ScaledGenerator, ScalePlan
 
 AXIS = 0
 
@@ -86,8 +87,12 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
     parser.add_argument(
         "--overlap",
         type=non_negative_int,
-        default=DEFAULT_SCALE_OVERLAP,
-        help=f"context added to each side of a block (default: {DEFAULT_SCALE_OVERLAP})",
+        help="context added to each side of a block (default: train.yaml)",
+    )
+    parser.add_argument(
+        "--crop-margin",
+        type=non_negative_int,
+        help="voxels discarded from every outer face (default: train.yaml)",
     )
     parser.add_argument(
         "--count",
@@ -103,8 +108,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
     parser.add_argument(
         "--guidance-scale",
         type=float,
-        default=1.0,
-        help="classifier-free guidance scale (default: 1)",
+        help="classifier-free guidance scale (default: train.yaml)",
     )
     parser.add_argument(
         "--out",
@@ -261,11 +265,20 @@ def main() -> None:
         print(f"GT         : {args.gt.resolve()}")
 
     generator = load_generator(weight, device=device)
-    overlap = args.overlap
-    shape = tuple(generator.patch_size * count for count in args.blocks)
+    settings = load_generation_settings(weight)
+    overlap = settings.overlap if args.overlap is None else args.overlap
+    crop_margin = settings.crop_margin if args.crop_margin is None else args.crop_margin
+    guidance_scale = (
+        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
+    )
+    args.guidance_scale = guidance_scale
     scaled = ScaledGenerator(generator)
-    plan = scaled.plan(shape, overlap)
+    shape = scaled.shape_from_blocks(tuple(args.blocks), overlap)
+    generation_shape = tuple(size + 2 * crop_margin for size in shape)
+    plan = scaled.plan(generation_shape, overlap)
     print_plan(plan, device)
+    print(f"Output shape : {' × '.join(map(str, shape))}")
+    print(f"Crop margin  : {crop_margin} per outer face")
     base_result = generate_base(parser, args, generator, anchor_count)
     base = base_result.volume
     target = base_result.target
@@ -274,7 +287,10 @@ def main() -> None:
 
     conditioning = "soft base" if base is not None else "none"
     print(f"Conditioning : {conditioning}")
-    print("Postprocess  : none")
+    postprocess = (
+        f"center crop ({crop_margin} voxels per outer face)" if crop_margin else "none"
+    )
+    print(f"Postprocess  : {postprocess}")
 
     print("Status     : scaling...", flush=True)
 
@@ -286,9 +302,10 @@ def main() -> None:
     vol = scaled.generate(
         blocks=tuple(args.blocks),
         overlap=overlap,
+        crop_margin=crop_margin,
         base=base,
         vf=None,
-        guidance_scale=args.guidance_scale,
+        guidance_scale=guidance_scale,
         domain=args.domain,
     )
     stats = scaled.stats

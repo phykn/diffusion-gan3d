@@ -9,6 +9,7 @@ import tifffile
 import torch
 
 from src.build import build_models
+from src.config import GenerationSettings
 from src.generate import Generator
 from src.train.weights import save_weights
 from src.utils import save_yaml
@@ -117,6 +118,11 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
     monkeypatch.setattr(
         module,
+        "load_generation_settings",
+        lambda _path: GenerationSettings(),
+    )
+    monkeypatch.setattr(
+        module,
         "load_volume",
         lambda *_args, **_kwargs: torch.zeros((4, 4, 4), dtype=torch.uint8),
     )
@@ -174,6 +180,11 @@ def test_unconditioned_check_routes_guidance_scale(
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
+    monkeypatch.setattr(
+        module,
+        "load_generation_settings",
+        lambda _path: GenerationSettings(),
+    )
     monkeypatch.setattr(module, "show_slices", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(
@@ -205,6 +216,11 @@ def test_unconditioned_check_propagates_generator_guidance_validation(
     generator.patch_size = 4
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: generator)
+    monkeypatch.setattr(
+        module,
+        "load_generation_settings",
+        lambda _path: GenerationSettings(),
+    )
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(
         module.sys,

@@ -37,6 +37,7 @@ from provenance import (
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
+from src.config import load_generation_settings
 from src.evaluate import (
     fid_score,
     make_fid_metric,
@@ -45,7 +46,7 @@ from src.evaluate import (
     tortuosity,
     voxel_accuracy,
 )
-from src.scale import DEFAULT_SCALE_OVERLAP, ScaledGenerator
+from src.scale import ScaledGenerator
 
 REFERENCE_PATH = PROJECT_ROOT / "scripts" / "gt_128.tiff"
 TEMP_DIR = PROJECT_ROOT / "temp"
@@ -63,7 +64,6 @@ REAL_REFERENCE_SEED = 10_000
 REAL_EVALUATION_SEEDS = (20_000, 20_001, 20_002, 20_003)
 TAUFACTOR_CONVERGENCE = 1e-3
 SCALE_BLOCKS = (3, 3, 3)
-SCALE_OVERLAP = DEFAULT_SCALE_OVERLAP
 
 CONDITIONS = (
     "Real 2D crops",
@@ -81,7 +81,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weight", type=Path, required=True)
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance-scale", type=float, default=1.0)
+    parser.add_argument("--guidance-scale", type=float)
     parser.add_argument(
         "--reuse",
         action="store_true",
@@ -104,6 +104,12 @@ def main() -> None:
 
     VOLUME_DIR.mkdir(parents=True, exist_ok=True)
     weights = args.weight.resolve()
+    generation_settings = load_generation_settings(weights)
+    guidance_scale = (
+        generation_settings.guidance_scale
+        if args.guidance_scale is None
+        else args.guidance_scale
+    )
     generation = {
         "conditions": list(CONDITIONS[1:]),
         "domain": args.domain,
@@ -112,14 +118,17 @@ def main() -> None:
         "anchor_counts": list(ANCHOR_COUNTS),
         "scale_geometry": "fixed_blocks_inward_margins",
         "scale_blocks": list(SCALE_BLOCKS),
-        "scale_overlap": SCALE_OVERLAP,
-        "scale_output_shape": list(scale_output_shape(patch_size)),
+        "scale_overlap": generation_settings.overlap,
+        "scale_crop_margin": generation_settings.crop_margin,
+        "scale_output_shape": list(
+            scale_output_shape(patch_size, generation_settings.overlap)
+        ),
         "reference_shape": list(reference.shape),
         "phase_fraction_target": [target_porosity, 1.0 - target_porosity],
     }
     provenance = build_provenance(
         weights,
-        args.guidance_scale,
+        guidance_scale,
         generation=generation,
         reference=REFERENCE_PATH,
         additional_inputs={"training_image": SAMPLE_PATH},
@@ -149,8 +158,10 @@ def main() -> None:
             reference,
             target_porosity,
             weights,
-            args.guidance_scale,
+            guidance_scale,
             args.domain,
+            generation_settings.overlap,
+            generation_settings.crop_margin,
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -179,7 +190,7 @@ def main() -> None:
                 make_row(
                     condition=condition,
                     seed=seed,
-                    guidance_scale=args.guidance_scale,
+                    guidance_scale=guidance_scale,
                     fid=fid_scores[(condition, seed)],
                     porosity_value=phase_fraction(volume, PORE_PHASE),
                     tortuosity_value=tortuosity(
@@ -203,7 +214,7 @@ def main() -> None:
         reference_porosity=target_porosity,
         reference_tortuosity=reference_tortuosity,
         reference_percolation=reference_percolation,
-        guidance_scale=args.guidance_scale,
+        guidance_scale=guidance_scale,
     )
     write_csv(summary_rows, SUMMARY_CSV)
     render_summary_chart(summary_rows, FIGURE_PATH)
@@ -216,6 +227,8 @@ def main() -> None:
         reference_porosity=target_porosity,
         reference_tortuosity=reference_tortuosity,
         reference_percolation=reference_percolation,
+        scale_overlap=generation_settings.overlap,
+        scale_crop_margin=generation_settings.crop_margin,
         output=MANIFEST_PATH,
     )
     print(f"Raw metrics : {RAW_CSV.resolve()}")
@@ -230,6 +243,8 @@ def generate_volumes(
     weights: Path,
     guidance_scale: float,
     domain: int,
+    scale_overlap: int,
+    scale_crop_margin: int,
 ) -> dict[tuple[str, int], float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
@@ -298,13 +313,14 @@ def generate_volumes(
                 scaled = ScaledGenerator(generator)
                 volume = scaled.generate(
                     blocks=SCALE_BLOCKS,
-                    overlap=SCALE_OVERLAP,
+                    overlap=scale_overlap,
+                    crop_margin=scale_crop_margin,
                     base=base,
                     progress=False,
                     guidance_scale=guidance_scale,
                     domain=domain,
                 )
-                expected_shape = scaled.shape_from_blocks(SCALE_BLOCKS, SCALE_OVERLAP)
+                expected_shape = scaled.shape_from_blocks(SCALE_BLOCKS, scale_overlap)
                 if tuple(volume.shape) != expected_shape:
                     raise RuntimeError("scale-up output does not match its block plan.")
             else:
@@ -429,8 +445,11 @@ def select_indices(size: int, count: int) -> tuple[int, ...]:
     return tuple((2 * index + 1) * size // (2 * count) for index in range(count))
 
 
-def scale_output_shape(patch_size: int) -> tuple[int, int, int]:
-    stride = patch_size - 2 * SCALE_OVERLAP
+def scale_output_shape(
+    patch_size: int,
+    overlap: int,
+) -> tuple[int, int, int]:
+    stride = patch_size - 2 * overlap
     return tuple(patch_size + (count - 1) * stride for count in SCALE_BLOCKS)
 
 
@@ -644,6 +663,8 @@ def write_manifest(
     reference_porosity: float,
     reference_tortuosity: float,
     reference_percolation: float,
+    scale_overlap: int,
+    scale_crop_margin: int,
     output: Path,
 ) -> None:
     data = {
@@ -667,8 +688,11 @@ def write_manifest(
         "anchor_counts": list(ANCHOR_COUNTS),
         "scale_geometry": "fixed_blocks_inward_margins",
         "scale_blocks": list(SCALE_BLOCKS),
-        "scale_overlap": SCALE_OVERLAP,
-        "scale_output_shape": list(scale_output_shape(reference.shape[0])),
+        "scale_overlap": scale_overlap,
+        "scale_crop_margin": scale_crop_margin,
+        "scale_output_shape": list(
+            scale_output_shape(reference.shape[0], scale_overlap)
+        ),
         "reference_fid": reference_fid,
         "reference_porosity": reference_porosity,
         "reference_tortuosity_axis0": reference_tortuosity,

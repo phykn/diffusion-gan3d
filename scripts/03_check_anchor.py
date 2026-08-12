@@ -15,6 +15,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
+from src.config import load_generation_settings
 from src.evaluate import (
     continuation_delta,
     phase_change_rate,
@@ -72,8 +73,7 @@ def main() -> None:
     parser.add_argument(
         "--guidance-scale",
         type=float,
-        default=1.0,
-        help="classifier-free guidance scale (default: 1)",
+        help="classifier-free guidance scale (default: train.yaml)",
     )
     parser.add_argument(
         "--out",
@@ -98,6 +98,10 @@ def main() -> None:
     print(f"GT      : {args.gt.resolve()}", flush=True)
 
     generator = load_generator(weight, device=device)
+    settings = load_generation_settings(weight)
+    guidance_scale = (
+        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
+    )
     if anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
     target = load_volume(
@@ -127,7 +131,7 @@ def main() -> None:
     gen = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
-        guidance_scale=args.guidance_scale,
+        guidance_scale=guidance_scale,
         domain=args.domain,
     )
     print("Status   : complete", flush=True)

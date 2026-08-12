@@ -12,8 +12,6 @@ from tqdm import tqdm
 from .generate import Generator
 from .model.denoiser import Denoiser3D, validate_guidance_scale
 
-DEFAULT_SCALE_OVERLAP = 8
-
 
 @dataclass(frozen=True)
 class ScalePlan:
@@ -32,6 +30,8 @@ class ScalePlan:
     cpu_bytes: int
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
     guidance_bytes: int = 0
+    generation_shape: tuple[int, int, int] | None = None
+    crop_margin: int = 0
 
     @property
     def base_shell(self) -> int:
@@ -180,7 +180,7 @@ class ScaledGenerator:
     def plan(
         self,
         shape: int | Sequence[int],
-        overlap: int = DEFAULT_SCALE_OVERLAP,
+        overlap: int = 8,
     ) -> ScalePlan:
         shape = self.parse_shape(shape)
         factor = self.get_downsample_factor()
@@ -268,19 +268,26 @@ class ScaledGenerator:
     def generate_probs(
         self,
         shape: int | Sequence[int],
-        overlap: int = DEFAULT_SCALE_OVERLAP,
+        overlap: int = 8,
         base: torch.Tensor | None = None,
         vf: Sequence[float] | None = None,
         progress: bool = True,
         guidance_scale: float = 1.0,
         domain: int | None = None,
+        crop_margin: int = 8,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
             raise TypeError("progress must be a boolean.")
         guidance_scale = validate_guidance_scale(guidance_scale)
+        output_shape = self.parse_shape(shape)
+        plan = self._generation_plan(
+            output_shape,
+            overlap,
+            crop_margin,
+        )
         plan = self._account_guidance_memory(
-            self.plan(shape, overlap),
+            plan,
             guidance_scale,
             vf is not None,
         )
@@ -314,15 +321,15 @@ class ScaledGenerator:
         probs.div_(
             probs.sum(dim=1, keepdim=True).clamp_min_(torch.finfo(probs.dtype).eps)
         )
-        probs = probs.squeeze(0).cpu()
-        self.stats = plan
+        probs = self.crop_output(probs.squeeze(0).cpu(), output_shape, crop_margin)
+        self.stats = self._output_plan(plan, output_shape)
         return probs
 
     @torch.no_grad()
     def generate(
         self,
         blocks: int | Sequence[int] | None = None,
-        overlap: int = DEFAULT_SCALE_OVERLAP,
+        overlap: int = 8,
         base: torch.Tensor | None = None,
         vf: Sequence[float] | None = None,
         storage: str = "auto",
@@ -331,6 +338,7 @@ class ScaledGenerator:
         shape: int | Sequence[int] | None = None,
         guidance_scale: float = 1.0,
         domain: int | None = None,
+        crop_margin: int = 8,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
@@ -344,8 +352,9 @@ class ScaledGenerator:
             if shape is not None:
                 raise ValueError("blocks and shape cannot be provided together.")
             output_shape = self.shape_from_blocks(blocks, overlap)
+        plan = self._generation_plan(output_shape, overlap, crop_margin)
         plan = self._account_guidance_memory(
-            self.plan(output_shape, overlap),
+            plan,
             guidance_scale,
             vf is not None,
         )
@@ -369,13 +378,14 @@ class ScaledGenerator:
             progress=progress,
             guidance_scale=guidance_scale,
         )
-        self.stats = plan
+        labels = self.crop_output(labels, output_shape, crop_margin)
+        self.stats = self._output_plan(plan, output_shape)
         return labels
 
     def shape_from_blocks(
         self,
         blocks: int | Sequence[int],
-        overlap: int = DEFAULT_SCALE_OVERLAP,
+        overlap: int = 8,
     ) -> tuple[int, int, int]:
         counts = self.parse_shape(blocks)
         patch_size = self.generator.patch_size
@@ -385,6 +395,60 @@ class ScaledGenerator:
             raise ValueError("twice overlap must be smaller than patch_size.")
         stride = patch_size - 2 * overlap
         return tuple(patch_size + (count - 1) * stride for count in counts)
+
+    def _generation_plan(
+        self,
+        output_shape: tuple[int, int, int],
+        overlap: int,
+        crop_margin: int,
+    ) -> ScalePlan:
+        if (
+            not isinstance(crop_margin, int)
+            or isinstance(crop_margin, bool)
+            or crop_margin < 0
+        ):
+            raise ValueError("crop_margin must be a non-negative integer.")
+        # Preserve the public minimum-size contract for the requested output.
+        self.plan(output_shape, overlap)
+        generation_shape = tuple(size + 2 * crop_margin for size in output_shape)
+        plan = self.plan(generation_shape, overlap)
+        return replace(
+            plan,
+            generation_shape=generation_shape,
+            crop_margin=crop_margin,
+        )
+
+    @staticmethod
+    def _output_plan(
+        plan: ScalePlan,
+        output_shape: tuple[int, int, int],
+    ) -> ScalePlan:
+        crop_margin = plan.crop_margin
+        seams = tuple(
+            tuple(
+                seam - crop_margin
+                for seam in axis
+                if crop_margin < seam < plan.shape[index] - crop_margin
+            )
+            for index, axis in enumerate(plan.seams)
+        )
+        return replace(
+            plan,
+            shape=output_shape,
+            seams=seams,
+        )
+
+    @staticmethod
+    def crop_output(
+        volume: torch.Tensor,
+        output_shape: tuple[int, int, int],
+        crop_margin: int,
+    ) -> torch.Tensor:
+        if crop_margin == 0:
+            return volume
+        region = tuple(slice(crop_margin, crop_margin + size) for size in output_shape)
+        leading = (slice(None),) * (volume.ndim - 3)
+        return volume[leading + region].clone()
 
     @staticmethod
     def axis_starts(size: int, tile_size: int, stride: int) -> tuple[int, ...]:

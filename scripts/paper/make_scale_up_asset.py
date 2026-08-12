@@ -31,10 +31,10 @@ from provenance import (
 
 from src.anchor import PlaneAnchor
 from src.build import load_generator
-from src.scale import DEFAULT_SCALE_OVERLAP, ScaledGenerator
+from src.config import load_generation_settings
+from src.scale import ScaledGenerator
 
 BLOCKS = (3, 3, 3)
-OVERLAP = DEFAULT_SCALE_OVERLAP
 
 
 @dataclass(frozen=True)
@@ -69,21 +69,28 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance-scale", type=float, default=1.0)
+    parser.add_argument("--guidance-scale", type=float)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = args.weight.resolve()
+    settings = load_generation_settings(weights)
+    guidance_scale = (
+        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
+    )
+    overlap = settings.overlap
+    crop_margin = settings.crop_margin
     provenance = build_provenance(
         weights,
-        args.guidance_scale,
+        guidance_scale,
         generation={
             "seed": SEED,
             "domain": args.domain,
             "axis": AXIS,
             "blocks": list(BLOCKS),
             "scale_geometry": "fixed_blocks_inward_margins",
-            "overlap": OVERLAP,
+            "overlap": overlap,
+            "crop_margin": crop_margin,
             "source_roi_left_top": list(ROI_POSITIONS[1]),
             "source_crop_size": CROP_SIZE,
         },
@@ -103,29 +110,31 @@ def main() -> None:
     print("-----------------------")
     print(f"Weights : {weights.resolve()}")
     print(f"Device  : {device}")
-    print(f"Guidance: {args.guidance_scale}")
+    print(f"Guidance: {guidance_scale}")
     print(f"Blocks  : {BLOCKS}")
-    print(f"Overlap : {OVERLAP}")
+    print(f"Overlap : {overlap}")
+    print(f"Crop    : {crop_margin}")
     print("Status  : generating anchored base...", flush=True)
     base = generator.generate(
         anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=anchor_index),),
-        guidance_scale=args.guidance_scale,
+        guidance_scale=guidance_scale,
         domain=args.domain,
     )
 
     scaled = ScaledGenerator(generator)
-    shape = scaled.shape_from_blocks(BLOCKS, OVERLAP)
-    plan = scaled.plan(shape, OVERLAP)
+    shape = scaled.shape_from_blocks(BLOCKS, overlap)
+    plan = scaled.plan(tuple(size + 2 * crop_margin for size in shape), overlap)
     print(f"Shape   : {shape}")
     print(f"Tiles   : {plan.tile_count}")
     print("Status  : scaling...", flush=True)
     start_time = perf_counter()
     volume = scaled.generate(
         blocks=BLOCKS,
-        overlap=OVERLAP,
+        overlap=overlap,
+        crop_margin=crop_margin,
         base=base,
         progress=False,
-        guidance_scale=args.guidance_scale,
+        guidance_scale=guidance_scale,
         domain=args.domain,
     )
     elapsed = perf_counter() - start_time
@@ -154,7 +163,8 @@ def main() -> None:
                 "seed": SEED,
                 "scale_plan": {
                     "blocks": list(BLOCKS),
-                    "overlap": OVERLAP,
+                    "overlap": overlap,
+                    "crop_margin": crop_margin,
                     "block_size": plan.tile_size,
                     "stride": plan.stride,
                     "shape": list(plan.shape),

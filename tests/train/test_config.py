@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from src.config import find_train_config, get_schedule_steps
+from src.config import (
+    GenerationSettings,
+    find_train_config,
+    get_schedule_steps,
+    load_generation_settings,
+)
 from src.utils import load_yaml, save_yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +39,53 @@ def test_find_train_config_walks_from_numbered_checkpoint(tmp_path: Path) -> Non
     weight.write_bytes(b"weights")
 
     assert find_train_config(weight) == config.resolve()
+
+
+def test_generation_settings_use_yaml_values(tmp_path: Path) -> None:
+    weight = tmp_path / "run" / "checkpoints" / "1" / "generator.pt"
+    weight.parent.mkdir(parents=True)
+    weight.touch()
+    (tmp_path / "run" / "train.yaml").write_text(
+        "generation:\n  guidance_scale: 1.5\n  overlap: 12\n  crop_margin: 6\n",
+        encoding="utf-8",
+    )
+
+    assert load_generation_settings(weight) == GenerationSettings(1.5, 12, 6)
+
+
+def test_generation_settings_support_old_configs(tmp_path: Path) -> None:
+    weight = tmp_path / "run" / "generator.pt"
+    weight.parent.mkdir()
+    weight.touch()
+    (weight.parent / "train.yaml").write_text("train: {}\n", encoding="utf-8")
+
+    assert load_generation_settings(weight) == GenerationSettings()
+
+
+@pytest.mark.parametrize(
+    "generation",
+    (
+        "[]",
+        "{overlap: -1}",
+        "{crop_margin: true}",
+        "{guidance_scale: .inf}",
+        "{blocks: [2, 2, 2]}",
+    ),
+)
+def test_generation_settings_reject_invalid_values(
+    tmp_path: Path,
+    generation: str,
+) -> None:
+    weight = tmp_path / "run" / "generator.pt"
+    weight.parent.mkdir()
+    weight.touch()
+    (weight.parent / "train.yaml").write_text(
+        f"generation: {generation}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        load_generation_settings(weight)
 
 
 def test_yaml_config_remains_a_plain_mapping(tmp_path: Path) -> None:

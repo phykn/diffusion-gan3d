@@ -34,6 +34,11 @@ diffusion:
   beta_min: 0.1
   beta_max: 20.0
 
+generation:
+  guidance_scale: 1.0
+  overlap: 8
+  crop_margin: 8
+
 anchor:
   start_step: 3000
   ramp_steps: 6000

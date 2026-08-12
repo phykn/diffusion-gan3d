@@ -156,7 +156,7 @@ def test_paper_metrics_reuses_real_fid_features(
 
 
 @pytest.mark.parametrize("filename", PAPER_SCRIPTS)
-def test_paper_generation_cli_requires_weight_and_defaults_guidance(
+def test_paper_generation_cli_requires_weight_and_loads_guidance_from_yaml(
     filename: str,
 ) -> None:
     tree = _tree(filename)
@@ -169,8 +169,7 @@ def test_paper_generation_cli_requires_weight_and_defaults_guidance(
     guidance = _keywords(arguments["--guidance-scale"])
     assert isinstance(guidance["type"], ast.Name)
     assert guidance["type"].id == "float"
-    assert isinstance(guidance["default"], ast.Constant)
-    assert guidance["default"].value == 1.0
+    assert "default" not in guidance
 
     imported_names = {
         alias.name
@@ -178,6 +177,7 @@ def test_paper_generation_cli_requires_weight_and_defaults_guidance(
         if isinstance(node, ast.ImportFrom)
         for alias in node.names
     }
+    assert "load_generation_settings" in imported_names
     assert "find_weights" not in imported_names
 
 
@@ -344,7 +344,7 @@ def test_overlap_metrics_report_degenerate_outputs_without_crashing() -> None:
 def test_paper_metrics_uses_fixed_block_geometry() -> None:
     module = _load_script("evaluate_paper_metrics.py")
 
-    assert module.scale_output_shape(128) == (352, 352, 352)
+    assert module.scale_output_shape(128, 8) == (352, 352, 352)
 
 
 @pytest.mark.parametrize(
@@ -374,7 +374,7 @@ def test_anchor_asset_writes_generation_sidecar(
     weight = run_dir / "generator.pt"
     weight.write_bytes(b"anchor-weights")
     (run_dir / "train.yaml").write_text(
-        "train: {}\n",
+        "generation:\n  overlap: 0\n  crop_margin: 0\n",
         encoding="utf-8",
     )
     sample = tmp_path / "sample.png"
@@ -442,7 +442,7 @@ def test_scale_asset_writes_generation_sidecar(
     weight = run_dir / "generator.pt"
     weight.write_bytes(b"scale-weights")
     (run_dir / "train.yaml").write_text(
-        "train: {}\n",
+        "generation:\n  overlap: 0\n  crop_margin: 0\n",
         encoding="utf-8",
     )
     sample = tmp_path / "sample.png"
@@ -460,12 +460,12 @@ def test_scale_asset_writes_generation_sidecar(
     class FakeScaled:
         def shape_from_blocks(self, blocks, overlap):
             assert blocks == module.BLOCKS
-            assert overlap == module.OVERLAP
+            assert overlap == 0
             return (12, 12, 12)
 
         def plan(self, shape, overlap):
             assert shape == (12, 12, 12)
-            assert overlap == module.OVERLAP
+            assert overlap == 0
             return SimpleNamespace(
                 tile_count=27,
                 base_shell=0,

@@ -18,7 +18,26 @@ from src.build import (
 from src.diffusion import Diffusion
 from src.generate import Generator
 from src.model.denoiser import Denoiser3D
-from src.scale import DEFAULT_SCALE_OVERLAP, ScaledGenerator, TileBuffer, VolumeState
+from src.scale import ScaledGenerator, TileBuffer, VolumeState
+
+_SCALED_GENERATE = ScaledGenerator.generate
+_SCALED_GENERATE_PROBS = ScaledGenerator.generate_probs
+
+
+@pytest.fixture(autouse=True)
+def preserve_legacy_scale_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+    def generate(self, *args, **kwargs):
+        kwargs.setdefault("crop_margin", 0)
+        return _SCALED_GENERATE(self, *args, **kwargs)
+
+    def generate_probs(self, *args, **kwargs):
+        kwargs.setdefault("crop_margin", 0)
+        return _SCALED_GENERATE_PROBS(self, *args, **kwargs)
+
+    monkeypatch.setattr(ScaledGenerator, "generate", generate)
+    monkeypatch.setattr(ScaledGenerator, "generate_probs", generate_probs)
+
+
 from src.train.ema import build_ema
 from src.train.weights import save_checkpoint, save_weights
 from src.utils import save_yaml
@@ -764,11 +783,42 @@ def test_scaled_generator_uses_default_overlap() -> None:
     probs = scaled.generate_probs(shape=(48, 32, 32), progress=False)
     vol = scaled.generate(shape=(48, 32, 32), progress=False)
 
-    assert plan.overlap == DEFAULT_SCALE_OVERLAP == 8
+    assert plan.overlap == 8
     assert probs.shape == (3, 48, 32, 32)
     assert vol.shape == (48, 32, 32)
     assert scaled.stats is not None
-    assert scaled.stats.overlap == DEFAULT_SCALE_OVERLAP
+    assert scaled.stats.overlap == 8
+
+
+def test_scaled_generation_crops_eight_voxels_from_every_outer_face() -> None:
+    scaled = ScaledGenerator(
+        _generator(_PhaseModel(phase=1), Diffusion(1), patch_size=32)
+    )
+
+    volume = _SCALED_GENERATE(
+        scaled,
+        shape=32,
+        overlap=8,
+        progress=False,
+    )
+    plan = scaled.stats
+
+    assert volume.shape == (32, 32, 32)
+    assert torch.all(volume == 1)
+    assert plan is not None
+    assert plan.shape == (32, 32, 32)
+    assert plan.generation_shape == (48, 48, 48)
+    assert plan.crop_margin == 8
+    assert plan.tile_count == 8
+
+
+def test_crop_output_keeps_the_requested_rectangular_center() -> None:
+    volume = torch.arange(7 * 8 * 9).reshape(7, 8, 9)
+
+    cropped = ScaledGenerator.crop_output(volume, (3, 4, 5), 2)
+
+    assert torch.equal(cropped, volume[2:5, 2:6, 2:7])
+    assert cropped.untyped_storage().data_ptr() != volume.untyped_storage().data_ptr()
 
 
 def test_overlapping_tiles_read_the_same_unchanged_global_state() -> None:

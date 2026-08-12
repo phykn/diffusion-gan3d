@@ -17,6 +17,7 @@ from provenance import (
 )
 
 from src.build import load_generator
+from src.config import load_generation_settings
 
 REFERENCE_SIZE = 128
 SEED = 10_000
@@ -32,13 +33,17 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance-scale", type=float, default=1.0)
+    parser.add_argument("--guidance-scale", type=float)
     args = parser.parse_args()
 
     weights = args.weight.resolve()
+    settings = load_generation_settings(weights)
+    guidance_scale = (
+        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
+    )
     provenance = build_provenance(
         weights,
-        args.guidance_scale,
+        guidance_scale,
         generation={
             "seed": SEED,
             "domain": args.domain,
@@ -59,7 +64,7 @@ def main() -> None:
         torch.cuda.manual_seed_all(SEED)
     volume = (
         generator.generate(
-            guidance_scale=args.guidance_scale,
+            guidance_scale=guidance_scale,
             domain=args.domain,
         )
         .to(torch.uint8)
@@ -97,7 +102,7 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"Weights  : {weights}")
-    print(f"Guidance : {args.guidance_scale}")
+    print(f"Guidance : {guidance_scale}")
     print(f"Reference: {OUTPUT.resolve()}")
     print(f"Manifest : {MANIFEST.resolve()}")
     print(f"SHA-256  : {digest}")

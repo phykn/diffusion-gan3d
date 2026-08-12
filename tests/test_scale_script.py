@@ -5,6 +5,7 @@ import pytest
 import tifffile
 import torch
 
+from src.config import GenerationSettings
 from src.scale import ScalePlan
 
 
@@ -77,6 +78,9 @@ def test_main_prints_plan_before_scaled_generation(
             events.append(("plan", shape, overlap))
             return plan
 
+        def shape_from_blocks(self, blocks, overlap):
+            return tuple(4 + (count - 1) * (4 - 2 * overlap) for count in blocks)
+
         def generate(self, **kwargs):
             events.append(
                 (
@@ -94,6 +98,11 @@ def test_main_prints_plan_before_scaled_generation(
     weights = tmp_path / "run" / "generator.pt"
     scaled = FakeScaled()
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
+    monkeypatch.setattr(
+        module,
+        "load_generation_settings",
+        lambda _path: GenerationSettings(crop_margin=0),
+    )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: scaled)
     monkeypatch.setattr(module, "show_slices", lambda *args, **kwargs: None)
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
@@ -123,7 +132,7 @@ def test_main_prints_plan_before_scaled_generation(
 
     output = capsys.readouterr().out
     assert events == [
-        ("plan", (8, 8, 8), 1),
+        ("plan", (6, 6, 6), 1),
         ("generate", (2, 2, 2), 1, 1.0, 1),
     ]
     assert output.index("State memory") < output.index("Status     : scaling")
@@ -157,6 +166,9 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
             events.append(("plan", overlap))
             return plan
 
+        def shape_from_blocks(self, blocks, overlap):
+            return tuple(4 + (count - 1) * (4 - 2 * overlap) for count in blocks)
+
         def generate(self, **kwargs):
             events.append(
                 (
@@ -171,6 +183,11 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
             return torch.zeros(plan.shape, dtype=torch.uint8)
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
+    monkeypatch.setattr(
+        module,
+        "load_generation_settings",
+        lambda _path: GenerationSettings(crop_margin=0),
+    )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(
         module,
