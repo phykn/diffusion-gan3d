@@ -72,7 +72,7 @@ def main() -> None:
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     weights = args.weight.resolve()
-    settings = load_generation_settings(weights)
+    settings = load_generation_settings()
     guidance_scale = (
         settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
     )

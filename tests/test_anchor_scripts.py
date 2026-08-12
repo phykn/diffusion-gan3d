@@ -119,7 +119,7 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda _path: GenerationSettings(),
+        lambda: GenerationSettings(),
     )
     monkeypatch.setattr(
         module,
@@ -183,7 +183,7 @@ def test_unconditioned_check_routes_guidance_scale(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda _path: GenerationSettings(),
+        lambda: GenerationSettings(),
     )
     monkeypatch.setattr(module, "show_slices", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
@@ -219,7 +219,7 @@ def test_unconditioned_check_propagates_generator_guidance_validation(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda _path: GenerationSettings(),
+        lambda: GenerationSettings(),
     )
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(

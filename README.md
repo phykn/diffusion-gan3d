@@ -76,13 +76,12 @@ volume = ScaledGenerator(generator).generate(
 
 Single-domain weights default to domain 0; multi-domain weights should specify a domain. Direct generation produces `input_size³`. Scale-up length per axis is `input_size + (blocks - 1) × (input_size - 2 × overlap)`, so 128-sized blocks with three blocks and overlap eight produce `352³`. Scale-up generates eight extra voxels beyond every outer face by default and returns only the requested center, avoiding zero-padding artifacts at the volume boundary.
 
-Shared generation defaults live in the run `train.yaml`; CLI values override them:
+Shared generation defaults live in [`config/gen.yaml`](config/gen.yaml); CLI values override them:
 
 ```yaml
-generation:
-  guidance_scale: 1.0
-  overlap: 8
-  crop_margin: 8
+guidance_scale: 1.0
+overlap: 8
+crop_margin: 8
 ```
 
 `anchor_strength=0` disables anchor conditioning. `guidance_scale=1` is the standard conditional path; validate non-default guidance with weights trained using condition dropout. See [`PAPER.md`](PAPER.md) for details.

@@ -101,7 +101,7 @@ def test_main_prints_plan_before_scaled_generation(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda _path: GenerationSettings(crop_margin=0),
+        lambda: GenerationSettings(crop_margin=0),
     )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: scaled)
     monkeypatch.setattr(module, "show_slices", lambda *args, **kwargs: None)
@@ -186,7 +186,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda _path: GenerationSettings(crop_margin=0),
+        lambda: GenerationSettings(crop_margin=0),
     )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(

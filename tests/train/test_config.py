@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import src.config as config_module
 from src.config import (
     GenerationSettings,
     find_train_config,
@@ -41,51 +42,51 @@ def test_find_train_config_walks_from_numbered_checkpoint(tmp_path: Path) -> Non
     assert find_train_config(weight) == config.resolve()
 
 
-def test_generation_settings_use_yaml_values(tmp_path: Path) -> None:
-    weight = tmp_path / "run" / "checkpoints" / "1" / "generator.pt"
-    weight.parent.mkdir(parents=True)
-    weight.touch()
-    (tmp_path / "run" / "train.yaml").write_text(
-        "generation:\n  guidance_scale: 1.5\n  overlap: 12\n  crop_margin: 6\n",
-        encoding="utf-8",
+def test_generation_settings_use_gen_yaml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        config_module,
+        "load_yaml",
+        lambda path: {
+            "guidance_scale": 1.5,
+            "overlap": 12,
+            "crop_margin": 6,
+        },
     )
 
-    assert load_generation_settings(weight) == GenerationSettings(1.5, 12, 6)
+    assert load_generation_settings() == GenerationSettings(1.5, 12, 6)
 
 
-def test_generation_settings_support_old_configs(tmp_path: Path) -> None:
-    weight = tmp_path / "run" / "generator.pt"
-    weight.parent.mkdir()
-    weight.touch()
-    (weight.parent / "train.yaml").write_text("train: {}\n", encoding="utf-8")
+def test_generation_settings_support_missing_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config_module, "load_yaml", lambda path: {})
 
-    assert load_generation_settings(weight) == GenerationSettings()
+    assert load_generation_settings() == GenerationSettings()
+
+
+def test_repository_generation_config_has_expected_defaults() -> None:
+    assert load_generation_settings() == GenerationSettings()
 
 
 @pytest.mark.parametrize(
-    "generation",
+    "settings",
     (
-        "[]",
-        "{overlap: -1}",
-        "{crop_margin: true}",
-        "{guidance_scale: .inf}",
-        "{blocks: [2, 2, 2]}",
+        {"overlap": -1},
+        {"crop_margin": True},
+        {"guidance_scale": float("inf")},
+        {"blocks": [2, 2, 2]},
     ),
 )
 def test_generation_settings_reject_invalid_values(
-    tmp_path: Path,
-    generation: str,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: dict,
 ) -> None:
-    weight = tmp_path / "run" / "generator.pt"
-    weight.parent.mkdir()
-    weight.touch()
-    (weight.parent / "train.yaml").write_text(
-        f"generation: {generation}\n",
-        encoding="utf-8",
-    )
+    monkeypatch.setattr(config_module, "load_yaml", lambda path: settings)
 
-    with pytest.raises((TypeError, ValueError)):
-        load_generation_settings(weight)
+    with pytest.raises(ValueError):
+        load_generation_settings()
 
 
 def test_yaml_config_remains_a_plain_mapping(tmp_path: Path) -> None:

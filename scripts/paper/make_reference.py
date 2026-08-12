@@ -37,7 +37,7 @@ def main() -> None:
     args = parser.parse_args()
 
     weights = args.weight.resolve()
-    settings = load_generation_settings(weights)
+    settings = load_generation_settings()
     guidance_scale = (
         settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
     )

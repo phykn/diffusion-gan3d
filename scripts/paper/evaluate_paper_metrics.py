@@ -104,7 +104,7 @@ def main() -> None:
 
     VOLUME_DIR.mkdir(parents=True, exist_ok=True)
     weights = args.weight.resolve()
-    generation_settings = load_generation_settings(weights)
+    generation_settings = load_generation_settings()
     guidance_scale = (
         generation_settings.guidance_scale
         if args.guidance_scale is None

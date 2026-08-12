@@ -12,11 +12,8 @@ class GenerationSettings:
     crop_margin: int = 8
 
 
-def load_generation_settings(weights: str | Path) -> GenerationSettings:
-    config = load_yaml(find_train_config(weights))
-    section = config.get("generation", {})
-    if not isinstance(section, dict):
-        raise TypeError("generation must be a mapping.")
+def load_generation_settings() -> GenerationSettings:
+    section = load_yaml(Path(__file__).resolve().parents[1] / "config" / "gen.yaml")
     unknown = section.keys() - {"guidance_scale", "overlap", "crop_margin"}
     if unknown:
         names = ", ".join(sorted(unknown))

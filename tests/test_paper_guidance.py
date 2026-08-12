@@ -374,7 +374,7 @@ def test_anchor_asset_writes_generation_sidecar(
     weight = run_dir / "generator.pt"
     weight.write_bytes(b"anchor-weights")
     (run_dir / "train.yaml").write_text(
-        "generation:\n  overlap: 0\n  crop_margin: 0\n",
+        "train: {}\n",
         encoding="utf-8",
     )
     sample = tmp_path / "sample.png"
@@ -442,7 +442,7 @@ def test_scale_asset_writes_generation_sidecar(
     weight = run_dir / "generator.pt"
     weight.write_bytes(b"scale-weights")
     (run_dir / "train.yaml").write_text(
-        "generation:\n  overlap: 0\n  crop_margin: 0\n",
+        "train: {}\n",
         encoding="utf-8",
     )
     sample = tmp_path / "sample.png"
@@ -483,6 +483,11 @@ def test_scale_asset_writes_generation_sidecar(
     monkeypatch.setattr(module, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(module, "SAMPLE_PATH", sample)
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
+    monkeypatch.setattr(
+        module,
+        "load_generation_settings",
+        lambda: SimpleNamespace(guidance_scale=1.0, overlap=0, crop_margin=0),
+    )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(
         module,

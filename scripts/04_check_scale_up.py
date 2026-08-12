@@ -87,12 +87,12 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
     parser.add_argument(
         "--overlap",
         type=non_negative_int,
-        help="context added to each side of a block (default: train.yaml)",
+        help="context added to each side of a block (default: config/gen.yaml)",
     )
     parser.add_argument(
         "--crop-margin",
         type=non_negative_int,
-        help="voxels discarded from every outer face (default: train.yaml)",
+        help="voxels discarded from every outer face (default: config/gen.yaml)",
     )
     parser.add_argument(
         "--count",
@@ -108,7 +108,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
     parser.add_argument(
         "--guidance-scale",
         type=float,
-        help="classifier-free guidance scale (default: train.yaml)",
+        help="classifier-free guidance scale (default: config/gen.yaml)",
     )
     parser.add_argument(
         "--out",
@@ -265,7 +265,7 @@ def main() -> None:
         print(f"GT         : {args.gt.resolve()}")
 
     generator = load_generator(weight, device=device)
-    settings = load_generation_settings(weight)
+    settings = load_generation_settings()
     overlap = settings.overlap if args.overlap is None else args.overlap
     crop_margin = settings.crop_margin if args.crop_margin is None else args.crop_margin
     guidance_scale = (

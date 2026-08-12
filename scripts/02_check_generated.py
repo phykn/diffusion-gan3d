@@ -30,7 +30,7 @@ def main() -> None:
     parser.add_argument(
         "--guidance-scale",
         type=float,
-        help="classifier-free guidance scale (default: train.yaml)",
+        help="classifier-free guidance scale (default: config/gen.yaml)",
     )
     parser.add_argument(
         "--out",
@@ -51,7 +51,7 @@ def main() -> None:
     print(f"Weight  : {weight.resolve()}", flush=True)
 
     generator = load_generator(weight, device=device)
-    settings = load_generation_settings(weight)
+    settings = load_generation_settings()
     guidance_scale = (
         settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
     )
