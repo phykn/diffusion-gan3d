@@ -43,16 +43,14 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance-scale", type=float)
+    parser.add_argument("--guidance", type=float)
     args = parser.parse_args()
     weights = args.weight.resolve()
     settings = load_generation_settings()
-    guidance_scale = (
-        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
-    )
+    guidance = settings.guidance if args.guidance is None else args.guidance
     provenance = build_provenance(
         weights,
-        guidance_scale,
+        guidance,
         generation={
             "seeds": list(SEEDS),
             "domain": args.domain,
@@ -60,7 +58,7 @@ def main() -> None:
             "blocks": list(BLOCKS),
             "scale_geometry": "fixed_blocks_inward_margins",
             "default_overlap": settings.overlap,
-            "crop_margin": settings.crop_margin,
+            "margin": settings.margin,
             "seam_exclusion_radius": SEAM_EXCLUSION_RADIUS,
         },
     )
@@ -81,7 +79,7 @@ def main() -> None:
     print("----------------")
     print(f"Weights : {weights}")
     print(f"Device  : {device}")
-    print(f"Guidance: {guidance_scale}")
+    print(f"Guidance: {guidance}")
     for seed in SEEDS:
         for overlap in OVERLAPS:
             set_seed(seed, device)
@@ -93,9 +91,9 @@ def main() -> None:
             volume = scaled.generate(
                 blocks=BLOCKS,
                 overlap=overlap,
-                crop_margin=settings.crop_margin,
+                margin=settings.margin,
                 progress=False,
-                guidance_scale=guidance_scale,
+                guidance=guidance,
                 domain=args.domain,
             )
             if device.type == "cuda":
@@ -120,7 +118,7 @@ def main() -> None:
                 "overlap": overlap,
                 "output_axis0": plan.shape[0],
                 "seam_axis0": plan.seams[0][0],
-                "guidance_scale": guidance_scale,
+                "guidance": guidance,
                 "exact_seam_change_ratio": exact_ratio,
                 "band_change_ratio": optional_float(quality.change_ratio[0]),
                 "transition_tv": optional_float(quality.transition_tv[0]),
@@ -136,7 +134,7 @@ def main() -> None:
             print(json.dumps(row), flush=True)
             del volume
 
-    summary = summarize(rows, guidance_scale)
+    summary = summarize(rows, guidance)
     write_csv(rows, RAW_CSV)
     write_csv(summary, SUMMARY_CSV)
     render(summary, FIGURE)
@@ -148,7 +146,7 @@ def main() -> None:
                 "seeds": list(SEEDS),
                 "overlaps": list(OVERLAPS),
                 "default_overlap": settings.overlap,
-                "crop_margin": settings.crop_margin,
+                "margin": settings.margin,
                 "blocks": list(BLOCKS),
                 "output_shapes": {
                     str(overlap): list(scaled.shape_from_blocks(BLOCKS, overlap))
@@ -205,7 +203,7 @@ def optional_float(value: float | None) -> float:
 
 def summarize(
     rows: list[dict[str, float | int]],
-    guidance_scale: float,
+    guidance: float,
 ) -> list[dict[str, float | int]]:
     metrics = (
         "exact_seam_change_ratio",
@@ -226,7 +224,7 @@ def summarize(
             "overlap": overlap,
             "output_axis0": output_sizes.pop(),
             "seam_axis0": seam_positions.pop(),
-            "guidance_scale": guidance_scale,
+            "guidance": guidance,
             "samples": len(selected),
         }
         for metric in metrics:

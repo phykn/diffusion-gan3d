@@ -5,7 +5,7 @@ from itertools import combinations
 from pathlib import Path
 
 from src.config import find_train_config
-from src.model.denoiser import validate_guidance_scale
+from src.model.denoiser import validate_guidance
 
 
 def sha256_file(path: str | Path) -> str:
@@ -21,7 +21,7 @@ def sha256_file(path: str | Path) -> str:
 
 def build_provenance(
     weights: str | Path,
-    guidance_scale: float,
+    guidance: float,
     *,
     generation: Mapping[str, object],
     reference: str | Path | None = None,
@@ -29,7 +29,7 @@ def build_provenance(
 ) -> dict[str, object]:
     weight_path = Path(weights).resolve()
     config_path = find_train_config(weight_path)
-    guidance = validate_guidance_scale(guidance_scale)
+    guidance = validate_guidance(guidance)
     reference_path = None if reference is None else Path(reference).resolve()
     inputs = {
         name: file_record(path)
@@ -47,7 +47,7 @@ def build_provenance(
         "weight_sha256": sha256_file(weight_path),
         "train_config": str(config_path),
         "train_config_sha256": sha256_file(config_path),
-        "guidance_scale": guidance,
+        "guidance": guidance,
         "reference": None if reference_path is None else str(reference_path),
         "reference_sha256": (
             None if reference_path is None else sha256_file(reference_path)

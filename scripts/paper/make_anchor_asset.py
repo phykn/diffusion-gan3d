@@ -45,22 +45,21 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance-scale", type=float)
+    parser.add_argument("--guidance", type=float)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = args.weight.resolve()
     settings = load_generation_settings()
-    guidance_scale = (
-        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
-    )
+    guidance = settings.guidance if args.guidance is None else args.guidance
     provenance = build_provenance(
         weights,
-        guidance_scale,
+        guidance,
         generation={
             "seed": SEED,
             "domain": args.domain,
             "axis": AXIS,
+            "margin": settings.margin,
             "source_roi_left_top": list(ROI_POSITIONS[1]),
             "source_crop_size": CROP_SIZE,
         },
@@ -80,13 +79,14 @@ def main() -> None:
     print("---------------------")
     print(f"Weights : {weights.resolve()}")
     print(f"Device  : {device}")
-    print(f"Guidance: {guidance_scale}")
+    print(f"Guidance: {guidance}")
     print(f"Anchor  : axis {AXIS}, index {index}, shape {tuple(anchor.shape)}")
     print("Status  : generating...", flush=True)
     volume = generator.generate(
         anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=index),),
-        guidance_scale=guidance_scale,
+        guidance=guidance,
         domain=args.domain,
+        margin=settings.margin,
     )
     generated = volume.select(AXIS, index)
     matches = int((generated == anchor).sum())

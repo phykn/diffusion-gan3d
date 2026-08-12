@@ -68,23 +68,23 @@ base = generator.generate(anchors=(anchor,), domain=0)
 volume = ScaledGenerator(generator).generate(
     blocks=(3, 3, 3),
     overlap=8,
-    crop_margin=8,
+    margin=8,
     base=base,
     domain=0,
 )
 ```
 
-Single-domain weights default to domain 0; multi-domain weights should specify a domain. Direct generation produces `input_size³`. Scale-up length per axis is `input_size + (blocks - 1) × (input_size - 2 × overlap)`, so 128-sized blocks with three blocks and overlap eight produce `352³`. Scale-up generates eight extra voxels beyond every outer face by default and returns only the requested center, avoiding zero-padding artifacts at the volume boundary.
+Single-domain weights default to domain 0; multi-domain weights should specify a domain. Direct generation produces `input_size³`. Scale-up length per axis is `input_size + (blocks - 1) × (input_size - 2 × overlap)`, so 128-sized blocks with three blocks and overlap eight produce `352³`. Direct, anchor, and scale-up generation add the configured margin beyond every outer face and return only the requested center, reducing zero-padding artifacts at the volume boundary. `overlap` applies only to scale-up.
 
 Shared generation defaults live in [`config/gen.yaml`](config/gen.yaml); CLI values override them:
 
 ```yaml
-guidance_scale: 1.0
+guidance: 1.0
 overlap: 8
-crop_margin: 8
+margin: 8
 ```
 
-`anchor_strength=0` disables anchor conditioning. `guidance_scale=1` is the standard conditional path; validate non-default guidance with weights trained using condition dropout. See [`PAPER.md`](PAPER.md) for details.
+`anchor_strength=0` disables anchor conditioning. `guidance=1` is the standard conditional path; validate non-default guidance with weights trained using condition dropout. See [`PAPER.md`](PAPER.md) for details.
 
 
 Run the diagnostic scripts with an explicit generator weight. Script `03`
@@ -98,7 +98,7 @@ python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0
 ```
 
-Generator scripts default to `--domain 0` and `--guidance-scale 1.0`. Paper scripts require explicit weights and record input provenance.
+Generator scripts default to `--domain 0` and the `guidance` value in `config/gen.yaml`. Paper scripts require explicit weights and record input provenance.
 
 `generator.pt` is the latest weight; `checkpoint_every_steps` preserves numbered sets under `checkpoints/step_XXXXXXXX/`.
 

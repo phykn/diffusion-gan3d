@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from .generate import Generator
-from .model.denoiser import Denoiser3D, validate_guidance_scale
+from .model.denoiser import Denoiser3D, validate_guidance
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class ScalePlan:
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
     guidance_bytes: int = 0
     generation_shape: tuple[int, int, int] | None = None
-    crop_margin: int = 0
+    margin: int = 0
 
     @property
     def base_shell(self) -> int:
@@ -241,10 +241,10 @@ class ScaledGenerator:
     def _account_guidance_memory(
         self,
         plan: ScalePlan,
-        guidance_scale: float,
+        guidance: float,
         conditioned: bool,
     ) -> ScalePlan:
-        if not conditioned or guidance_scale in {0.0, 1.0}:
+        if not conditioned or guidance in {0.0, 1.0}:
             return plan
         bytes_per_logit = 2 if self.generator.use_amp else 4
         # Keep both logits and their two float32 guidance work buffers.
@@ -272,23 +272,23 @@ class ScaledGenerator:
         base: torch.Tensor | None = None,
         vf: Sequence[float] | None = None,
         progress: bool = True,
-        guidance_scale: float = 1.0,
+        guidance: float = 1.0,
         domain: int | None = None,
-        crop_margin: int = 8,
+        margin: int = 8,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
             raise TypeError("progress must be a boolean.")
-        guidance_scale = validate_guidance_scale(guidance_scale)
+        guidance = validate_guidance(guidance)
         output_shape = self.parse_shape(shape)
         plan = self._generation_plan(
             output_shape,
             overlap,
-            crop_margin,
+            margin,
         )
         plan = self._account_guidance_memory(
             plan,
-            guidance_scale,
+            guidance,
             vf is not None,
         )
         if plan.states_bytes > 1024**3:
@@ -314,14 +314,14 @@ class ScaledGenerator:
             domain,
             labels=None,
             progress=progress,
-            guidance_scale=guidance_scale,
+            guidance=guidance,
         )
         probs = current.values.float()
         probs.add_(1.0).mul_(0.5).clamp_(0.0, 1.0)
         probs.div_(
             probs.sum(dim=1, keepdim=True).clamp_min_(torch.finfo(probs.dtype).eps)
         )
-        probs = self.crop_output(probs.squeeze(0).cpu(), output_shape, crop_margin)
+        probs = self.crop_output(probs.squeeze(0).cpu(), output_shape, margin)
         self.stats = self._output_plan(plan, output_shape)
         return probs
 
@@ -336,14 +336,14 @@ class ScaledGenerator:
         progress: bool = True,
         *,
         shape: int | Sequence[int] | None = None,
-        guidance_scale: float = 1.0,
+        guidance: float = 1.0,
         domain: int | None = None,
-        crop_margin: int = 8,
+        margin: int = 8,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
             raise TypeError("progress must be a boolean.")
-        guidance_scale = validate_guidance_scale(guidance_scale)
+        guidance = validate_guidance(guidance)
         if blocks is None:
             if shape is None:
                 raise TypeError("blocks must be provided.")
@@ -352,10 +352,10 @@ class ScaledGenerator:
             if shape is not None:
                 raise ValueError("blocks and shape cannot be provided together.")
             output_shape = self.shape_from_blocks(blocks, overlap)
-        plan = self._generation_plan(output_shape, overlap, crop_margin)
+        plan = self._generation_plan(output_shape, overlap, margin)
         plan = self._account_guidance_memory(
             plan,
-            guidance_scale,
+            guidance,
             vf is not None,
         )
         selected = self.select_storage(plan, storage)
@@ -376,9 +376,9 @@ class ScaledGenerator:
             domain,
             labels=labels,
             progress=progress,
-            guidance_scale=guidance_scale,
+            guidance=guidance,
         )
-        labels = self.crop_output(labels, output_shape, crop_margin)
+        labels = self.crop_output(labels, output_shape, margin)
         self.stats = self._output_plan(plan, output_shape)
         return labels
 
@@ -400,22 +400,18 @@ class ScaledGenerator:
         self,
         output_shape: tuple[int, int, int],
         overlap: int,
-        crop_margin: int,
+        margin: int,
     ) -> ScalePlan:
-        if (
-            not isinstance(crop_margin, int)
-            or isinstance(crop_margin, bool)
-            or crop_margin < 0
-        ):
-            raise ValueError("crop_margin must be a non-negative integer.")
+        if not isinstance(margin, int) or isinstance(margin, bool) or margin < 0:
+            raise ValueError("margin must be a non-negative integer.")
         # Preserve the public minimum-size contract for the requested output.
         self.plan(output_shape, overlap)
-        generation_shape = tuple(size + 2 * crop_margin for size in output_shape)
+        generation_shape = tuple(size + 2 * margin for size in output_shape)
         plan = self.plan(generation_shape, overlap)
         return replace(
             plan,
             generation_shape=generation_shape,
-            crop_margin=crop_margin,
+            margin=margin,
         )
 
     @staticmethod
@@ -423,12 +419,12 @@ class ScaledGenerator:
         plan: ScalePlan,
         output_shape: tuple[int, int, int],
     ) -> ScalePlan:
-        crop_margin = plan.crop_margin
+        margin = plan.margin
         seams = tuple(
             tuple(
-                seam - crop_margin
+                seam - margin
                 for seam in axis
-                if crop_margin < seam < plan.shape[index] - crop_margin
+                if margin < seam < plan.shape[index] - margin
             )
             for index, axis in enumerate(plan.seams)
         )
@@ -442,11 +438,11 @@ class ScaledGenerator:
     def crop_output(
         volume: torch.Tensor,
         output_shape: tuple[int, int, int],
-        crop_margin: int,
+        margin: int,
     ) -> torch.Tensor:
-        if crop_margin == 0:
+        if margin == 0:
             return volume
-        region = tuple(slice(crop_margin, crop_margin + size) for size in output_shape)
+        region = tuple(slice(margin, margin + size) for size in output_shape)
         leading = (slice(None),) * (volume.ndim - 3)
         return volume[leading + region].clone()
 
@@ -827,7 +823,7 @@ class ScaledGenerator:
         domain: torch.Tensor,
         labels: torch.Tensor | None,
         progress: bool,
-        guidance_scale: float = 1.0,
+        guidance: float = 1.0,
     ) -> VolumeState:
         generator = self.generator
         tile_buffer = TileBuffer(
@@ -876,7 +872,7 @@ class ScaledGenerator:
                     final_labels,
                     fusion,
                     tile_buffer,
-                    guidance_scale=guidance_scale,
+                    guidance=guidance,
                 )
                 if final_labels is None:
                     current, next_state = next_state, current
@@ -899,7 +895,7 @@ class ScaledGenerator:
         labels: torch.Tensor | None,
         fusion: Fusion,
         tile_buffer: TileBuffer | None = None,
-        guidance_scale: float = 1.0,
+        guidance: float = 1.0,
     ) -> None:
         generator = self.generator
         if tile_buffer is None:
@@ -924,7 +920,7 @@ class ScaledGenerator:
                     values,
                     time,
                     latent,
-                    guidance_scale=guidance_scale,
+                    guidance=guidance,
                     domain=domain,
                     vf=vf,
                 )

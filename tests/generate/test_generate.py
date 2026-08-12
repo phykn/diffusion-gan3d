@@ -22,20 +22,32 @@ from src.scale import ScaledGenerator, TileBuffer, VolumeState
 
 _SCALED_GENERATE = ScaledGenerator.generate
 _SCALED_GENERATE_PROBS = ScaledGenerator.generate_probs
+_GENERATOR_GENERATE = Generator.generate
+_GENERATOR_GENERATE_PROBS = Generator.generate_probs
 
 
 @pytest.fixture(autouse=True)
-def preserve_legacy_scale_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+def preserve_legacy_generation_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
     def generate(self, *args, **kwargs):
-        kwargs.setdefault("crop_margin", 0)
+        kwargs.setdefault("margin", 0)
         return _SCALED_GENERATE(self, *args, **kwargs)
 
     def generate_probs(self, *args, **kwargs):
-        kwargs.setdefault("crop_margin", 0)
+        kwargs.setdefault("margin", 0)
         return _SCALED_GENERATE_PROBS(self, *args, **kwargs)
+
+    def direct_generate(self, *args, **kwargs):
+        kwargs.setdefault("margin", 0)
+        return _GENERATOR_GENERATE(self, *args, **kwargs)
+
+    def direct_generate_probs(self, *args, **kwargs):
+        kwargs.setdefault("margin", 0)
+        return _GENERATOR_GENERATE_PROBS(self, *args, **kwargs)
 
     monkeypatch.setattr(ScaledGenerator, "generate", generate)
     monkeypatch.setattr(ScaledGenerator, "generate_probs", generate_probs)
+    monkeypatch.setattr(Generator, "generate", direct_generate)
+    monkeypatch.setattr(Generator, "generate_probs", direct_generate_probs)
 
 
 from src.train.ema import build_ema
@@ -304,7 +316,36 @@ def test_scaled_sampling_reuses_domain_for_every_tile_and_step() -> None:
     assert all(call.domain is model.calls[0].domain for call in model.calls)
 
 
-def test_guidance_scale_one_preserves_default_rng_path() -> None:
+def test_direct_generation_uses_eight_voxels_of_outer_context() -> None:
+    model = _TraceModel()
+    generator = _generator(model, Diffusion(1))
+
+    volume = _GENERATOR_GENERATE(generator)
+
+    assert volume.shape == (4, 4, 4)
+    assert model.calls[0].current.shape == (1, 3, 20, 20, 20)
+
+
+def test_direct_anchor_coordinates_survive_margin_crop() -> None:
+    model = _AnchorTraceModel()
+    generator = _generator(model, Diffusion(1))
+    anchor = PlaneAnchor(
+        image=torch.ones((4, 4), dtype=torch.long),
+        axis=0,
+        index=1,
+        position=(0, 0),
+    )
+
+    volume = _GENERATOR_GENERATE(generator, anchors=(anchor,))
+
+    assert volume.shape == (4, 4, 4)
+    mask = model.calls[0].anchor_mask[0, 0]
+    assert mask.shape == (20, 20, 20)
+    assert int(mask.sum()) == 16
+    assert torch.all(mask[9, 8:12, 8:12])
+
+
+def test_guidance_one_preserves_default_rng_path() -> None:
     generator = _generator(_ControlledModel(), Diffusion(3))
 
     torch.manual_seed(71)
@@ -312,7 +353,7 @@ def test_guidance_scale_one_preserves_default_rng_path() -> None:
     torch.manual_seed(71)
     explicit = generator.generate_probs(
         vf=(0.5, 0.1, 0.4),
-        guidance_scale=1.0,
+        guidance=1.0,
     )
 
     assert torch.equal(explicit, baseline)
@@ -340,12 +381,12 @@ def test_label_fast_path_matches_probability_sampling() -> None:
     assert torch.equal(observed, expected.to(torch.uint8))
 
 
-def test_guidance_scale_routes_direct_and_scaled_predictions() -> None:
+def test_guidance_routes_direct_and_scaled_predictions() -> None:
     direct_model = _GuidanceTraceModel()
     direct = _generator(direct_model, Diffusion(2))
     direct.generate_probs(
         vf=(0.5, 0.1, 0.4),
-        guidance_scale=1.75,
+        guidance=1.75,
     )
 
     scaled_model = _GuidanceTraceModel()
@@ -356,12 +397,12 @@ def test_guidance_scale_routes_direct_and_scaled_predictions() -> None:
         vf=(0.5, 0.1, 0.4),
         overlap=0,
         progress=False,
-        guidance_scale=1.75,
+        guidance=1.75,
     )
     guided_plan = scaled.stats
 
-    assert direct_model.guidance_scales == [1.75, 1.75]
-    assert scaled_model.guidance_scales == [1.75] * 4
+    assert direct_model.guidances == [1.75, 1.75]
+    assert scaled_model.guidances == [1.75] * 4
     assert guided_plan is not None
     expected_guidance = 3 * guided_plan.tile_size**3 * 16
     assert guided_plan.guidance_bytes == expected_guidance
@@ -405,7 +446,7 @@ def test_amp_guidance_runs_direct_and_scaled_with_float32_diffusion_state() -> N
 
     direct = generator.generate(
         vf=(0.5, 0.1, 0.4),
-        guidance_scale=1.5,
+        guidance=1.5,
     )
     scaled = ScaledGenerator(generator).generate(
         shape=4,
@@ -413,7 +454,7 @@ def test_amp_guidance_runs_direct_and_scaled_with_float32_diffusion_state() -> N
         vf=(0.5, 0.1, 0.4),
         storage="cuda",
         progress=False,
-        guidance_scale=1.5,
+        guidance=1.5,
     )
 
     assert direct.shape == scaled.shape == (4, 4, 4)
@@ -436,11 +477,11 @@ def test_guided_sampling_uses_anchor_as_a_condition() -> None:
     ) as predict_guided:
         volume = generator.generate(
             anchors=(anchor,),
-            guidance_scale=1.5,
+            guidance=1.5,
         )
 
     assert volume.shape == (4, 4, 4)
-    assert model.guidance_scales == [1.5, 1.5]
+    assert model.guidances == [1.5, 1.5]
     assert all(
         call.kwargs["anchor_image"] is not None
         for call in predict_guided.call_args_list
@@ -452,20 +493,20 @@ def test_guided_sampling_uses_anchor_as_a_condition() -> None:
 
 
 @pytest.mark.parametrize(
-    "guidance_scale",
+    "guidance",
     (-0.1, float("nan"), float("inf"), True),
 )
-def test_guidance_scale_rejects_invalid_values(guidance_scale: object) -> None:
+def test_guidance_rejects_invalid_values(guidance: object) -> None:
     generator = _generator(_ControlledModel(), Diffusion(1))
 
-    with pytest.raises(ValueError, match="guidance_scale"):
-        generator.generate_probs(guidance_scale=guidance_scale)
-    with pytest.raises(ValueError, match="guidance_scale"):
+    with pytest.raises(ValueError, match="guidance"):
+        generator.generate_probs(guidance=guidance)
+    with pytest.raises(ValueError, match="guidance"):
         ScaledGenerator(generator).generate(
             shape=4,
             overlap=0,
             progress=False,
-            guidance_scale=guidance_scale,
+            guidance=guidance,
         )
 
 
@@ -485,7 +526,7 @@ def test_scaled_guidance_one_preserves_default_rng_path() -> None:
         vf=(0.5, 0.1, 0.4),
         overlap=0,
         progress=False,
-        guidance_scale=1.0,
+        guidance=1.0,
     )
 
     assert torch.equal(explicit, baseline)
@@ -518,7 +559,7 @@ def test_base_only_guidance_is_a_no_op() -> None:
         base=base,
         overlap=0,
         progress=False,
-        guidance_scale=1.5,
+        guidance=1.5,
     )
 
     assert torch.equal(guided, baseline)
@@ -808,7 +849,7 @@ def test_scaled_generation_crops_eight_voxels_from_every_outer_face() -> None:
     assert plan is not None
     assert plan.shape == (32, 32, 32)
     assert plan.generation_shape == (48, 48, 48)
-    assert plan.crop_margin == 8
+    assert plan.margin == 8
     assert plan.tile_count == 8
 
 
@@ -1906,7 +1947,7 @@ class _ControlledModel(torch.nn.Module):
 class _GuidanceTraceModel(_ControlledModel):
     def __init__(self) -> None:
         super().__init__()
-        self.guidance_scales: list[float] = []
+        self.guidances: list[float] = []
         self.guidance_inputs: list[
             tuple[
                 torch.Tensor,
@@ -1921,14 +1962,14 @@ class _GuidanceTraceModel(_ControlledModel):
         current: torch.Tensor,
         timestep: torch.Tensor,
         latent: torch.Tensor,
-        guidance_scale: float,
+        guidance: float,
         domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del anchor_image, anchor_mask
-        self.guidance_scales.append(guidance_scale)
+        self.guidances.append(guidance)
         self.guidance_inputs.append((current, timestep, latent, vf))
         return self.forward(current, timestep, latent, domain=domain, vf=vf)
 

@@ -57,7 +57,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weight", type=Path, required=True)
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance-scale", type=float)
+    parser.add_argument("--guidance", type=float)
     parser.add_argument(
         "--reuse",
         action="store_true",
@@ -73,9 +73,7 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     weights = args.weight.resolve()
     settings = load_generation_settings()
-    guidance_scale = (
-        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
-    )
+    guidance = settings.guidance if args.guidance is None else args.guidance
     generation = {
         "seed": SEED,
         "domain": args.domain,
@@ -83,10 +81,11 @@ def main() -> None:
         "anchor_counts": list(COUNTS),
         "reference_shape": list(reference.shape),
         "pore_phase": PORE_PHASE,
+        "margin": settings.margin,
     }
     provenance = build_provenance(
         weights,
-        guidance_scale,
+        guidance,
         generation=generation,
         reference=REFERENCE_PATH,
     )
@@ -106,7 +105,7 @@ def main() -> None:
             "weight_sha256",
             "train_config",
             "train_config_sha256",
-            "guidance_scale",
+            "guidance",
             "reference",
             "reference_sha256",
             "additional_inputs",
@@ -128,7 +127,7 @@ def main() -> None:
         generation_times = load_generation_times(csv_path)
     else:
         generation_times = generate_volumes(
-            reference, weights, guidance_scale, args.domain
+            reference, weights, guidance, args.domain, settings.margin
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -166,7 +165,7 @@ def main() -> None:
         row = {
             "anchor_count": count,
             "coverage": count / reference.shape[AXIS],
-            "guidance_scale": guidance_scale,
+            "guidance": guidance,
             "fid": fid_value,
             "porosity": phase_fraction(volume, PORE_PHASE),
             "tortuosity_axis0": tortuosity(
@@ -218,8 +217,9 @@ def main() -> None:
 def generate_volumes(
     reference: np.ndarray,
     weights: Path,
-    guidance_scale: float,
+    guidance: float,
     domain: int,
+    margin: int,
 ) -> dict[int, float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
@@ -236,7 +236,7 @@ def generate_volumes(
     print(f"Weights : {weights.resolve()}")
     print(f"Reference: {REFERENCE_PATH.resolve()}")
     print(f"Device  : {device}")
-    print(f"Guidance: {guidance_scale}")
+    print(f"Guidance: {guidance}")
     elapsed_times = {}
     for count in COUNTS:
         indices = select_indices(reference.shape[AXIS], count)
@@ -255,8 +255,9 @@ def generate_volumes(
         start = start_generation_timer(device)
         volume = generator.generate(
             anchors=anchors,
-            guidance_scale=guidance_scale,
+            guidance=guidance,
             domain=domain,
+            margin=margin,
         )
         elapsed = stop_generation_timer(device, start)
         elapsed_times[count] = elapsed

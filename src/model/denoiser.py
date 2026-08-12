@@ -14,20 +14,19 @@ from .blocks import (
     Upsample3D,
 )
 
-MAX_GUIDANCE_SCALE = 10_000.0
+MAX_GUIDANCE = 10_000.0
 
 
-def validate_guidance_scale(value: float) -> float:
+def validate_guidance(value: float) -> float:
     if (
         not isinstance(value, (int, float))
         or isinstance(value, bool)
         or not math.isfinite(value)
         or value < 0.0
-        or value > MAX_GUIDANCE_SCALE
+        or value > MAX_GUIDANCE
     ):
         raise ValueError(
-            "guidance_scale must be a finite number between zero and "
-            f"{MAX_GUIDANCE_SCALE:g}."
+            f"guidance must be a finite number between zero and {MAX_GUIDANCE:g}."
         )
     return float(value)
 
@@ -202,7 +201,7 @@ class Denoiser3D(nn.Module):
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
-        guidance_scale: float,
+        guidance: float,
         domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         vf_present: torch.Tensor | None = None,
@@ -210,9 +209,9 @@ class Denoiser3D(nn.Module):
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Combine conditional and unconditional logits with shared stochastic inputs."""
-        guidance_scale = validate_guidance_scale(guidance_scale)
+        guidance = validate_guidance(guidance)
         self._validate_vf_condition(x_current, vf, vf_present)
-        if guidance_scale == 1.0 or (
+        if guidance == 1.0 or (
             vf is None and anchor_image is None and anchor_mask is None
         ):
             return self(
@@ -226,7 +225,7 @@ class Denoiser3D(nn.Module):
                 anchor_mask=anchor_mask,
             )
         unconditional = self.predict_logits(x_current, time, latent, domain)
-        if guidance_scale == 0.0:
+        if guidance == 0.0:
             return self.decode(unconditional)
         conditional = self.predict_logits(
             x_current,
@@ -240,7 +239,7 @@ class Denoiser3D(nn.Module):
         )
         baseline = unconditional.to(torch.float32)
         guided = conditional.to(torch.float32)
-        guided.sub_(baseline).mul_(guidance_scale).add_(baseline)
+        guided.sub_(baseline).mul_(guidance).add_(baseline)
         return self.decode(guided).to(x_current.dtype)
 
     @staticmethod

@@ -28,7 +28,7 @@ def main() -> None:
         help="numeric domain ID (default: 0)",
     )
     parser.add_argument(
-        "--guidance-scale",
+        "--guidance",
         type=float,
         help="classifier-free guidance scale (default: config/gen.yaml)",
     )
@@ -52,20 +52,19 @@ def main() -> None:
 
     generator = load_generator(weight, device=device)
     settings = load_generation_settings()
-    guidance_scale = (
-        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
-    )
+    guidance = settings.guidance if args.guidance is None else args.guidance
     shape = (generator.patch_size,) * 3
     print(f"Shape   : {' × '.join(map(str, shape))}")
     print(f"Device  : {device}")
     print("Conditioning : none")
-    print("Postprocess  : none")
+    print(f"Margin  : {settings.margin} per outer face")
     print("Status  : generating...", flush=True)
 
     vol = generator.generate(
         vf=None,
-        guidance_scale=guidance_scale,
+        guidance=guidance,
         domain=args.domain,
+        margin=settings.margin,
     )
     print("Status  : complete", flush=True)
     if args.out is not None:

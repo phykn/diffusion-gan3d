@@ -233,7 +233,7 @@ class Denoiser3DTest(unittest.TestCase):
             inputs,
             time,
             latent,
-            guidance_scale=1.0,
+            guidance=1.0,
             domain=domain,
             vf=vf,
         )
@@ -241,7 +241,7 @@ class Denoiser3DTest(unittest.TestCase):
             inputs,
             time,
             latent,
-            guidance_scale=2.0,
+            guidance=2.0,
             domain=domain,
             vf=vf,
         )
@@ -249,7 +249,7 @@ class Denoiser3DTest(unittest.TestCase):
             inputs,
             time,
             latent,
-            guidance_scale=0.0,
+            guidance=0.0,
             domain=domain,
             vf=vf,
         )
@@ -261,12 +261,12 @@ class Denoiser3DTest(unittest.TestCase):
         self.assertTrue(torch.equal(disabled, model.decode(unconditional)))
 
         for invalid in (-1.0, 1e39, float("nan"), float("inf"), True):
-            with self.assertRaisesRegex(ValueError, "guidance_scale"):
+            with self.assertRaisesRegex(ValueError, "guidance"):
                 model.predict_guided(
                     inputs,
                     time,
                     latent,
-                    guidance_scale=invalid,
+                    guidance=invalid,
                     domain=domain,
                     vf=vf,
                 )
@@ -317,7 +317,7 @@ class Denoiser3DTest(unittest.TestCase):
             inputs,
             time,
             latent,
-            guidance_scale=1.5,
+            guidance=1.5,
             domain=domain,
             vf=vf,
         )
@@ -348,7 +348,7 @@ class Denoiser3DTest(unittest.TestCase):
             inputs,
             time,
             latent,
-            guidance_scale=1.5,
+            guidance=1.5,
             domain=domain,
             vf=vf,
         )

@@ -69,20 +69,18 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance-scale", type=float)
+    parser.add_argument("--guidance", type=float)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = args.weight.resolve()
     settings = load_generation_settings()
-    guidance_scale = (
-        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
-    )
+    guidance = settings.guidance if args.guidance is None else args.guidance
     overlap = settings.overlap
-    crop_margin = settings.crop_margin
+    margin = settings.margin
     provenance = build_provenance(
         weights,
-        guidance_scale,
+        guidance,
         generation={
             "seed": SEED,
             "domain": args.domain,
@@ -90,7 +88,7 @@ def main() -> None:
             "blocks": list(BLOCKS),
             "scale_geometry": "fixed_blocks_inward_margins",
             "overlap": overlap,
-            "crop_margin": crop_margin,
+            "margin": margin,
             "source_roi_left_top": list(ROI_POSITIONS[1]),
             "source_crop_size": CROP_SIZE,
         },
@@ -110,20 +108,21 @@ def main() -> None:
     print("-----------------------")
     print(f"Weights : {weights.resolve()}")
     print(f"Device  : {device}")
-    print(f"Guidance: {guidance_scale}")
+    print(f"Guidance: {guidance}")
     print(f"Blocks  : {BLOCKS}")
     print(f"Overlap : {overlap}")
-    print(f"Crop    : {crop_margin}")
+    print(f"Margin  : {margin}")
     print("Status  : generating anchored base...", flush=True)
     base = generator.generate(
         anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=anchor_index),),
-        guidance_scale=guidance_scale,
+        guidance=guidance,
         domain=args.domain,
+        margin=margin,
     )
 
     scaled = ScaledGenerator(generator)
     shape = scaled.shape_from_blocks(BLOCKS, overlap)
-    plan = scaled.plan(tuple(size + 2 * crop_margin for size in shape), overlap)
+    plan = scaled.plan(tuple(size + 2 * margin for size in shape), overlap)
     print(f"Shape   : {shape}")
     print(f"Tiles   : {plan.tile_count}")
     print("Status  : scaling...", flush=True)
@@ -131,10 +130,10 @@ def main() -> None:
     volume = scaled.generate(
         blocks=BLOCKS,
         overlap=overlap,
-        crop_margin=crop_margin,
+        margin=margin,
         base=base,
         progress=False,
-        guidance_scale=guidance_scale,
+        guidance=guidance,
         domain=args.domain,
     )
     elapsed = perf_counter() - start_time
@@ -164,7 +163,7 @@ def main() -> None:
                 "scale_plan": {
                     "blocks": list(BLOCKS),
                     "overlap": overlap,
-                    "crop_margin": crop_margin,
+                    "margin": margin,
                     "block_size": plan.tile_size,
                     "stride": plan.stride,
                     "shape": list(plan.shape),

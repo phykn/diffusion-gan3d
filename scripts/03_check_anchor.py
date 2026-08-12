@@ -71,7 +71,7 @@ def main() -> None:
         help="anchor conditioning strength from 0 to 1 (default: 1)",
     )
     parser.add_argument(
-        "--guidance-scale",
+        "--guidance",
         type=float,
         help="classifier-free guidance scale (default: config/gen.yaml)",
     )
@@ -99,9 +99,7 @@ def main() -> None:
 
     generator = load_generator(weight, device=device)
     settings = load_generation_settings()
-    guidance_scale = (
-        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
-    )
+    guidance = settings.guidance if args.guidance is None else args.guidance
     if anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
     target = load_volume(
@@ -125,14 +123,15 @@ def main() -> None:
     print(f"Conditioning : {mode}")
     if indices:
         print(f"Anchor strength : {args.anchor_strength:.2f}")
-    print("Postprocess  : none")
+    print(f"Margin  : {settings.margin} per outer face")
     print("Status   : generating...", flush=True)
 
     gen = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
-        guidance_scale=guidance_scale,
+        guidance=guidance,
         domain=args.domain,
+        margin=settings.margin,
     )
     print("Status   : complete", flush=True)
     if args.out is not None:

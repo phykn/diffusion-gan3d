@@ -90,7 +90,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
         help="context added to each side of a block (default: config/gen.yaml)",
     )
     parser.add_argument(
-        "--crop-margin",
+        "--margin",
         type=non_negative_int,
         help="voxels discarded from every outer face (default: config/gen.yaml)",
     )
@@ -106,7 +106,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
         help="base anchor conditioning strength from 0 to 1 (default: 1)",
     )
     parser.add_argument(
-        "--guidance-scale",
+        "--guidance",
         type=float,
         help="classifier-free guidance scale (default: config/gen.yaml)",
     )
@@ -148,8 +148,9 @@ def generate_base(
         print("Base       : unanchored")
         print("Status     : generating base...", flush=True)
         base = generator.generate(
-            guidance_scale=args.guidance_scale,
+            guidance=args.guidance,
             domain=args.domain,
+            margin=args.margin,
         )
         return BaseResult(base, None, (), None)
 
@@ -170,8 +171,9 @@ def generate_base(
     base = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
-        guidance_scale=args.guidance_scale,
+        guidance=args.guidance,
         domain=args.domain,
+        margin=args.margin,
     )
     return BaseResult(
         base,
@@ -267,18 +269,17 @@ def main() -> None:
     generator = load_generator(weight, device=device)
     settings = load_generation_settings()
     overlap = settings.overlap if args.overlap is None else args.overlap
-    crop_margin = settings.crop_margin if args.crop_margin is None else args.crop_margin
-    guidance_scale = (
-        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
-    )
-    args.guidance_scale = guidance_scale
+    margin = settings.margin if args.margin is None else args.margin
+    guidance = settings.guidance if args.guidance is None else args.guidance
+    args.guidance = guidance
+    args.margin = margin
     scaled = ScaledGenerator(generator)
     shape = scaled.shape_from_blocks(tuple(args.blocks), overlap)
-    generation_shape = tuple(size + 2 * crop_margin for size in shape)
+    generation_shape = tuple(size + 2 * margin for size in shape)
     plan = scaled.plan(generation_shape, overlap)
     print_plan(plan, device)
     print(f"Output shape : {' × '.join(map(str, shape))}")
-    print(f"Crop margin  : {crop_margin} per outer face")
+    print(f"Margin       : {margin} per outer face")
     base_result = generate_base(parser, args, generator, anchor_count)
     base = base_result.volume
     target = base_result.target
@@ -287,9 +288,7 @@ def main() -> None:
 
     conditioning = "soft base" if base is not None else "none"
     print(f"Conditioning : {conditioning}")
-    postprocess = (
-        f"center crop ({crop_margin} voxels per outer face)" if crop_margin else "none"
-    )
+    postprocess = f"center crop ({margin} voxels per outer face)" if margin else "none"
     print(f"Postprocess  : {postprocess}")
 
     print("Status     : scaling...", flush=True)
@@ -302,10 +301,10 @@ def main() -> None:
     vol = scaled.generate(
         blocks=tuple(args.blocks),
         overlap=overlap,
-        crop_margin=crop_margin,
+        margin=margin,
         base=base,
         vf=None,
-        guidance_scale=guidance_scale,
+        guidance=guidance,
         domain=args.domain,
     )
     stats = scaled.stats

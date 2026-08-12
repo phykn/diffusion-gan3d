@@ -7,30 +7,30 @@ from .utils import load_yaml
 
 @dataclass(frozen=True)
 class GenerationSettings:
-    guidance_scale: float = 1.0
+    guidance: float = 1.0
     overlap: int = 8
-    crop_margin: int = 8
+    margin: int = 8
 
 
 def load_generation_settings() -> GenerationSettings:
     section = load_yaml(Path(__file__).resolve().parents[1] / "config" / "gen.yaml")
-    unknown = section.keys() - {"guidance_scale", "overlap", "crop_margin"}
+    unknown = section.keys() - {"guidance", "overlap", "margin"}
     if unknown:
         names = ", ".join(sorted(unknown))
         raise ValueError(f"unknown generation setting: {names}")
 
-    guidance_scale = section.get("guidance_scale", 1.0)
+    guidance = section.get("guidance", 1.0)
     if (
-        not isinstance(guidance_scale, (int, float))
-        or isinstance(guidance_scale, bool)
-        or not math.isfinite(guidance_scale)
-        or guidance_scale < 0.0
-        or guidance_scale > 10_000.0
+        not isinstance(guidance, (int, float))
+        or isinstance(guidance, bool)
+        or not math.isfinite(guidance)
+        or guidance < 0.0
+        or guidance > 10_000.0
     ):
-        raise ValueError("generation.guidance_scale must be between zero and 10000.")
+        raise ValueError("generation.guidance must be between zero and 10000.")
     overlap = _non_negative_int(section.get("overlap", 8), "overlap")
-    crop_margin = _non_negative_int(section.get("crop_margin", 8), "crop_margin")
-    return GenerationSettings(float(guidance_scale), overlap, crop_margin)
+    margin = _non_negative_int(section.get("margin", 8), "margin")
+    return GenerationSettings(float(guidance), overlap, margin)
 
 
 def _non_negative_int(value: object, name: str) -> int:

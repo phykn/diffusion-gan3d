@@ -87,7 +87,7 @@ def test_main_prints_plan_before_scaled_generation(
                     "generate",
                     kwargs["blocks"],
                     kwargs["overlap"],
-                    kwargs["guidance_scale"],
+                    kwargs["guidance"],
                     kwargs["domain"],
                 )
             )
@@ -101,7 +101,7 @@ def test_main_prints_plan_before_scaled_generation(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda: GenerationSettings(crop_margin=0),
+        lambda: GenerationSettings(margin=0),
     )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: scaled)
     monkeypatch.setattr(module, "show_slices", lambda *args, **kwargs: None)
@@ -155,8 +155,8 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
         patch_size = 4
         num_phases = 3
 
-        def generate(self, *, guidance_scale, domain):
-            events.append(("base", guidance_scale, domain))
+        def generate(self, *, guidance, domain, margin):
+            events.append(("base", guidance, domain, margin))
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     class FakeScaled:
@@ -175,7 +175,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
                     "scaled",
                     kwargs["overlap"],
                     kwargs["base"] is not None,
-                    kwargs["guidance_scale"],
+                    kwargs["guidance"],
                     kwargs["domain"],
                 )
             )
@@ -186,7 +186,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda: GenerationSettings(crop_margin=0),
+        lambda: GenerationSettings(margin=0),
     )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(
@@ -208,7 +208,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
             "3",
             "--anchor-strength",
             "0",
-            "--guidance-scale",
+            "--guidance",
             "1.75",
         ],
     )
@@ -218,7 +218,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
     output = capsys.readouterr().out
     assert events == [
         ("plan", 8),
-        ("base", 1.75, 2),
+        ("base", 1.75, 2, 0),
         ("scaled", 8, True, 1.75, 2),
     ]
     assert "Base       : unanchored" in output

@@ -81,7 +81,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weight", type=Path, required=True)
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance-scale", type=float)
+    parser.add_argument("--guidance", type=float)
     parser.add_argument(
         "--reuse",
         action="store_true",
@@ -105,11 +105,7 @@ def main() -> None:
     VOLUME_DIR.mkdir(parents=True, exist_ok=True)
     weights = args.weight.resolve()
     generation_settings = load_generation_settings()
-    guidance_scale = (
-        generation_settings.guidance_scale
-        if args.guidance_scale is None
-        else args.guidance_scale
-    )
+    guidance = generation_settings.guidance if args.guidance is None else args.guidance
     generation = {
         "conditions": list(CONDITIONS[1:]),
         "domain": args.domain,
@@ -119,7 +115,8 @@ def main() -> None:
         "scale_geometry": "fixed_blocks_inward_margins",
         "scale_blocks": list(SCALE_BLOCKS),
         "scale_overlap": generation_settings.overlap,
-        "scale_crop_margin": generation_settings.crop_margin,
+        "scale_margin": generation_settings.margin,
+        "margin": generation_settings.margin,
         "scale_output_shape": list(
             scale_output_shape(patch_size, generation_settings.overlap)
         ),
@@ -128,7 +125,7 @@ def main() -> None:
     }
     provenance = build_provenance(
         weights,
-        guidance_scale,
+        guidance,
         generation=generation,
         reference=REFERENCE_PATH,
         additional_inputs={"training_image": SAMPLE_PATH},
@@ -158,10 +155,10 @@ def main() -> None:
             reference,
             target_porosity,
             weights,
-            guidance_scale,
+            guidance,
             args.domain,
             generation_settings.overlap,
-            generation_settings.crop_margin,
+            generation_settings.margin,
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -190,7 +187,7 @@ def main() -> None:
                 make_row(
                     condition=condition,
                     seed=seed,
-                    guidance_scale=guidance_scale,
+                    guidance=guidance,
                     fid=fid_scores[(condition, seed)],
                     porosity_value=phase_fraction(volume, PORE_PHASE),
                     tortuosity_value=tortuosity(
@@ -214,7 +211,7 @@ def main() -> None:
         reference_porosity=target_porosity,
         reference_tortuosity=reference_tortuosity,
         reference_percolation=reference_percolation,
-        guidance_scale=guidance_scale,
+        guidance=guidance,
     )
     write_csv(summary_rows, SUMMARY_CSV)
     render_summary_chart(summary_rows, FIGURE_PATH)
@@ -228,7 +225,7 @@ def main() -> None:
         reference_tortuosity=reference_tortuosity,
         reference_percolation=reference_percolation,
         scale_overlap=generation_settings.overlap,
-        scale_crop_margin=generation_settings.crop_margin,
+        scale_margin=generation_settings.margin,
         output=MANIFEST_PATH,
     )
     print(f"Raw metrics : {RAW_CSV.resolve()}")
@@ -241,10 +238,10 @@ def generate_volumes(
     reference: np.ndarray,
     target_porosity: float,
     weights: Path,
-    guidance_scale: float,
+    guidance: float,
     domain: int,
     scale_overlap: int,
-    scale_crop_margin: int,
+    scale_margin: int,
 ) -> dict[tuple[str, int], float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
@@ -264,7 +261,7 @@ def generate_volumes(
     print("-----------------------------")
     print(f"Weights : {weights.resolve()}")
     print(f"Device  : {device}")
-    print(f"Guidance: {guidance_scale}")
+    print(f"Guidance: {guidance}")
     elapsed_times = {}
     for condition in CONDITIONS[1:]:
         for seed in SEEDS:
@@ -274,14 +271,16 @@ def generate_volumes(
             if condition == "3D":
                 volume = generator.generate(
                     vf=None,
-                    guidance_scale=guidance_scale,
+                    guidance=guidance,
                     domain=domain,
+                    margin=scale_margin,
                 )
             elif condition == "3D (phase-fraction conditioned)":
                 volume = generator.generate(
                     vf=(target_porosity, 1.0 - target_porosity),
-                    guidance_scale=guidance_scale,
+                    guidance=guidance,
                     domain=domain,
+                    margin=scale_margin,
                 )
             elif condition in anchor_map:
                 count = anchor_map[condition]
@@ -295,8 +294,9 @@ def generate_volumes(
                 )
                 volume = generator.generate(
                     anchors=anchors,
-                    guidance_scale=guidance_scale,
+                    guidance=guidance,
                     domain=domain,
+                    margin=scale_margin,
                 )
             elif condition == "3D (scale-up)":
                 base = generator.generate(
@@ -307,17 +307,18 @@ def generate_volumes(
                             index=center_index,
                         ),
                     ),
-                    guidance_scale=guidance_scale,
+                    guidance=guidance,
                     domain=domain,
+                    margin=scale_margin,
                 )
                 scaled = ScaledGenerator(generator)
                 volume = scaled.generate(
                     blocks=SCALE_BLOCKS,
                     overlap=scale_overlap,
-                    crop_margin=scale_crop_margin,
+                    margin=scale_margin,
                     base=base,
                     progress=False,
-                    guidance_scale=guidance_scale,
+                    guidance=guidance,
                     domain=domain,
                 )
                 expected_shape = scaled.shape_from_blocks(SCALE_BLOCKS, scale_overlap)
@@ -460,7 +461,7 @@ def mean_percolation(volume: np.ndarray) -> float:
 def make_row(
     condition: str,
     seed: int,
-    guidance_scale: float | None = None,
+    guidance: float | None = None,
     fid: float | None = None,
     porosity_value: float | None = None,
     tortuosity_value: float | None = None,
@@ -471,7 +472,7 @@ def make_row(
     return {
         "condition": condition,
         "seed": seed,
-        "guidance_scale": guidance_scale,
+        "guidance": guidance,
         "fid": fid,
         "porosity": porosity_value,
         "tortuosity_axis0": tortuosity_value,
@@ -487,12 +488,12 @@ def summarize(
     reference_porosity: float,
     reference_tortuosity: float,
     reference_percolation: float,
-    guidance_scale: float,
+    guidance: float,
 ) -> list[dict[str, object]]:
     summary = [
         {
             "condition": "GT reference volume",
-            "guidance_scale": None,
+            "guidance": None,
             "samples": 1,
             "fid_mean": reference_fid,
             "fid_std": None,
@@ -512,9 +513,7 @@ def summarize(
         rows = [row for row in raw_rows if row["condition"] == condition]
         result: dict[str, object] = {
             "condition": condition,
-            "guidance_scale": (
-                None if condition == "Real 2D crops" else guidance_scale
-            ),
+            "guidance": None if condition == "Real 2D crops" else guidance,
             "samples": len(rows),
         }
         for metric in (
@@ -664,7 +663,7 @@ def write_manifest(
     reference_tortuosity: float,
     reference_percolation: float,
     scale_overlap: int,
-    scale_crop_margin: int,
+    scale_margin: int,
     output: Path,
 ) -> None:
     data = {
@@ -689,7 +688,7 @@ def write_manifest(
         "scale_geometry": "fixed_blocks_inward_margins",
         "scale_blocks": list(SCALE_BLOCKS),
         "scale_overlap": scale_overlap,
-        "scale_crop_margin": scale_crop_margin,
+        "scale_margin": scale_margin,
         "scale_output_shape": list(
             scale_output_shape(reference.shape[0], scale_overlap)
         ),

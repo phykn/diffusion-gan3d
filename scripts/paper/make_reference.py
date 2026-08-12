@@ -33,20 +33,19 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance-scale", type=float)
+    parser.add_argument("--guidance", type=float)
     args = parser.parse_args()
 
     weights = args.weight.resolve()
     settings = load_generation_settings()
-    guidance_scale = (
-        settings.guidance_scale if args.guidance_scale is None else args.guidance_scale
-    )
+    guidance = settings.guidance if args.guidance is None else args.guidance
     provenance = build_provenance(
         weights,
-        guidance_scale,
+        guidance,
         generation={
             "seed": SEED,
             "domain": args.domain,
+            "margin": settings.margin,
             "output_size": REFERENCE_SIZE,
         },
     )
@@ -64,8 +63,9 @@ def main() -> None:
         torch.cuda.manual_seed_all(SEED)
     volume = (
         generator.generate(
-            guidance_scale=guidance_scale,
+            guidance=guidance,
             domain=args.domain,
+            margin=settings.margin,
         )
         .to(torch.uint8)
         .numpy()
@@ -102,7 +102,7 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"Weights  : {weights}")
-    print(f"Guidance : {guidance_scale}")
+    print(f"Guidance : {guidance}")
     print(f"Reference: {OUTPUT.resolve()}")
     print(f"Manifest : {MANIFEST.resolve()}")
     print(f"SHA-256  : {digest}")

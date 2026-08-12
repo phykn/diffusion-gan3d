@@ -166,7 +166,7 @@ def test_paper_generation_cli_requires_weight_and_loads_guidance_from_yaml(
     assert isinstance(weight["required"], ast.Constant)
     assert weight["required"].value is True
 
-    guidance = _keywords(arguments["--guidance-scale"])
+    guidance = _keywords(arguments["--guidance"])
     assert isinstance(guidance["type"], ast.Name)
     assert guidance["type"].id == "float"
     assert "default" not in guidance
@@ -193,7 +193,8 @@ def test_every_paper_generation_call_forwards_guidance(filename: str) -> None:
 
     assert calls
     for call in calls:
-        assert "guidance_scale" in _keywords(call)
+        assert "guidance" in _keywords(call)
+        assert "margin" in _keywords(call)
 
 
 @pytest.mark.parametrize("filename", PAPER_SCRIPTS)
@@ -220,7 +221,7 @@ def test_generation_helper_accepts_guidance_explicitly(filename: str) -> None:
         if isinstance(node, ast.FunctionDef) and node.name == "generate_volumes"
     )
 
-    assert "guidance_scale" in {argument.arg for argument in function.args.args}
+    assert "guidance" in {argument.arg for argument in function.args.args}
 
 
 def test_common_manifest_rejects_changed_inputs_and_cache_paths(tmp_path: Path) -> None:
@@ -383,10 +384,11 @@ def test_anchor_asset_writes_generation_sidecar(
     class FakeGenerator:
         patch_size = 4
 
-        def generate(self, *, anchors, guidance_scale, domain):
+        def generate(self, *, anchors, guidance, domain, margin):
             assert len(anchors) == 1
-            assert guidance_scale == 1.5
+            assert guidance == 1.5
             assert domain == 0
+            assert margin == 8
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "OUTPUT_DIR", tmp_path)
@@ -410,7 +412,7 @@ def test_anchor_asset_writes_generation_sidecar(
             "make_anchor_asset.py",
             "--weight",
             str(weight),
-            "--guidance-scale",
+            "--guidance",
             "1.5",
         ],
     )
@@ -423,7 +425,7 @@ def test_anchor_asset_writes_generation_sidecar(
     assert metadata["weights"] == str(weight.resolve())
     assert len(metadata["weight_sha256"]) == 64
     assert len(metadata["train_config_sha256"]) == 64
-    assert metadata["guidance_scale"] == 1.5
+    assert metadata["guidance"] == 1.5
     assert len(metadata["reference_sha256"]) == 64
     assert len(metadata["generation_signature"]) == 64
     assert metadata["seed"] == module.SEED
@@ -451,10 +453,11 @@ def test_scale_asset_writes_generation_sidecar(
     class FakeGenerator:
         patch_size = 4
 
-        def generate(self, *, anchors, guidance_scale, domain):
+        def generate(self, *, anchors, guidance, domain, margin):
             assert len(anchors) == 1
-            assert guidance_scale == 1.75
+            assert guidance == 1.75
             assert domain == 0
+            assert margin == 0
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     class FakeScaled:
@@ -476,7 +479,8 @@ def test_scale_asset_writes_generation_sidecar(
             )
 
         def generate(self, **kwargs):
-            assert kwargs["guidance_scale"] == 1.75
+            assert kwargs["guidance"] == 1.75
+            assert kwargs["margin"] == 0
             assert kwargs["domain"] == 0
             return torch.zeros((12, 12, 12), dtype=torch.uint8)
 
@@ -486,7 +490,7 @@ def test_scale_asset_writes_generation_sidecar(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda: SimpleNamespace(guidance_scale=1.0, overlap=0, crop_margin=0),
+        lambda: SimpleNamespace(guidance=1.0, overlap=0, margin=0),
     )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(
@@ -507,7 +511,7 @@ def test_scale_asset_writes_generation_sidecar(
             "make_scale_up_asset.py",
             "--weight",
             str(weight),
-            "--guidance-scale",
+            "--guidance",
             "1.75",
         ],
     )
@@ -518,7 +522,7 @@ def test_scale_asset_writes_generation_sidecar(
     assert metadata["weights"] == str(weight.resolve())
     assert len(metadata["weight_sha256"]) == 64
     assert len(metadata["train_config_sha256"]) == 64
-    assert metadata["guidance_scale"] == 1.75
+    assert metadata["guidance"] == 1.75
     assert len(metadata["reference_sha256"]) == 64
     assert len(metadata["generation_signature"]) == 64
     assert metadata["seed"] == module.SEED

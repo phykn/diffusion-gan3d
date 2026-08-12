@@ -49,9 +49,9 @@ def test_generation_settings_use_gen_yaml(
         config_module,
         "load_yaml",
         lambda path: {
-            "guidance_scale": 1.5,
+            "guidance": 1.5,
             "overlap": 12,
-            "crop_margin": 6,
+            "margin": 6,
         },
     )
 
@@ -74,8 +74,8 @@ def test_repository_generation_config_has_expected_defaults() -> None:
     "settings",
     (
         {"overlap": -1},
-        {"crop_margin": True},
-        {"guidance_scale": float("inf")},
+        {"margin": True},
+        {"guidance": float("inf")},
         {"blocks": [2, 2, 2]},
     ),
 )
