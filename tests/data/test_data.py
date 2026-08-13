@@ -267,16 +267,27 @@ class DomainDataTest(unittest.TestCase):
         self.assertEqual(set(domains[0]), {0})
         self.assertEqual(set(domains[1]), {1, 2})
 
-    def test_domains_require_at_least_one_source_for_every_axis(self):
-        with self.assertRaisesRegex(ValueError, "no data for axes:.*2"):
-            get_domains(
-                {
-                    "domains": {
-                        0: {0: ["axis_0"]},
-                        1: {1: ["axis_1"]},
-                    }
+    def test_domains_may_collectively_provide_only_one_axis(self):
+        domains = get_domains({"domains": {0: {0: ["axis_0"]}}})
+
+        self.assertEqual(set(domains[0]), {0})
+
+    def test_build_datasets_accepts_one_axis(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "axis_0"
+            folder.mkdir()
+            _save_image(folder / "sample.png", np.zeros((4, 4), dtype=np.uint8))
+            cfg = {
+                "data": {
+                    "domains": {0: {0: [folder]}},
+                    "crop_size": 4,
+                    "input_size": 4,
                 }
-            )
+            }
+
+            datasets = build_datasets(cfg)
+
+        self.assertEqual(set(datasets[0]), {0})
 
     def test_domain_datasets_keep_axis_folders_separate(self):
         with tempfile.TemporaryDirectory() as temp:

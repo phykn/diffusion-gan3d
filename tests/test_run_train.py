@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from run_train import make_run_dir
@@ -99,14 +100,18 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
     assert "conditioning/vf_hard_0" in tags
 
 
-def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
+@pytest.mark.parametrize("axes", ((0, 1, 2), (0,)))
+def test_cpu_entrypoint_saves_one_complete_step(
+    tmp_path: Path,
+    axes: tuple[int, ...],
+) -> None:
     folders = {}
     shapes = {
         0: (8, 8),
         1: (4, 8),
         2: (8, 6),
     }
-    for axis in (0, 1, 2):
+    for axis in axes:
         folder = tmp_path / "slices" / str(axis)
         folder.mkdir(parents=True)
         Image.fromarray(
@@ -231,23 +236,58 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
     assert run_dirs[0].name.isdigit()
     weights = run_dirs[0] / "generator.pt"
     assert weights.is_file()
-    assert tuple(path.name for path in sorted(run_dirs[0].glob("critic_*.pt"))) == (
-        "critic_0.pt",
-        "critic_1.pt",
-        "critic_2.pt",
-        "critic_c.pt",
+    expected_critics = tuple(f"critic_{axis}.pt" for axis in axes) + ("critic_c.pt",)
+    assert (
+        tuple(path.name for path in sorted(run_dirs[0].glob("critic_*.pt")))
+        == expected_critics
     )
     assert (run_dirs[0] / "train.yaml").is_file()
     checkpoint = run_dirs[0] / "checkpoints" / "step_00000001"
     assert (checkpoint / "generator.pt").is_file()
-    assert tuple(path.name for path in sorted(checkpoint.glob("critic_*.pt"))) == (
-        "critic_0.pt",
-        "critic_1.pt",
-        "critic_2.pt",
-        "critic_c.pt",
+    assert (
+        tuple(path.name for path in sorted(checkpoint.glob("critic_*.pt")))
+        == expected_critics
     )
     values = __import__("torch").load(weights, weights_only=True)
     assert values
     assert all(
         isinstance(value, __import__("torch").Tensor) for value in values.values()
     )
+
+
+def test_dataset_check_script_accepts_one_axis(tmp_path: Path) -> None:
+    folder = tmp_path / "axis_0"
+    folder.mkdir()
+    Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(folder / "sample.png")
+    config = tmp_path / "train.yaml"
+    save_yaml(
+        config,
+        {
+            "data": {
+                "domains": {0: {0: [str(folder)]}},
+                "crop_size": 8,
+                "input_size": 8,
+                "num_phases": 2,
+            }
+        },
+    )
+    environment = dict(os.environ)
+    environment["MPLBACKEND"] = "Agg"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "01_check_dataset.py"),
+            "--config",
+            str(config),
+            "--domain",
+            "0",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

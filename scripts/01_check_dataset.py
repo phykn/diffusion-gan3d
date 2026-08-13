@@ -8,7 +8,6 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src import AXES
 from src.build import build_datasets
 from src.utils import load_yaml
 
@@ -28,13 +27,14 @@ def main() -> None:
     args = parser.parse_args()
     cfg = load_yaml(args.config)
     datasets = build_datasets(cfg)
+    axes = tuple(datasets[args.domain])
     fig, panels = plt.subplots(
-        len(AXES),
+        len(axes),
         SAMPLES,
         squeeze=False,
-        figsize=(3 * SAMPLES, 8),
+        figsize=(3 * SAMPLES, 2.5 * len(axes)),
     )
-    for row, axis in enumerate(AXES):
+    for row, axis in enumerate(axes):
         ds = datasets[args.domain][axis]
         for col in range(SAMPLES):
             img = ds[np.random.randint(len(ds))].numpy()

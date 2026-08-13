@@ -30,8 +30,8 @@ def save_all_weights(
 ) -> Path:
     check_critics(critics)
     root = Path(run_dir)
-    for axis, name in enumerate(CRITIC_FILES):
-        save_atomic(critics[str(axis)].state_dict(), root / name)
+    for axis in sorted(int(value) for value in critics):
+        save_atomic(critics[str(axis)].state_dict(), root / CRITIC_FILES[axis])
     save_atomic(
         connectivity_critic.state_dict(),
         root / CRITIC_C_FILE,
@@ -91,8 +91,8 @@ def load_state(path: Path) -> dict[str, torch.Tensor]:
 def check_critics(critics: nn.ModuleDict) -> None:
     if not isinstance(critics, nn.ModuleDict):
         raise TypeError("critics must be a ModuleDict.")
-    if set(critics) != {"0", "1", "2"}:
-        raise ValueError("critics must contain axes 0, 1, and 2.")
+    if not critics or not set(critics).issubset({"0", "1", "2"}):
+        raise ValueError("critics must contain one or more valid axes.")
 
 
 def save_atomic(data: object, path: Path) -> None:

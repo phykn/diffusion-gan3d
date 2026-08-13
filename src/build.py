@@ -41,11 +41,14 @@ def get_domains(
                 f"domain {domain} contains invalid axes: {sorted(unknown)}."
             )
         parsed[domain] = dict(folders)
-    available = {axis for folders in parsed.values() for axis in folders}
-    if available != set(AXES):
-        missing = sorted(set(AXES) - available)
-        raise ValueError(f"data.domains has no data for axes: {missing}.")
     return parsed
+
+
+def get_data_axes(data: Mapping[str, object]) -> tuple[int, ...]:
+    domains = get_domains(data)
+    return tuple(
+        axis for axis in AXES if any(axis in folders for folders in domains.values())
+    )
 
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
@@ -60,7 +63,7 @@ def find_slice_groups(
         raise ValueError("axis folders may contain only axes 0, 1, and 2.")
 
     grouped = {}
-    for axis in AXES:
+    for axis in sorted(folders):
         values = folders[axis]
         if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
             raise TypeError(f"axis {axis} folders must be a sequence of paths.")
@@ -166,7 +169,7 @@ def build_models(
                 num_domains=num_domains,
                 gradient_checkpointing=model["gradient_checkpointing"],
             )
-            for axis in AXES
+            for axis in get_data_axes(data)
         }
     )
     connectivity_critic = ConnectivityCritic2D(
@@ -203,7 +206,7 @@ def build_optimizers(
             lr=optim["critic_lr"],
             betas=betas,
         )
-        for axis in AXES
+        for axis in sorted(int(axis) for axis in critics)
     }
     connectivity_optim = torch.optim.Adam(
         connectivity_critic.parameters(),

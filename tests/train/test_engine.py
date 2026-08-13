@@ -307,6 +307,8 @@ def test_get_batches_uses_one_domain_for_all_axes() -> None:
         for domain in (0, 1)
     }
     trainer.streams = streams
+    trainer.active_axes = (0, 1, 2)
+    trainer.axis_domains = {axis: (0, 1) for axis in (0, 1, 2)}
 
     batches = trainer.get_batches(1)
 
@@ -327,6 +329,7 @@ def test_missing_axes_borrow_from_axis_providers() -> None:
         },
     }
     trainer.axis_domains = {0: (0, 1), 1: (1,), 2: (1,)}
+    trainer.active_axes = (0, 1, 2)
 
     sources = trainer.select_batch_domains(0)
     batches = trainer.get_batches(0, sources)
@@ -533,6 +536,29 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
         for axis in (0, 1, 2)
     )
     assert all(not parameter.requires_grad for parameter in ema.parameters())
+
+
+@pytest.mark.parametrize("axis", (0, 2))
+def test_training_step_with_one_axis_updates_only_that_critic(axis: int) -> None:
+    trainer, denoiser, streams = _conditioning_trainer(
+        anchored=False,
+        axes=(axis,),
+    )
+    denoiser_before = _parameters(denoiser)
+    critic_before = _parameters(trainer.critics[str(axis)])
+
+    metrics = trainer.step(0, transition=1)
+
+    assert trainer.active_axes == (axis,)
+    assert set(trainer.critics) == {str(axis)}
+    assert set(trainer.critic_optims) == {str(axis)}
+    assert streams[axis].calls == 1
+    assert metrics.critic_axes[axis] != 0.0
+    assert all(
+        value == 0.0 for index, value in enumerate(metrics.critic_axes) if index != axis
+    )
+    assert _changed(denoiser_before, denoiser)
+    assert _changed(critic_before, trainer.critics[str(axis)])
 
 
 def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
@@ -1121,9 +1147,10 @@ def _conditioning_trainer(
     normal_transition_weight: float = 0.0,
     cfg_drop_each_probability: float = 0.0,
     cfg_single_drop_probability: float = 0.0,
+    axes: tuple[int, ...] = (0, 1, 2),
 ) -> tuple[Trainer, nn.Module, dict[int, _ConstantStream]]:
     data = DataConfig(
-        domains={0: {0: ".", 1: ".", 2: "."}},
+        domains={0: {axis: "." for axis in axes}},
         crop_size=crop_size,
         input_size=patch_size,
         num_phases=3,
@@ -1181,7 +1208,7 @@ def _conditioning_trainer(
     )
     streams = {
         axis: _ConstantStream((base + axis).remainder(3).to(torch.long))
-        for axis in (0, 1, 2)
+        for axis in axes
     }
     trainer = _make_trainer(
         cfg,

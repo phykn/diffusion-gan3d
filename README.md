@@ -18,8 +18,9 @@ pip install -r requirements.txt
 
 Set the 2D section folders and training options in [`config/train.yaml`](config/train.yaml), then train the model:
 
-Each numeric domain contains folders for one or more axes. Across all domains,
-axes 0, 1, and 2 must each have at least one data source:
+Each numeric domain contains folders for one or more axes. Training creates and
+updates critics only for axes that appear anywhere in the configuration, so a
+single axis is sufficient:
 
 ~~~yaml
 data:
@@ -40,6 +41,9 @@ that axis and removes the domain condition for that critic. `domain_dropout`
 also removes the domain condition from complete training steps with the given
 probability, teaching the shared network path without adding a common domain ID.
 Anchors and volume-fraction targets use only axes owned by the target domain.
+Critic weight files follow the union of configured axes: if another domain
+provides all three axes, all three critics are trained and saved; if the entire
+configuration contains only axis 0, only `critic_0.pt` is created.
 
 Set `data.allow_partial_crop: true` to train from a section whose height or
 width is smaller than `crop_size`. Each available dimension is cropped to at

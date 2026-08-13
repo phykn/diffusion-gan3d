@@ -175,10 +175,9 @@ class TrainerComponents:
         if any(not set(streams).issubset(AXES) for streams in self.streams.values()):
             raise ValueError("domain streams may contain only axes 0, 1, and 2.")
         available = {axis for streams in self.streams.values() for axis in streams}
-        if available != set(AXES):
-            raise ValueError("streams must collectively contain axes 0, 1, and 2.")
-        if set(self.critic_optims) != {str(axis) for axis in AXES}:
-            raise ValueError("critic optimizers must contain axes 0, 1, and 2.")
+        expected = {str(axis) for axis in available}
+        if set(self.critics) != expected or set(self.critic_optims) != expected:
+            raise ValueError("critics and optimizers must match the available axes.")
         if self.critic_augment is not None and not isinstance(
             self.critic_augment,
             CriticAugment,
@@ -339,11 +338,12 @@ class Trainer:
         self.connectivity_critic = components.connectivity_critic
         self.streams = components.streams
         self.num_domains = len(components.streams)
+        self.active_axes = tuple(int(axis) for axis in components.critics)
         self.axis_domains = {
             axis: tuple(
                 domain for domain, streams in self.streams.items() if axis in streams
             )
-            for axis in AXES
+            for axis in self.active_axes
         }
         self.diffusion = components.diffusion
         self.denoiser_optim = components.denoiser_optim
@@ -434,7 +434,7 @@ class Trainer:
                 ),
                 axis,
             )
-            for axis in AXES
+            for axis in self.active_axes
         }
 
         connectivity_real, connectivity_fake = self.make_connectivity_triplets(
@@ -716,7 +716,7 @@ class Trainer:
 
     def select_batch_domains(self, domain: int) -> dict[int, int]:
         selected = {}
-        for axis in AXES:
+        for axis in self.active_axes:
             if axis in self.streams[domain]:
                 selected[axis] = domain
                 continue
@@ -742,7 +742,7 @@ class Trainer:
                 self.device,
                 non_blocking=True,
             )
-            for axis in AXES
+            for axis in self.active_axes
         }
 
     def sample_domain_condition(self, domain: int) -> int:
@@ -1180,12 +1180,12 @@ class Trainer:
         domains: dict[int, int],
     ) -> tuple[list[float], float, float, float]:
         apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
-        critic_losses = []
+        critic_losses = [0.0] * len(AXES)
         r1_sum = 0.0
         global_sum = 0.0
         local_sum = 0.0
         local_weight = self.critic_local_weight
-        for axis in AXES:
+        for axis in self.active_axes:
             critic = self.critics[str(axis)]
             optimizer = self.critic_optims[str(axis)]
             optimizer.zero_grad(set_to_none=True)
@@ -1234,7 +1234,7 @@ class Trainer:
                 loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
             self.scaler.scale(loss).backward()
             self.scaler.step(optimizer)
-            critic_losses.append(float(loss.detach()))
+            critic_losses[axis] = float(loss.detach())
         self.scaler.update()
         return critic_losses, r1_sum, global_sum, local_sum
 
@@ -1285,7 +1285,7 @@ class Trainer:
             heads = []
             local_weight = self.critic_local_weight
             with self.autocast():
-                for axis in AXES:
+                for axis in self.active_axes:
                     fake_prev, fake_curr = batch.fake[axis]
                     time = self.make_time(batch.transition, fake_prev.shape[0])
                     domains = self.make_domain(

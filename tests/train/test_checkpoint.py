@@ -87,6 +87,20 @@ def test_training_weights_load_independently(
     _assert_same_state(connectivity, source_connectivity)
 
 
+def test_training_weights_save_only_active_axis_critics(tmp_path: Path) -> None:
+    source = nn.Linear(3, 2)
+    critics = nn.ModuleDict({"1": nn.Linear(2, 1)})
+    connectivity = nn.Linear(4, 1)
+
+    save_all_weights(tmp_path, source, critics, connectivity)
+
+    assert (tmp_path / "generator.pt").is_file()
+    assert (tmp_path / "critic_1.pt").is_file()
+    assert not (tmp_path / "critic_0.pt").exists()
+    assert not (tmp_path / "critic_2.pt").exists()
+    assert (tmp_path / CRITIC_C_FILE).is_file()
+
+
 def test_numbered_checkpoint_preserves_complete_weight_set(tmp_path: Path) -> None:
     source = nn.Linear(3, 2)
     critics = nn.ModuleDict({str(axis): nn.Linear(2, 1) for axis in range(3)})
