@@ -170,16 +170,6 @@ class BatchStream:
             return next(self.iterator)
 
 
-def folder_weights(counts: Sequence[int]) -> torch.Tensor:
-    values = tuple(counts)
-    if not values or any(
-        not isinstance(count, int) or isinstance(count, bool) or count < 1
-        for count in values
-    ):
-        raise ValueError("folder counts must be positive integers.")
-    return torch.log1p(torch.tensor(values, dtype=torch.float64))
-
-
 class FolderBatchSampler(Sampler[list[int]]):
     def __init__(self, dataset: SliceDataset, batch_size: int) -> None:
         if (
@@ -200,13 +190,10 @@ class FolderBatchSampler(Sampler[list[int]]):
                 )
             buckets.append(group)
         self._buckets = tuple(buckets)
-        self._weights = folder_weights(len(bucket) for bucket in self._buckets)
 
     def __iter__(self) -> Iterator[list[int]]:
         for _ in range(self.num_batches):
-            bucket_index = int(
-                torch.multinomial(self._weights, 1, replacement=True).item()
-            )
+            bucket_index = int(torch.randint(len(self._buckets), ()).item())
             bucket = self._buckets[bucket_index]
             choices = torch.randint(len(bucket), (self.batch_size,))
             yield [bucket[int(choice)] for choice in choices]

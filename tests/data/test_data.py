@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 
 from src.build import build_datasets, build_stream, find_slices, get_domains
-from src.dataset import FolderBatchSampler, SliceDataset, folder_weights
+from src.dataset import FolderBatchSampler, SliceDataset
 from src.train.engine import Trainer
 
 
@@ -385,15 +385,12 @@ class DomainDataTest(unittest.TestCase):
 
             dataset = build_datasets(cfg)[0][0]
             sampler = FolderBatchSampler(dataset, batch_size=3)
-            torch.testing.assert_close(
-                folder_weights((2, 4)),
-                torch.log1p(torch.tensor((2.0, 4.0), dtype=torch.float64)),
-            )
-            with (
-                patch("torch.multinomial", return_value=torch.tensor([1])),
-                patch("torch.randint", return_value=torch.tensor([0, 1, 2])),
-            ):
+            with patch(
+                "torch.randint",
+                side_effect=(torch.tensor(1), torch.tensor([0, 1, 2])),
+            ) as randint:
                 indices = next(iter(sampler))
+            self.assertEqual(randint.call_args_list[0].args, (2, ()))
             stream = build_stream(
                 dataset,
                 batch_size=3,
