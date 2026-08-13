@@ -12,6 +12,7 @@ from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
 from ..dataset import BatchStream
 from ..diffusion import Diffusion
 from ..model.denoiser import Denoiser3D
+from ..model.domain import NULL_DOMAIN
 from .augment import CriticAugment
 from .connect import (
     TEACHER_MIN_ENTRIES,
@@ -89,7 +90,8 @@ class DenoiserUpdate:
 @dataclass(frozen=True)
 class DenoiserBatch:
     transition: int
-    domain: int
+    model_domain: int
+    critic_domains: dict[int, int]
     fake: dict[int, tuple[torch.Tensor, torch.Tensor]]
     connectivity_real: TripletBatch
     connectivity_fake: TripletBatch
@@ -105,6 +107,8 @@ class DenoiserBatch:
 class StepPreparation:
     transition: int
     domain: int
+    model_domain: int
+    critic_domains: dict[int, int]
     real: dict[int, torch.Tensor]
     selection: "AnchorSelection | None"
     anchor: AnchorCondition | None
@@ -166,8 +170,13 @@ class TrainerComponents:
     def __post_init__(self) -> None:
         if set(self.streams) != set(range(len(self.streams))):
             raise ValueError("stream domain IDs must be contiguous and start at zero.")
-        if any(set(streams) != set(AXES) for streams in self.streams.values()):
-            raise ValueError("each domain must contain streams for axes 0, 1, and 2.")
+        if any(not streams for streams in self.streams.values()):
+            raise ValueError("each domain must contain at least one axis stream.")
+        if any(not set(streams).issubset(AXES) for streams in self.streams.values()):
+            raise ValueError("domain streams may contain only axes 0, 1, and 2.")
+        available = {axis for streams in self.streams.values() for axis in streams}
+        if available != set(AXES):
+            raise ValueError("streams must collectively contain axes 0, 1, and 2.")
         if set(self.critic_optims) != {str(axis) for axis in AXES}:
             raise ValueError("critic optimizers must contain axes 0, 1, and 2.")
         if self.critic_augment is not None and not isinstance(
@@ -206,6 +215,7 @@ class TrainerSettings:
     cfg_single_drop_probability: float
     latent_channels: int
     amp_enabled: bool
+    domain_dropout: float = 0.0
 
     def __post_init__(self) -> None:
         self._validate_positive_integers()
@@ -286,6 +296,7 @@ class TrainerSettings:
             "cfg_single_drop_probability": self.cfg_single_drop_probability,
             "anchor_multi_probability": self.anchor_multi_probability,
             "anchor_mixed_axis_probability": self.anchor_mixed_axis_probability,
+            "domain_dropout": self.domain_dropout,
         }
         for name, value in values.items():
             if (
@@ -328,6 +339,12 @@ class Trainer:
         self.connectivity_critic = components.connectivity_critic
         self.streams = components.streams
         self.num_domains = len(components.streams)
+        self.axis_domains = {
+            axis: tuple(
+                domain for domain, streams in self.streams.items() if axis in streams
+            )
+            for axis in AXES
+        }
         self.diffusion = components.diffusion
         self.denoiser_optim = components.denoiser_optim
         self.critic_optims = components.critic_optims
@@ -354,7 +371,8 @@ class Trainer:
         self.normal_transition_weight = settings.normal_transition_weight
         self.connect = Connectivity(
             num_phases=settings.num_phases,
-            num_domains=self.num_domains,
+            # The extra replay/teacher bank stores domain-dropped predictions.
+            num_domains=self.num_domains + 1,
             patch_size=settings.patch_size,
             replay_triplets_per_axis=settings.connectivity_replay_triplets_per_axis,
             replay_capacity_per_axis=settings.connectivity_replay_capacity_per_axis,
@@ -368,6 +386,7 @@ class Trainer:
         self.vf_loss_weight = settings.vf_loss_weight
         self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
         self.cfg_single_drop_probability = float(settings.cfg_single_drop_probability)
+        self.domain_dropout = float(settings.domain_dropout)
         self.latent_channels = settings.latent_channels
         self.amp_enabled = settings.amp_enabled
         self.critic_augment = (
@@ -387,8 +406,8 @@ class Trainer:
         prepared = self.prepare_step(step, transition)
         volume_size = self.patch_size
         transition = prepared.transition
-        domain = prepared.domain
         real = prepared.real
+        critic_domains = prepared.critic_domains
         anchor = prepared.anchor
         target_vf = prepared.target_vf
         presence = prepared.presence
@@ -422,7 +441,7 @@ class Trainer:
             prediction,
             anchor,
             transition,
-            domain,
+            self.replay_domain(prepared.model_domain),
         )
 
         (
@@ -435,21 +454,22 @@ class Trainer:
             fake,
             real,
             step,
-            domain,
+            critic_domains,
         )
         if self.connectivity_weight > 0.0:
             critic_connectivity, connectivity_r1 = self.update_connectivity_critic(
                 connectivity_real.values,
                 connectivity_fake,
                 step,
-                domain,
+                prepared.model_domain,
             )
         else:
             critic_connectivity, connectivity_r1 = 0.0, 0.0
         denoiser_update = self.update_denoiser(
             DenoiserBatch(
                 transition=transition,
-                domain=domain,
+                model_domain=prepared.model_domain,
+                critic_domains=critic_domains,
                 fake=fake,
                 connectivity_real=connectivity_real,
                 connectivity_fake=connectivity_fake,
@@ -492,14 +512,27 @@ class Trainer:
         ):
             raise ValueError("transition is outside the diffusion schedule.")
 
-        domain = int(torch.randint(self.num_domains, ()).item())
-        batches = self.get_batches(domain)
-        vf_pool = self.get_vf_pool(batches)
+        domain = self.sample_target_domain()
+        model_domain = self.sample_domain_condition(domain)
+        batch_domains = self.select_batch_domains(domain)
+        batches = self.get_batches(domain, batch_domains)
+        own_batches = {axis: batches[axis] for axis in self.streams[domain]}
+        critic_domains = self.make_critic_domains(
+            domain,
+            model_domain,
+            batch_domains,
+        )
+        vf_pool = self.get_vf_pool(own_batches)
         ramp = self.get_anchor_ramp(step)
         selection = (
             None
             if ramp == 0.0
-            else self.sample_anchor(batches, self.patch_size, step, domain)
+            else self.sample_anchor(
+                own_batches,
+                self.patch_size,
+                step,
+                self.replay_domain(model_domain),
+            )
         )
         anchor = None if selection is None else selection.condition
         target_vf, resample_rate = self.resolve_target_vf(
@@ -512,13 +545,15 @@ class Trainer:
             anchor,
             target_vf,
             presence,
-            self.make_domain(domain, self.volume_batch_size),
+            self.make_domain(model_domain, self.volume_batch_size),
         )
         if transition is None:
             transition = self.sample_transition(anchor is not None)
         return StepPreparation(
             transition=transition,
             domain=domain,
+            model_domain=model_domain,
+            critic_domains=critic_domains,
             real=batches,
             selection=selection,
             anchor=anchor,
@@ -554,7 +589,7 @@ class Trainer:
             prediction,
             prepared.selection,
             prepared.transition,
-            prepared.domain,
+            self.replay_domain(prepared.model_domain),
         )
         update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
         anchor = prepared.anchor
@@ -679,9 +714,29 @@ class Trainer:
             return 0
         return int(torch.randint(1, self.diffusion.timesteps, ()).item())
 
-    def get_batches(self, domain: int) -> dict[int, torch.Tensor]:
+    def select_batch_domains(self, domain: int) -> dict[int, int]:
+        selected = {}
+        for axis in AXES:
+            if axis in self.streams[domain]:
+                selected[axis] = domain
+                continue
+            candidates = self.axis_domains[axis]
+            index = int(torch.randint(len(candidates), ()).item())
+            selected[axis] = candidates[index]
+        return selected
+
+    def sample_target_domain(self) -> int:
+        return int(torch.randint(self.num_domains, ()).item())
+
+    def get_batches(
+        self,
+        domain: int,
+        batch_domains: dict[int, int] | None = None,
+    ) -> dict[int, torch.Tensor]:
+        if batch_domains is None:
+            batch_domains = self.select_batch_domains(domain)
         return {
-            axis: self.streams[domain][axis]
+            axis: self.streams[batch_domains[axis]][axis]
             .next()
             .to(
                 self.device,
@@ -689,6 +744,27 @@ class Trainer:
             )
             for axis in AXES
         }
+
+    def sample_domain_condition(self, domain: int) -> int:
+        if self.domain_dropout > 0.0 and bool(torch.rand(()) < self.domain_dropout):
+            return NULL_DOMAIN
+        return domain
+
+    @staticmethod
+    def make_critic_domains(
+        domain: int,
+        model_domain: int,
+        batch_domains: dict[int, int],
+    ) -> dict[int, int]:
+        if model_domain == NULL_DOMAIN:
+            return {axis: NULL_DOMAIN for axis in batch_domains}
+        return {
+            axis: domain if source_domain == domain else NULL_DOMAIN
+            for axis, source_domain in batch_domains.items()
+        }
+
+    def replay_domain(self, model_domain: int) -> int:
+        return self.num_domains if model_domain == NULL_DOMAIN else model_domain
 
     def make_domain(self, domain: int, batch_size: int) -> torch.Tensor:
         return torch.full(
@@ -743,8 +819,8 @@ class Trainer:
         )
 
     def get_vf_pool(self, batches: dict[int, torch.Tensor]) -> torch.Tensor:
-        if set(batches) != set(AXES):
-            raise ValueError("batches must contain axes 0, 1, and 2.")
+        if not batches or not set(batches).issubset(AXES):
+            raise ValueError("batches must contain at least one valid axis.")
         if any(
             not isinstance(images, torch.Tensor) or images.ndim != 3
             for images in batches.values()
@@ -752,11 +828,12 @@ class Trainer:
             raise ValueError("training crops must have shape [B, H, W].")
         batch_sizes = {images.shape[0] for images in batches.values()}
         if len(batch_sizes) != 1 or not batch_sizes or next(iter(batch_sizes)) < 1:
-            raise ValueError("each axis must provide the same non-empty crop batch.")
+            raise ValueError(
+                "each available axis must provide the same non-empty crop batch."
+            )
 
         values = []
-        for axis in AXES:
-            images = batches[axis]
+        for images in batches.values():
             if images.numel() == 0:
                 raise ValueError("training crops must not be empty.")
             labels = images.to(torch.long)
@@ -931,7 +1008,8 @@ class Trainer:
         batches: dict[int, torch.Tensor],
         volume_size: int,
     ) -> AnchorSelection:
-        axis = int(torch.randint(len(AXES), ()).item())
+        axes = tuple(batches)
+        axis = axes[int(torch.randint(len(axes), ()).item())]
         images = batches[axis]
         if images.shape[0] < self.volume_batch_size:
             raise ValueError(
@@ -1099,7 +1177,7 @@ class Trainer:
         fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
         batches: dict[int, torch.Tensor],
         step: int,
-        domain: int,
+        domains: dict[int, int],
     ) -> tuple[list[float], float, float, float]:
         apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
         critic_losses = []
@@ -1135,8 +1213,8 @@ class Trainer:
             fake_prev = fake_prev.detach().float()
             fake_curr = fake_curr.detach().float()
             fake_time = self.make_time(transition, fake_prev.shape[0])
-            real_domain = self.make_domain(domain, real_prev.shape[0])
-            fake_domain = self.make_domain(domain, fake_prev.shape[0])
+            real_domain = self.make_domain(domains[axis], real_prev.shape[0])
+            fake_domain = self.make_domain(domains[axis], fake_prev.shape[0])
 
             autocast = self.autocast(self.amp_enabled and not apply_r1)
             with autocast:
@@ -1210,7 +1288,10 @@ class Trainer:
                 for axis in AXES:
                     fake_prev, fake_curr = batch.fake[axis]
                     time = self.make_time(batch.transition, fake_prev.shape[0])
-                    domains = self.make_domain(batch.domain, fake_prev.shape[0])
+                    domains = self.make_domain(
+                        batch.critic_domains[axis],
+                        fake_prev.shape[0],
+                    )
                     scores = self.critics[str(axis)](
                         fake_prev,
                         fake_curr,
@@ -1226,7 +1307,10 @@ class Trainer:
                     connectivity_scores = self.connectivity_critic(
                         batch.connectivity_fake.values,
                         batch.connectivity_fake.axes,
-                        self.make_domain(batch.domain, len(batch.connectivity_fake)),
+                        self.make_domain(
+                            batch.model_domain,
+                            len(batch.connectivity_fake),
+                        ),
                     )
                     connectivity_head = get_generator_loss(connectivity_scores)
                     connectivity_loss = connectivity_head.combine(local_weight)

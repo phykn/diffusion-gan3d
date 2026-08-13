@@ -18,23 +18,28 @@ pip install -r requirements.txt
 
 Set the 2D section folders and training options in [`config/train.yaml`](config/train.yaml), then train the model:
 
-Each numeric domain contains its own folders for axes 0, 1, and 2:
+Each numeric domain contains folders for one or more axes. Across all domains,
+axes 0, 1, and 2 must each have at least one data source:
 
 ~~~yaml
 data:
   domains:
     0:
       0: [data/domain_0/axis_0]
-      1: [data/domain_0/axis_1]
-      2: [data/domain_0/axis_2]
     1:
       0: [data/domain_1/axis_0]
       1: [data/domain_1/axis_1]
       2: [data/domain_1/axis_2]
+  domain_dropout: 0.2
 ~~~
 
 Folders listed under one axis are pooled within that domain. Training uniformly
-samples one domain per step and takes all three axis batches from it.
+samples one target domain per step. An axis present in the target domain uses
+that domain's data. A missing axis uniformly borrows from domains that provide
+that axis and removes the domain condition for that critic. `domain_dropout`
+also removes the domain condition from complete training steps with the given
+probability, teaching the shared network path without adding a common domain ID.
+Anchors and volume-fraction targets use only axes owned by the target domain.
 
 Set `data.allow_partial_crop: true` to train from a section whose height or
 width is smaller than `crop_size`. Each available dimension is cropped to at

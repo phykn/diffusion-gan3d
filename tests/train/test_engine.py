@@ -11,6 +11,7 @@ from torch import nn
 from src.anchor import PlaneAnchor, build_anchors
 from src.build import build_models, build_optimizers
 from src.diffusion import Diffusion
+from src.model.domain import NULL_DOMAIN
 from src.train.augment import CriticAugment
 from src.train.connect import TripletBatch
 from src.train.ema import build_ema
@@ -312,6 +313,125 @@ def test_get_batches_uses_one_domain_for_all_axes() -> None:
     assert all(bool((batch == 1).all()) for batch in batches.values())
     assert all(stream.calls == 0 for stream in streams[0].values())
     assert all(stream.calls == 1 for stream in streams[1].values())
+
+
+def test_missing_axes_borrow_from_axis_providers() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.device = torch.device("cpu")
+    trainer.streams = {
+        0: {0: _ConstantStream(torch.full((1, 2, 2), 10))},
+        1: {
+            0: _ConstantStream(torch.full((1, 2, 2), 20)),
+            1: _ConstantStream(torch.full((1, 2, 2), 21)),
+            2: _ConstantStream(torch.full((1, 2, 2), 22)),
+        },
+    }
+    trainer.axis_domains = {0: (0, 1), 1: (1,), 2: (1,)}
+
+    sources = trainer.select_batch_domains(0)
+    batches = trainer.get_batches(0, sources)
+    critic_domains = trainer.make_critic_domains(0, 0, sources)
+
+    assert sources == {0: 0, 1: 1, 2: 1}
+    assert [int(batches[axis][0, 0, 0]) for axis in (0, 1, 2)] == [10, 21, 22]
+    assert critic_domains == {0: 0, 1: NULL_DOMAIN, 2: NULL_DOMAIN}
+
+
+def test_domain_dropout_masks_every_axis_critic() -> None:
+    sources = {0: 0, 1: 1, 2: 1}
+
+    critic_domains = Trainer.make_critic_domains(0, NULL_DOMAIN, sources)
+
+    assert critic_domains == {axis: NULL_DOMAIN for axis in (0, 1, 2)}
+
+
+def test_domain_dropout_probability_controls_the_model_condition() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.domain_dropout = 0.0
+    assert trainer.sample_domain_condition(2) == 2
+
+    trainer.domain_dropout = 1.0
+    assert trainer.sample_domain_condition(2) == NULL_DOMAIN
+
+
+def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
+    data = DataConfig(
+        domains={0: {0: "."}, 1: {0: ".", 1: ".", 2: "."}},
+        crop_size=8,
+        input_size=8,
+        num_phases=2,
+        batch_size=2,
+        domain_dropout=0.0,
+    )
+    model = ModelConfig(
+        base_channels=4,
+        channel_multipliers=(1, 2),
+        embedding_channels=8,
+        latent_channels=4,
+        critic_channels=(4, 8),
+        gradient_checkpointing=False,
+    )
+    optim = OptimConfig(
+        denoiser_lr=1e-3,
+        critic_lr=1e-3,
+        beta1=0.0,
+        beta2=0.9,
+        r1_gamma=0.0,
+        r1_interval=2,
+        local_loss_weight=0.5,
+    )
+    cfg = _config(data, model, optim)
+    denoiser, critics, connectivity_critic = build_models(cfg)
+    ema = build_ema(denoiser)
+    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
+        denoiser,
+        critics,
+        connectivity_critic,
+        cfg,
+    )
+    images = torch.randint(0, data.num_phases, (data.batch_size, 8, 8))
+    streams = {
+        0: {0: _ConstantStream(images)},
+        1: {axis: _ConstantStream(images) for axis in (0, 1, 2)},
+    }
+    trainer = _make_trainer(
+        cfg,
+        denoiser=denoiser,
+        ema_denoiser=ema,
+        critics=critics,
+        connectivity_critic=connectivity_critic,
+        streams=streams,
+        streams_by_domain=True,
+        diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
+        denoiser_optim=denoiser_optim,
+        critic_optims=critic_optims,
+        connectivity_optim=connectivity_optim,
+        device=torch.device("cpu"),
+    )
+    observed_domains = {axis: [] for axis in (0, 1, 2)}
+    hooks = [
+        critics[str(axis)].register_forward_pre_hook(
+            lambda _module, args, axis=axis: observed_domains[axis].append(
+                args[3].tolist()
+            )
+        )
+        for axis in (0, 1, 2)
+    ]
+    try:
+        with patch.object(trainer, "sample_target_domain", return_value=0):
+            metrics = trainer.step(0, transition=1)
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    assert metrics.domain == 0
+    assert streams[0][0].calls == 1
+    assert streams[1][0].calls == 0
+    assert streams[1][1].calls == 1
+    assert streams[1][2].calls == 1
+    assert all(set(values) == {0} for values in observed_domains[0])
+    assert all(set(values) == {NULL_DOMAIN} for values in observed_domains[1])
+    assert all(set(values) == {NULL_DOMAIN} for values in observed_domains[2])
 
 
 def test_training_step_updates_denoiser_and_all_critics() -> None:
@@ -1087,6 +1207,7 @@ def _make_trainer(
     critics,
     connectivity_critic,
     streams,
+    streams_by_domain=False,
     diffusion,
     denoiser_optim,
     critic_optims,
@@ -1100,7 +1221,7 @@ def _make_trainer(
             ema_denoiser=ema_denoiser,
             critics=critics,
             connectivity_critic=connectivity_critic,
-            streams={0: streams},
+            streams=streams if streams_by_domain else {0: streams},
             diffusion=diffusion,
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,
@@ -1136,6 +1257,7 @@ def _make_trainer(
             ),
             connectivity_max_triplets_per_step=(cfg.connectivity.max_triplets_per_step),
             vf_loss_weight=cfg.vf.loss_weight,
+            domain_dropout=cfg.data.get("domain_dropout", 0.0),
             cfg_drop_each_probability=(cfg.conditioning.cfg_dropout.drop_each_prob),
             cfg_single_drop_probability=(
                 cfg.conditioning.cfg_dropout.single_condition_drop_prob

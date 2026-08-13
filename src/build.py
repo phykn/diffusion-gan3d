@@ -33,7 +33,18 @@ def get_domains(
     for domain, folders in domains.items():
         if not isinstance(folders, Mapping):
             raise TypeError(f"domain {domain} must map axes to folders.")
+        if not folders:
+            raise ValueError(f"domain {domain} must contain at least one axis.")
+        unknown = set(folders) - set(AXES)
+        if unknown:
+            raise ValueError(
+                f"domain {domain} contains invalid axes: {sorted(unknown)}."
+            )
         parsed[domain] = dict(folders)
+    available = {axis for folders in parsed.values() for axis in folders}
+    if available != set(AXES):
+        missing = sorted(set(AXES) - available)
+        raise ValueError(f"data.domains has no data for axes: {missing}.")
     return parsed
 
 
@@ -43,8 +54,10 @@ IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
 def find_slice_groups(
     folders: dict[int, Sequence[str | Path]],
 ) -> dict[int, tuple[tuple[Path, ...], ...]]:
-    if set(folders) != set(AXES):
-        raise ValueError("axis folders must contain exactly axes 0, 1, and 2.")
+    if not folders:
+        raise ValueError("axis folders must contain at least one axis.")
+    if not set(folders).issubset(AXES):
+        raise ValueError("axis folders may contain only axes 0, 1, and 2.")
 
     grouped = {}
     for axis in AXES:
@@ -331,6 +344,7 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             ),
             connectivity_max_triplets_per_step=(connectivity["max_triplets_per_step"]),
             vf_loss_weight=vf["loss_weight"],
+            domain_dropout=data.get("domain_dropout", 0.0),
             cfg_drop_each_probability=conditioning["drop_each_prob"],
             cfg_single_drop_probability=conditioning["single_condition_drop_prob"],
             latent_channels=model["latent_channels"],

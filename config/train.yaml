@@ -20,6 +20,7 @@ data:
   augment_prob: 0.5
   batch_size: 8
   num_workers: 0
+  domain_dropout: 0.2
 
 model:
   base_channels: 16

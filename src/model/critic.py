@@ -12,6 +12,7 @@ from .blocks import (
     SinusoidalTimeEmbedding,
     choose_groups,
 )
+from .domain import masked_domain_embedding
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,12 @@ class _Critic2D(nn.Module):
         embedding: torch.Tensor,
         domain: torch.Tensor,
     ) -> CriticScores:
-        domain_emb = self.domain_embedding(domain.to(inputs.device)).to(inputs.dtype)
+        domain_emb = masked_domain_embedding(
+            self.domain_embedding,
+            domain,
+            device=inputs.device,
+            dtype=inputs.dtype,
+        )
         embedding = (embedding + domain_emb) * INV_SQRT_TWO
         x = self.input(inputs)
         for idx, block in enumerate(self.blocks):

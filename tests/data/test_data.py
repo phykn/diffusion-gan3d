@@ -254,6 +254,30 @@ class AxisDataTest(unittest.TestCase):
 
 
 class DomainDataTest(unittest.TestCase):
+    def test_domains_may_omit_axes_when_the_global_union_is_complete(self):
+        domains = get_domains(
+            {
+                "domains": {
+                    0: {0: ["axis_0"]},
+                    1: {1: ["axis_1"], 2: ["axis_2"]},
+                }
+            }
+        )
+
+        self.assertEqual(set(domains[0]), {0})
+        self.assertEqual(set(domains[1]), {1, 2})
+
+    def test_domains_require_at_least_one_source_for_every_axis(self):
+        with self.assertRaisesRegex(ValueError, "no data for axes:.*2"):
+            get_domains(
+                {
+                    "domains": {
+                        0: {0: ["axis_0"]},
+                        1: {1: ["axis_1"]},
+                    }
+                }
+            )
+
     def test_domain_datasets_keep_axis_folders_separate(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

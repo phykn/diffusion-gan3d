@@ -121,6 +121,20 @@ class Denoiser3DTest(unittest.TestCase):
 
         self.assertFalse(torch.equal(first, second))
 
+    def test_negative_one_masks_the_domain_embedding(self):
+        model = _denoiser()
+        inputs = torch.randn(1, 3, 4, 4, 4)
+        time = torch.zeros(1)
+        latent = torch.randn(1, 4)
+        null_domain = _domain(inputs, -1)
+
+        first = model(inputs, time, latent, null_domain)
+        with torch.no_grad():
+            model.domain_embedding.weight.add_(100.0)
+        second = model(inputs, time, latent, null_domain)
+
+        torch.testing.assert_close(first, second)
+
     def test_group_norm_accepts_a_single_voxel_bottleneck(self):
         model = Denoiser3D(
             num_phases=3,

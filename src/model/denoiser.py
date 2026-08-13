@@ -13,6 +13,7 @@ from .blocks import (
     SinusoidalTimeEmbedding,
     Upsample3D,
 )
+from .domain import masked_domain_embedding
 
 MAX_GUIDANCE = 10_000.0
 
@@ -261,7 +262,12 @@ class Denoiser3D(nn.Module):
         time_emb = self.time_mlp(self.time_emb(time).to(dtype=inputs.dtype))
         latent_emb = self.latent_mlp(latent)
         emb = (time_emb + latent_emb) * INV_SQRT_TWO
-        domain_emb = self.domain_embedding(domain.to(inputs.device)).to(inputs.dtype)
+        domain_emb = masked_domain_embedding(
+            self.domain_embedding,
+            domain,
+            device=inputs.device,
+            dtype=inputs.dtype,
+        )
         emb = (emb + domain_emb) * INV_SQRT_TWO
         if vf is not None:
             vf = vf.to(device=inputs.device, dtype=inputs.dtype)
