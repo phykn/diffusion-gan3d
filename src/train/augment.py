@@ -4,8 +4,6 @@ from typing import Literal, cast
 
 import torch
 
-from .. import AXES
-
 AugmentMode = Literal["isotropic", "anisotropic"]
 
 MODES = {"isotropic", "anisotropic"}
@@ -15,7 +13,7 @@ ANISOTROPIC_TRANSFORMS = (0, 4)
 
 
 class CriticAugment:
-    """Apply differentiable, axis-aware symmetries to critic inputs."""
+    """Apply shared differentiable planar symmetries to critic inputs."""
 
     def __init__(
         self,
@@ -51,8 +49,7 @@ class CriticAugment:
     def enabled(self) -> bool:
         return self.mode is not None and self.prob > 0.0
 
-    def allowed_transforms(self, axis: int) -> tuple[int, ...]:
-        self.check_axis(axis)
+    def allowed_transforms(self) -> tuple[int, ...]:
         if self.mode is None:
             return (0,)
         if self.mode == "isotropic":
@@ -63,15 +60,13 @@ class CriticAugment:
         self,
         previous: torch.Tensor,
         current: torch.Tensor,
-        axis: int | torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        previous, current = self.apply_together((previous, current), axis)
+        previous, current = self.apply_together((previous, current))
         return previous, current
 
     def apply_together(
         self,
         inputs: Sequence[torch.Tensor],
-        axis: int | torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         tensors = tuple(inputs)
         if not tensors:
@@ -91,18 +86,20 @@ class CriticAugment:
         if not self.enabled or first.shape[0] == 0:
             return tensors
 
-        axes = self.prepare_axes(axis, first.shape[0], first.device)
         transforms = self.sample_transforms(
-            axes,
+            first.shape[0],
+            device=first.device,
             square=first.shape[-2] == first.shape[-1],
         )
         return tuple(self.apply_transforms(tensor, transforms) for tensor in tensors)
 
     def sample_transforms(
-        self, axes: torch.Tensor, square: bool = True
+        self,
+        batch: int,
+        *,
+        device: torch.device,
+        square: bool = True,
     ) -> torch.Tensor:
-        batch = axes.shape[0]
-        device = axes.device
         if self.mode == "anisotropic":
             selected = torch.randint(2, (batch,), device=device).mul_(4)
         elif not square:
@@ -155,29 +152,6 @@ class CriticAugment:
         if index >= 4:
             inputs = torch.flip(inputs, dims=(-1,))
         return torch.rot90(inputs, index % 4, dims=(-2, -1))
-
-    @staticmethod
-    def prepare_axes(
-        axis: int | torch.Tensor,
-        batch: int,
-        device: torch.device,
-    ) -> torch.Tensor:
-        if isinstance(axis, int) and not isinstance(axis, bool):
-            CriticAugment.check_axis(axis)
-            return torch.full((batch,), axis, device=device, dtype=torch.long)
-        if not isinstance(axis, torch.Tensor):
-            raise TypeError("axis must be an integer or tensor.")
-        if axis.shape != (batch,):
-            raise ValueError("axis tensor must have one value per batch item.")
-        axes = axis.to(device=device, dtype=torch.long)
-        if axes.numel() and (int(axes.min()) < 0 or int(axes.max()) > 2):
-            raise ValueError("axis values must be zero, one, or two.")
-        return axes
-
-    @staticmethod
-    def check_axis(axis: int) -> None:
-        if not isinstance(axis, int) or isinstance(axis, bool) or axis not in AXES:
-            raise ValueError("axis must be zero, one, or two.")
 
     @staticmethod
     def check_inputs(inputs: torch.Tensor) -> None:

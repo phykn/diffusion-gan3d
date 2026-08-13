@@ -432,7 +432,6 @@ class Trainer:
                     axis_masks=None if anchor is None else anchor.axis_masks,
                     crop_shape=tuple(real[axis].shape[-2:]),
                 ),
-                axis,
             )
             for axis in self.active_axes
         }
@@ -670,7 +669,6 @@ class Trainer:
         real, fake = self.connect.match_anchor(prediction, anchor, domain)
         real_values, fake_values = self.critic_augment.apply_together(
             (real.values, fake.values),
-            fake.axes,
         )
         return (
             TripletBatch(
@@ -1206,7 +1204,6 @@ class Trainer:
             real_prev, real_curr = self.critic_augment.apply_pair(
                 real_prev,
                 real_curr,
-                axis,
             )
             real_prev.requires_grad_(apply_r1)
             fake_prev, fake_curr = fake[axis]

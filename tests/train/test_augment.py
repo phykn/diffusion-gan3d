@@ -15,8 +15,8 @@ def test_augment_presets_select_expected_transforms() -> None:
     isotropic = CriticAugment("isotropic")
     anisotropic = CriticAugment("anisotropic")
 
-    assert isotropic.allowed_transforms(0) == ALL_TRANSFORMS
-    assert anisotropic.allowed_transforms(2) == ANISOTROPIC_TRANSFORMS
+    assert isotropic.allowed_transforms() == ALL_TRANSFORMS
+    assert anisotropic.allowed_transforms() == ANISOTROPIC_TRANSFORMS
 
 
 def test_all_square_symmetries_are_distinct() -> None:
@@ -76,7 +76,6 @@ def test_pair_shares_one_transform_and_preserves_gradients() -> None:
         transformed_previous, transformed_current = augment.apply_pair(
             previous,
             current,
-            axis=0,
         )
 
     assert torch.equal(
@@ -91,7 +90,6 @@ def test_pair_shares_one_transform_and_preserves_gradients() -> None:
 def test_triplet_real_and_fake_share_the_same_transform() -> None:
     real = torch.arange(54, dtype=torch.float32).reshape(2, 3, 1, 3, 3)
     fake = real + 1000.0
-    axes = torch.tensor([0, 2])
     augment = CriticAugment("isotropic", 1.0)
 
     with patch.object(
@@ -101,7 +99,6 @@ def test_triplet_real_and_fake_share_the_same_transform() -> None:
     ):
         transformed_real, transformed_fake = augment.apply_together(
             (real, fake),
-            axes,
         )
 
     assert torch.equal(
@@ -115,7 +112,7 @@ def test_zero_probability_returns_original_tensors() -> None:
     second = torch.randn(2, 3, 4, 4)
     augment = CriticAugment("isotropic", 0.0)
 
-    actual = augment.apply_together((first, second), axis=1)
+    actual = augment.apply_together((first, second))
 
     assert actual[0] is first
     assert actual[1] is second
@@ -127,7 +124,8 @@ def test_rectangular_inputs_use_only_shape_preserving_transforms() -> None:
 
     with patch("torch.randint", return_value=torch.tensor([1, 3])):
         transforms = augment.sample_transforms(
-            torch.tensor([0, 2]),
+            2,
+            device=inputs.device,
             square=False,
         )
 
@@ -154,14 +152,13 @@ def test_anisotropic_pair_uses_only_left_right_flips_and_preserves_gradients() -
     augment = CriticAugment("anisotropic", 1.0)
 
     with patch("torch.randint", return_value=torch.tensor([0, 1])):
-        transforms = augment.sample_transforms(torch.tensor([0, 2]))
+        transforms = augment.sample_transforms(2, device=previous.device)
     assert transforms.tolist() == [0, 4]
 
     with patch.object(augment, "sample_transforms", return_value=transforms):
         transformed_previous, transformed_current = augment.apply_pair(
             previous,
             current,
-            axis=0,
         )
 
     assert transformed_previous.shape == previous.shape
