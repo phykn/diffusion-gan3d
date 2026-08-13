@@ -5,20 +5,18 @@ import torch
 
 from src.train.augment import (
     ALL_TRANSFORMS,
-    AXIS_PRESERVING_TRANSFORMS,
+    ANISOTROPIC_TRANSFORMS,
+    SHAPE_PRESERVING_TRANSFORMS,
     CriticAugment,
 )
 
 
-def test_augment_presets_select_axis_safe_transforms() -> None:
+def test_augment_presets_select_expected_transforms() -> None:
     isotropic = CriticAugment("isotropic")
-    transverse = CriticAugment("transverse_2")
-    directional = CriticAugment("directional")
+    anisotropic = CriticAugment("anisotropic")
 
     assert isotropic.allowed_transforms(0) == ALL_TRANSFORMS
-    assert transverse.allowed_transforms(2) == ALL_TRANSFORMS
-    assert transverse.allowed_transforms(0) == AXIS_PRESERVING_TRANSFORMS
-    assert directional.allowed_transforms(2) == AXIS_PRESERVING_TRANSFORMS
+    assert anisotropic.allowed_transforms(2) == ANISOTROPIC_TRANSFORMS
 
 
 def test_all_square_symmetries_are_distinct() -> None:
@@ -42,14 +40,20 @@ def test_true_is_rejected_instead_of_guessing_a_preset() -> None:
     [
         (False, None),
         ("isotropic", "isotropic"),
-        ("transverse_0", "transverse_0"),
-        ("transverse_1", "transverse_1"),
-        ("transverse_2", "transverse_2"),
-        ("directional", "directional"),
+        ("anisotropic", "anisotropic"),
     ],
 )
 def test_augment_presets_are_parsed(mode: bool | str, expected: str | None) -> None:
     assert CriticAugment(mode).mode == expected
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ("transverse_0", "transverse_1", "transverse_2", "directional"),
+)
+def test_removed_augment_presets_are_rejected(mode: str) -> None:
+    with pytest.raises(ValueError, match="anisotropic, isotropic"):
+        CriticAugment(mode)
 
 
 @pytest.mark.parametrize("probability", [-0.1, 1.1, float("nan"), True])
@@ -88,7 +92,7 @@ def test_triplet_real_and_fake_share_the_same_transform() -> None:
     real = torch.arange(54, dtype=torch.float32).reshape(2, 3, 1, 3, 3)
     fake = real + 1000.0
     axes = torch.tensor([0, 2])
-    augment = CriticAugment("transverse_2", 1.0)
+    augment = CriticAugment("isotropic", 1.0)
 
     with patch.object(
         augment,
@@ -127,7 +131,7 @@ def test_rectangular_inputs_use_only_shape_preserving_transforms() -> None:
             square=False,
         )
 
-    assert all(int(index) in AXIS_PRESERVING_TRANSFORMS for index in transforms)
+    assert all(int(index) in SHAPE_PRESERVING_TRANSFORMS for index in transforms)
     actual = augment.apply_transforms(inputs, transforms)
     assert actual.shape == inputs.shape
 
@@ -143,17 +147,17 @@ def test_rectangular_inputs_reject_quarter_turns() -> None:
         )
 
 
-def test_rectangular_pair_preserves_shape_and_gradients() -> None:
+def test_anisotropic_pair_uses_only_left_right_flips_and_preserves_gradients() -> None:
     previous = torch.arange(24, dtype=torch.float32).reshape(2, 1, 3, 4)
     previous.requires_grad_()
     current = previous + 100.0
-    augment = CriticAugment("directional", 1.0)
+    augment = CriticAugment("anisotropic", 1.0)
 
-    with patch.object(
-        augment,
-        "sample_transforms",
-        return_value=torch.tensor([2, 6]),
-    ):
+    with patch("torch.randint", return_value=torch.tensor([0, 1])):
+        transforms = augment.sample_transforms(torch.tensor([0, 2]))
+    assert transforms.tolist() == [0, 4]
+
+    with patch.object(augment, "sample_transforms", return_value=transforms):
         transformed_previous, transformed_current = augment.apply_pair(
             previous,
             current,
@@ -161,6 +165,8 @@ def test_rectangular_pair_preserves_shape_and_gradients() -> None:
         )
 
     assert transformed_previous.shape == previous.shape
+    assert torch.equal(transformed_previous[0], previous[0])
+    assert torch.equal(transformed_previous[1], previous[1].flip(-1))
     assert torch.equal(
         transformed_current - transformed_previous,
         torch.full_like(transformed_previous, 100.0),

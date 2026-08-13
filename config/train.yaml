@@ -1,10 +1,7 @@
 # augment presets:
-#   false          Disable augmentation.
-#   isotropic      All three axes are equivalent.
-#   transverse_0   Axis 0 is the unique direction.
-#   transverse_1   Axis 1 is the unique direction.
-#   transverse_2   Axis 2 is the unique direction.
-#   directional    Preserve axis identities; allow flips and 180-degree rotations.
+#   false        Disable augmentation.
+#   isotropic    Allow all rotations and reflections.
+#   anisotropic  Preserve directions; allow only left-right flips.
 
 data:
   domains:

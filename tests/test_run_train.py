@@ -129,7 +129,7 @@ def test_cpu_entrypoint_saves_one_complete_step(tmp_path: Path) -> None:
                 "crop_size": 8,
                 "input_size": 8,
                 "allow_partial_crop": True,
-                "augment": "directional",
+                "augment": "anisotropic",
                 "augment_prob": 1.0,
                 "num_phases": 3,
                 "batch_size": 2,

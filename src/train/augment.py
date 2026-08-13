@@ -6,23 +6,12 @@ import torch
 
 from .. import AXES
 
-AugmentMode = Literal[
-    "isotropic",
-    "transverse_0",
-    "transverse_1",
-    "transverse_2",
-    "directional",
-]
+AugmentMode = Literal["isotropic", "anisotropic"]
 
-MODES = {
-    "isotropic",
-    "transverse_0",
-    "transverse_1",
-    "transverse_2",
-    "directional",
-}
+MODES = {"isotropic", "anisotropic"}
 ALL_TRANSFORMS = tuple(range(8))
-AXIS_PRESERVING_TRANSFORMS = (0, 2, 4, 6)
+SHAPE_PRESERVING_TRANSFORMS = (0, 2, 4, 6)
+ANISOTROPIC_TRANSFORMS = (0, 4)
 
 
 class CriticAugment:
@@ -42,12 +31,6 @@ class CriticAugment:
         ):
             raise ValueError("augment_prob must be between zero and one.")
         self.prob = float(prob)
-        if self.mode == "isotropic":
-            self.axis_swap_axes = AXES
-        elif self.mode is not None and self.mode.startswith("transverse_"):
-            self.axis_swap_axes = (int(self.mode[-1]),)
-        else:
-            self.axis_swap_axes = ()
         self._index_cache: dict[tuple[torch.device, int, int], torch.Tensor] = {}
 
     @staticmethod
@@ -72,9 +55,9 @@ class CriticAugment:
         self.check_axis(axis)
         if self.mode is None:
             return (0,)
-        if axis in self.axis_swap_axes:
+        if self.mode == "isotropic":
             return ALL_TRANSFORMS
-        return AXIS_PRESERVING_TRANSFORMS
+        return ANISOTROPIC_TRANSFORMS
 
     def apply_pair(
         self,
@@ -120,16 +103,12 @@ class CriticAugment:
     ) -> torch.Tensor:
         batch = axes.shape[0]
         device = axes.device
-        if not square:
-            selected = torch.randint(4, (batch,), device=device).mul_(2)
-        elif len(self.axis_swap_axes) == len(AXES):
-            selected = torch.randint(8, (batch,), device=device)
-        elif not self.axis_swap_axes:
+        if self.mode == "anisotropic":
+            selected = torch.randint(2, (batch,), device=device).mul_(4)
+        elif not square:
             selected = torch.randint(4, (batch,), device=device).mul_(2)
         else:
-            full = torch.randint(8, (batch,), device=device)
-            reduced = torch.randint(4, (batch,), device=device).mul_(2)
-            selected = torch.where(axes == self.axis_swap_axes[0], full, reduced)
+            selected = torch.randint(8, (batch,), device=device)
 
         active = torch.rand(batch, device=device) < self.prob
         return torch.where(active, selected, torch.zeros_like(selected))
