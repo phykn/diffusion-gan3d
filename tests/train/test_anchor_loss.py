@@ -79,6 +79,38 @@ def test_soft_anchor_loss_applies_configured_pixel_weight() -> None:
     torch.testing.assert_close(result.total, 0.05 * result.pixel)
 
 
+def test_partial_pooling_cells_are_weighted_by_observed_coverage() -> None:
+    condition = _condition(
+        (
+            PlaneAnchor(
+                torch.zeros(5, 5, dtype=torch.uint8),
+                axis=0,
+                index=1,
+                position=(0, 0),
+            ),
+        ),
+        size=8,
+    )
+    logits = _matching_logits(condition, phases=2)
+    logits[:, 0, :, 4:, 4:] = -10.0
+    logits[:, 1, :, 4:, 4:] = 10.0
+
+    result = soft_anchor_loss(
+        logits,
+        condition,
+        torch.tensor((True,)),
+        pool_size=4,
+        coarse_weight=1.0,
+        pixel_weight=0.0,
+    )
+    wrong_probability = torch.tensor((-10.0, 10.0)).softmax(dim=0)[0]
+    wrong_cell = -wrong_probability.clamp_min(
+        torch.finfo(torch.float32).eps
+    ).log()
+
+    torch.testing.assert_close(result.coarse, wrong_cell / 25.0)
+
+
 def test_hidden_anchor_has_differentiable_zero_loss() -> None:
     condition = _condition(
         (PlaneAnchor(torch.zeros(4, 4, dtype=torch.uint8), axis=0, index=1),),

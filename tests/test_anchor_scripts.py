@@ -127,6 +127,8 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
             anchor_sigma,
             anchor_residual_blur,
             anchor_residual_blur_early,
+            anchor_coupling_release,
+            anchor_temporal_profile,
             guidance,
             domain,
             margin,
@@ -138,6 +140,8 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
                     anchor_sigma,
                     anchor_residual_blur,
                     anchor_residual_blur_early,
+                    anchor_coupling_release,
+                    anchor_temporal_profile,
                     guidance,
                     domain,
                     margin,
@@ -181,7 +185,9 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     module.main()
 
     output = capsys.readouterr().out
-    assert calls == [((), 0.0, 2.0, 1.5, 2.0, 1.75, 1, 8)]
+    assert calls == [
+        ((), 0.0, 2.0, 0.0, 0.0, "off", "split", 1.75, 1, 8)
+    ]
     assert "Anchors  : 0 planes" in output
     assert "Conditioning : none" in output
 

@@ -57,7 +57,7 @@ def soft_anchor_loss(
     target = torch.zeros_like(probs)
     target.scatter_(1, condition.target.unsqueeze(1), 1.0)
     coarse_sum = zero
-    coarse_cells = 0
+    coarse_coverage = zero
     for axis in AXES:
         axis_mask = condition.axis_masks[:, axis].unsqueeze(1) & visibility
         if not bool(axis_mask.any()):
@@ -72,7 +72,8 @@ def soft_anchor_loss(
             ceil_mode=True,
             count_include_pad=False,
         )
-        valid = denominator[:, 0] > 0.0
+        coverage = denominator[:, 0]
+        valid = coverage > 0.0
         if not bool(valid.any()):
             continue
         pooled_target = _masked_pool(target, axis_mask, denominator, kernel)
@@ -81,10 +82,16 @@ def soft_anchor_loss(
             pooled_target
             * pooled_probs.clamp_min(torch.finfo(pooled_probs.dtype).eps).log()
         ).sum(dim=1)
-        coarse_sum = coarse_sum + cross_entropy[valid].sum()
-        coarse_cells += int(valid.sum().item())
+        coarse_sum = coarse_sum + (
+            cross_entropy[valid] * coverage[valid]
+        ).sum()
+        coarse_coverage = coarse_coverage + coverage[valid].sum()
 
-    coarse = zero if coarse_cells == 0 else coarse_sum / coarse_cells
+    coarse = (
+        zero
+        if not bool(coarse_coverage > 0.0)
+        else coarse_sum / coarse_coverage
+    )
     total = float(coarse_weight) * coarse + float(pixel_weight) * pixel
     return AnchorLoss(total, coarse, pixel, accuracy, visible_voxels)
 

@@ -78,7 +78,11 @@ def test_repository_training_config_enables_soft_anchor_relation_learning() -> N
     assert cfg["anchor"]["coarse_loss_weight"] == 1.0
     assert cfg["anchor"]["pixel_loss_weight"] == 0.05
     assert cfg["relation"]["loss_weight"] == 0.02
-    assert cfg["relation"]["start_step"] == 9000
+    assert cfg["relation"]["start_step"] == cfg["anchor"]["start_step"]
+    assert cfg["relation"]["phase_weight"] == 0.75
+    assert cfg["relation"]["support_weight"] == 0.25
+    assert cfg["relation"]["support_max_radius"] == 2
+    assert cfg["relation"]["direction_reduction"] == "mean"
     assert "distances" not in cfg["relation"]
 
 

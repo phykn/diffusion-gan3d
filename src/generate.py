@@ -1,6 +1,7 @@
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -8,6 +9,11 @@ import torch.nn.functional as F
 from .anchor import PlaneAnchor, build_anchors
 from .diffusion import Diffusion
 from .model.denoiser import Denoiser3D, validate_guidance
+
+AnchorCouplingRelease = Literal["off", "shell", "global"]
+ANCHOR_COUPLING_RELEASE_MODES = ("off", "shell", "global")
+AnchorTemporalProfile = Literal["split", "legacy"]
+ANCHOR_TEMPORAL_PROFILES = ("split", "legacy")
 
 
 class _GuidedDenoiser:
@@ -54,12 +60,14 @@ class _SpatialAnchorDenoiser:
         axes: tuple[_SpatialAnchorAxis, ...],
         residual_blur: float,
         residual_blur_early: float,
+        temporal_profile: AnchorTemporalProfile = "split",
     ) -> None:
         self.generator = generator
         self.guidance = guidance
         self.anchor_image = anchor_image
         self.anchor_mask = anchor_mask
         self.axes = axes
+        self.temporal_profile = temporal_profile
         self.kernels = self.make_kernel_schedule(
             generator,
             axes,
@@ -110,16 +118,42 @@ class _SpatialAnchorDenoiser:
             weight_sum.add_(weight)
             max_weight = torch.maximum(max_weight, weight)
         correction.mul_(max_weight / weight_sum.clamp_min(torch.finfo(torch.float32).eps))
-        if self.generator.diffusion.timesteps == 1:
-            temporal_scale = torch.ones_like(time, dtype=torch.float32)
-        else:
-            temporal_scale = time.to(torch.float32).div(
-                self.generator.diffusion.timesteps - 1
-            )
-            temporal_scale.mul_(0.75).add_(0.25).mul_(2.0)
-        correction.mul_(temporal_scale.view(-1, 1, 1, 1, 1))
+        plane_scale, context_scale = self.temporal_scales(
+            time,
+            self.generator.diffusion.timesteps,
+            self.temporal_profile,
+        )
+        plane_scale = plane_scale.view(-1, 1, 1, 1, 1)
+        context_scale = context_scale.view(-1, 1, 1, 1, 1)
+        temporal_scale = torch.lerp(
+            context_scale,
+            plane_scale,
+            self.anchor_mask.to(torch.float32),
+        )
+        correction.mul_(temporal_scale)
         logits = baseline.add_(correction)
         return Denoiser3D.decode(logits).to(current.dtype)
+
+    @staticmethod
+    def temporal_scales(
+        time: torch.Tensor,
+        timesteps: int,
+        profile: AnchorTemporalProfile,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if timesteps == 1:
+            progress = torch.ones_like(time, dtype=torch.float32)
+            if profile == "legacy":
+                return progress, progress
+        else:
+            progress = 1.0 - time.to(torch.float32) / (timesteps - 1)
+        if profile == "split":
+            plane = 0.5 + 0.5 * progress.square()
+            context = 0.6 * (1.0 - progress) + 0.15 * progress
+            return plane, context
+        if profile == "legacy":
+            scale = 2.0 * (1.0 - 0.75 * progress)
+            return scale, scale
+        raise ValueError("anchor_temporal_profile must be 'split' or 'legacy'.")
 
     def smooth_scheduled(
         self,
@@ -214,6 +248,8 @@ class _CoupledAnchorSampler:
         coupling_weight: torch.Tensor,
         residual_blur: float,
         residual_blur_early: float,
+        coupling_release: AnchorCouplingRelease,
+        temporal_profile: AnchorTemporalProfile,
     ) -> None:
         self.generator = generator
         self.guidance = guidance
@@ -225,8 +261,10 @@ class _CoupledAnchorSampler:
             axes,
             residual_blur,
             residual_blur_early,
+            temporal_profile,
         )
         self.coupling_weight = coupling_weight
+        self.coupling_release = coupling_release
 
     def sample(
         self,
@@ -281,10 +319,10 @@ class _CoupledAnchorSampler:
                 noise=posterior_noise,
             )
             progress = 1.0 if last_step == 0 else 1.0 - transition / last_step
-            release = progress**4
-            coupling_weight = self.coupling_weight.lerp(
-                torch.ones_like(self.coupling_weight),
-                release,
+            coupling_weight = self.apply_release(
+                self.coupling_weight,
+                progress,
+                self.coupling_release,
             )
             anchor_state = torch.lerp(
                 base_next.float(),
@@ -293,6 +331,24 @@ class _CoupledAnchorSampler:
             ).to(base_next.dtype)
             base_state = base_next
         return anchor_state
+
+    @staticmethod
+    def apply_release(
+        base_weight: torch.Tensor,
+        progress: float,
+        mode: AnchorCouplingRelease,
+    ) -> torch.Tensor:
+        if mode == "off":
+            return base_weight
+        release = progress**4
+        if mode == "shell":
+            shell = base_weight * (1.0 - base_weight)
+            return (base_weight + release * shell).clamp(0.0, 1.0)
+        if mode == "global":
+            return base_weight.lerp(torch.ones_like(base_weight), release)
+        raise ValueError(
+            "anchor_coupling_release must be 'off', 'shell', or 'global'."
+        )
 
 
 class Generator:
@@ -429,8 +485,10 @@ class Generator:
         domain: int | None = None,
         margin: int = 8,
         anchor_sigma: float = 2.0,
-        anchor_residual_blur: float = 1.5,
-        anchor_residual_blur_early: float = 2.0,
+        anchor_residual_blur: float = 0.0,
+        anchor_residual_blur_early: float = 0.0,
+        anchor_coupling_release: AnchorCouplingRelease = "off",
+        anchor_temporal_profile: AnchorTemporalProfile = "split",
     ) -> torch.Tensor:
         size = self.patch_size if size is None else size
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
@@ -473,6 +531,14 @@ class Generator:
                 "anchor_residual_blur_early must be a non-negative finite number."
             )
         anchor_residual_blur_early = float(anchor_residual_blur_early)
+        if anchor_coupling_release not in ANCHOR_COUPLING_RELEASE_MODES:
+            raise ValueError(
+                "anchor_coupling_release must be 'off', 'shell', or 'global'."
+            )
+        if anchor_temporal_profile not in ANCHOR_TEMPORAL_PROFILES:
+            raise ValueError(
+                "anchor_temporal_profile must be 'split' or 'legacy'."
+            )
         guidance = validate_guidance(guidance)
         vf = self.prepare_vf(vf)
         generation_size = size + 2 * margin
@@ -543,6 +609,8 @@ class Generator:
                     coupling_weight,
                     anchor_residual_blur,
                     anchor_residual_blur_early,
+                    anchor_coupling_release,
+                    anchor_temporal_profile,
                 )
                 clean = sampler.sample(initial_noise, conditions)
             else:
@@ -725,8 +793,10 @@ class Generator:
         domain: int | None = None,
         margin: int = 8,
         anchor_sigma: float = 2.0,
-        anchor_residual_blur: float = 1.5,
-        anchor_residual_blur_early: float = 2.0,
+        anchor_residual_blur: float = 0.0,
+        anchor_residual_blur_early: float = 0.0,
+        anchor_coupling_release: AnchorCouplingRelease = "off",
+        anchor_temporal_profile: AnchorTemporalProfile = "split",
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,
@@ -736,6 +806,8 @@ class Generator:
             anchor_sigma=anchor_sigma,
             anchor_residual_blur=anchor_residual_blur,
             anchor_residual_blur_early=anchor_residual_blur_early,
+            anchor_coupling_release=anchor_coupling_release,
+            anchor_temporal_profile=anchor_temporal_profile,
             guidance=guidance,
             domain=domain,
             margin=margin,
@@ -756,8 +828,10 @@ class Generator:
         domain: int | None = None,
         margin: int = 8,
         anchor_sigma: float = 2.0,
-        anchor_residual_blur: float = 1.5,
-        anchor_residual_blur_early: float = 2.0,
+        anchor_residual_blur: float = 0.0,
+        anchor_residual_blur_early: float = 0.0,
+        anchor_coupling_release: AnchorCouplingRelease = "off",
+        anchor_temporal_profile: AnchorTemporalProfile = "split",
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,
@@ -767,6 +841,8 @@ class Generator:
             anchor_sigma=anchor_sigma,
             anchor_residual_blur=anchor_residual_blur,
             anchor_residual_blur_early=anchor_residual_blur_early,
+            anchor_coupling_release=anchor_coupling_release,
+            anchor_temporal_profile=anchor_temporal_profile,
             guidance=guidance,
             domain=domain,
             margin=margin,

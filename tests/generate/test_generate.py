@@ -16,7 +16,12 @@ from src.build import (
     validate_anchor_capacity,
 )
 from src.diffusion import Diffusion
-from src.generate import Generator, _SpatialAnchorAxis, _SpatialAnchorDenoiser
+from src.generate import (
+    Generator,
+    _CoupledAnchorSampler,
+    _SpatialAnchorAxis,
+    _SpatialAnchorDenoiser,
+)
 from src.model.denoiser import Denoiser3D
 from src.scale import ScaledGenerator, TileBuffer, VolumeState
 
@@ -746,6 +751,119 @@ def test_anchor_coupling_weight_has_plateau_and_wide_cosine_taper() -> None:
     assert weight[4] == pytest.approx(0.0)
 
 
+def test_anchor_coupling_release_never_changes_far_field_or_core_by_default() -> None:
+    weight = torch.tensor((0.0, 0.25, 0.5, 0.75, 1.0))
+
+    fixed = _CoupledAnchorSampler.apply_release(weight, 1.0, "off")
+    shell = _CoupledAnchorSampler.apply_release(weight, 1.0, "shell")
+    legacy = _CoupledAnchorSampler.apply_release(weight, 1.0, "global")
+
+    assert torch.equal(fixed, weight)
+    assert shell[0] == 0.0
+    assert shell[-1] == 1.0
+    assert bool((shell[1:-1] > weight[1:-1]).all())
+    assert torch.equal(legacy, torch.ones_like(weight))
+
+
+def test_split_temporal_profile_separates_plane_fidelity_from_context() -> None:
+    time = torch.tensor((9, 0))
+
+    plane, context = _SpatialAnchorDenoiser.temporal_scales(time, 10, "split")
+    legacy_plane, legacy_context = _SpatialAnchorDenoiser.temporal_scales(
+        time,
+        10,
+        "legacy",
+    )
+
+    torch.testing.assert_close(plane, torch.tensor((0.5, 1.0)))
+    torch.testing.assert_close(context, torch.tensor((0.6, 0.15)))
+    torch.testing.assert_close(legacy_plane, torch.tensor((2.0, 0.5)))
+    torch.testing.assert_close(legacy_context, legacy_plane)
+    single_plane, single_context = _SpatialAnchorDenoiser.temporal_scales(
+        torch.zeros(1, dtype=torch.long),
+        1,
+        "legacy",
+    )
+    torch.testing.assert_close(single_plane, torch.ones(1))
+    torch.testing.assert_close(single_context, single_plane)
+
+
+def test_final_anchor_step_preserves_same_rng_baseline_in_far_field() -> None:
+    class GlobalPropagationModel(torch.nn.Module):
+        def forward(
+            self,
+            current: torch.Tensor,
+            timestep: torch.Tensor,
+            latent: torch.Tensor,
+            *,
+            domain: torch.Tensor,
+            anchor_image: torch.Tensor | None = None,
+            anchor_mask: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            return Denoiser3D.decode(
+                self.predict_logits(
+                    current,
+                    timestep,
+                    latent,
+                    domain=domain,
+                    anchor_image=anchor_image,
+                    anchor_mask=anchor_mask,
+                )
+            )
+
+        def predict_logits(
+            self,
+            current: torch.Tensor,
+            timestep: torch.Tensor,
+            latent: torch.Tensor,
+            *,
+            domain: torch.Tensor,
+            anchor_image: torch.Tensor | None = None,
+            anchor_mask: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            del timestep, latent, domain
+            logits = (
+                current.mean(dim=(2, 3, 4), keepdim=True)
+                .expand_as(current)
+                .clone()
+            )
+            if anchor_image is not None and anchor_mask is not None:
+                logits = logits + 2.0 * anchor_image * anchor_mask
+            return logits
+
+    generator = _generator(
+        GlobalPropagationModel(),
+        _TraceDiffusion(timesteps=3),
+        patch_size=16,
+    )
+    anchor = PlaneAnchor(
+        image=torch.zeros(16, 16, dtype=torch.long),
+        axis=0,
+        index=8,
+    )
+
+    torch.manual_seed(41)
+    baseline = generator.generate_probs(size=16)
+    torch.manual_seed(41)
+    fixed = generator.generate_probs(
+        anchors=(anchor,),
+        size=16,
+        anchor_sigma=0.25,
+        anchor_coupling_release="off",
+    )
+    torch.manual_seed(41)
+    legacy = generator.generate_probs(
+        anchors=(anchor,),
+        size=16,
+        anchor_sigma=0.25,
+        anchor_coupling_release="global",
+    )
+
+    torch.testing.assert_close(fixed[:, 0, 0, 0], baseline[:, 0, 0, 0])
+    assert not torch.allclose(fixed[:, 8, 8, 8], baseline[:, 8, 8, 8])
+    assert not torch.allclose(legacy[:, 0, 0, 0], baseline[:, 0, 0, 0])
+
+
 def test_anchor_prediction_residual_is_gaussian_blended_before_posterior() -> None:
     class BinaryConditionModel(torch.nn.Module):
         def predict_logits(
@@ -786,7 +904,9 @@ def test_anchor_prediction_residual_is_gaussian_blended_before_posterior() -> No
         device=torch.device("cpu"),
     )
     expected_logits = torch.zeros((1, 3, 4, 4, 4))
-    expected_logits[:, :1].copy_(weight)
+    temporal = torch.full_like(weight, 0.15)
+    temporal[:, :, 1] = 1.0
+    expected_logits[:, :1].copy_(weight * temporal)
     expected = Denoiser3D.decode(expected_logits)
     assert torch.allclose(diffusion.calls[1].clean, expected)
     probabilities = diffusion.calls[1].clean.add(1.0).mul(0.5)
@@ -943,6 +1063,22 @@ def test_anchor_residual_blur_early_rejects_invalid_values(
         generator.generate_probs(
             anchor_residual_blur_early=anchor_residual_blur_early
         )
+
+
+@pytest.mark.parametrize("release", (None, True, "everywhere"))
+def test_anchor_coupling_release_rejects_invalid_values(release: object) -> None:
+    generator = _generator(_AnchorTraceModel(), Diffusion(3))
+
+    with pytest.raises(ValueError, match="anchor_coupling_release"):
+        generator.generate_probs(anchor_coupling_release=release)
+
+
+@pytest.mark.parametrize("profile", (None, True, "uniform"))
+def test_anchor_temporal_profile_rejects_invalid_values(profile: object) -> None:
+    generator = _generator(_AnchorTraceModel(), Diffusion(3))
+
+    with pytest.raises(ValueError, match="anchor_temporal_profile"):
+        generator.generate_probs(anchor_temporal_profile=profile)
 
 
 def test_anchor_never_overwrites_a_different_model_prediction() -> None:

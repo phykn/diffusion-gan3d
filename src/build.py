@@ -371,7 +371,14 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             relation_quantile_high=relation.get("quantile_high", 0.90),
             relation_start_step=relation.get(
                 "start_step",
-                anchor_start_step + anchor_ramp_steps,
+                anchor_start_step,
+            ),
+            relation_support_max_radius=relation.get("support_max_radius", 2),
+            relation_phase_weight=relation.get("phase_weight", 0.75),
+            relation_support_weight=relation.get("support_weight", 0.25),
+            relation_direction_reduction=relation.get(
+                "direction_reduction",
+                "mean",
             ),
         ),
     )

@@ -114,14 +114,26 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
     parser.add_argument(
         "--anchor-residual-blur",
         type=non_negative_float,
-        default=1.5,
-        help="base anchor logit residual blur along the plane normal (default: 1.5)",
+        default=0.0,
+        help="base anchor logit residual blur along the plane normal (default: 0)",
     )
     parser.add_argument(
         "--anchor-residual-blur-early",
         type=non_negative_float,
-        default=2.0,
-        help="base anchor residual blur at early diffusion steps (default: 2)",
+        default=0.0,
+        help="base anchor residual blur at early diffusion steps (default: 0)",
+    )
+    parser.add_argument(
+        "--anchor-coupling-release",
+        choices=("off", "shell", "global"),
+        default="off",
+        help="base anchor coupling release mode (default: off)",
+    )
+    parser.add_argument(
+        "--anchor-temporal-profile",
+        choices=("split", "legacy"),
+        default="split",
+        help="base anchor temporal profile (default: split)",
     )
     parser.add_argument(
         "--guidance",
@@ -192,6 +204,8 @@ def generate_base(
         anchor_sigma=args.anchor_sigma,
         anchor_residual_blur=args.anchor_residual_blur,
         anchor_residual_blur_early=args.anchor_residual_blur_early,
+        anchor_coupling_release=args.anchor_coupling_release,
+        anchor_temporal_profile=args.anchor_temporal_profile,
         guidance=args.guidance,
         domain=args.domain,
         margin=args.margin,

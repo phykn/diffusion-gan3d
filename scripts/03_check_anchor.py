@@ -80,14 +80,26 @@ def main() -> None:
     parser.add_argument(
         "--anchor-residual-blur",
         type=non_negative_float,
-        default=1.5,
-        help="anchor logit residual blur along the plane normal (default: 1.5)",
+        default=0.0,
+        help="anchor logit residual blur along the plane normal (default: 0)",
     )
     parser.add_argument(
         "--anchor-residual-blur-early",
         type=non_negative_float,
-        default=2.0,
-        help="anchor residual blur at early diffusion steps (default: 2)",
+        default=0.0,
+        help="anchor residual blur at early diffusion steps (default: 0)",
+    )
+    parser.add_argument(
+        "--anchor-coupling-release",
+        choices=("off", "shell", "global"),
+        default="off",
+        help="late coupling release: off, shell-only, or legacy global (default: off)",
+    )
+    parser.add_argument(
+        "--anchor-temporal-profile",
+        choices=("split", "legacy"),
+        default="split",
+        help="separate plane/context timing or use the legacy shared scale",
     )
     parser.add_argument(
         "--guidance",
@@ -153,6 +165,8 @@ def main() -> None:
             f"{args.anchor_residual_blur_early:g} -> "
             f"{args.anchor_residual_blur:g} voxels"
         )
+        print(f"Coupling release: {args.anchor_coupling_release}")
+        print(f"Temporal profile: {args.anchor_temporal_profile}")
     print(f"Margin  : {settings.margin} per outer face")
     print("Status   : generating...", flush=True)
 
@@ -169,6 +183,8 @@ def main() -> None:
         anchor_sigma=args.anchor_sigma,
         anchor_residual_blur=args.anchor_residual_blur,
         anchor_residual_blur_early=args.anchor_residual_blur_early,
+        anchor_coupling_release=args.anchor_coupling_release,
+        anchor_temporal_profile=args.anchor_temporal_profile,
         guidance=guidance,
         domain=args.domain,
         margin=settings.margin,

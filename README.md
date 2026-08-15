@@ -53,15 +53,21 @@ Anchor training separates appearance from continuation. A mask-normalized
 coarse loss preserves the supplied section's phase layout, while a low-weight
 pixel loss lets exact boundaries adapt. Both losses, the connectivity loss, and
 teacher promotion are disabled for samples whose anchor was removed by CFG
-dropout. The optional relation loss stores only phase-relation curves from a
-separate anchor-free, full EMA diffusion sample and morphology descriptors—
-never generated images. It measures chance-corrected
-center-to-slice phase relations at every available distance, learns the useful
-distance range from the stored curves, and stops gradients through the anchor
-plane. Domain curves are used only for axes actually observed in that domain;
-otherwise training falls back to a balanced shared bank built from domains that
-own the axis. An out-of-distribution descriptor gate disables unsuitable shared
-matches instead of forcing an external anchor toward a generated style.
+dropout. Coarse pooling cells are weighted by their observed coverage, so a
+one-pixel partial-anchor edge cannot outweigh a fully observed cell. The optional
+relation loss stores only relation curves and morphology descriptors from a full
+anchor/VF-free EMA diffusion sample—never generated images. Before anchor
+training begins, one EMA snapshot is held fixed until this bank is complete; the
+bank then remains frozen. It measures both chance-corrected phase covariance and
+lateral-movement-tolerant support continuation at every available distance.
+Minus and plus directions are penalized separately so failure on one side cannot
+be hidden by the other. Reference crops follow the training anchor ROI shapes,
+use the same hard morphology descriptor as observed anchors, learn their useful
+distance range from the data, and stop gradients through the anchor plane. Domain
+curves are used only for axes actually observed in that domain; otherwise training
+falls back to a balanced shared bank built from domains that own the axis. An
+out-of-distribution descriptor gate disables unsuitable shared matches instead of
+forcing an external anchor toward a generated style.
 
 The repository defaults keep pseudo multi-anchor replay off while this relation
 path is trained. Existing model checkpoints remain load-compatible because the
@@ -121,17 +127,19 @@ keeps separate baseline and anchor trajectories from the same initial noise. Bot
 trajectories share every step's latent and posterior noise. All anchor planes are
 passed in one joint conditional prediction, and its logit residual is blended
 through a Gaussian spatial window controlled by `anchor_sigma` before decoding.
-The residual is smoothed along each anchor's normal axis by the separate
-`anchor_residual_blur` control. By default, this blur decreases from
-`anchor_residual_blur_early=2` at the first noisy steps to
-`anchor_residual_blur=1.5` at the final cleanup steps. After each posterior update,
-the anchor trajectory is kept intact near the anchor and tapered back to the
-baseline over a wide cosine window. This prevents distant structure from drifting;
-the coupling is gradually released during final cleanup so the model can resolve
-the transition instead of leaving a hard mixture. The defaults (`anchor_strength=1`,
-`anchor_sigma=2`,
-`anchor_residual_blur_early=2`, `anchor_residual_blur=1.5`) favor
-similar conditional structure over exact plane reconstruction. Script `03` reports
+The residual can be smoothed along each anchor's normal axis, but both early and
+late `anchor_residual_blur` defaults are zero so the model's learned continuation
+is not artificially thickened. After each posterior update, the anchor trajectory
+is kept intact near the anchor and tapered back to the baseline over a wide cosine
+window. The default `anchor_coupling_release=off` preserves that same-RNG baseline
+exactly in the far field through the final step. `shell` relaxes only the transition
+zone, while `global` reproduces the legacy whole-volume late release for ablation.
+The default `anchor_temporal_profile=split` uses stronger context guidance early
+and reduces it during cleanup, while plane guidance rises toward the final step;
+`legacy` applies the old shared early-strong/late-weak scale. The defaults
+(`anchor_strength=1`, `anchor_sigma=2`, zero residual blur, fixed far field, split
+timing) favor similar conditional structure over exact plane reconstruction.
+Script `03` reports
 slice-change rates for distances zero through 24 from the nearest anchor to make
 displaced transition seams visible. `guidance=1` is the standard conditional path;
 pass `--compare-unconditioned` to Script `03` to report distance-wise voxel
@@ -147,7 +155,7 @@ and `--anchor-strength` is nonzero:
 ```bash
 python scripts/01_check_dataset.py
 python scripts/02_check_generated.py --weight run/<run-id>/generator.pt --domain 0
-python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3 --anchor-strength 1 --anchor-sigma 2 --anchor-residual-blur-early 2 --anchor-residual-blur 1.5
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3 --anchor-strength 1 --anchor-sigma 2 --anchor-coupling-release off --anchor-temporal-profile split
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0
 ```
 

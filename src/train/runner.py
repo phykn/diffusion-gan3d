@@ -114,6 +114,12 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "loss/anchor_coarse": metrics.anchor_coarse_loss,
         "loss/anchor_pixel": metrics.anchor_pixel_loss,
         "loss/relation": metrics.relation_loss,
+        "loss/relation_raw": metrics.relation_loss,
+        "loss/relation_weighted": metrics.relation_weighted_loss,
+        "loss/relation_phase": metrics.relation_phase_loss,
+        "loss/relation_support": metrics.relation_support_loss,
+        "loss/relation_minus": metrics.relation_minus_loss,
+        "loss/relation_plus": metrics.relation_plus_loss,
         "train/transition": metrics.transition,
         "train/volume_size": metrics.volume_size,
         "train/domain": metrics.domain,
@@ -125,8 +131,20 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "train/relation_matches": metrics.relation_matches,
         "train/relation_domain_matches": metrics.relation_domain_matches,
         "train/relation_shared_matches": metrics.relation_shared_matches,
+        "train/relation_ood_rejections": metrics.relation_ood_rejections,
+        "train/relation_missing_references": (
+            metrics.relation_missing_references
+        ),
+        "train/relation_match_rate": (
+            metrics.relation_matches / max(metrics.relation_queries, 1)
+        ),
+        "train/relation_ood_reject_rate": (
+            metrics.relation_ood_rejections / max(metrics.relation_queries, 1)
+        ),
+        "train/relation_time_weight": metrics.relation_time_weight,
         "train/relation_bank_entries": metrics.relation_bank_entries,
         "train/relation_ready_buckets": metrics.relation_ready_buckets,
+        "train/relation_prior_ready": float(metrics.relation_prior_ready),
         "conditioning/anchor_planes": metrics.anchor_planes,
         "conditioning/anchor_ramp": metrics.anchor_ramp,
         "conditioning/anchor_input_active_fraction": (
@@ -141,6 +159,27 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
     }
     for tag, value in scalars.items():
         writer.add_scalar(tag, value, step)
+
+    for distance in (1, 2, 4):
+        if distance <= len(metrics.relation_distance_weights):
+            writer.add_scalar(
+                f"train/relation_distance_weight_d{distance}",
+                metrics.relation_distance_weights[distance - 1],
+                step,
+            )
+    if metrics.relation_distance_weights:
+        weighted_distance = sum(
+            distance * weight
+            for distance, weight in enumerate(
+                metrics.relation_distance_weights,
+                start=1,
+            )
+        )
+        writer.add_scalar(
+            "train/relation_weighted_distance",
+            weighted_distance,
+            step,
+        )
 
     states = ("both", "anchor_only", "vf_only", "joint_null")
     for name, fraction in zip(

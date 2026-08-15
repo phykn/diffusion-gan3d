@@ -5,10 +5,14 @@ from src.anchor import PlaneAnchor, build_anchors
 from src.train.relation import (
     RelationBank,
     RelationCurve,
+    RelationPenalty,
     RelationTarget,
+    matching_descriptor,
     morphology_descriptor,
     relation_curve,
     relation_interval_loss,
+    relation_penalty,
+    support_relation,
 )
 
 
@@ -18,8 +22,11 @@ def test_relation_curve_removes_chance_phase_overlap_at_every_distance() -> None
 
     curve = relation_curve(probs, axis=0, index=0, roi=roi)
 
-    assert curve.values.shape == (3, 2, 2)
-    assert curve.valid.tolist() == [True, True, True]
+    assert curve.values.shape == (2, 3, 2, 2)
+    assert curve.valid.tolist() == [
+        [False, False, False],
+        [True, True, True],
+    ]
     torch.testing.assert_close(curve.values, torch.zeros_like(curve.values))
 
 
@@ -38,7 +45,14 @@ def test_persistent_phase_support_has_positive_diagonal_relation() -> None:
     )
 
     expected = torch.tensor(((0.25, -0.25), (-0.25, 0.25)))
-    torch.testing.assert_close(curve.values, expected.expand_as(curve.values))
+    torch.testing.assert_close(
+        curve.values[0],
+        torch.zeros_like(curve.values[0]),
+    )
+    torch.testing.assert_close(
+        curve.values[1],
+        expected.expand_as(curve.values[1]),
+    )
 
 
 def test_relation_gradient_changes_neighbors_but_not_the_center() -> None:
@@ -72,26 +86,35 @@ def test_relation_curve_is_invariant_to_a_shared_spatial_permutation() -> None:
 def test_relation_interval_is_zero_inside_and_pushes_outside_values_back() -> None:
     valid = torch.tensor((True, True))
     weights = torch.tensor((0.75, 0.25))
+    empty_support = torch.empty(2, 0, 2, 2)
     target = RelationTarget(
         lower=torch.full((2, 2, 2), -0.1),
         upper=torch.full((2, 2, 2), 0.1),
         weights=weights,
         valid=valid,
+        support_lower=empty_support,
+        support_upper=empty_support,
+        support_weights=torch.empty(2, 0),
+        support_valid=torch.empty(2, 0, 2, 2, dtype=torch.bool),
         ood_weight=1.0,
         source="shared",
     )
-    inside_values = torch.zeros(2, 2, 2, requires_grad=True)
+    inside_values = torch.zeros(2, 2, 2, 2, requires_grad=True)
     inside = RelationCurve(
         inside_values,
-        valid,
-        torch.zeros(3),
+        valid.expand(2, -1),
+        torch.empty(2, 2, 0, 2, 2),
+        torch.empty(2, 2, 0, 2, 2, dtype=torch.bool),
+        torch.zeros(7),
         roi_pixels=16,
     )
-    outside_values = torch.full((2, 2, 2), 0.2, requires_grad=True)
+    outside_values = torch.full((2, 2, 2, 2), 0.2, requires_grad=True)
     outside = RelationCurve(
         outside_values,
-        valid,
-        torch.zeros(3),
+        valid.expand(2, -1),
+        torch.empty(2, 2, 0, 2, 2),
+        torch.empty(2, 2, 0, 2, 2, dtype=torch.bool),
+        torch.zeros(7),
         roi_pixels=16,
     )
 
@@ -124,7 +147,8 @@ def test_frozen_bank_uses_domain_then_shared_fallback_without_storing_images() -
         owned_axes=(1,),
     )
     stored = tuple(bank._domains[0][0].entries)
-    assert all(entry.values.ndim == 3 for entry in stored)
+    assert all(entry.values.ndim == 4 for entry in stored)
+    assert all(entry.support.ndim == 5 for entry in stored)
     assert all(entry.descriptor.ndim == 1 for entry in stored)
 
     condition = _checker_condition()
@@ -179,6 +203,104 @@ def test_descriptor_ignores_pixels_outside_partial_roi() -> None:
         morphology_descriptor(first, mask),
         morphology_descriptor(second, mask),
     )
+
+
+def test_matching_descriptor_uses_same_hard_morphology_for_soft_reference() -> None:
+    labels = torch.tensor(
+        ((0, 1, 0, 1), (1, 0, 1, 0), (0, 1, 0, 1), (1, 0, 1, 0))
+    )
+    hard = F.one_hot(labels, num_classes=2).movedim(-1, 0).to(torch.float32)
+    soft = 0.6 * hard + 0.4 * (1.0 - hard)
+    roi = torch.ones(4, 4, dtype=torch.bool)
+
+    torch.testing.assert_close(
+        matching_descriptor(soft, roi),
+        matching_descriptor(hard, roi),
+    )
+
+
+def test_reference_bank_samples_the_observed_anchor_roi_geometry() -> None:
+    bank = _bank(axes=(0,))
+    bank.observe_shape(axis=0, height=2, width=3, volume_size=4)
+
+    bank.add(
+        _persistent_probs(),
+        condition_domain=0,
+        source_domain=0,
+        owned_axes=(0,),
+    )
+
+    geometry = bank._domains[0][0].entries[0].descriptor[-4:].float()
+    torch.testing.assert_close(
+        geometry,
+        torch.tensor((3 / 8, 1 / 2, 3 / 4, 0.0)),
+    )
+
+
+def test_one_sided_relation_failure_is_not_hidden_by_direction_averaging() -> None:
+    expected = torch.tensor(((0.25, -0.25), (-0.25, 0.25)))
+    curve_values = expected.expand(2, 1, 2, 2).clone()
+    curve_values[1].zero_()
+    curve = RelationCurve(
+        values=curve_values,
+        valid=torch.ones(2, 1, dtype=torch.bool),
+        support=torch.empty(2, 1, 0, 2, 2),
+        support_valid=torch.empty(2, 1, 0, 2, 2, dtype=torch.bool),
+        descriptor=torch.zeros(7),
+        roi_pixels=16,
+    )
+    target = RelationTarget(
+        lower=(expected - 0.01).unsqueeze(0),
+        upper=(expected + 0.01).unsqueeze(0),
+        weights=torch.ones(1),
+        valid=torch.ones(1, dtype=torch.bool),
+        support_lower=torch.empty(1, 0, 2, 2),
+        support_upper=torch.empty(1, 0, 2, 2),
+        support_weights=torch.empty(1, 0),
+        support_valid=torch.empty(1, 0, 2, 2, dtype=torch.bool),
+        ood_weight=1.0,
+        source="shared",
+    )
+
+    penalty: RelationPenalty = relation_penalty(
+        curve,
+        target,
+        phase_weight=1.0,
+        support_weight=0.0,
+        direction_reduction="mean",
+    )
+
+    assert float(penalty.minus) == 0.0
+    assert float(penalty.plus) > 0.0
+    torch.testing.assert_close(penalty.loss, 0.5 * penalty.plus)
+
+
+def test_support_relation_allows_a_one_voxel_lateral_shift() -> None:
+    center_labels = torch.zeros(8, 8, dtype=torch.long)
+    center_labels[2:6, 2:5] = 1
+    neighbor_labels = torch.zeros_like(center_labels)
+    neighbor_labels[2:6, 3:6] = 1
+    center = F.one_hot(center_labels, num_classes=2).movedim(-1, 0).float()
+    neighbor_logits = (
+        F.one_hot(neighbor_labels, num_classes=2)
+        .movedim(-1, 0)
+        .float()
+        .requires_grad_()
+    )
+    roi = torch.ones(8, 8, dtype=torch.bool)
+
+    values, valid = support_relation(
+        center,
+        neighbor_logits.unsqueeze(0),
+        roi,
+        max_radius=1,
+    )
+    values[valid].sum().backward()
+
+    assert bool(valid[0, 0, 1].all())
+    assert bool((values[0, 0, 1] > 0.99).all())
+    assert neighbor_logits.grad is not None
+    assert bool(neighbor_logits.grad.abs().sum() > 0.0)
 
 
 def _bank(*, axes: tuple[int, ...]) -> RelationBank:

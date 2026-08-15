@@ -428,6 +428,29 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         connectivity_optim=connectivity_optim,
         device=torch.device("cpu"),
     )
+    trainer.relation_loss_weight = 0.02
+
+    def shared_relation_loss(probs, condition, visible, *, domain):
+        assert domain == 0
+        assert bool(visible.all())
+        assert not bool(condition.axis_masks[:, 0].any())
+        assert bool(condition.axis_masks[:, 1:].any())
+        zero = probs.sum() * 0.0
+        return RelationLoss(
+            loss=zero,
+            phase=zero,
+            support=zero,
+            minus=zero,
+            plus=zero,
+            queries=1,
+            matches=1,
+            domain_matches=0,
+            shared_matches=1,
+            ood_rejections=0,
+            missing_references=0,
+            distance_weights=probs.new_zeros(probs.shape[2] - 1),
+        )
+
     observed_domains = {axis: [] for axis in (0, 1, 2)}
     hooks = [
         critics[str(axis)].register_forward_pre_hook(
@@ -438,7 +461,16 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         for axis in (0, 1, 2)
     ]
     try:
-        with patch.object(trainer, "sample_target_domain", return_value=0):
+        with (
+            patch.object(trainer, "sample_target_domain", return_value=0),
+            patch.object(trainer.relation, "prior_ready", return_value=True),
+            patch.object(trainer.relation, "needs_data", return_value=False),
+            patch.object(
+                trainer.relation,
+                "loss",
+                side_effect=shared_relation_loss,
+            ),
+        ):
             metrics = trainer.step(0, transition=1)
     finally:
         for hook in hooks:
@@ -446,6 +478,7 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
 
     assert metrics.domain == 0
     assert metrics.anchor_shared
+    assert metrics.relation_queries == metrics.relation_shared_matches == 1
     assert metrics.target_vfs == pytest.approx((0.5, 0.5))
     assert streams[0][0].calls == 1
     assert streams[1][0].calls == 0
@@ -1116,21 +1149,99 @@ def test_relation_reference_sampling_preserves_training_rng() -> None:
     assert torch.equal(torch.random.get_rng_state(), before)
 
 
+def test_relation_prior_freezes_before_anchor_training_begins() -> None:
+    trainer, _, _ = _conditioning_trainer(anchored=True)
+    trainer.relation_loss_weight = 0.02
+    trainer.relation_start_step = 0
+    trainer.relation = RelationBank(
+        num_domains=1,
+        num_phases=3,
+        axes=(0, 1, 2),
+        capacity_per_axis=2,
+        profiles_per_axis=2,
+        neighbors=2,
+        quantile_low=0.1,
+        quantile_high=0.9,
+    )
+    captured = {}
+    original_sample = trainer.diffusion.sample
+
+    def capture_sample(model, initial, latent_channels, conditions):
+        captured["conditions"] = conditions
+        return original_sample(model, initial, latent_channels, conditions)
+
+    with patch.object(trainer.diffusion, "sample", side_effect=capture_sample):
+        prior_step = trainer.step(0, transition=0)
+    anchored_step = trainer.step(1, transition=0)
+
+    conditions = captured["conditions"]
+    assert "anchor_image" not in conditions
+    assert "anchor_mask" not in conditions
+    assert not bool(conditions["vf_present"].any())
+    assert torch.equal(conditions["vf"], torch.zeros_like(conditions["vf"]))
+    assert prior_step.anchor_ramp == 0.0
+    assert prior_step.anchor_planes == 0
+    assert prior_step.relation_prior_ready
+    assert anchored_step.anchor_ramp == 1.0
+    assert anchored_step.anchor_planes == 1
+
+
+def test_relation_bank_uses_one_fixed_ema_snapshot_until_complete() -> None:
+    trainer, _, _ = _conditioning_trainer(anchored=True)
+    trainer.relation_loss_weight = 0.02
+    trainer.relation_start_step = 0
+    trainer.relation = RelationBank(
+        num_domains=1,
+        num_phases=3,
+        axes=(0, 1, 2),
+        capacity_per_axis=3,
+        profiles_per_axis=1,
+        neighbors=2,
+        quantile_low=0.1,
+        quantile_high=0.9,
+    )
+    snapshot = _parameters(trainer.ema_denoiser)
+
+    first = trainer.step(0, transition=0)
+    second = trainer.step(1, transition=0)
+
+    assert not first.relation_prior_ready
+    assert not second.relation_prior_ready
+    assert not _changed(snapshot, trainer.ema_denoiser)
+
+    third = trainer.step(2, transition=0)
+
+    assert third.relation_prior_ready
+    assert _changed(snapshot, trainer.ema_denoiser)
+
+
 def test_relation_loss_uses_diffusion_signal_weight_in_generator_total() -> None:
     trainer, _, _ = _conditioning_trainer(anchored=True)
     trainer.relation_loss_weight = 0.02
 
     def relation_loss(probs, condition, visible, *, domain):
         del condition, visible, domain
+        zero = probs.sum() * 0.0
         return RelationLoss(
-            loss=probs.sum() * 0.0 + 2.0,
+            loss=zero + 2.0,
+            phase=zero + 1.5,
+            support=zero + 0.5,
+            minus=zero + 0.75,
+            plus=zero + 1.25,
             queries=1,
             matches=1,
             domain_matches=0,
             shared_matches=1,
+            ood_rejections=0,
+            missing_references=0,
+            distance_weights=probs.new_tensor((0.75, 0.25, 0, 0, 0, 0, 0)),
         )
 
-    with patch.object(trainer.relation, "loss", side_effect=relation_loss):
+    with (
+        patch.object(trainer.relation, "prior_ready", return_value=True),
+        patch.object(trainer.relation, "needs_data", return_value=False),
+        patch.object(trainer.relation, "loss", side_effect=relation_loss),
+    ):
         metrics = trainer.step(0, transition=0)
 
     temporal = float(trainer.diffusion.alpha_bars[1])
@@ -1142,6 +1253,16 @@ def test_relation_loss_uses_diffusion_signal_weight_in_generator_total() -> None
     )
     assert metrics.relation_queries == metrics.relation_matches == 1
     assert metrics.relation_shared_matches == 1
+    assert math.isclose(
+        metrics.relation_weighted_loss,
+        0.02 * temporal * metrics.relation_loss,
+        rel_tol=1e-6,
+    )
+    assert metrics.relation_phase_loss == 1.5
+    assert metrics.relation_support_loss == 0.5
+    assert metrics.relation_minus_loss == 0.75
+    assert metrics.relation_plus_loss == 1.25
+    assert metrics.relation_distance_weights[:2] == (0.75, 0.25)
     assert math.isclose(metrics.generator_total, expected, rel_tol=1e-5)
 
 

@@ -66,11 +66,14 @@ connectivity:
   normal_transition_loss_weight: 0.10
 
 relation:
-  # Store only EMA morphology descriptors and phase-relation curves, never images.
-  # Wait until the unconditional prior and EMA output are mature enough that the
-  # first frozen bank does not preserve early-training relations indefinitely.
-  start_step: 9000
+  # Starting here, freeze an anchor/VF-free EMA relation prior before anchor
+  # training is allowed to begin. The bank stores statistics, never images.
+  start_step: 3000
   loss_weight: 0.02
+  phase_weight: 0.75
+  support_weight: 0.25
+  support_max_radius: 2
+  direction_reduction: mean
   bank_capacity_per_axis: 64
   profiles_per_axis: 4
   neighbors: 8
