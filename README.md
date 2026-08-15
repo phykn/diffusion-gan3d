@@ -93,7 +93,17 @@ overlap: 8
 margin: 8
 ```
 
-`anchor_strength=0` disables anchor conditioning. `guidance=1` is the standard conditional path; validate non-default guidance with weights trained using condition dropout. See [`PAPER.md`](PAPER.md) for details.
+`anchor_strength=0` disables anchor conditioning. With anchors enabled, every
+diffusion step predicts the same global noisy volume both with and without the
+anchor. The conditional prediction residual is blended through a Gaussian spatial
+window controlled by `anchor_sigma`, so anchor influence decays smoothly into the
+unconditioned 3D distribution without overwriting the diffusion state. The residual
+itself is smoothed along each anchor's normal axis, then its guidance decays from
+macro-structure guidance at early steps to unconditioned cleanup at late steps. The
+defaults (`anchor_strength=1`, `anchor_sigma=2`) favor similar conditional structure
+over exact plane reconstruction. `guidance=1` is the standard conditional path;
+validate non-default guidance with weights trained using condition dropout. See
+[`PAPER.md`](PAPER.md) for details.
 
 
 Run the diagnostic scripts with an explicit generator weight. Script `03`
@@ -103,7 +113,7 @@ and `--anchor-strength` is nonzero:
 ```bash
 python scripts/01_check_dataset.py
 python scripts/02_check_generated.py --weight run/<run-id>/generator.pt --domain 0
-python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3 --anchor-strength 1 --anchor-sigma 2
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0
 ```
 

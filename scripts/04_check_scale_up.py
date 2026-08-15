@@ -103,7 +103,13 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
         "--anchor-strength",
         type=unit_interval,
         default=1.0,
-        help="base anchor conditioning strength from 0 to 1 (default: 1)",
+        help="normalized base anchor prediction strength (default: 1)",
+    )
+    parser.add_argument(
+        "--anchor-sigma",
+        type=positive_float,
+        default=2.0,
+        help="Gaussian base anchor influence radius in voxels (default: 2)",
     )
     parser.add_argument(
         "--guidance",
@@ -171,6 +177,7 @@ def generate_base(
     base = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
+        anchor_sigma=args.anchor_sigma,
         guidance=args.guidance,
         domain=args.domain,
         margin=args.margin,
@@ -404,6 +411,13 @@ def unit_interval(value: str) -> float:
     parsed = float(value)
     if not 0.0 <= parsed <= 1.0:
         raise argparse.ArgumentTypeError("value must be between zero and one")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if not np.isfinite(parsed) or parsed <= 0.0:
+        raise argparse.ArgumentTypeError("value must be a positive finite number")
     return parsed
 
 

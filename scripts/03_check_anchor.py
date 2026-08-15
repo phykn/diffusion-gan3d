@@ -68,7 +68,13 @@ def main() -> None:
         "--anchor-strength",
         type=unit_interval,
         default=1.0,
-        help="anchor conditioning strength from 0 to 1 (default: 1)",
+        help="normalized anchor prediction strength from 0 to 1 (default: 1)",
+    )
+    parser.add_argument(
+        "--anchor-sigma",
+        type=positive_float,
+        default=2.0,
+        help="Gaussian anchor influence radius in voxels (default: 2)",
     )
     parser.add_argument(
         "--guidance",
@@ -123,12 +129,14 @@ def main() -> None:
     print(f"Conditioning : {mode}")
     if indices:
         print(f"Anchor strength : {args.anchor_strength:.2f}")
+        print(f"Anchor sigma    : {args.anchor_sigma:g} voxels")
     print(f"Margin  : {settings.margin} per outer face")
     print("Status   : generating...", flush=True)
 
     gen = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
+        anchor_sigma=args.anchor_sigma,
         guidance=guidance,
         domain=args.domain,
         margin=settings.margin,
@@ -200,6 +208,13 @@ def unit_interval(value: str) -> float:
     parsed = float(value)
     if not 0.0 <= parsed <= 1.0:
         raise argparse.ArgumentTypeError("value must be between zero and one")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if not np.isfinite(parsed) or parsed <= 0.0:
+        raise argparse.ArgumentTypeError("value must be a positive finite number")
     return parsed
 
 

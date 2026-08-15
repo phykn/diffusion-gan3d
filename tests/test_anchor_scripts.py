@@ -43,6 +43,7 @@ def test_anchor_check_script_runs_with_fixed_volume(
 
     filename = "03_check_anchor.py"
     module = _load_script(filename)
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -111,8 +112,22 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
         patch_size = 4
         num_phases = 3
 
-        def generate(self, *, anchors, anchor_strength, guidance, domain, margin):
-            calls.append((anchors, anchor_strength, guidance, domain, margin))
+        class diffusion:
+            timesteps = 10
+
+        def generate(
+            self,
+            *,
+            anchors,
+            anchor_strength,
+            anchor_sigma,
+            guidance,
+            domain,
+            margin,
+        ):
+            calls.append(
+                (anchors, anchor_strength, anchor_sigma, guidance, domain, margin)
+            )
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
@@ -151,7 +166,7 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     module.main()
 
     output = capsys.readouterr().out
-    assert calls == [((), 0.0, 1.75, 1, 8)]
+    assert calls == [((), 0.0, 2.0, 1.75, 1, 8)]
     assert "Anchors  : 0 planes" in output
     assert "Conditioning : none" in output
 

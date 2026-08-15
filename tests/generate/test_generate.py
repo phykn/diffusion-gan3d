@@ -339,7 +339,10 @@ def test_direct_anchor_coordinates_survive_margin_crop() -> None:
     volume = _GENERATOR_GENERATE(generator, anchors=(anchor,))
 
     assert volume.shape == (4, 4, 4)
-    mask = model.calls[0].anchor_mask[0, 0]
+    assert model.calls[0].anchor_mask is None
+    anchor_mask = model.calls[1].anchor_mask
+    assert anchor_mask is not None
+    mask = anchor_mask[0, 0]
     assert mask.shape == (20, 20, 20)
     assert int(mask.sum()) == 16
     assert torch.all(mask[9, 8:12, 8:12])
@@ -481,15 +484,16 @@ def test_guided_sampling_uses_anchor_as_a_condition() -> None:
         )
 
     assert volume.shape == (4, 4, 4)
-    assert model.guidances == [1.5, 1.5]
-    assert all(
-        call.kwargs["anchor_image"] is not None
-        for call in predict_guided.call_args_list
-    )
-    assert all(
-        int(call.kwargs["anchor_mask"].sum()) == 16
-        for call in predict_guided.call_args_list
-    )
+    assert model.guidances == [1.5] * 4
+    for plain, conditioned in zip(
+        predict_guided.call_args_list[::2],
+        predict_guided.call_args_list[1::2],
+        strict=True,
+    ):
+        assert plain.kwargs.get("anchor_image") is None
+        assert plain.kwargs.get("anchor_mask") is None
+        assert conditioned.kwargs["anchor_image"] is not None
+        assert int(conditioned.kwargs["anchor_mask"].sum()) == 16
 
 
 @pytest.mark.parametrize(
@@ -632,7 +636,7 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
         assert right.current.shape == (1, 3, 4, 4, 4)
 
 
-def test_parallel_anchors_use_one_combined_prediction_per_step() -> None:
+def test_parallel_anchors_mix_plain_and_combined_anchor_predictions_per_step() -> None:
     model = _AnchorTraceModel()
     diffusion = _TraceDiffusion(timesteps=3)
     generator = _generator(model, diffusion)
@@ -657,18 +661,28 @@ def test_parallel_anchors_use_one_combined_prediction_per_step() -> None:
     assert probs.shape == (3, 4, 4, 4)
     assert diffusion.sample_calls == 1
     assert [call.transition for call in diffusion.calls] == [2, 1, 0]
-    assert len(model.calls) == 3
-    assert all(int(call.anchor_mask.sum()) == 32 for call in model.calls)
+    assert len(model.calls) == 6
+    plain_calls = model.calls[::2]
+    anchor_calls = model.calls[1::2]
+    assert all(call.anchor_mask is None for call in plain_calls)
+    assert all(
+        call.anchor_mask is not None and int(call.anchor_mask.sum()) == 32
+        for call in anchor_calls
+    )
 
     vf = model.calls[0].vf
     assert vf is not None
-    assert [call.transition for call in model.calls] == [2, 1, 0]
+    assert [call.transition for call in plain_calls] == [2, 1, 0]
+    for plain, conditioned in zip(plain_calls, anchor_calls, strict=True):
+        assert plain.current_ptr == conditioned.current_ptr
+        assert plain.timestep is conditioned.timestep
+        assert plain.latent is conditioned.latent
     assert all(call.vf is vf for call in model.calls)
-    assert len({call.anchor_image_id for call in model.calls}) == 1
-    assert len({call.anchor_mask_id for call in model.calls}) == 1
+    assert len({call.anchor_image_id for call in anchor_calls}) == 1
+    assert len({call.anchor_mask_id for call in anchor_calls}) == 1
 
 
-def test_anchor_strength_scales_combined_mask_for_every_step() -> None:
+def test_anchor_strength_scales_gaussian_prediction_weight_not_anchor_mask() -> None:
     model = _AnchorTraceModel()
     generator = _generator(model, Diffusion(2))
     anchor = PlaneAnchor(
@@ -682,10 +696,128 @@ def test_anchor_strength_scales_combined_mask_for_every_step() -> None:
         anchor_strength=0.75,
     )
 
-    assert len(model.calls) == 2
-    expected = torch.full((1, 1, 4, 4, 4), 0.75)
-    expected[:, :, (0, 2, 3)] = 0.0
-    assert all(torch.equal(call.anchor_mask, expected) for call in model.calls)
+    assert len(model.calls) == 4
+    assert all(call.anchor_mask is None for call in model.calls[::2])
+    for call in model.calls[1::2]:
+        assert call.anchor_mask is not None
+        assert call.anchor_mask.dtype == torch.bool
+        assert int(call.anchor_mask.sum()) == 16
+
+    weight = generator.make_anchor_weight(
+        (anchor,),
+        4,
+        sigma=1.0,
+        strength=0.75,
+        device=torch.device("cpu"),
+    )
+    assert weight[0, 0, 1, 0, 0] == pytest.approx(0.75)
+    assert weight[0, 0, 0, 0, 0] == pytest.approx(0.75 * math.exp(-0.5))
+    assert weight[0, 0, 3, 0, 0] < weight[0, 0, 0, 0, 0]
+
+
+def test_anchor_prediction_residual_is_gaussian_blended_before_posterior() -> None:
+    class BinaryConditionModel(torch.nn.Module):
+        def forward(
+            self,
+            current: torch.Tensor,
+            timestep: torch.Tensor,
+            latent: torch.Tensor,
+            *,
+            domain: torch.Tensor,
+            anchor_image: torch.Tensor | None = None,
+            anchor_mask: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            del timestep, latent, domain, anchor_mask
+            value = -1.0 if anchor_image is None else 1.0
+            return torch.full_like(current, value)
+
+    diffusion = _TraceDiffusion(timesteps=1)
+    generator = _generator(BinaryConditionModel(), diffusion)
+    anchor = PlaneAnchor(
+        image=torch.zeros(4, 4, dtype=torch.long),
+        axis=0,
+        index=1,
+    )
+
+    generator.generate_probs(
+        anchors=(anchor,),
+        anchor_strength=0.75,
+        anchor_sigma=1.0,
+    )
+
+    weight = generator.make_anchor_weight(
+        (anchor,),
+        4,
+        sigma=1.0,
+        strength=0.75,
+        device=torch.device("cpu"),
+    )
+    expected = weight.mul(2.0).sub(1.0).expand(1, 3, 4, 4, 4)
+    assert torch.allclose(diffusion.calls[0].clean, expected)
+
+
+def test_anchor_prediction_residual_is_smoothed_along_plane_normal() -> None:
+    class AnchorImageModel(torch.nn.Module):
+        def forward(
+            self,
+            current: torch.Tensor,
+            timestep: torch.Tensor,
+            latent: torch.Tensor,
+            *,
+            domain: torch.Tensor,
+            anchor_image: torch.Tensor | None = None,
+            anchor_mask: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            del timestep, latent, domain, anchor_mask
+            if anchor_image is None:
+                return torch.zeros_like(current)
+            return anchor_image
+
+    diffusion = _TraceDiffusion(timesteps=1)
+    generator = _generator(AnchorImageModel(), diffusion)
+    anchor = PlaneAnchor(
+        image=torch.zeros(4, 4, dtype=torch.long),
+        axis=0,
+        index=2,
+    )
+
+    generator.generate_probs(anchors=(anchor,), anchor_sigma=1.0)
+
+    clean = diffusion.calls[0].clean
+    assert bool((clean[:, :, 1].abs() > 0).any())
+    assert bool((clean[:, :, 3].abs() > 0).any())
+    assert clean[:, :, 2].abs().mean() > clean[:, :, 1].abs().mean()
+
+
+def test_spatial_anchor_mixing_keeps_one_global_state_and_no_state_injection() -> None:
+    model = _AnchorTraceModel()
+    diffusion = _NoiseTraceDiffusion(timesteps=3)
+    generator = _generator(model, diffusion)
+    anchor = PlaneAnchor(
+        image=torch.zeros(4, 4, dtype=torch.long),
+        axis=0,
+        index=1,
+    )
+
+    generator.generate_probs(anchors=(anchor,), anchor_sigma=2.0)
+
+    assert [call.transition for call in model.calls] == [2, 2, 1, 1, 0, 0]
+    assert diffusion.noise_calls == []
+    assert len(diffusion.calls) == 3
+    for plain, conditioned in zip(model.calls[::2], model.calls[1::2], strict=True):
+        assert plain.current_ptr == conditioned.current_ptr
+        assert plain.timestep is conditioned.timestep
+        assert plain.latent is conditioned.latent
+        assert plain.anchor_mask is None
+        assert conditioned.anchor_mask is not None
+
+
+@pytest.mark.parametrize("anchor_sigma", (0, -1, float("nan"), float("inf"), True))
+def test_anchor_sigma_rejects_invalid_values(anchor_sigma: object) -> None:
+    generator = _generator(_AnchorTraceModel(), Diffusion(3))
+
+    with pytest.raises(ValueError, match="anchor_sigma"):
+        generator.generate_probs(anchor_sigma=anchor_sigma)
 
 
 def test_anchor_never_overwrites_a_different_model_prediction() -> None:
@@ -734,7 +866,7 @@ def test_anchor_strength_rejects_invalid_values(strength: object) -> None:
         generator.generate_probs(anchor_strength=strength)
 
 
-def test_mixed_axis_anchors_keep_single_combined_prediction() -> None:
+def test_mixed_axis_anchors_keep_one_global_state_update() -> None:
     model = _AnchorTraceModel()
     diffusion = _TraceDiffusion(timesteps=2)
     generator = _generator(model, diffusion)
@@ -755,8 +887,17 @@ def test_mixed_axis_anchors_keep_single_combined_prediction() -> None:
 
     assert diffusion.sample_calls == 1
     assert len(diffusion.calls) == 2
-    assert len(model.calls) == 2
-    assert all(int(call.anchor_mask.sum()) == 28 for call in model.calls)
+    assert len(model.calls) == 6
+    for offset in range(0, len(model.calls), 3):
+        plain, axis_zero, axis_one = model.calls[offset : offset + 3]
+        assert plain.anchor_mask is None
+        assert axis_zero.anchor_mask is not None
+        assert axis_one.anchor_mask is not None
+        assert int(axis_zero.anchor_mask.sum()) == 16
+        assert int(axis_one.anchor_mask.sum()) == 16
+        assert plain.current_ptr == axis_zero.current_ptr == axis_one.current_ptr
+        assert plain.timestep is axis_zero.timestep is axis_one.timestep
+        assert plain.latent is axis_zero.latent is axis_one.latent
 
 
 def test_scaled_generation_reuses_vf_for_every_tile_and_transition() -> None:
@@ -1698,9 +1839,10 @@ class _AnchorModelCall:
     latent: torch.Tensor
     current_ptr: int
     vf: torch.Tensor | None
-    anchor_image_id: int
-    anchor_mask_id: int
-    anchor_mask: torch.Tensor
+    anchor_image_id: int | None
+    anchor_mask_id: int | None
+    anchor_mask: torch.Tensor | None
+    current: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -1770,8 +1912,8 @@ class _AnchorTraceModel(torch.nn.Module):
         latent: torch.Tensor,
         *,
         domain: torch.Tensor,
-        anchor_image: torch.Tensor,
-        anchor_mask: torch.Tensor,
+        anchor_image: torch.Tensor | None = None,
+        anchor_mask: torch.Tensor | None = None,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self.calls.append(
@@ -1781,12 +1923,16 @@ class _AnchorTraceModel(torch.nn.Module):
                 latent=latent,
                 current_ptr=current.untyped_storage().data_ptr(),
                 vf=vf,
-                anchor_image_id=id(anchor_image),
-                anchor_mask_id=id(anchor_mask),
-                anchor_mask=anchor_mask.detach().clone(),
+                anchor_image_id=None if anchor_image is None else id(anchor_image),
+                anchor_mask_id=None if anchor_mask is None else id(anchor_mask),
+                anchor_mask=(
+                    None if anchor_mask is None else anchor_mask.detach().clone()
+                ),
+                current=current.detach().clone(),
             )
         )
-        return torch.tanh(0.25 * current + 0.05 * anchor_image)
+        anchor_bias = 0.0 if anchor_image is None else 0.05 * anchor_image
+        return torch.tanh(0.25 * current + anchor_bias)
 
 
 class _PhaseModel(torch.nn.Module):
