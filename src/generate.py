@@ -39,9 +39,7 @@ class _GuidedDenoiser:
 
 
 @dataclass(frozen=True)
-class _SpatialAnchorCondition:
-    image: torch.Tensor
-    mask: torch.Tensor
+class _SpatialAnchorAxis:
     axis: int
     weight: torch.Tensor
 
@@ -51,13 +49,23 @@ class _SpatialAnchorDenoiser:
         self,
         generator: "Generator",
         guidance: float,
-        conditions: tuple[_SpatialAnchorCondition, ...],
-        sigma: float,
+        anchor_image: torch.Tensor,
+        anchor_mask: torch.Tensor,
+        axes: tuple[_SpatialAnchorAxis, ...],
+        residual_blur: float,
+        residual_blur_early: float,
     ) -> None:
         self.generator = generator
         self.guidance = guidance
-        self.conditions = conditions
-        self.kernels = self.make_kernels(generator, conditions, sigma)
+        self.anchor_image = anchor_image
+        self.anchor_mask = anchor_mask
+        self.axes = axes
+        self.kernels = self.make_kernel_schedule(
+            generator,
+            axes,
+            residual_blur,
+            residual_blur_early,
+        )
 
     def __call__(
         self,
@@ -68,7 +76,7 @@ class _SpatialAnchorDenoiser:
         domain: torch.Tensor,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        plain = self.generator.predict(
+        plain = self.generator.predict_logits(
             current,
             time,
             latent,
@@ -77,28 +85,28 @@ class _SpatialAnchorDenoiser:
             vf=vf,
         )
         baseline = plain.float()
+        conditioned = self.generator.predict_logits(
+            current,
+            time,
+            latent,
+            guidance=self.guidance,
+            domain=domain,
+            vf=vf,
+            anchor_image=self.anchor_image,
+            anchor_mask=self.anchor_mask,
+        )
+        residual = conditioned.float().sub(baseline)
         correction = torch.zeros_like(baseline)
-        weight_sum = torch.zeros_like(self.conditions[0].weight)
+        weight_sum = torch.zeros_like(self.axes[0].weight)
         max_weight = torch.zeros_like(weight_sum)
-        for condition in self.conditions:
-            conditioned = self.generator.predict(
-                current,
-                time,
-                latent,
-                guidance=self.guidance,
-                domain=domain,
-                vf=vf,
-                anchor_image=condition.image,
-                anchor_mask=condition.mask,
-            )
-            residual = conditioned.float().sub(baseline)
-            residual = self.smooth_axis(
+        for anchor_axis in self.axes:
+            smoothed = self.smooth_scheduled(
                 residual,
-                condition.axis,
-                self.kernels[condition.axis],
+                time,
+                anchor_axis.axis,
             )
-            weight = condition.weight.to(device=plain.device, dtype=torch.float32)
-            correction.add_(residual.mul(weight))
+            weight = anchor_axis.weight.to(device=plain.device, dtype=torch.float32)
+            correction.add_(smoothed.mul(weight))
             weight_sum.add_(weight)
             max_weight = torch.maximum(max_weight, weight)
         correction.mul_(max_weight / weight_sum.clamp_min(torch.finfo(torch.float32).eps))
@@ -110,17 +118,59 @@ class _SpatialAnchorDenoiser:
             )
             temporal_scale.mul_(0.75).add_(0.25).mul_(2.0)
         correction.mul_(temporal_scale.view(-1, 1, 1, 1, 1))
-        return baseline.add_(correction).to(plain.dtype)
+        logits = baseline.add_(correction)
+        return Denoiser3D.decode(logits).to(current.dtype)
+
+    def smooth_scheduled(
+        self,
+        residual: torch.Tensor,
+        time: torch.Tensor,
+        axis: int,
+    ) -> torch.Tensor:
+        smoothed = torch.empty_like(residual)
+        for step in time.unique():
+            selected = time == step
+            smoothed[selected] = self.smooth_axis(
+                residual[selected],
+                axis,
+                self.kernels[int(step.item())][axis],
+            ).to(residual.dtype)
+        return smoothed
+
+    @classmethod
+    def make_kernel_schedule(
+        cls,
+        generator: "Generator",
+        axes: tuple[_SpatialAnchorAxis, ...],
+        residual_blur: float,
+        residual_blur_early: float,
+    ) -> dict[int, dict[int, torch.Tensor]]:
+        last_step = generator.diffusion.timesteps - 1
+        schedule = {}
+        for step in range(generator.diffusion.timesteps):
+            progress = 0.0 if last_step == 0 else step / last_step
+            sigma = residual_blur + progress * (
+                residual_blur_early - residual_blur
+            )
+            schedule[step] = cls.make_kernels(generator, axes, sigma)
+        return schedule
 
     @staticmethod
     def make_kernels(
         generator: "Generator",
-        conditions: tuple[_SpatialAnchorCondition, ...],
+        axes: tuple[_SpatialAnchorAxis, ...],
         sigma: float,
     ) -> dict[int, torch.Tensor]:
         kernels = {}
-        for axis in {condition.axis for condition in conditions}:
-            length = conditions[0].weight.shape[axis + 2]
+        for axis in {item.axis for item in axes}:
+            if sigma == 0.0:
+                kernels[axis] = torch.ones(
+                    (generator.num_phases, 1, 1, 1, 1),
+                    device=generator.device,
+                    dtype=torch.float32,
+                )
+                continue
+            length = axes[0].weight.shape[axis + 2]
             radius = min(math.ceil(3.0 * sigma), max(1, (length - 1) // 2))
             positions = torch.arange(
                 -radius,
@@ -151,6 +201,98 @@ class _SpatialAnchorDenoiser:
         padding[2 * (2 - axis) + 1] = radius
         padded = F.pad(residual, tuple(padding), mode="replicate")
         return F.conv3d(padded, kernel, groups=residual.shape[1])
+
+
+class _CoupledAnchorSampler:
+    def __init__(
+        self,
+        generator: "Generator",
+        guidance: float,
+        anchor_image: torch.Tensor,
+        anchor_mask: torch.Tensor,
+        axes: tuple[_SpatialAnchorAxis, ...],
+        coupling_weight: torch.Tensor,
+        residual_blur: float,
+        residual_blur_early: float,
+    ) -> None:
+        self.generator = generator
+        self.guidance = guidance
+        self.anchor_denoiser = _SpatialAnchorDenoiser(
+            generator,
+            guidance,
+            anchor_image,
+            anchor_mask,
+            axes,
+            residual_blur,
+            residual_blur_early,
+        )
+        self.coupling_weight = coupling_weight
+
+    def sample(
+        self,
+        initial_noise: torch.Tensor,
+        conditions: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        generator = self.generator
+        base_state = initial_noise.clone()
+        anchor_state = initial_noise.clone()
+        last_step = generator.diffusion.timesteps - 1
+        for transition in reversed(range(generator.diffusion.timesteps)):
+            time = torch.full(
+                (initial_noise.shape[0],),
+                transition,
+                device=generator.device,
+                dtype=torch.long,
+            )
+            latent = torch.randn(
+                initial_noise.shape[0],
+                generator.latent_channels,
+                device=generator.device,
+                dtype=initial_noise.dtype,
+            )
+            base_pred = Denoiser3D.decode(
+                generator.predict_logits(
+                    base_state,
+                    time,
+                    latent,
+                    guidance=self.guidance,
+                    **conditions,
+                )
+            ).to(base_state.dtype)
+            anchor_pred = self.anchor_denoiser(
+                anchor_state,
+                time,
+                latent,
+                **conditions,
+            )
+            posterior_noise = (
+                None if transition == 0 else torch.randn_like(base_state)
+            )
+            base_next = generator.diffusion.sample_posterior(
+                base_state,
+                base_pred,
+                transition,
+                noise=posterior_noise,
+            )
+            anchor_next_raw = generator.diffusion.sample_posterior(
+                anchor_state,
+                anchor_pred,
+                transition,
+                noise=posterior_noise,
+            )
+            progress = 1.0 if last_step == 0 else 1.0 - transition / last_step
+            release = progress**4
+            coupling_weight = self.coupling_weight.lerp(
+                torch.ones_like(self.coupling_weight),
+                release,
+            )
+            anchor_state = torch.lerp(
+                base_next.float(),
+                anchor_next_raw.float(),
+                coupling_weight,
+            ).to(base_next.dtype)
+            base_state = base_next
+        return anchor_state
 
 
 class Generator:
@@ -196,6 +338,36 @@ class Generator:
         if guidance == 1.0:
             return self.model(current, time, latent, **conditions)
         return self.model.predict_guided(
+            current,
+            time,
+            latent,
+            guidance,
+            **conditions,
+        )
+
+    def predict_logits(
+        self,
+        current: torch.Tensor,
+        time: torch.Tensor,
+        latent: torch.Tensor,
+        *,
+        domain: torch.Tensor,
+        guidance: float = 1.0,
+        vf: torch.Tensor | None = None,
+        anchor_image: torch.Tensor | None = None,
+        anchor_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        guidance = validate_guidance(guidance)
+        conditions = {"domain": domain}
+        if vf is not None:
+            conditions["vf"] = vf
+        if anchor_image is not None:
+            conditions["anchor_image"] = anchor_image
+        if anchor_mask is not None:
+            conditions["anchor_mask"] = anchor_mask
+        if guidance == 1.0:
+            return self.model.predict_logits(current, time, latent, **conditions)
+        return self.model.predict_guided_logits(
             current,
             time,
             latent,
@@ -257,6 +429,8 @@ class Generator:
         domain: int | None = None,
         margin: int = 8,
         anchor_sigma: float = 2.0,
+        anchor_residual_blur: float = 1.5,
+        anchor_residual_blur_early: float = 2.0,
     ) -> torch.Tensor:
         size = self.patch_size if size is None else size
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
@@ -279,6 +453,26 @@ class Generator:
         ):
             raise ValueError("anchor_sigma must be a positive finite number.")
         anchor_sigma = float(anchor_sigma)
+        if (
+            not isinstance(anchor_residual_blur, (int, float))
+            or isinstance(anchor_residual_blur, bool)
+            or not math.isfinite(anchor_residual_blur)
+            or anchor_residual_blur < 0.0
+        ):
+            raise ValueError(
+                "anchor_residual_blur must be a non-negative finite number."
+            )
+        anchor_residual_blur = float(anchor_residual_blur)
+        if (
+            not isinstance(anchor_residual_blur_early, (int, float))
+            or isinstance(anchor_residual_blur_early, bool)
+            or not math.isfinite(anchor_residual_blur_early)
+            or anchor_residual_blur_early < 0.0
+        ):
+            raise ValueError(
+                "anchor_residual_blur_early must be a non-negative finite number."
+            )
+        anchor_residual_blur_early = float(anchor_residual_blur_early)
         guidance = validate_guidance(guidance)
         vf = self.prepare_vf(vf)
         generation_size = size + 2 * margin
@@ -292,7 +486,8 @@ class Generator:
             dtype=torch.float32,
         )
         anchor = None
-        anchor_conditions: tuple[_SpatialAnchorCondition, ...] = ()
+        anchor_axes: tuple[_SpatialAnchorAxis, ...] = ()
+        coupling_weight = None
         if anchor_strength > 0.0:
             shifted_anchors = self.offset_anchors(anchors, size, margin)
             anchor = build_anchors(
@@ -309,19 +504,8 @@ class Generator:
                     axis_anchors = tuple(
                         item for item in shifted_anchors if item.axis == axis
                     )
-                    axis_condition = build_anchors(
-                        axis_anchors,
-                        batch_size=1,
-                        num_phases=self.num_phases,
-                        volume_size=generation_size,
-                        device=self.device,
-                        dtype=initial_noise.dtype,
-                    )
-                    assert axis_condition is not None
                     grouped.append(
-                        _SpatialAnchorCondition(
-                            image=axis_condition.image,
-                            mask=axis_condition.mask,
+                        _SpatialAnchorAxis(
                             axis=axis,
                             weight=self.make_anchor_weight(
                                 axis_anchors,
@@ -332,7 +516,14 @@ class Generator:
                             ),
                         )
                     )
-                anchor_conditions = tuple(grouped)
+                anchor_axes = tuple(grouped)
+                coupling_weight = self.make_anchor_coupling_weight(
+                    shifted_anchors,
+                    generation_size,
+                    inner_radius=anchor_sigma * 3.0,
+                    outer_radius=anchor_sigma * 10.0,
+                    device=self.device,
+                )
         conditions = {"domain": self.prepare_domain(domain)}
         if vf is not None:
             conditions["vf"] = vf
@@ -342,22 +533,28 @@ class Generator:
             enabled=self.use_amp,
         ):
             if anchor is not None:
-                sampling_model = _SpatialAnchorDenoiser(
+                assert coupling_weight is not None
+                sampler = _CoupledAnchorSampler(
                     self,
                     guidance,
-                    anchor_conditions,
-                    anchor_sigma,
+                    anchor.image,
+                    anchor.mask,
+                    anchor_axes,
+                    coupling_weight,
+                    anchor_residual_blur,
+                    anchor_residual_blur_early,
                 )
+                clean = sampler.sample(initial_noise, conditions)
             else:
                 sampling_model = (
                     self.model if guidance == 1.0 else _GuidedDenoiser(self, guidance)
                 )
-            clean = self.diffusion.sample(
-                sampling_model,
-                initial_noise,
-                self.latent_channels,
-                conditions=conditions or None,
-            )
+                clean = self.diffusion.sample(
+                    sampling_model,
+                    initial_noise,
+                    self.latent_channels,
+                    conditions=conditions or None,
+                )
         return self.crop_clean(clean, size, margin)
 
     @staticmethod
@@ -398,6 +595,50 @@ class Generator:
                 distance_sq = distance_sq + (before + after).square()
             gaussian = torch.exp(distance_sq.mul(-0.5 / sigma**2)).mul(strength)
             weight = torch.maximum(weight, gaussian)
+        return weight.unsqueeze(0).unsqueeze(0)
+
+    @staticmethod
+    def make_anchor_coupling_weight(
+        anchors: Sequence[PlaneAnchor],
+        volume_size: int,
+        inner_radius: float,
+        outer_radius: float,
+        *,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Keep the anchor trajectory locally, then taper to the baseline."""
+        shape = (volume_size, volume_size, volume_size)
+        coords = [
+            torch.arange(volume_size, device=device, dtype=torch.float32).view(
+                tuple(volume_size if dim == axis else 1 for dim in range(3))
+            )
+            for axis in range(3)
+        ]
+        weight = torch.zeros(shape, device=device, dtype=torch.float32)
+        width = outer_radius - inner_radius
+        for anchor in anchors:
+            height, plane_width = anchor.image.shape[-2:]
+            if anchor.position is None:
+                row = (volume_size - height) // 2
+                col = (volume_size - plane_width) // 2
+            else:
+                row, col = anchor.position
+            remaining = [axis for axis in range(3) if axis != anchor.axis]
+            distance_sq = (coords[anchor.axis] - anchor.index).square()
+            for axis, start, length in zip(
+                remaining,
+                (row, col),
+                (height, plane_width),
+                strict=True,
+            ):
+                before = (start - coords[axis]).clamp_min(0.0)
+                after = (coords[axis] - (start + length - 1)).clamp_min(0.0)
+                distance_sq = distance_sq + (before + after).square()
+            phase = (
+                distance_sq.sqrt().sub(inner_radius).div(width).clamp_(0.0, 1.0)
+            )
+            taper = phase.mul(math.pi).cos_().add_(1.0).mul_(0.5)
+            weight = torch.maximum(weight, taper)
         return weight.unsqueeze(0).unsqueeze(0)
 
     @staticmethod
@@ -484,6 +725,8 @@ class Generator:
         domain: int | None = None,
         margin: int = 8,
         anchor_sigma: float = 2.0,
+        anchor_residual_blur: float = 1.5,
+        anchor_residual_blur_early: float = 2.0,
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,
@@ -491,6 +734,8 @@ class Generator:
             size=size,
             anchor_strength=anchor_strength,
             anchor_sigma=anchor_sigma,
+            anchor_residual_blur=anchor_residual_blur,
+            anchor_residual_blur_early=anchor_residual_blur_early,
             guidance=guidance,
             domain=domain,
             margin=margin,
@@ -511,6 +756,8 @@ class Generator:
         domain: int | None = None,
         margin: int = 8,
         anchor_sigma: float = 2.0,
+        anchor_residual_blur: float = 1.5,
+        anchor_residual_blur_early: float = 2.0,
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,
@@ -518,6 +765,8 @@ class Generator:
             size=size,
             anchor_strength=anchor_strength,
             anchor_sigma=anchor_sigma,
+            anchor_residual_blur=anchor_residual_blur,
+            anchor_residual_blur_early=anchor_residual_blur_early,
             guidance=guidance,
             domain=domain,
             margin=margin,

@@ -210,12 +210,38 @@ class Denoiser3D(nn.Module):
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Combine conditional and unconditional logits with shared stochastic inputs."""
+        logits = self.predict_guided_logits(
+            x_current,
+            time,
+            latent,
+            guidance,
+            domain,
+            vf=vf,
+            vf_present=vf_present,
+            anchor_image=anchor_image,
+            anchor_mask=anchor_mask,
+        )
+        return self.decode(logits).to(x_current.dtype)
+
+    def predict_guided_logits(
+        self,
+        x_current: torch.Tensor,
+        time: torch.Tensor,
+        latent: torch.Tensor,
+        guidance: float,
+        domain: torch.Tensor,
+        vf: torch.Tensor | None = None,
+        vf_present: torch.Tensor | None = None,
+        anchor_image: torch.Tensor | None = None,
+        anchor_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return conditional guidance before phase-probability decoding."""
         guidance = validate_guidance(guidance)
         self._validate_vf_condition(x_current, vf, vf_present)
         if guidance == 1.0 or (
             vf is None and anchor_image is None and anchor_mask is None
         ):
-            return self(
+            return self.predict_logits(
                 x_current,
                 time,
                 latent,
@@ -224,10 +250,10 @@ class Denoiser3D(nn.Module):
                 vf_present=vf_present,
                 anchor_image=anchor_image,
                 anchor_mask=anchor_mask,
-            )
+        )
         unconditional = self.predict_logits(x_current, time, latent, domain)
         if guidance == 0.0:
-            return self.decode(unconditional)
+            return unconditional
         conditional = self.predict_logits(
             x_current,
             time,
@@ -241,7 +267,7 @@ class Denoiser3D(nn.Module):
         baseline = unconditional.to(torch.float32)
         guided = conditional.to(torch.float32)
         guided.sub_(baseline).mul_(guidance).add_(baseline)
-        return self.decode(guided).to(x_current.dtype)
+        return guided
 
     @staticmethod
     def decode(logits: torch.Tensor) -> torch.Tensor:

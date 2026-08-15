@@ -27,6 +27,7 @@ from src.evaluate import (
 )
 
 AXIS = 0
+DISTANCE_PROFILE_RADIUS = 24
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,18 @@ def main() -> None:
         help="Gaussian anchor influence radius in voxels (default: 2)",
     )
     parser.add_argument(
+        "--anchor-residual-blur",
+        type=non_negative_float,
+        default=1.5,
+        help="anchor logit residual blur along the plane normal (default: 1.5)",
+    )
+    parser.add_argument(
+        "--anchor-residual-blur-early",
+        type=non_negative_float,
+        default=2.0,
+        help="anchor residual blur at early diffusion steps (default: 2)",
+    )
+    parser.add_argument(
         "--guidance",
         type=float,
         help="classifier-free guidance scale (default: config/gen.yaml)",
@@ -90,6 +103,11 @@ def main() -> None:
         "--napari",
         action="store_true",
         help="show the complete generated phase volume in Napari",
+    )
+    parser.add_argument(
+        "--compare-unconditioned",
+        action="store_true",
+        help="also generate the same-RNG unconditioned baseline",
     )
     args = parser.parse_args()
     if args.count < 0:
@@ -130,18 +148,46 @@ def main() -> None:
     if indices:
         print(f"Anchor strength : {args.anchor_strength:.2f}")
         print(f"Anchor sigma    : {args.anchor_sigma:g} voxels")
+        print(
+            "Residual blur   : "
+            f"{args.anchor_residual_blur_early:g} -> "
+            f"{args.anchor_residual_blur:g} voxels"
+        )
     print(f"Margin  : {settings.margin} per outer face")
     print("Status   : generating...", flush=True)
+
+    cpu_rng = torch.random.get_rng_state() if args.compare_unconditioned else None
+    cuda_rng = (
+        torch.cuda.get_rng_state_all()
+        if args.compare_unconditioned and device.type == "cuda"
+        else None
+    )
 
     gen = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
         anchor_sigma=args.anchor_sigma,
+        anchor_residual_blur=args.anchor_residual_blur,
+        anchor_residual_blur_early=args.anchor_residual_blur_early,
         guidance=guidance,
         domain=args.domain,
         margin=settings.margin,
     )
     print("Status   : complete", flush=True)
+    baseline = None
+    if args.compare_unconditioned and indices:
+        assert cpu_rng is not None
+        torch.random.set_rng_state(cpu_rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
+        print("Baseline : generating same-RNG unconditioned volume...", flush=True)
+        baseline = generator.generate(
+            anchor_strength=0.0,
+            guidance=guidance,
+            domain=args.domain,
+            margin=settings.margin,
+        )
+        print("Baseline : complete", flush=True)
     if args.out is not None:
         save_volume(gen, args.out)
     gen_slices = get_slices(gen, AXIS)
@@ -170,6 +216,23 @@ def main() -> None:
         AXIS,
         generator.num_phases,
     )
+    distance_profile = measure_distance_changes(
+        gen,
+        indices,
+        AXIS,
+        DISTANCE_PROFILE_RADIUS,
+    )
+    baseline_profile = (
+        ()
+        if baseline is None
+        else measure_distance_divergence(
+            gen,
+            baseline,
+            indices,
+            AXIS,
+            DISTANCE_PROFILE_RADIUS,
+        )
+    )
 
     print_quality(
         anchor_acc=anchor_acc,
@@ -177,6 +240,8 @@ def main() -> None:
         iou=iou,
         recall=recall,
         boundary=boundary,
+        distance_profile=distance_profile,
+        baseline_profile=baseline_profile,
     )
     if args.napari:
         show_napari(gen)
@@ -218,6 +283,13 @@ def positive_float(value: str) -> float:
     return parsed
 
 
+def non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if not np.isfinite(parsed) or parsed < 0.0:
+        raise argparse.ArgumentTypeError("value must be a non-negative finite number")
+    return parsed
+
+
 def select_display_index(size: int, indices: tuple[int, ...]) -> int:
     center = size // 2
     if not indices:
@@ -246,6 +318,8 @@ def print_quality(
     iou: list[float],
     recall: list[float],
     boundary: BoundaryQuality,
+    distance_profile: tuple[float | None, ...],
+    baseline_profile: tuple[float | None, ...] = (),
 ) -> None:
     print("\nQuality")
     print("-------")
@@ -261,6 +335,16 @@ def print_quality(
     print(f"Change ratio       : {format_value(boundary.change_ratio)}")
     print(f"Transition TV      : {format_value(boundary.transition_tv)}")
     print(f"Continuation delta : {format_value(boundary.continuation_delta)}")
+    if distance_profile:
+        print("\nDistance profile")
+        print("----------------")
+        for distance, change in enumerate(distance_profile):
+            print(f"Distance {distance:2d} : {format_score(change)}")
+    if baseline_profile:
+        print("\nSame-RNG baseline divergence")
+        print("----------------------------")
+        for distance, change in enumerate(baseline_profile):
+            print(f"Distance {distance:2d} : {format_score(change)}")
 
 
 def format_scores(values: tuple[float, ...]) -> str:
@@ -320,6 +404,55 @@ def measure_boundaries(
         tv_value,
         continuation_value,
     )
+
+
+def measure_distance_changes(
+    vol: torch.Tensor,
+    indices: tuple[int, ...],
+    axis: int,
+    max_distance: int,
+) -> tuple[float | None, ...]:
+    if not indices:
+        return ()
+    slices = get_slices(vol, axis)
+    buckets: list[list[int]] = [[] for _ in range(max_distance + 1)]
+    for pair in range(slices.shape[0] - 1):
+        distance = min(
+            min(abs(pair - index), abs(pair + 1 - index)) for index in indices
+        )
+        if distance <= max_distance:
+            buckets[distance].append(pair)
+    profile = []
+    for pairs in buckets:
+        if not pairs:
+            profile.append(None)
+            continue
+        left = slices[pairs]
+        right = slices[[pair + 1 for pair in pairs]]
+        profile.append(float((left != right).to(torch.float32).mean()))
+    return tuple(profile)
+
+
+def measure_distance_divergence(
+    anchored: torch.Tensor,
+    baseline: torch.Tensor,
+    indices: tuple[int, ...],
+    axis: int,
+    max_distance: int,
+) -> tuple[float | None, ...]:
+    if not indices:
+        return ()
+    anchored_slices = get_slices(anchored, axis)
+    baseline_slices = get_slices(baseline, axis)
+    changes = (anchored_slices != baseline_slices).to(torch.float32).mean((1, 2))
+    positions = torch.arange(anchored_slices.shape[0], dtype=torch.long)
+    anchors = torch.tensor(indices, dtype=torch.long)
+    distances = (positions[:, None] - anchors[None, :]).abs().amin(dim=1)
+    profile = []
+    for distance in range(max_distance + 1):
+        selected = changes[distances == distance]
+        profile.append(None if selected.numel() == 0 else float(selected.mean()))
+    return tuple(profile)
 
 
 def show_result(

@@ -40,10 +40,33 @@ that domain's data. A missing axis uniformly borrows from domains that provide
 that axis and removes the domain condition for that critic. `domain_dropout`
 also removes the domain condition from complete training steps with the given
 probability, teaching the shared network path without adding a common domain ID.
-Anchors and volume-fraction targets use only axes owned by the target domain.
+Volume-fraction targets always use only the target domain. Anchors normally use
+an owned axis; a bounded `anchor.shared_axis_probability` can instead present a
+borrowed missing-axis section as an external/shared anchor. Incompatible
+borrowed sections fall back to an owned anchor rather than borrowing another
+domain's volume fraction.
 Critic weight files follow the union of configured axes: if another domain
 provides all three axes, all three critics are trained and saved; if the entire
 configuration contains only axis 0, only `critic_0.pt` is created.
+
+Anchor training separates appearance from continuation. A mask-normalized
+coarse loss preserves the supplied section's phase layout, while a low-weight
+pixel loss lets exact boundaries adapt. Both losses, the connectivity loss, and
+teacher promotion are disabled for samples whose anchor was removed by CFG
+dropout. The optional relation loss stores only phase-relation curves from a
+separate anchor-free, full EMA diffusion sample and morphology descriptors—
+never generated images. It measures chance-corrected
+center-to-slice phase relations at every available distance, learns the useful
+distance range from the stored curves, and stops gradients through the anchor
+plane. Domain curves are used only for axes actually observed in that domain;
+otherwise training falls back to a balanced shared bank built from domains that
+own the axis. An out-of-distribution descriptor gate disables unsuitable shared
+matches instead of forcing an external anchor toward a generated style.
+
+The repository defaults keep pseudo multi-anchor replay off while this relation
+path is trained. Existing model checkpoints remain load-compatible because the
+new banks are trainer-side statistics rather than model parameters, but weights
+must be fine-tuned or retrained to learn the new objective.
 
 Set `data.allow_partial_crop: true` to train from a section whose height or
 width is smaller than `crop_size`. Each available dimension is cropped to at
@@ -93,15 +116,26 @@ overlap: 8
 margin: 8
 ```
 
-`anchor_strength=0` disables anchor conditioning. With anchors enabled, every
-diffusion step predicts the same global noisy volume both with and without the
-anchor. The conditional prediction residual is blended through a Gaussian spatial
-window controlled by `anchor_sigma`, so anchor influence decays smoothly into the
-unconditioned 3D distribution without overwriting the diffusion state. The residual
-itself is smoothed along each anchor's normal axis, then its guidance decays from
-macro-structure guidance at early steps to unconditioned cleanup at late steps. The
-defaults (`anchor_strength=1`, `anchor_sigma=2`) favor similar conditional structure
-over exact plane reconstruction. `guidance=1` is the standard conditional path;
+`anchor_strength=0` disables anchor conditioning. With anchors enabled, generation
+keeps separate baseline and anchor trajectories from the same initial noise. Both
+trajectories share every step's latent and posterior noise. All anchor planes are
+passed in one joint conditional prediction, and its logit residual is blended
+through a Gaussian spatial window controlled by `anchor_sigma` before decoding.
+The residual is smoothed along each anchor's normal axis by the separate
+`anchor_residual_blur` control. By default, this blur decreases from
+`anchor_residual_blur_early=2` at the first noisy steps to
+`anchor_residual_blur=1.5` at the final cleanup steps. After each posterior update,
+the anchor trajectory is kept intact near the anchor and tapered back to the
+baseline over a wide cosine window. This prevents distant structure from drifting;
+the coupling is gradually released during final cleanup so the model can resolve
+the transition instead of leaving a hard mixture. The defaults (`anchor_strength=1`,
+`anchor_sigma=2`,
+`anchor_residual_blur_early=2`, `anchor_residual_blur=1.5`) favor
+similar conditional structure over exact plane reconstruction. Script `03` reports
+slice-change rates for distances zero through 24 from the nearest anchor to make
+displaced transition seams visible. `guidance=1` is the standard conditional path;
+pass `--compare-unconditioned` to Script `03` to report distance-wise voxel
+divergence from a same-RNG unconditioned generation. This adds one generation pass.
 validate non-default guidance with weights trained using condition dropout. See
 [`PAPER.md`](PAPER.md) for details.
 
@@ -113,7 +147,7 @@ and `--anchor-strength` is nonzero:
 ```bash
 python scripts/01_check_dataset.py
 python scripts/02_check_generated.py --weight run/<run-id>/generator.pt --domain 0
-python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3 --anchor-strength 1 --anchor-sigma 2
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3 --anchor-strength 1 --anchor-sigma 2 --anchor-residual-blur-early 2 --anchor-residual-blur 1.5
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0
 ```
 

@@ -261,6 +261,7 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     model = cfg["model"]
     anchor = cfg["anchor"]
     connectivity = cfg["connectivity"]
+    relation = cfg.get("relation", {})
     conditioning = cfg["conditioning"]["cfg_dropout"]
     vf = cfg["vf"]
     optim = cfg["optim"]
@@ -337,6 +338,13 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             anchor_mixed_axis_probability=anchor["mixed_axis_prob"],
             anchor_teacher_bank_mebibytes=anchor["teacher_bank_size_mib"],
             anchor_loss_weight=anchor["loss_weight"],
+            anchor_pool_size=anchor.get("coarse_pool_size", 4),
+            anchor_coarse_loss_weight=anchor.get("coarse_loss_weight", 0.0),
+            anchor_pixel_loss_weight=anchor.get("pixel_loss_weight", 1.0),
+            anchor_shared_axis_probability=anchor.get(
+                "shared_axis_probability",
+                0.0,
+            ),
             connectivity_weight=connectivity["loss_weight"],
             normal_transition_weight=connectivity["normal_transition_loss_weight"],
             connectivity_replay_triplets_per_axis=(
@@ -352,6 +360,19 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             cfg_single_drop_probability=conditioning["single_condition_drop_prob"],
             latent_channels=model["latent_channels"],
             amp_enabled=use_amp,
+            relation_loss_weight=relation.get("loss_weight", 0.0),
+            relation_bank_capacity_per_axis=relation.get(
+                "bank_capacity_per_axis",
+                64,
+            ),
+            relation_profiles_per_axis=relation.get("profiles_per_axis", 4),
+            relation_neighbors=relation.get("neighbors", 8),
+            relation_quantile_low=relation.get("quantile_low", 0.10),
+            relation_quantile_high=relation.get("quantile_high", 0.90),
+            relation_start_step=relation.get(
+                "start_step",
+                anchor_start_step + anchor_ramp_steps,
+            ),
         ),
     )
 

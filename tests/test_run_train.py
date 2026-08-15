@@ -89,6 +89,12 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
     assert "conditioning/anchor_teacher" in tags
     assert "loss/vf" in tags
     assert "loss/normal_transition" in tags
+    assert "loss/anchor_coarse" in tags
+    assert "loss/anchor_pixel" in tags
+    assert "loss/relation" in tags
+    assert "train/relation_bank_entries" in tags
+    assert "train/relation_ready_buckets" in tags
+    assert "conditioning/anchor_shared" in tags
     assert "conditioning/state_joint_null_fraction" in tags
     assert "train/volume_size" in tags
     assert "train/domain" in tags
@@ -163,6 +169,9 @@ def test_cpu_entrypoint_saves_one_complete_step(
                 "mixed_axis_prob": 0.5,
                 "teacher_bank_size_mib": 1,
                 "loss_weight": 1.0,
+                "coarse_pool_size": 4,
+                "coarse_loss_weight": 1.0,
+                "pixel_loss_weight": 0.05,
             },
             "conditioning": {
                 "cfg_dropout": {
@@ -177,6 +186,15 @@ def test_cpu_entrypoint_saves_one_complete_step(
                 "replay_capacity_per_axis": 2,
                 "max_triplets_per_step": 1,
                 "reversal_invariant": True,
+            },
+            "relation": {
+                "start_step": 0,
+                "loss_weight": 0.02,
+                "bank_capacity_per_axis": 2,
+                "profiles_per_axis": 1,
+                "neighbors": 2,
+                "quantile_low": 0.1,
+                "quantile_high": 0.9,
             },
             "vf": {
                 "loss_weight": 1.0,

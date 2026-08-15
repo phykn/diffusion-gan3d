@@ -112,6 +112,18 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
         help="Gaussian base anchor influence radius in voxels (default: 2)",
     )
     parser.add_argument(
+        "--anchor-residual-blur",
+        type=non_negative_float,
+        default=1.5,
+        help="base anchor logit residual blur along the plane normal (default: 1.5)",
+    )
+    parser.add_argument(
+        "--anchor-residual-blur-early",
+        type=non_negative_float,
+        default=2.0,
+        help="base anchor residual blur at early diffusion steps (default: 2)",
+    )
+    parser.add_argument(
         "--guidance",
         type=float,
         help="classifier-free guidance scale (default: config/gen.yaml)",
@@ -178,6 +190,8 @@ def generate_base(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
         anchor_sigma=args.anchor_sigma,
+        anchor_residual_blur=args.anchor_residual_blur,
+        anchor_residual_blur_early=args.anchor_residual_blur_early,
         guidance=args.guidance,
         domain=args.domain,
         margin=args.margin,
@@ -418,6 +432,13 @@ def positive_float(value: str) -> float:
     parsed = float(value)
     if not np.isfinite(parsed) or parsed <= 0.0:
         raise argparse.ArgumentTypeError("value must be a positive finite number")
+    return parsed
+
+
+def non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if not np.isfinite(parsed) or parsed < 0.0:
+        raise argparse.ArgumentTypeError("value must be a non-negative finite number")
     return parsed
 
 

@@ -23,6 +23,7 @@ from src.train.engine import (
     TrainerSettings,
 )
 from src.train.loss import get_critic_r1
+from src.train.relation import RelationBank, RelationLoss
 from src.train.runner import run_training
 
 
@@ -50,6 +51,7 @@ def AnchorConfig(**values):
         mixed_axis_prob=0.5,
         teacher_bank_size_mib=1,
         loss_weight=0.0,
+        shared_axis_probability=0.0,
     )
     cfg.update(values)
     return cfg
@@ -383,7 +385,16 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         r1_interval=2,
         local_loss_weight=0.5,
     )
-    cfg = _config(data, model, optim)
+    cfg = _config(
+        data,
+        model,
+        optim,
+        anchor=AnchorConfig(
+            training_probability=1.0,
+            loss_weight=1.0,
+            shared_axis_probability=1.0,
+        ),
+    )
     denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
     denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
@@ -392,7 +403,13 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         connectivity_critic,
         cfg,
     )
-    images = torch.randint(0, data.num_phases, (data.batch_size, 8, 8))
+    images = (
+        torch.arange(64, dtype=torch.long)
+        .remainder(data.num_phases)
+        .reshape(1, 8, 8)
+        .expand(data.batch_size, -1, -1)
+        .clone()
+    )
     streams = {
         0: {0: _ConstantStream(images)},
         1: {axis: _ConstantStream(images) for axis in (0, 1, 2)},
@@ -428,6 +445,8 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
             hook.remove()
 
     assert metrics.domain == 0
+    assert metrics.anchor_shared
+    assert metrics.target_vfs == pytest.approx((0.5, 0.5))
     assert streams[0][0].calls == 1
     assert streams[1][0].calls == 0
     assert streams[1][1].calls == 1
@@ -842,6 +861,37 @@ def test_real_anchor_preserves_a_rectangular_observation() -> None:
     assert int(selection.condition.mask.sum()) == 4 * 8
 
 
+def test_incompatible_shared_anchor_falls_back_to_an_owned_axis() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.volume_batch_size = 1
+    trainer.num_phases = 2
+    trainer.device = torch.device("cpu")
+    trainer.anchor_shared_axis_probability = 1.0
+    own = torch.zeros(1, 8, 8, dtype=torch.long)
+    borrowed = torch.ones(1, 8, 8, dtype=torch.long)
+    batches = {0: own, 1: borrowed}
+    pool = trainer.get_vf_pool({0: own})
+
+    shared = trainer.sample_real_anchor(
+        batches,
+        volume_size=8,
+        owned_axes=(0,),
+    )
+
+    assert shared.source == "shared"
+    assert not trainer.anchor_has_compatible_vf(shared.condition, pool)
+
+    fallback = trainer.sample_real_anchor(
+        {0: own},
+        volume_size=8,
+        owned_axes=(0,),
+    )
+    target, _ = trainer.resolve_target_vf(fallback, pool, fallback.condition)
+
+    assert fallback.source == "real"
+    assert target.tolist() == [[1.0, 0.0]]
+
+
 def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
     trainer, denoiser, streams = _conditioning_trainer(
         anchored=False,
@@ -890,9 +940,11 @@ def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
     assert presence.fractions() == (0.25, 0.25, 0.25, 0.25)
 
 
-def test_anchor_input_can_drop_while_raw_anchor_loss_stays_active() -> None:
+def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
+        multi_probability=1.0,
+        connectivity_weight=0.25,
     )
     dropped = ConditionPresence(
         anchor=torch.tensor((False,)),
@@ -923,7 +975,14 @@ def test_anchor_input_can_drop_while_raw_anchor_loss_stays_active() -> None:
     assert not torch.equal(generated["previous"][mask], anchor_image[mask])
     assert not torch.equal(generated["prediction"][mask], anchor_image[mask])
     assert metrics.anchor_input_active_fraction == 0.0
-    assert metrics.anchor_loss > 0.0
+    assert metrics.anchor_loss == 0.0
+    assert metrics.anchor_coarse_loss == 0.0
+    assert metrics.anchor_pixel_loss == 0.0
+    assert metrics.generator_connectivity == 0.0
+    assert metrics.normal_transition_loss == 0.0
+    assert metrics.relation_loss == 0.0
+    assert metrics.teacher_volumes == 0
+    assert metrics.connectivity_replay == 3
 
 
 def test_vf_total_variation_uses_raw_prediction() -> None:
@@ -1003,6 +1062,87 @@ def test_unconditional_warmup_populates_reference_before_anchor_connectivity() -
         + anchored.vf_loss,
         rel_tol=1e-5,
     )
+
+
+@pytest.mark.parametrize("anchored", (False, True))
+def test_full_anchor_free_ema_sample_populates_frozen_relation_bank(
+    anchored: bool,
+) -> None:
+    trainer, _, _ = _conditioning_trainer(anchored=anchored)
+    trainer.relation_loss_weight = 0.02
+    trainer.relation_start_step = 0
+    trainer.relation = RelationBank(
+        num_domains=1,
+        num_phases=3,
+        axes=(0, 1, 2),
+        capacity_per_axis=2,
+        profiles_per_axis=2,
+        neighbors=2,
+        quantile_low=0.1,
+        quantile_high=0.9,
+    )
+
+    with patch.object(
+        trainer.ema_denoiser,
+        "forward",
+        wraps=trainer.ema_denoiser.forward,
+    ) as ema_forward:
+        metrics = trainer.step(0, transition=0)
+
+    assert ema_forward.call_count == trainer.diffusion.timesteps
+    assert metrics.relation_bank_entries == 12
+    assert metrics.relation_ready_buckets == 6
+
+
+def test_relation_reference_sampling_preserves_training_rng() -> None:
+    trainer, _, _ = _conditioning_trainer(anchored=False)
+    trainer.relation_loss_weight = 0.02
+    trainer.relation_start_step = 0
+    trainer.relation = RelationBank(
+        num_domains=1,
+        num_phases=3,
+        axes=(0, 1, 2),
+        capacity_per_axis=2,
+        profiles_per_axis=2,
+        neighbors=2,
+        quantile_low=0.1,
+        quantile_high=0.9,
+    )
+    prepared = trainer.prepare_step(0, transition=0)
+    before = torch.random.get_rng_state().clone()
+
+    trainer.record_relation_reference(step=0, prepared=prepared)
+
+    assert torch.equal(torch.random.get_rng_state(), before)
+
+
+def test_relation_loss_uses_diffusion_signal_weight_in_generator_total() -> None:
+    trainer, _, _ = _conditioning_trainer(anchored=True)
+    trainer.relation_loss_weight = 0.02
+
+    def relation_loss(probs, condition, visible, *, domain):
+        del condition, visible, domain
+        return RelationLoss(
+            loss=probs.sum() * 0.0 + 2.0,
+            queries=1,
+            matches=1,
+            domain_matches=0,
+            shared_matches=1,
+        )
+
+    with patch.object(trainer.relation, "loss", side_effect=relation_loss):
+        metrics = trainer.step(0, transition=0)
+
+    temporal = float(trainer.diffusion.alpha_bars[1])
+    expected = (
+        metrics.generator
+        + metrics.anchor_loss
+        + metrics.vf_loss
+        + 0.02 * temporal * metrics.relation_loss
+    )
+    assert metrics.relation_queries == metrics.relation_matches == 1
+    assert metrics.relation_shared_matches == 1
+    assert math.isclose(metrics.generator_total, expected, rel_tol=1e-5)
 
 
 def test_single_real_prediction_is_promoted_only_on_a_later_step() -> None:
@@ -1274,6 +1414,10 @@ def _make_trainer(
             anchor_mixed_axis_probability=cfg.anchor.mixed_axis_prob,
             anchor_teacher_bank_mebibytes=cfg.anchor.teacher_bank_size_mib,
             anchor_loss_weight=cfg.anchor.loss_weight,
+            anchor_shared_axis_probability=cfg.anchor.get(
+                "shared_axis_probability",
+                0.0,
+            ),
             connectivity_weight=cfg.connectivity.loss_weight,
             normal_transition_weight=(cfg.connectivity.normal_transition_loss_weight),
             connectivity_replay_triplets_per_axis=(

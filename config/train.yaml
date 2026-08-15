@@ -36,12 +36,19 @@ anchor:
   start_step: 3000
   ramp_steps: 6000
   training_probability: 0.80
-  multi_anchor_prob: 0.5
+  # Occasionally treat a provider-domain section as an external anchor for a
+  # target domain that does not own that axis. Target-domain VF remains local.
+  shared_axis_probability: 0.20
+  # Keep pseudo multi-anchor training off while relation learning is evaluated.
+  multi_anchor_prob: 0.0
   max_density: 0.05
   min_spacing: 4
   mixed_axis_prob: 0.5
   teacher_bank_size_mib: 128
   loss_weight: 1.0
+  coarse_pool_size: 4
+  coarse_loss_weight: 1.0
+  pixel_loss_weight: 0.05
 
 conditioning:
   cfg_dropout:
@@ -57,6 +64,18 @@ connectivity:
   reversal_invariant: true
   loss_weight: 0.25
   normal_transition_loss_weight: 0.10
+
+relation:
+  # Store only EMA morphology descriptors and phase-relation curves, never images.
+  # Wait until the unconditional prior and EMA output are mature enough that the
+  # first frozen bank does not preserve early-training relations indefinitely.
+  start_step: 9000
+  loss_weight: 0.02
+  bank_capacity_per_axis: 64
+  profiles_per_axis: 4
+  neighbors: 8
+  quantile_low: 0.10
+  quantile_high: 0.90
 
 vf:
   loss_weight: 1.0

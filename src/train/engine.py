@@ -13,6 +13,7 @@ from ..dataset import BatchStream
 from ..diffusion import Diffusion
 from ..model.denoiser import Denoiser3D
 from ..model.domain import NULL_DOMAIN
+from .anchor_loss import soft_anchor_loss
 from .augment import CriticAugment
 from .connect import (
     TEACHER_MIN_ENTRIES,
@@ -26,6 +27,7 @@ from .loss import (
     get_critic_r1,
     get_generator_loss,
 )
+from .relation import RelationBank
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,16 @@ class Metrics:
         0.0,
     )
     normal_transition_loss: float = 0.0
+    anchor_coarse_loss: float = 0.0
+    anchor_pixel_loss: float = 0.0
+    relation_loss: float = 0.0
+    relation_queries: int = 0
+    relation_matches: int = 0
+    relation_domain_matches: int = 0
+    relation_shared_matches: int = 0
+    relation_bank_entries: int = 0
+    relation_ready_buckets: int = 0
+    anchor_shared: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,7 +95,14 @@ class DenoiserUpdate:
     connectivity: float
     normal_transition: float
     anchor: float
+    anchor_coarse: float
+    anchor_pixel: float
     anchor_accuracy: float
+    relation: float
+    relation_queries: int
+    relation_matches: int
+    relation_domain_matches: int
+    relation_shared_matches: int
     vf: float
 
 
@@ -98,6 +117,7 @@ class DenoiserBatch:
     logits: torch.Tensor
     clean_probs: torch.Tensor
     anchor: AnchorCondition | None
+    anchor_present: torch.Tensor
     anchor_ramp: float
     target_vf: torch.Tensor
     vf_present: torch.Tensor
@@ -122,7 +142,7 @@ class StepPreparation:
 @dataclass(frozen=True)
 class AnchorSelection:
     condition: AnchorCondition
-    source: Literal["real", "teacher"]
+    source: Literal["real", "shared", "teacher"]
     seeds: tuple[PlaneAnchor, ...] = ()
     target_vf: torch.Tensor | None = None
 
@@ -215,6 +235,17 @@ class TrainerSettings:
     latent_channels: int
     amp_enabled: bool
     domain_dropout: float = 0.0
+    anchor_pool_size: int = 4
+    anchor_coarse_loss_weight: float = 0.0
+    anchor_pixel_loss_weight: float = 1.0
+    relation_loss_weight: float = 0.0
+    relation_bank_capacity_per_axis: int = 64
+    relation_profiles_per_axis: int = 4
+    relation_neighbors: int = 8
+    relation_quantile_low: float = 0.10
+    relation_quantile_high: float = 0.90
+    relation_start_step: int | None = None
+    anchor_shared_axis_probability: float = 0.0
 
     def __post_init__(self) -> None:
         self._validate_positive_integers()
@@ -242,6 +273,18 @@ class TrainerSettings:
         self._validate_non_negative_values()
         if not isinstance(self.amp_enabled, bool):
             raise TypeError("amp_enabled must be a boolean.")
+        if self.relation_start_step is not None and (
+            not isinstance(self.relation_start_step, int)
+            or isinstance(self.relation_start_step, bool)
+            or self.relation_start_step < 0
+        ):
+            raise ValueError("relation_start_step must be a non-negative integer.")
+        if self.relation_quantile_low >= self.relation_quantile_high:
+            raise ValueError("relation quantiles must be strictly increasing.")
+        if self.relation_neighbors < 2:
+            raise ValueError("relation neighbors must be at least two.")
+        if self.relation_neighbors > self.relation_bank_capacity_per_axis:
+            raise ValueError("relation neighbors must not exceed bank capacity.")
 
     def validate_denoiser(self, denoiser: Denoiser3D) -> None:
         downsample_factor = getattr(denoiser, "downsample_factor", None)
@@ -274,6 +317,12 @@ class TrainerSettings:
             ),
             "anchor_min_spacing": self.anchor_min_spacing,
             "latent_channels": self.latent_channels,
+            "anchor_pool_size": self.anchor_pool_size,
+            "relation_bank_capacity_per_axis": (
+                self.relation_bank_capacity_per_axis
+            ),
+            "relation_profiles_per_axis": self.relation_profiles_per_axis,
+            "relation_neighbors": self.relation_neighbors,
         }
         for name, value in values.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -296,6 +345,11 @@ class TrainerSettings:
             "anchor_multi_probability": self.anchor_multi_probability,
             "anchor_mixed_axis_probability": self.anchor_mixed_axis_probability,
             "domain_dropout": self.domain_dropout,
+            "relation_quantile_low": self.relation_quantile_low,
+            "relation_quantile_high": self.relation_quantile_high,
+            "anchor_shared_axis_probability": (
+                self.anchor_shared_axis_probability
+            ),
         }
         for name, value in values.items():
             if (
@@ -311,6 +365,9 @@ class TrainerSettings:
             "r1_gamma": self.r1_gamma,
             "critic_local_weight": self.critic_local_weight,
             "anchor_loss_weight": self.anchor_loss_weight,
+            "anchor_coarse_loss_weight": self.anchor_coarse_loss_weight,
+            "anchor_pixel_loss_weight": self.anchor_pixel_loss_weight,
+            "relation_loss_weight": self.relation_loss_weight,
             "connectivity_weight": self.connectivity_weight,
             "normal_transition_weight": self.normal_transition_weight,
             "vf_loss_weight": self.vf_loss_weight,
@@ -366,7 +423,13 @@ class Trainer:
             settings.anchor_start_step + settings.anchor_ramp_steps
         )
         self.anchor_multi_probability = float(settings.anchor_multi_probability)
+        self.anchor_shared_axis_probability = float(
+            settings.anchor_shared_axis_probability
+        )
         self.anchor_loss_weight = settings.anchor_loss_weight
+        self.anchor_pool_size = settings.anchor_pool_size
+        self.anchor_coarse_loss_weight = settings.anchor_coarse_loss_weight
+        self.anchor_pixel_loss_weight = settings.anchor_pixel_loss_weight
         self.connectivity_weight = settings.connectivity_weight
         self.normal_transition_weight = settings.normal_transition_weight
         self.connect = Connectivity(
@@ -382,6 +445,22 @@ class Trainer:
             max_density=settings.anchor_max_density,
             min_spacing=settings.anchor_min_spacing,
             mixed_axis_probability=settings.anchor_mixed_axis_probability,
+        )
+        self.relation_loss_weight = settings.relation_loss_weight
+        self.relation_start_step = (
+            self.anchor_multi_start_step
+            if settings.relation_start_step is None
+            else settings.relation_start_step
+        )
+        self.relation = RelationBank(
+            num_domains=self.num_domains,
+            num_phases=self.num_phases,
+            axes=self.active_axes,
+            capacity_per_axis=settings.relation_bank_capacity_per_axis,
+            profiles_per_axis=settings.relation_profiles_per_axis,
+            neighbors=settings.relation_neighbors,
+            quantile_low=settings.relation_quantile_low,
+            quantile_high=settings.relation_quantile_high,
         )
         self.vf_loss_weight = settings.vf_loss_weight
         self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
@@ -412,6 +491,10 @@ class Trainer:
         target_vf = prepared.target_vf
         presence = prepared.presence
         ramp = prepared.anchor_ramp
+        self.record_relation_reference(
+            step=step,
+            prepared=prepared,
+        )
         (
             previous,
             current,
@@ -423,13 +506,19 @@ class Trainer:
             volume_size,
         )
         clean_probs = (prediction + 1.0) * 0.5
+        visible_axis_masks = (
+            None
+            if anchor is None
+            else anchor.axis_masks
+            & presence.anchor.reshape(-1, 1, 1, 1, 1)
+        )
         fake = {
             axis: self.critic_augment.apply_pair(
                 *self.sample_pairs(
                     previous,
                     current,
                     axis,
-                    axis_masks=None if anchor is None else anchor.axis_masks,
+                    axis_masks=visible_axis_masks,
                     crop_shape=tuple(real[axis].shape[-2:]),
                 ),
             )
@@ -441,6 +530,7 @@ class Trainer:
             anchor,
             transition,
             self.replay_domain(prepared.model_domain),
+            presence.anchor,
         )
 
         (
@@ -475,6 +565,7 @@ class Trainer:
                 logits=logits,
                 clean_probs=clean_probs,
                 anchor=anchor,
+                anchor_present=presence.anchor,
                 anchor_ramp=ramp,
                 target_vf=target_vf,
                 vf_present=presence.vf,
@@ -527,12 +618,23 @@ class Trainer:
             None
             if ramp == 0.0
             else self.sample_anchor(
-                own_batches,
+                batches,
                 self.patch_size,
                 step,
                 self.replay_domain(model_domain),
+                owned_axes=tuple(own_batches),
             )
         )
+        if (
+            selection is not None
+            and selection.source == "shared"
+            and not self.anchor_has_compatible_vf(selection.condition, vf_pool)
+        ):
+            selection = self.sample_real_anchor(
+                own_batches,
+                self.patch_size,
+                owned_axes=tuple(own_batches),
+            )
         anchor = None if selection is None else selection.condition
         target_vf, resample_rate = self.resolve_target_vf(
             selection,
@@ -589,6 +691,7 @@ class Trainer:
             prepared.selection,
             prepared.transition,
             self.replay_domain(prepared.model_domain),
+            prepared.presence.anchor,
         )
         update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
         anchor = prepared.anchor
@@ -615,6 +718,7 @@ class Trainer:
             anchor_teacher=(
                 prepared.selection is not None
                 and prepared.selection.source == "teacher"
+                and bool(presence.anchor.any())
             ),
             teacher_volumes=self.connect.teacher_count,
             teacher_mebibytes=self.connect.teacher_storage_bytes / 1024**2,
@@ -636,6 +740,20 @@ class Trainer:
             vf_active_fraction=float(presence.vf.to(torch.float32).mean()),
             condition_state_fractions=presence.fractions(),
             normal_transition_loss=denoiser_update.normal_transition,
+            anchor_coarse_loss=denoiser_update.anchor_coarse,
+            anchor_pixel_loss=denoiser_update.anchor_pixel,
+            relation_loss=denoiser_update.relation,
+            relation_queries=denoiser_update.relation_queries,
+            relation_matches=denoiser_update.relation_matches,
+            relation_domain_matches=denoiser_update.relation_domain_matches,
+            relation_shared_matches=denoiser_update.relation_shared_matches,
+            relation_bank_entries=self.relation.entry_count,
+            relation_ready_buckets=self.relation.ready_bucket_count,
+            anchor_shared=(
+                prepared.selection is not None
+                and prepared.selection.source == "shared"
+                and bool(presence.anchor.any())
+            ),
         )
 
     def resolve_target_vf(
@@ -654,6 +772,7 @@ class Trainer:
         anchor: AnchorCondition | None,
         transition: int,
         domain: int,
+        visible: torch.Tensor | None = None,
     ) -> tuple[TripletBatch, TripletBatch]:
         empty = TripletBatch(
             values=prediction.new_empty(
@@ -664,6 +783,9 @@ class Trainer:
         )
         enabled = self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
         if not enabled or transition != 0 or anchor is None:
+            return empty, empty
+        anchor = self.visible_anchor(anchor, visible)
+        if not bool(anchor.mask.any()):
             return empty, empty
 
         real, fake = self.connect.match_anchor(prediction, anchor, domain)
@@ -689,6 +811,7 @@ class Trainer:
         selection: AnchorSelection | None,
         transition: int,
         domain: int,
+        visible: torch.Tensor | None = None,
     ) -> None:
         if transition != 0:
             return
@@ -696,12 +819,56 @@ class Trainer:
             if self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0:
                 self.connect.record_unconditional(prediction, domain)
             return
-        if selection.source == "real" and self.anchor_multi_probability > 0.0:
+        if visible is None:
+            visible = torch.ones(
+                prediction.shape[0],
+                device=prediction.device,
+                dtype=torch.bool,
+            )
+        if visible.shape != (prediction.shape[0],) or visible.dtype != torch.bool:
+            raise ValueError("anchor visibility must be boolean with shape [B].")
+        hidden = ~visible
+        if bool(hidden.any()) and (
+            self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
+        ):
+            self.connect.record_unconditional(prediction[hidden], domain)
+        if (
+            selection.source == "real"
+            and self.anchor_multi_probability > 0.0
+            and bool(visible.any())
+        ):
+            indices = visible.nonzero().flatten()
+            seeds = tuple(
+                selection.seeds[index]
+                for index in indices.tolist()
+            )
             self.connect.record_seeded(
-                prediction,
-                selection.seeds,
+                prediction.index_select(0, indices),
+                seeds,
                 domain,
             )
+
+    @staticmethod
+    def visible_anchor(
+        anchor: AnchorCondition,
+        visible: torch.Tensor | None,
+    ) -> AnchorCondition:
+        if visible is None:
+            return anchor
+        if visible.shape != (anchor.mask.shape[0],) or visible.dtype != torch.bool:
+            raise ValueError("anchor visibility must be boolean with shape [B].")
+        if visible.device != anchor.mask.device:
+            raise ValueError("anchor visibility and condition must share a device.")
+        mask = visible.reshape(-1, 1, 1, 1, 1)
+        return AnchorCondition(
+            image=anchor.image * mask,
+            mask=anchor.mask & mask,
+            axis_masks=anchor.axis_masks & mask,
+            target=anchor.target,
+            planes=anchor.planes,
+            conflicts=anchor.conflicts,
+            source_voxels=anchor.source_voxels,
+        )
 
     def sample_transition(self, anchored: bool) -> int:
         if not isinstance(anchored, bool):
@@ -892,18 +1059,7 @@ class Trainer:
         if anchor is not None:
             if anchor.target.shape[0] != self.volume_batch_size:
                 raise ValueError("anchor and generated volume batches must match.")
-            voxel_count = math.prod(anchor.target.shape[1:])
-            required = []
-            for labels, mask in zip(
-                anchor.target,
-                anchor.mask[:, 0].to(torch.bool),
-                strict=True,
-            ):
-                counts = torch.bincount(
-                    labels[mask].to(torch.long),
-                    minlength=self.num_phases,
-                ).to(torch.float32)
-                required.append(counts / voxel_count)
+            required = self.anchor_minimum_vfs(anchor)
             for batch, minimum in enumerate(required):
                 valid = (pool + 1e-7 >= minimum).all(dim=1).nonzero().flatten()
                 if not len(valid):
@@ -917,6 +1073,34 @@ class Trainer:
                     resampled += 1
         target = self.validate_target_vf(pool.index_select(0, indices))
         return target, resampled / self.volume_batch_size
+
+    def anchor_has_compatible_vf(
+        self,
+        anchor: AnchorCondition,
+        pool: torch.Tensor,
+    ) -> bool:
+        """Whether every anchor sample fits at least one target-domain VF."""
+        required = self.anchor_minimum_vfs(anchor)
+        pool = pool.to(device=required.device, dtype=torch.float32)
+        compatible = (pool.unsqueeze(0) + 1e-7 >= required.unsqueeze(1)).all(dim=2)
+        return bool(compatible.any(dim=1).all())
+
+    def anchor_minimum_vfs(self, anchor: AnchorCondition) -> torch.Tensor:
+        if anchor.target.shape[0] != self.volume_batch_size:
+            raise ValueError("anchor and generated volume batches must match.")
+        voxel_count = math.prod(anchor.target.shape[1:])
+        required = []
+        for labels, mask in zip(
+            anchor.target,
+            anchor.mask[:, 0].to(torch.bool),
+            strict=True,
+        ):
+            counts = torch.bincount(
+                labels[mask].to(torch.long),
+                minlength=self.num_phases,
+            ).to(torch.float32)
+            required.append(counts / voxel_count)
+        return torch.stack(required)
 
     def sample_condition_presence(self, has_anchor: bool) -> ConditionPresence:
         if not isinstance(has_anchor, bool):
@@ -975,6 +1159,8 @@ class Trainer:
         volume_size: int,
         step: int,
         domain: int,
+        *,
+        owned_axes: tuple[int, ...] | None = None,
     ) -> AnchorSelection | None:
         probability = self.anchor_training_probability
         if probability <= 0.0:
@@ -999,14 +1185,35 @@ class Trainer:
                     source="teacher",
                     target_vf=teacher.target_vf,
                 )
-        return self.sample_real_anchor(batches, volume_size)
+        return self.sample_real_anchor(
+            batches,
+            volume_size,
+            owned_axes=owned_axes,
+        )
 
     def sample_real_anchor(
         self,
         batches: dict[int, torch.Tensor],
         volume_size: int,
+        *,
+        owned_axes: tuple[int, ...] | None = None,
     ) -> AnchorSelection:
-        axes = tuple(batches)
+        if not batches:
+            raise ValueError("anchor batches must not be empty.")
+        if owned_axes is None:
+            owned_axes = tuple(batches)
+        if not owned_axes or any(axis not in batches for axis in owned_axes):
+            raise ValueError("owned anchor axes must be present in the batches.")
+        shared_axes = tuple(axis for axis in batches if axis not in owned_axes)
+        use_shared = (
+            bool(shared_axes)
+            and getattr(self, "anchor_shared_axis_probability", 0.0) > 0.0
+            and bool(
+                torch.rand(())
+                < getattr(self, "anchor_shared_axis_probability", 0.0)
+            )
+        )
+        axes = shared_axes if use_shared else owned_axes
         axis = axes[int(torch.randint(len(axes), ()).item())]
         images = batches[axis]
         if images.shape[0] < self.volume_batch_size:
@@ -1052,9 +1259,57 @@ class Trainer:
         )
         return AnchorSelection(
             condition=condition,
-            source="real",
+            source="shared" if use_shared else "real",
             seeds=seeds,
         )
+
+    @torch.no_grad()
+    def record_relation_reference(
+        self,
+        *,
+        step: int,
+        prepared: StepPreparation,
+    ) -> None:
+        owned_axes = tuple(self.streams[prepared.domain])
+        if (
+            self.relation_loss_weight <= 0.0
+            or step < self.relation_start_step
+            or not self.relation.needs_data(
+                condition_domain=prepared.model_domain,
+                source_domain=prepared.domain,
+                owned_axes=owned_axes,
+            )
+        ):
+            return
+        conditions = {
+            name: values
+            for name, values in prepared.model_conditions.items()
+            if name not in ("anchor_image", "anchor_mask")
+        }
+        devices = [self.device] if self.device.type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            shape = (
+                self.volume_batch_size,
+                self.num_phases,
+                self.patch_size,
+                self.patch_size,
+                self.patch_size,
+            )
+            initial = torch.randn(shape, device=self.device, dtype=torch.float32)
+            with self.autocast():
+                prediction = self.diffusion.sample(
+                    self.ema_denoiser,
+                    initial,
+                    self.latent_channels,
+                    conditions,
+                )
+            probs = (prediction.float() + 1.0) * 0.5
+            self.relation.add(
+                probs,
+                condition_domain=prepared.model_domain,
+                source_domain=prepared.domain,
+                owned_axes=owned_axes,
+            )
 
     def generate_pair(
         self,
@@ -1318,22 +1573,47 @@ class Trainer:
                         batch.connectivity_fake,
                     )
                 anchor_loss = adversarial_loss.new_zeros(())
+                anchor_coarse = adversarial_loss.new_zeros(())
+                anchor_pixel = adversarial_loss.new_zeros(())
                 anchor_accuracy = adversarial_loss.new_zeros(())
                 if batch.anchor is not None:
-                    selected = batch.anchor.mask[:, 0]
-                    anchor_target = batch.anchor.target[selected]
-                    anchor_logits = batch.logits.movedim(1, -1)[selected]
-                    anchor_loss = F.cross_entropy(anchor_logits, anchor_target)
-                    anchor_accuracy = (
-                        (anchor_logits.argmax(dim=1) == anchor_target)
-                        .to(torch.float32)
-                        .mean()
+                    anchor_result = soft_anchor_loss(
+                        batch.logits,
+                        batch.anchor,
+                        batch.anchor_present,
+                        pool_size=self.anchor_pool_size,
+                        coarse_weight=self.anchor_coarse_loss_weight,
+                        pixel_weight=self.anchor_pixel_loss_weight,
                     )
+                    anchor_loss = anchor_result.total
+                    anchor_coarse = anchor_result.coarse
+                    anchor_pixel = anchor_result.pixel
+                    anchor_accuracy = anchor_result.accuracy
+                relation_loss = adversarial_loss.new_zeros(())
+                relation_queries = 0
+                relation_matches = 0
+                relation_domain_matches = 0
+                relation_shared_matches = 0
+                if batch.anchor is not None and self.relation_loss_weight > 0.0:
+                    relation_result = self.relation.loss(
+                        batch.clean_probs,
+                        batch.anchor,
+                        batch.anchor_present,
+                        domain=batch.model_domain,
+                    )
+                    relation_loss = relation_result.loss
+                    relation_queries = relation_result.queries
+                    relation_matches = relation_result.matches
+                    relation_domain_matches = relation_result.domain_matches
+                    relation_shared_matches = relation_result.shared_matches
                 vf_loss = adversarial_loss.new_zeros(())
                 if bool(batch.vf_present.any()):
                     pred_vf = batch.clean_probs.mean(dim=(2, 3, 4))
                     per_sample = 0.5 * (pred_vf - batch.target_vf).abs().sum(dim=1)
                     vf_loss = per_sample[batch.vf_present].mean()
+                relation_time_weight = self.diffusion.alpha_bars[
+                    batch.transition + 1
+                ].to(device=adversarial_loss.device, dtype=adversarial_loss.dtype)
                 total = (
                     adversarial_loss
                     + batch.anchor_ramp
@@ -1341,6 +1621,9 @@ class Trainer:
                         self.connectivity_weight * connectivity_loss
                         + self.normal_transition_weight * normal_loss
                         + self.anchor_loss_weight * anchor_loss
+                        + self.relation_loss_weight
+                        * relation_time_weight
+                        * relation_loss
                     )
                     + self.vf_loss_weight * vf_loss
                 )
@@ -1359,7 +1642,14 @@ class Trainer:
             connectivity=float(connectivity_loss.detach()),
             normal_transition=float(normal_loss.detach()),
             anchor=float(anchor_loss.detach()),
+            anchor_coarse=float(anchor_coarse.detach()),
+            anchor_pixel=float(anchor_pixel.detach()),
             anchor_accuracy=float(anchor_accuracy.detach()),
+            relation=float(relation_loss.detach()),
+            relation_queries=relation_queries,
+            relation_matches=relation_matches,
+            relation_domain_matches=relation_domain_matches,
+            relation_shared_matches=relation_shared_matches,
             vf=float(vf_loss.detach()),
         )
 

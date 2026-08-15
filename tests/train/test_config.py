@@ -70,6 +70,18 @@ def test_repository_generation_config_has_expected_defaults() -> None:
     assert load_generation_settings() == GenerationSettings()
 
 
+def test_repository_training_config_enables_soft_anchor_relation_learning() -> None:
+    cfg = load_yaml(ROOT / "config" / "train.yaml")
+
+    assert cfg["anchor"]["multi_anchor_prob"] == 0.0
+    assert cfg["anchor"]["shared_axis_probability"] == 0.20
+    assert cfg["anchor"]["coarse_loss_weight"] == 1.0
+    assert cfg["anchor"]["pixel_loss_weight"] == 0.05
+    assert cfg["relation"]["loss_weight"] == 0.02
+    assert cfg["relation"]["start_step"] == 9000
+    assert "distances" not in cfg["relation"]
+
+
 @pytest.mark.parametrize(
     "settings",
     (

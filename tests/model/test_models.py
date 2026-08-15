@@ -259,6 +259,14 @@ class Denoiser3DTest(unittest.TestCase):
             domain=domain,
             vf=vf,
         )
+        guided_logits = model.predict_guided_logits(
+            inputs,
+            time,
+            latent,
+            guidance=2.0,
+            domain=domain,
+            vf=vf,
+        )
         disabled = model.predict_guided(
             inputs,
             time,
@@ -272,6 +280,10 @@ class Denoiser3DTest(unittest.TestCase):
             torch.equal(default, model(inputs, time, latent, domain, vf=vf))
         )
         torch.testing.assert_close(guided, expected)
+        torch.testing.assert_close(
+            guided_logits,
+            unconditional + 2.0 * (conditional - unconditional),
+        )
         self.assertTrue(torch.equal(disabled, model.decode(unconditional)))
 
         for invalid in (-1.0, 1e39, float("nan"), float("inf"), True):

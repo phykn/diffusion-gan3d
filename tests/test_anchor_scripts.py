@@ -78,6 +78,10 @@ def test_anchor_check_script_runs_with_fixed_volume(
     assert "Ordinary planes" in output
     if count == 0:
         assert "Anchor sides       : n/a" in output
+        assert "Distance profile" not in output
+    else:
+        assert "Distance profile" in output
+        assert "Distance  0" in output
     assert "Indices" not in output
     assert "Center slice" not in output
 
@@ -121,12 +125,23 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
             anchors,
             anchor_strength,
             anchor_sigma,
+            anchor_residual_blur,
+            anchor_residual_blur_early,
             guidance,
             domain,
             margin,
         ):
             calls.append(
-                (anchors, anchor_strength, anchor_sigma, guidance, domain, margin)
+                (
+                    anchors,
+                    anchor_strength,
+                    anchor_sigma,
+                    anchor_residual_blur,
+                    anchor_residual_blur_early,
+                    guidance,
+                    domain,
+                    margin,
+                )
             )
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
@@ -166,7 +181,7 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     module.main()
 
     output = capsys.readouterr().out
-    assert calls == [((), 0.0, 2.0, 1.75, 1, 8)]
+    assert calls == [((), 0.0, 2.0, 1.5, 2.0, 1.75, 1, 8)]
     assert "Anchors  : 0 planes" in output
     assert "Conditioning : none" in output
 
@@ -281,6 +296,51 @@ def test_anchor_boundary_quality_is_empty_without_anchors() -> None:
     quality = module.measure_boundaries(vol, (), axis=0, num_phases=2)
 
     assert quality == module.BoundaryQuality(None, None, None, None, None)
+
+
+def test_anchor_distance_profile_groups_slice_changes_by_nearest_anchor() -> None:
+    module = _load_script("03_check_anchor.py")
+    checker = torch.tensor([[0, 1], [0, 1]], dtype=torch.uint8)
+    vol = torch.stack(
+        (
+            torch.zeros_like(checker),
+            checker,
+            torch.ones_like(checker),
+            torch.zeros_like(checker),
+        )
+    )
+
+    profile = module.measure_distance_changes(
+        vol,
+        (2,),
+        axis=0,
+        max_distance=2,
+    )
+
+    assert profile[0] == pytest.approx(0.75)
+    assert profile[1] == pytest.approx(0.5)
+    assert profile[2] is None
+
+
+def test_anchor_divergence_profile_compares_same_distance_slices() -> None:
+    module = _load_script("03_check_anchor.py")
+    baseline = torch.zeros((5, 2, 2), dtype=torch.uint8)
+    anchored = baseline.clone()
+    anchored[2] = 1
+    anchored[1, 0] = 1
+
+    profile = module.measure_distance_divergence(
+        anchored,
+        baseline,
+        (2,),
+        axis=0,
+        max_distance=3,
+    )
+
+    assert profile[0] == pytest.approx(1.0)
+    assert profile[1] == pytest.approx(0.25)
+    assert profile[2] == pytest.approx(0.0)
+    assert profile[3] is None
 
 
 def _load_script(filename: str):
