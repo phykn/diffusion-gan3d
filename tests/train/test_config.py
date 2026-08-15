@@ -73,6 +73,7 @@ def test_repository_generation_config_has_expected_defaults() -> None:
 def test_repository_training_config_enables_soft_anchor_relation_learning() -> None:
     cfg = load_yaml(ROOT / "config" / "train.yaml")
 
+    assert cfg["model"]["anchor_adapter"] == "multiscale"
     assert cfg["anchor"]["multi_anchor_prob"] == 0.0
     assert cfg["anchor"]["shared_axis_probability"] == 0.20
     assert cfg["anchor"]["coarse_loss_weight"] == 1.0
@@ -82,6 +83,9 @@ def test_repository_training_config_enables_soft_anchor_relation_learning() -> N
     assert cfg["relation"]["phase_weight"] == 0.75
     assert cfg["relation"]["support_weight"] == 0.25
     assert cfg["relation"]["support_max_radius"] == 2
+    assert cfg["relation"]["min_support_pixels"] == 8
+    assert cfg["relation"]["min_phase_fraction"] == 0.001
+    assert cfg["relation"]["min_chance_gap"] == 0.02
     assert cfg["relation"]["direction_reduction"] == "mean"
     assert "distances" not in cfg["relation"]
 

@@ -27,7 +27,23 @@ from .loss import (
     get_critic_r1,
     get_generator_loss,
 )
-from .relation import RelationBank
+from .relation import RelationBank, RelationLoss
+
+
+def _float_matrix(values: torch.Tensor) -> tuple[tuple[float, ...], ...]:
+    return tuple(
+        tuple(float(value) for value in row)
+        for row in values.detach().to(device="cpu").tolist()
+    )
+
+
+def _float_tensor3(
+    values: torch.Tensor,
+) -> tuple[tuple[tuple[float, ...], ...], ...]:
+    return tuple(
+        tuple(tuple(float(value) for value in cell) for cell in row)
+        for row in values.detach().to(device="cpu").tolist()
+    )
 
 
 @dataclass(frozen=True)
@@ -90,6 +106,17 @@ class Metrics:
     relation_ood_rejections: int = 0
     relation_missing_references: int = 0
     relation_distance_weights: tuple[float, ...] = ()
+    relation_phase_distance_weights: tuple[tuple[float, ...], ...] = ()
+    relation_support_distance_weights: tuple[tuple[float, ...], ...] = ()
+    relation_correlation_strength: tuple[tuple[float, ...], ...] = ()
+    relation_uncertainty: tuple[tuple[float, ...], ...] = ()
+    relation_displacement_quantiles: tuple[tuple[tuple[float, ...], ...], ...] = ()
+    relation_dilation_radii: tuple[tuple[float, ...], ...] = ()
+    relation_valid_ratio_by_phase: tuple[float, ...] = ()
+    relation_matched_reference_counts: tuple[tuple[float, ...], ...] = ()
+    relation_support_forward_loss: float = 0.0
+    relation_support_backward_loss: float = 0.0
+    relation_long_range_loss: float = 0.0
     relation_bank_entries: int = 0
     relation_ready_buckets: int = 0
     relation_prior_ready: bool = False
@@ -122,6 +149,17 @@ class DenoiserUpdate:
     relation_ood_rejections: int
     relation_missing_references: int
     relation_distance_weights: tuple[float, ...]
+    relation_phase_distance_weights: tuple[tuple[float, ...], ...]
+    relation_support_distance_weights: tuple[tuple[float, ...], ...]
+    relation_correlation_strength: tuple[tuple[float, ...], ...]
+    relation_uncertainty: tuple[tuple[float, ...], ...]
+    relation_displacement_quantiles: tuple[tuple[tuple[float, ...], ...], ...]
+    relation_dilation_radii: tuple[tuple[float, ...], ...]
+    relation_valid_ratio_by_phase: tuple[float, ...]
+    relation_matched_reference_counts: tuple[tuple[float, ...], ...]
+    relation_support_forward: float
+    relation_support_backward: float
+    relation_long_range: float
     vf: float
 
 
@@ -269,6 +307,9 @@ class TrainerSettings:
     relation_phase_weight: float = 0.75
     relation_support_weight: float = 0.25
     relation_direction_reduction: Literal["mean", "max"] = "mean"
+    relation_min_support_pixels: int = 8
+    relation_min_phase_fraction: float = 0.001
+    relation_min_chance_gap: float = 0.02
 
     def __post_init__(self) -> None:
         self._validate_positive_integers()
@@ -322,6 +363,11 @@ class TrainerSettings:
             raise ValueError("at least one relation component weight must be positive.")
         if self.relation_direction_reduction not in ("mean", "max"):
             raise ValueError("relation_direction_reduction must be 'mean' or 'max'.")
+        if (
+            self.relation_min_phase_fraction == 0.0
+            or self.relation_min_chance_gap == 0.0
+        ):
+            raise ValueError("relation numerical guard fractions must be positive.")
 
     def validate_denoiser(self, denoiser: Denoiser3D) -> None:
         downsample_factor = getattr(denoiser, "downsample_factor", None)
@@ -355,11 +401,10 @@ class TrainerSettings:
             "anchor_min_spacing": self.anchor_min_spacing,
             "latent_channels": self.latent_channels,
             "anchor_pool_size": self.anchor_pool_size,
-            "relation_bank_capacity_per_axis": (
-                self.relation_bank_capacity_per_axis
-            ),
+            "relation_bank_capacity_per_axis": (self.relation_bank_capacity_per_axis),
             "relation_profiles_per_axis": self.relation_profiles_per_axis,
             "relation_neighbors": self.relation_neighbors,
+            "relation_min_support_pixels": self.relation_min_support_pixels,
         }
         for name, value in values.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -385,9 +430,9 @@ class TrainerSettings:
             "domain_dropout": self.domain_dropout,
             "relation_quantile_low": self.relation_quantile_low,
             "relation_quantile_high": self.relation_quantile_high,
-            "anchor_shared_axis_probability": (
-                self.anchor_shared_axis_probability
-            ),
+            "anchor_shared_axis_probability": (self.anchor_shared_axis_probability),
+            "relation_min_phase_fraction": self.relation_min_phase_fraction,
+            "relation_min_chance_gap": self.relation_min_chance_gap,
         }
         for name, value in values.items():
             if (
@@ -460,9 +505,7 @@ class Trainer:
         self.anchor_start_step = settings.anchor_start_step
         self.anchor_ramp_steps = settings.anchor_ramp_steps
         self.anchor_effective_start_step: int | None = (
-            settings.anchor_start_step
-            if settings.relation_loss_weight <= 0.0
-            else None
+            settings.anchor_start_step if settings.relation_loss_weight <= 0.0 else None
         )
         self.anchor_multi_start_step = (
             settings.anchor_start_step + settings.anchor_ramp_steps
@@ -498,8 +541,7 @@ class Trainer:
             else settings.relation_start_step
         )
         self.relation_owned_axes = {
-            domain: tuple(streams)
-            for domain, streams in self.streams.items()
+            domain: tuple(streams) for domain, streams in self.streams.items()
         }
         self.relation_prior_snapshot_active = False
         self.relation = RelationBank(
@@ -515,6 +557,9 @@ class Trainer:
             phase_weight=settings.relation_phase_weight,
             support_weight=settings.relation_support_weight,
             direction_reduction=settings.relation_direction_reduction,
+            min_support_pixels=settings.relation_min_support_pixels,
+            min_phase_fraction=settings.relation_min_phase_fraction,
+            min_chance_gap=settings.relation_min_chance_gap,
         )
         self.vf_loss_weight = settings.vf_loss_weight
         self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
@@ -563,8 +608,7 @@ class Trainer:
         visible_axis_masks = (
             None
             if anchor is None
-            else anchor.axis_masks
-            & presence.anchor.reshape(-1, 1, 1, 1, 1)
+            else anchor.axis_masks & presence.anchor.reshape(-1, 1, 1, 1, 1)
         )
         fake = {
             axis: self.critic_augment.apply_pair(
@@ -817,12 +861,31 @@ class Trainer:
             relation_domain_matches=denoiser_update.relation_domain_matches,
             relation_shared_matches=denoiser_update.relation_shared_matches,
             relation_ood_rejections=denoiser_update.relation_ood_rejections,
-            relation_missing_references=(
-                denoiser_update.relation_missing_references
+            relation_missing_references=(denoiser_update.relation_missing_references),
+            relation_distance_weights=(denoiser_update.relation_distance_weights),
+            relation_phase_distance_weights=(
+                denoiser_update.relation_phase_distance_weights
             ),
-            relation_distance_weights=(
-                denoiser_update.relation_distance_weights
+            relation_support_distance_weights=(
+                denoiser_update.relation_support_distance_weights
             ),
+            relation_correlation_strength=(
+                denoiser_update.relation_correlation_strength
+            ),
+            relation_uncertainty=denoiser_update.relation_uncertainty,
+            relation_displacement_quantiles=(
+                denoiser_update.relation_displacement_quantiles
+            ),
+            relation_dilation_radii=denoiser_update.relation_dilation_radii,
+            relation_valid_ratio_by_phase=(
+                denoiser_update.relation_valid_ratio_by_phase
+            ),
+            relation_matched_reference_counts=(
+                denoiser_update.relation_matched_reference_counts
+            ),
+            relation_support_forward_loss=(denoiser_update.relation_support_forward),
+            relation_support_backward_loss=(denoiser_update.relation_support_backward),
+            relation_long_range_loss=denoiser_update.relation_long_range,
             relation_bank_entries=self.relation.entry_count,
             relation_ready_buckets=self.relation.ready_bucket_count,
             relation_prior_ready=self.relation_prior_ready(),
@@ -915,10 +978,7 @@ class Trainer:
             and bool(visible.any())
         ):
             indices = visible.nonzero().flatten()
-            seeds = tuple(
-                selection.seeds[index]
-                for index in indices.tolist()
-            )
+            seeds = tuple(selection.seeds[index] for index in indices.tolist())
             self.connect.record_seeded(
                 prediction.index_select(0, indices),
                 seeds,
@@ -1297,8 +1357,7 @@ class Trainer:
             bool(shared_axes)
             and getattr(self, "anchor_shared_axis_probability", 0.0) > 0.0
             and bool(
-                torch.rand(())
-                < getattr(self, "anchor_shared_axis_probability", 0.0)
+                torch.rand(()) < getattr(self, "anchor_shared_axis_probability", 0.0)
             )
         )
         axes = shared_axes if use_shared else owned_axes
@@ -1689,19 +1748,10 @@ class Trainer:
                     anchor_coarse = anchor_result.coarse
                     anchor_pixel = anchor_result.pixel
                     anchor_accuracy = anchor_result.accuracy
-                relation_loss = adversarial_loss.new_zeros(())
-                relation_queries = 0
-                relation_matches = 0
-                relation_domain_matches = 0
-                relation_shared_matches = 0
-                relation_ood_rejections = 0
-                relation_missing_references = 0
-                relation_phase = adversarial_loss.new_zeros(())
-                relation_support = adversarial_loss.new_zeros(())
-                relation_minus = adversarial_loss.new_zeros(())
-                relation_plus = adversarial_loss.new_zeros(())
-                relation_distance_weights = adversarial_loss.new_zeros(
-                    self.patch_size - 1
+                relation_result = RelationLoss.empty(
+                    adversarial_loss,
+                    distances=self.patch_size - 1,
+                    phases=self.num_phases,
                 )
                 if batch.anchor is not None and self.relation_loss_weight > 0.0:
                     relation_result = self.relation.loss(
@@ -1710,18 +1760,6 @@ class Trainer:
                         batch.anchor_present,
                         domain=batch.model_domain,
                     )
-                    relation_loss = relation_result.loss
-                    relation_queries = relation_result.queries
-                    relation_matches = relation_result.matches
-                    relation_domain_matches = relation_result.domain_matches
-                    relation_shared_matches = relation_result.shared_matches
-                    relation_ood_rejections = relation_result.ood_rejections
-                    relation_missing_references = relation_result.missing_references
-                    relation_phase = relation_result.phase
-                    relation_support = relation_result.support
-                    relation_minus = relation_result.minus
-                    relation_plus = relation_result.plus
-                    relation_distance_weights = relation_result.distance_weights
                 vf_loss = adversarial_loss.new_zeros(())
                 if bool(batch.vf_present.any()):
                     pred_vf = batch.clean_probs.mean(dim=(2, 3, 4))
@@ -1734,7 +1772,7 @@ class Trainer:
                     batch.anchor_ramp
                     * self.relation_loss_weight
                     * relation_time_weight
-                    * relation_loss
+                    * relation_result.loss
                 )
                 total = (
                     adversarial_loss
@@ -1765,23 +1803,47 @@ class Trainer:
             anchor_coarse=float(anchor_coarse.detach()),
             anchor_pixel=float(anchor_pixel.detach()),
             anchor_accuracy=float(anchor_accuracy.detach()),
-            relation=float(relation_loss.detach()),
+            relation=float(relation_result.loss.detach()),
             relation_weighted=float(relation_weighted.detach()),
             relation_time_weight=float(relation_time_weight.detach()),
-            relation_phase=float(relation_phase.detach()),
-            relation_support=float(relation_support.detach()),
-            relation_minus=float(relation_minus.detach()),
-            relation_plus=float(relation_plus.detach()),
-            relation_queries=relation_queries,
-            relation_matches=relation_matches,
-            relation_domain_matches=relation_domain_matches,
-            relation_shared_matches=relation_shared_matches,
-            relation_ood_rejections=relation_ood_rejections,
-            relation_missing_references=relation_missing_references,
+            relation_phase=float(relation_result.phase.detach()),
+            relation_support=float(relation_result.support.detach()),
+            relation_minus=float(relation_result.minus.detach()),
+            relation_plus=float(relation_result.plus.detach()),
+            relation_queries=relation_result.queries,
+            relation_matches=relation_result.matches,
+            relation_domain_matches=relation_result.domain_matches,
+            relation_shared_matches=relation_result.shared_matches,
+            relation_ood_rejections=relation_result.ood_rejections,
+            relation_missing_references=relation_result.missing_references,
             relation_distance_weights=tuple(
                 float(value)
-                for value in relation_distance_weights.detach().to("cpu")
+                for value in relation_result.distance_weights.detach().to("cpu")
             ),
+            relation_phase_distance_weights=_float_matrix(
+                relation_result.phase_distance_weights
+            ),
+            relation_support_distance_weights=_float_matrix(
+                relation_result.support_distance_weights
+            ),
+            relation_correlation_strength=_float_matrix(
+                relation_result.correlation_strength
+            ),
+            relation_uncertainty=_float_matrix(relation_result.uncertainty),
+            relation_displacement_quantiles=_float_tensor3(
+                relation_result.displacement_quantile
+            ),
+            relation_dilation_radii=_float_matrix(relation_result.dilation_radius),
+            relation_valid_ratio_by_phase=tuple(
+                float(value)
+                for value in relation_result.valid_ratio_by_phase.detach().to("cpu")
+            ),
+            relation_matched_reference_counts=_float_matrix(
+                relation_result.matched_reference_count
+            ),
+            relation_support_forward=float(relation_result.support_forward.detach()),
+            relation_support_backward=float(relation_result.support_backward.detach()),
+            relation_long_range=float(relation_result.long_range.detach()),
             vf=float(vf_loss.detach()),
         )
 

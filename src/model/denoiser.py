@@ -16,6 +16,7 @@ from .blocks import (
 from .domain import masked_domain_embedding
 
 MAX_GUIDANCE = 10_000.0
+ANCHOR_ADAPTERS = ("single", "multiscale")
 
 
 def validate_guidance(value: float) -> float:
@@ -42,14 +43,18 @@ class Denoiser3D(nn.Module):
         latent_channels: int,
         num_domains: int,
         gradient_checkpointing: bool = False,
+        anchor_adapter: str = "single",
     ) -> None:
         super().__init__()
+        if anchor_adapter not in ANCHOR_ADAPTERS:
+            raise ValueError(f"anchor_adapter must be one of {ANCHOR_ADAPTERS}.")
         multipliers = tuple(channel_multipliers)
 
         channels = tuple(base_channels * scale for scale in multipliers)
         levels = len(channels)
         self.downsample_factor = 2 ** (levels - 1)
         self.gradient_checkpointing = gradient_checkpointing
+        self.anchor_adapter = anchor_adapter
 
         self.time_emb = SinusoidalTimeEmbedding(embedding_channels)
         self.time_mlp = nn.Sequential(
@@ -128,6 +133,19 @@ class Denoiser3D(nn.Module):
         nn.init.zeros_(vf_out.weight)
         nn.init.zeros_(vf_out.bias)
 
+        # Build optional weights last so the shared backbone keeps identical RNG init.
+        self.anchor_pyramid = nn.ModuleList()
+        if anchor_adapter == "multiscale":
+            for channel in channels[1:]:
+                projection = nn.Conv3d(
+                    num_phases + 1,
+                    channel,
+                    1,
+                    bias=False,
+                )
+                nn.init.zeros_(projection.weight)
+                self.anchor_pyramid.append(projection)
+
     def forward(
         self,
         x_current: torch.Tensor,
@@ -164,19 +182,25 @@ class Denoiser3D(nn.Module):
     ) -> torch.Tensor:
         emb = self.embed(x_current, time, latent, domain, vf, vf_present)
         x = self.input(x_current)
-        anchor_feat = self.encode_anchor(
+        anchor = self._prepare_anchor(
             x_current,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
         )
-        if anchor_feat is not None:
-            x = x + anchor_feat
+        if anchor is not None:
+            x = x + self.anchor_input(torch.cat(anchor, dim=1))
         skips = []
         for idx, block in enumerate(self.encoder):
             x = self.run_block(block, x, emb)
             if idx < len(self.downsample):
                 skips.append(x)
                 x = self.downsample[idx](x)
+                if anchor is not None and idx < len(self.anchor_pyramid):
+                    anchor_at_scale = self._pool_anchor(
+                        *anchor,
+                        output_size=x.shape[-3:],
+                    )
+                    x = x + self.anchor_pyramid[idx](anchor_at_scale)
 
         for block in self.middle:
             x = self.run_block(block, x, emb)
@@ -250,7 +274,7 @@ class Denoiser3D(nn.Module):
                 vf_present=vf_present,
                 anchor_image=anchor_image,
                 anchor_mask=anchor_mask,
-        )
+            )
         unconditional = self.predict_logits(x_current, time, latent, domain)
         if guidance == 0.0:
             return unconditional
@@ -348,6 +372,17 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None,
         anchor_mask: torch.Tensor | None,
     ) -> torch.Tensor | None:
+        anchor = self._prepare_anchor(inputs, anchor_image, anchor_mask)
+        if anchor is None:
+            return None
+        return self.anchor_input(torch.cat(anchor, dim=1))
+
+    def _prepare_anchor(
+        self,
+        inputs: torch.Tensor,
+        anchor_image: torch.Tensor | None,
+        anchor_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
         if anchor_image is None and anchor_mask is None:
             return None
         if anchor_image is None or anchor_mask is None:
@@ -365,4 +400,19 @@ class Denoiser3D(nn.Module):
         mask = anchor_mask.to(device=inputs.device, dtype=inputs.dtype)
         clean = anchor_image.to(device=inputs.device, dtype=inputs.dtype)
         probs = (clean + 1.0) * 0.5 * mask
-        return self.anchor_input(torch.cat((probs, mask), dim=1))
+        return probs, mask
+
+    @staticmethod
+    def _pool_anchor(
+        probs: torch.Tensor,
+        mask: torch.Tensor,
+        output_size: Sequence[int],
+    ) -> torch.Tensor:
+        coverage = F.adaptive_avg_pool3d(mask, output_size)
+        pooled_probs = F.adaptive_avg_pool3d(probs, output_size)
+        pooled_probs = torch.where(
+            coverage > 0.0,
+            pooled_probs / coverage.clamp_min(torch.finfo(probs.dtype).eps),
+            torch.zeros_like(pooled_probs),
+        )
+        return torch.cat((pooled_probs, coverage), dim=1)

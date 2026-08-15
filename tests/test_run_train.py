@@ -65,6 +65,21 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         soft_vfs=(0.48, 0.12, 0.4),
         hard_vfs=(0.46, 0.14, 0.4),
         hard_vf_mae=0.026,
+        relation_matches=1,
+        relation_phase_distance_weights=((0.75, 0.20), (0.25, 0.80)),
+        relation_support_distance_weights=((0.60, 0.30), (0.40, 0.70)),
+        relation_correlation_strength=((0.30, 0.10), (0.10, 0.20)),
+        relation_uncertainty=((0.05, 0.04), (0.03, 0.02)),
+        relation_displacement_quantiles=(
+            ((0.0, 1.0), (1.0, 1.0)),
+            ((1.0, 2.0), (2.0, 2.0)),
+        ),
+        relation_dilation_radii=((1.0, 1.0), (2.0, 2.0)),
+        relation_valid_ratio_by_phase=(1.0, 0.75),
+        relation_matched_reference_counts=((16.0, 12.0), (14.0, 10.0)),
+        relation_support_forward_loss=0.04,
+        relation_support_backward_loss=0.05,
+        relation_long_range_loss=0.06,
     )
 
     write_metrics(writer, 10, metrics)
@@ -92,6 +107,17 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
     assert "loss/anchor_coarse" in tags
     assert "loss/anchor_pixel" in tags
     assert "loss/relation" in tags
+    assert "loss/relation_support_forward" in tags
+    assert "loss/relation_support_backward" in tags
+    assert "loss/relation_long_range" in tags
+    assert "relation/support_forward_violation" in tags
+    assert "relation/support_backward_violation" in tags
+    assert "relation/long_range_violation" in tags
+    assert "relation/raw_loss" in tags
+    assert "relation/weighted_loss" in tags
+    assert "relation/matched_reference_count" in tags
+    assert "relation/weighted_distance_phase_0" in tags
+    assert "relation/valid_ratio_phase_1" in tags
     assert "train/relation_bank_entries" in tags
     assert "train/relation_ready_buckets" in tags
     assert "conditioning/anchor_shared" in tags
@@ -104,6 +130,11 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
     assert "conditioning/vf_target_std_0" in tags
     assert "conditioning/vf_soft_0" in tags
     assert "conditioning/vf_hard_0" in tags
+    image_tags = {call.args[0] for call in writer.add_image.call_args_list}
+    assert "relation/normalized_weight_by_phase_distance" in image_tags
+    assert "relation/support_weight_by_phase_distance" in image_tags
+    assert "relation/correlation_strength_by_phase_distance" in image_tags
+    assert "relation/dilation_radius_by_phase_distance" in image_tags
 
 
 @pytest.mark.parametrize("axes", ((0, 1, 2), (0,)))

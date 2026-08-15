@@ -1,6 +1,6 @@
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
@@ -8,46 +8,24 @@ import torch.nn.functional as F
 
 from ..anchor import AnchorCondition
 from ..model.domain import NULL_DOMAIN
-
-MINUS_DIRECTION = 0
-PLUS_DIRECTION = 1
-SUPPORT_FORWARD = 0
-SUPPORT_BACKWARD = 1
-
-
-@dataclass(frozen=True)
-class RelationCurve:
-    # Direction order is minus, plus. Distance slot zero means one voxel away.
-    values: torch.Tensor
-    valid: torch.Tensor
-    support: torch.Tensor
-    support_valid: torch.Tensor
-    descriptor: torch.Tensor
-    roi_pixels: int
-
-
-@dataclass(frozen=True)
-class RelationTarget:
-    lower: torch.Tensor
-    upper: torch.Tensor
-    weights: torch.Tensor
-    valid: torch.Tensor
-    support_lower: torch.Tensor
-    support_upper: torch.Tensor
-    support_weights: torch.Tensor
-    support_valid: torch.Tensor
-    ood_weight: float
-    source: str
-
-
-@dataclass(frozen=True)
-class RelationPenalty:
-    loss: torch.Tensor
-    phase: torch.Tensor
-    support: torch.Tensor
-    minus: torch.Tensor
-    plus: torch.Tensor
-    distance_weights: torch.Tensor
+from .relation_math import (
+    DEFAULT_MIN_CHANCE_GAP,
+    DEFAULT_MIN_PHASE_FRACTION,
+    DEFAULT_MIN_SUPPORT_PIXELS,
+    SUPPORT_DIRECTIONS,
+    RelationTarget,
+    _aggregate_direction_weights,
+    _collapse_phase_weights,
+    _empty_float,
+    _matched_directional_mean,
+    _summarize_phase_target,
+    _summarize_support_target,
+    _validate_support_guards,
+    _zero_float,
+    matching_descriptor,
+    relation_curve,
+    relation_penalty,
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +42,56 @@ class RelationLoss:
     ood_rejections: int
     missing_references: int
     distance_weights: torch.Tensor
+    phase_distance_weights: torch.Tensor = field(default_factory=_empty_float)
+    support_distance_weights: torch.Tensor = field(default_factory=_empty_float)
+    correlation_strength: torch.Tensor = field(default_factory=_empty_float)
+    uncertainty: torch.Tensor = field(default_factory=_empty_float)
+    displacement_quantile: torch.Tensor = field(default_factory=_empty_float)
+    dilation_radius: torch.Tensor = field(default_factory=_empty_float)
+    valid_ratio_by_phase: torch.Tensor = field(default_factory=_empty_float)
+    support_forward: torch.Tensor = field(default_factory=_zero_float)
+    support_backward: torch.Tensor = field(default_factory=_zero_float)
+    long_range: torch.Tensor = field(default_factory=_zero_float)
+    matched_reference_count: torch.Tensor = field(default_factory=_empty_float)
+
+    @classmethod
+    def empty(
+        cls,
+        reference: torch.Tensor,
+        *,
+        distances: int,
+        phases: int,
+    ) -> "RelationLoss":
+        shape = (distances, phases)
+        zero = reference.new_zeros(())
+        return cls(
+            loss=zero,
+            phase=zero,
+            support=zero,
+            minus=zero,
+            plus=zero,
+            queries=0,
+            matches=0,
+            domain_matches=0,
+            shared_matches=0,
+            ood_rejections=0,
+            missing_references=0,
+            distance_weights=reference.new_zeros(distances),
+            phase_distance_weights=reference.new_zeros(shape),
+            support_distance_weights=reference.new_zeros(shape),
+            correlation_strength=reference.new_zeros(shape),
+            uncertainty=reference.new_zeros(shape),
+            displacement_quantile=reference.new_full(
+                (*shape, SUPPORT_DIRECTIONS),
+                -1.0,
+            ),
+            dilation_radius=reference.new_full(shape, -1.0),
+            valid_ratio_by_phase=reference.new_zeros(phases),
+            support_forward=zero,
+            support_backward=zero,
+            long_range=zero,
+            matched_reference_count=reference.new_zeros(shape),
+        )
 
 
 @dataclass(frozen=True)
@@ -73,6 +101,11 @@ class _RelationEntry:
     valid: torch.Tensor
     support: torch.Tensor
     support_valid: torch.Tensor
+    independent: torch.Tensor
+    phase_valid: torch.Tensor
+    support_raw: torch.Tensor
+    displacement_hist: torch.Tensor
+    displacement_valid: torch.Tensor
 
 
 class _Bucket:
@@ -87,6 +120,22 @@ class _Bucket:
     def add(self, entry: _RelationEntry) -> None:
         if not self.ready:
             self.entries.append(entry)
+
+
+def _sample_profile_centers(
+    size: int,
+    count: int,
+    *,
+    generator: torch.Generator | None,
+) -> list[int]:
+    if count == 1:
+        return torch.randperm(size, generator=generator)[:1].tolist()
+    interior = (
+        (torch.randperm(size - 2, generator=generator)[: count - 2] + 1).tolist()
+        if count > 2
+        else []
+    )
+    return [0, size - 1, *interior]
 
 
 class RelationBank:
@@ -107,6 +156,9 @@ class RelationBank:
         phase_weight: float = 0.75,
         support_weight: float = 0.25,
         direction_reduction: Literal["mean", "max"] = "mean",
+        min_support_pixels: int = DEFAULT_MIN_SUPPORT_PIXELS,
+        min_phase_fraction: float = DEFAULT_MIN_PHASE_FRACTION,
+        min_chance_gap: float = DEFAULT_MIN_CHANCE_GAP,
     ) -> None:
         for name, value in (
             ("num_domains", num_domains),
@@ -123,6 +175,11 @@ class RelationBank:
             or support_max_radius < 0
         ):
             raise ValueError("support_max_radius must be a non-negative integer.")
+        _validate_support_guards(
+            min_support_pixels,
+            min_phase_fraction,
+            min_chance_gap,
+        )
         if not axes or any(axis not in (0, 1, 2) for axis in axes):
             raise ValueError("relation axes must contain values from 0, 1, and 2.")
         if len(set(axes)) != len(axes):
@@ -172,9 +229,10 @@ class RelationBank:
         self.phase_weight = float(phase_weight)
         self.support_weight = float(support_weight)
         self.direction_reduction = direction_reduction
-        self._shared: dict[int, dict[int, _Bucket]] = {
-            axis: {} for axis in self.axes
-        }
+        self.min_support_pixels = min_support_pixels
+        self.min_phase_fraction = float(min_phase_fraction)
+        self.min_chance_gap = float(min_chance_gap)
+        self._shared: dict[int, dict[int, _Bucket]] = {axis: {} for axis in self.axes}
         self._domains: tuple[dict[int, _Bucket], ...] = tuple(
             {axis: _Bucket(capacity_per_axis) for axis in self.axes}
             for _ in range(num_domains)
@@ -200,9 +258,7 @@ class RelationBank:
     @property
     def ready_bucket_count(self) -> int:
         domain_count = sum(
-            bucket.ready
-            for buckets in self._domains
-            for bucket in buckets.values()
+            bucket.ready for buckets in self._domains for bucket in buckets.values()
         )
         shared_count = sum(
             bucket.ready
@@ -236,9 +292,7 @@ class RelationBank:
         if axis not in self.axes:
             return
         if any(
-            not isinstance(value, int)
-            or isinstance(value, bool)
-            or value < 1
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
             for value in (height, width, volume_size)
         ):
             raise ValueError("relation ROI dimensions must be positive integers.")
@@ -287,7 +341,11 @@ class RelationBank:
         for axis in self.axes:
             if axis not in owned_axes:
                 continue
-            centers = torch.randperm(size, generator=generator)[:count].tolist()
+            centers = _sample_profile_centers(
+                size,
+                count,
+                generator=generator,
+            )
             for batch in range(probs.shape[0]):
                 for center in centers:
                     roi = self._sample_roi(
@@ -302,6 +360,9 @@ class RelationBank:
                         index=center,
                         roi=roi,
                         support_max_radius=self.support_max_radius,
+                        min_support_pixels=self.min_support_pixels,
+                        min_phase_fraction=self.min_phase_fraction,
+                        min_chance_gap=self.min_chance_gap,
                     )
                     entry = _RelationEntry(
                         descriptor=curve.descriptor.to(
@@ -315,6 +376,20 @@ class RelationBank:
                             dtype=torch.float16,
                         ),
                         support_valid=curve.support_valid.to(device="cpu"),
+                        independent=curve.independent.to(
+                            device="cpu",
+                            dtype=torch.float16,
+                        ),
+                        phase_valid=curve.phase_valid.to(device="cpu"),
+                        support_raw=curve.support_raw.to(
+                            device="cpu",
+                            dtype=torch.float16,
+                        ),
+                        displacement_hist=curve.displacement_hist.to(
+                            device="cpu",
+                            dtype=torch.float16,
+                        ),
+                        displacement_valid=curve.displacement_valid.to(device="cpu"),
                     )
                     sources = self._shared[axis]
                     shared = sources.setdefault(
@@ -337,11 +412,14 @@ class RelationBank:
         if visible.shape != (probs.shape[0],) or visible.dtype != torch.bool:
             raise ValueError("relation visibility must be boolean with shape [B].")
         if visible.device != probs.device:
-            raise ValueError("relation visibility and probabilities must share a device.")
+            raise ValueError(
+                "relation visibility and probabilities must share a device."
+            )
         if domain != NULL_DOMAIN and not 0 <= domain < self.num_domains:
             raise ValueError("relation domain is outside the configured domains.")
         zero = probs.sum() * 0.0
         penalties = []
+        matched_targets = []
         queries = 0
         domain_matches = 0
         shared_matches = 0
@@ -384,6 +462,10 @@ class RelationBank:
                         roi=roi,
                         frozen_mask=frozen,
                         support_max_radius=self.support_max_radius,
+                        min_support_pixels=self.min_support_pixels,
+                        min_phase_fraction=self.min_phase_fraction,
+                        min_chance_gap=self.min_chance_gap,
+                        collect_displacement=False,
                     )
                     penalties.append(
                         relation_penalty(
@@ -394,6 +476,7 @@ class RelationBank:
                             direction_reduction=self.direction_reduction,
                         )
                     )
+                    matched_targets.append(target)
                     if target.source == "domain":
                         domain_matches += 1
                     else:
@@ -407,9 +490,72 @@ class RelationBank:
             distance_weights = torch.stack(
                 [item.distance_weights for item in penalties]
             ).mean(dim=0)
+            phase_distance_weights = torch.stack(
+                [item.phase_distance_weights for item in penalties]
+            ).mean(dim=0)
+            support_distance_weights = torch.stack(
+                [item.support_distance_weights for item in penalties]
+            ).mean(dim=0)
+            support_forward = torch.stack(
+                [item.support_forward for item in penalties]
+            ).mean()
+            support_backward = torch.stack(
+                [item.support_backward for item in penalties]
+            ).mean()
+            long_range = torch.stack([item.long_range for item in penalties]).mean()
+            phase_target_valid = torch.stack(
+                [item.phase_valid.any(dim=-1) for item in matched_targets]
+            )
+            correlation_strength = _matched_directional_mean(
+                torch.stack([item.correlation_strength for item in matched_targets]),
+                phase_target_valid,
+            )
+            uncertainty = _matched_directional_mean(
+                torch.stack([item.uncertainty for item in matched_targets]),
+                phase_target_valid,
+            )
+            support_target_valid = torch.stack(
+                [item.support_valid for item in matched_targets]
+            )
+            displacement_quantile = _matched_directional_mean(
+                torch.stack([item.displacement_quantile for item in matched_targets]),
+                support_target_valid,
+                invalid_value=-1.0,
+            )
+            dilation_valid = support_target_valid.any(dim=-1)
+            dilation_radius = _matched_directional_mean(
+                torch.stack(
+                    [item.dilation_radius.to(torch.float32) for item in matched_targets]
+                ),
+                dilation_valid,
+                invalid_value=-1.0,
+            )
+            sample_count = torch.stack(
+                [item.sample_count.to(torch.float32) for item in matched_targets]
+            )
+            reference_count = torch.stack(
+                [item.valid_count.to(torch.float32) for item in matched_targets]
+            )
+            valid_ratio_by_phase = reference_count.sum(dim=(0, 1, 2)) / (
+                sample_count.sum(dim=(0, 1, 2)).clamp_min(1.0)
+            )
+            matched_reference_count = _matched_directional_mean(
+                reference_count,
+                phase_target_valid,
+            )
         else:
             loss = phase = support = minus = plus = zero
             distance_weights = probs.new_zeros(probs.shape[2] - 1)
+            shape = (probs.shape[2] - 1, self.num_phases)
+            phase_distance_weights = probs.new_zeros(shape)
+            support_distance_weights = probs.new_zeros(shape)
+            correlation_strength = probs.new_zeros(shape)
+            uncertainty = probs.new_zeros(shape)
+            displacement_quantile = probs.new_full((*shape, SUPPORT_DIRECTIONS), -1.0)
+            dilation_radius = probs.new_full(shape, -1.0)
+            valid_ratio_by_phase = probs.new_zeros(self.num_phases)
+            support_forward = support_backward = long_range = zero
+            matched_reference_count = probs.new_zeros(shape)
         return RelationLoss(
             loss=loss,
             phase=phase,
@@ -423,6 +569,17 @@ class RelationBank:
             ood_rejections=ood_rejections,
             missing_references=missing_references,
             distance_weights=distance_weights,
+            phase_distance_weights=phase_distance_weights,
+            support_distance_weights=support_distance_weights,
+            correlation_strength=correlation_strength,
+            uncertainty=uncertainty,
+            displacement_quantile=displacement_quantile,
+            dilation_radius=dilation_radius,
+            valid_ratio_by_phase=valid_ratio_by_phase,
+            support_forward=support_forward,
+            support_backward=support_backward,
+            long_range=long_range,
+            matched_reference_count=matched_reference_count,
         )
 
     def _find_target(
@@ -491,139 +648,123 @@ class RelationBank:
         normalized = (descriptors - median) / scale
         normalized_query = (query - median) / scale
         distances = (normalized - normalized_query).square().mean(dim=1).sqrt()
-        ood_weight = self._ood_weight(normalized, float(distances.min()))
+        ood_lower, ood_upper = self._ood_bounds(normalized)
+        ood_weight = self._ood_weight_from_bounds(
+            float(distances.min()),
+            lower=ood_lower,
+            upper=ood_upper,
+        )
         if ood_weight == 0.0:
             return None, True
-        nearest = distances.argsort()[: self.neighbors]
+        # Keep the full morphology-nearest ordering.  A global top-k cut creates
+        # an artificial long-range cutoff because random centers provide fewer
+        # valid samples for either signed direction at large distances.  The
+        # target summarizers instead take the nearest valid k references for
+        # each individual direction/distance/phase feature.
+        eligibility_limit = max(ood_lower, ood_upper)
+        nearest = distances.argsort(stable=True)
+        nearest = nearest[distances[nearest] <= eligibility_limit]
         selected = tuple(entries[int(index)] for index in nearest)
         phase_stack = torch.stack(
             [entry.values.to(torch.float32) for entry in selected]
         )
-        phase_valid_stack = torch.stack([entry.valid for entry in selected])
+        independent_stack = torch.stack(
+            [entry.independent.to(torch.float32) for entry in selected]
+        )
+        phase_valid_stack = torch.stack([entry.phase_valid for entry in selected])
         support_stack = torch.stack(
             [entry.support.to(torch.float32) for entry in selected]
         )
-        support_valid_stack = torch.stack(
-            [entry.support_valid for entry in selected]
+        support_valid_stack = torch.stack([entry.support_valid for entry in selected])
+        displacement_stack = torch.stack(
+            [entry.displacement_hist.to(torch.float32) for entry in selected]
         )
-        distance_count = phase_stack.shape[2]
-        lower = torch.zeros(
-            distance_count,
-            self.num_phases,
-            self.num_phases,
-            dtype=torch.float32,
+        displacement_valid_stack = torch.stack(
+            [entry.displacement_valid for entry in selected]
         )
-        upper = torch.zeros_like(lower)
-        midpoint = torch.zeros_like(lower)
-        valid = torch.zeros(distance_count, dtype=torch.bool)
-        phase_coverage = torch.zeros(distance_count, dtype=torch.float32)
-        for distance in range(distance_count):
-            selected_mask = phase_valid_stack[:, :, distance]
-            values = phase_stack[:, :, distance][selected_mask]
-            if values.shape[0] < 2:
-                continue
-            lower[distance] = torch.quantile(values, self.quantile_low, dim=0)
-            upper[distance] = torch.quantile(values, self.quantile_high, dim=0)
-            midpoint[distance] = torch.quantile(values, 0.5, dim=0)
-            phase_coverage[distance] = values.shape[0] / (2 * self.neighbors)
-            valid[distance] = True
-
-        support_shape = support_stack.shape[3:]
-        support_lower = torch.zeros(
-            distance_count,
-            *support_shape,
-            dtype=torch.float32,
+        phase = _summarize_phase_target(
+            phase_stack,
+            independent_stack,
+            phase_valid_stack,
+            quantile_low=self.quantile_low,
+            quantile_high=self.quantile_high,
+            uncertainty_floor=floor,
+            max_samples=self.neighbors,
         )
-        support_upper = torch.zeros_like(support_lower)
-        support_midpoint = torch.zeros_like(support_lower)
-        support_valid = torch.zeros_like(support_lower, dtype=torch.bool)
-        support_coverage = torch.zeros_like(support_lower)
-        for distance in range(distance_count):
-            for radius in range(support_shape[0]):
-                for phase in range(self.num_phases):
-                    for direction in (SUPPORT_FORWARD, SUPPORT_BACKWARD):
-                        mask = support_valid_stack[
-                            :,
-                            :,
-                            distance,
-                            radius,
-                            phase,
-                            direction,
-                        ]
-                        values = support_stack[
-                            :,
-                            :,
-                            distance,
-                            radius,
-                            phase,
-                            direction,
-                        ][mask]
-                        if values.shape[0] < 2:
-                            continue
-                        key = (distance, radius, phase, direction)
-                        support_lower[key] = torch.quantile(
-                            values,
-                            self.quantile_low,
-                        )
-                        support_upper[key] = torch.quantile(
-                            values,
-                            self.quantile_high,
-                        )
-                        support_midpoint[key] = torch.quantile(values, 0.5)
-                        support_coverage[key] = values.shape[0] / (
-                            2 * self.neighbors
-                        )
-                        support_valid[key] = True
-
-        phase_weights = _learned_group_weights(
-            midpoint,
-            upper - lower,
-            phase_coverage,
-            valid,
-            floor,
-            feature_dims=(-2, -1),
+        support = _summarize_support_target(
+            support_stack,
+            support_valid_stack,
+            displacement_stack,
+            displacement_valid_stack,
+            quantile_low=self.quantile_low,
+            quantile_high=self.quantile_high,
+            uncertainty_floor=floor,
+            max_samples=self.neighbors,
         )
-        support_group_valid = support_valid.any(dim=(-2, -1))
-        support_weights = _learned_group_weights(
-            support_midpoint,
-            support_upper - support_lower,
-            support_coverage,
-            support_group_valid,
-            floor,
-            feature_dims=(-2, -1),
-            feature_valid=support_valid,
-        )
-        if not bool(phase_weights.sum() > 0.0) and not bool(
-            support_weights.sum() > 0.0
+        if not bool(phase.weights.sum() > 0.0) and not bool(
+            support.weights.sum() > 0.0
         ):
             return None, False
+        legacy_phase_weights = _collapse_phase_weights(
+            _aggregate_direction_weights(phase.weights)
+        )
         return (
             RelationTarget(
-                lower=lower.to(device=device),
-                upper=upper.to(device=device),
-                weights=phase_weights.to(device=device),
-                valid=valid.to(device=device),
-                support_lower=support_lower.to(device=device),
-                support_upper=support_upper.to(device=device),
-                support_weights=support_weights.to(device=device),
-                support_valid=support_valid.to(device=device),
+                lower=phase.lower.to(device=device),
+                upper=phase.upper.to(device=device),
+                weights=legacy_phase_weights.to(device=device),
+                valid=phase.valid.any(dim=(0, 2, 3)).to(device=device),
+                support_lower=support.lower.to(device=device),
+                support_upper=support.upper.to(device=device),
+                support_weights=support.weights.to(device=device),
+                support_valid=support.valid.to(device=device),
                 ood_weight=ood_weight,
                 source=source,
+                mean_relation=phase.mean_relation.to(device=device),
+                independent_baseline=phase.independent.to(device=device),
+                correlation_strength=phase.strength.to(device=device),
+                uncertainty=phase.uncertainty.to(device=device),
+                phase_distance_weights=phase.weights.to(device=device),
+                phase_valid=phase.valid.to(device=device),
+                displacement_quantile=support.displacement_quantile.to(device=device),
+                dilation_radius=support.dilation_radius.to(device=device),
+                sample_count=phase.sample_count.to(device=device),
+                valid_count=phase.valid_count.to(device=device),
+                support_strength=support.strength.to(device=device),
+                support_uncertainty=support.uncertainty.to(device=device),
+                support_sample_count=support.sample_count.to(device=device),
+                support_valid_count=support.valid_count.to(device=device),
             ),
             False,
         )
 
     @staticmethod
     def _ood_weight(normalized: torch.Tensor, query_distance: float) -> float:
-        if normalized.shape[0] < 2:
-            return 0.0
-        pairwise = torch.cdist(normalized, normalized) / math.sqrt(
-            normalized.shape[1]
+        lower, upper = RelationBank._ood_bounds(normalized)
+        return RelationBank._ood_weight_from_bounds(
+            query_distance,
+            lower=lower,
+            upper=upper,
         )
+
+    @staticmethod
+    def _ood_bounds(normalized: torch.Tensor) -> tuple[float, float]:
+        if normalized.shape[0] < 2:
+            return 0.0, 0.0
+        pairwise = torch.cdist(normalized, normalized) / math.sqrt(normalized.shape[1])
         pairwise.fill_diagonal_(float("inf"))
         nearest = pairwise.min(dim=1).values
         lower = float(torch.quantile(nearest, 0.95))
         upper = float(torch.quantile(nearest, 0.99))
+        return lower, upper
+
+    @staticmethod
+    def _ood_weight_from_bounds(
+        query_distance: float,
+        *,
+        lower: float,
+        upper: float,
+    ) -> float:
         if query_distance <= lower:
             return 1.0
         if upper <= lower or query_distance >= upper:
@@ -678,484 +819,3 @@ class RelationBank:
             raise ValueError("relation source domain is invalid.")
         if any(axis not in self.axes for axis in owned_axes):
             raise ValueError("owned relation axes must be active axes.")
-
-
-def relation_curve(
-    probs: torch.Tensor,
-    *,
-    axis: int,
-    index: int,
-    roi: torch.Tensor,
-    frozen_mask: torch.Tensor | None = None,
-    support_max_radius: int = 0,
-) -> RelationCurve:
-    if probs.ndim != 4 or not probs.is_floating_point():
-        raise ValueError("relation volume must have shape [C, D, H, W].")
-    if axis not in (0, 1, 2):
-        raise ValueError("relation axis must be 0, 1, or 2.")
-    if (
-        not isinstance(support_max_radius, int)
-        or isinstance(support_max_radius, bool)
-        or support_max_radius < 0
-    ):
-        raise ValueError("support_max_radius must be a non-negative integer.")
-    planes = probs.float().movedim(axis + 1, 1)
-    size = planes.shape[1]
-    if size < 2:
-        raise ValueError("relation volume must contain at least two planes.")
-    if not 0 <= index < size:
-        raise ValueError("relation center index is outside the volume.")
-    if roi.shape != planes.shape[2:] or roi.dtype != torch.bool:
-        raise ValueError("relation ROI must be a boolean mask matching one plane.")
-    if roi.device != probs.device or not bool(roi.any()):
-        raise ValueError("relation ROI must be non-empty and on the volume device.")
-    if frozen_mask is not None:
-        if frozen_mask.shape != probs.shape[1:] or frozen_mask.dtype != torch.bool:
-            raise ValueError("frozen relation mask must match the volume.")
-        moved_frozen = frozen_mask.movedim(axis, 0)
-        planes = torch.where(moved_frozen.unsqueeze(0), planes.detach(), planes)
-
-    center = planes[:, index].detach()
-    channels = probs.shape[0]
-    values = torch.zeros(
-        2,
-        size - 1,
-        channels,
-        channels,
-        device=probs.device,
-        dtype=torch.float32,
-    )
-    valid = torch.zeros(2, size - 1, device=probs.device, dtype=torch.bool)
-    support = torch.zeros(
-        2,
-        size - 1,
-        support_max_radius,
-        channels,
-        2,
-        device=probs.device,
-        dtype=torch.float32,
-    )
-    support_valid = torch.zeros_like(support, dtype=torch.bool)
-    mask = roi.to(torch.float32)
-    area = mask.sum()
-    center_masked = center * mask
-    center_fraction = center_masked.sum(dim=(-2, -1)) / area
-    for direction, neighbor_indices in (
-        (MINUS_DIRECTION, tuple(range(index - 1, -1, -1))),
-        (PLUS_DIRECTION, tuple(range(index + 1, size))),
-    ):
-        if not neighbor_indices:
-            continue
-        neighbors = planes[:, neighbor_indices].movedim(1, 0)
-        neighbors_masked = neighbors * mask
-        joint = torch.einsum(
-            "chw,nkhw->nck",
-            center_masked,
-            neighbors_masked,
-        ) / area
-        neighbor_fraction = neighbors_masked.sum(dim=(-2, -1)) / area
-        corrected = joint - torch.einsum(
-            "c,nk->nck",
-            center_fraction,
-            neighbor_fraction,
-        )
-        distance_indices = torch.arange(
-            len(neighbor_indices),
-            device=probs.device,
-        )
-        values[direction, distance_indices] = corrected
-        valid[direction, distance_indices] = True
-        if support_max_radius:
-            side_support, side_valid = support_relation(
-                center,
-                neighbors,
-                roi,
-                max_radius=support_max_radius,
-            )
-            support[direction, distance_indices] = side_support
-            support_valid[direction, distance_indices] = side_valid
-    return RelationCurve(
-        values=values,
-        valid=valid,
-        support=support,
-        support_valid=support_valid,
-        descriptor=matching_descriptor(center, roi),
-        roi_pixels=int(area.item()),
-    )
-
-
-def support_relation(
-    center: torch.Tensor,
-    neighbors: torch.Tensor,
-    roi: torch.Tensor,
-    *,
-    max_radius: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if center.ndim != 3 or neighbors.ndim != 4:
-        raise ValueError("support inputs must be [C,H,W] and [N,C,H,W].")
-    if neighbors.shape[1:] != center.shape:
-        raise ValueError("support center and neighbor planes must match.")
-    if roi.shape != center.shape[1:] or roi.dtype != torch.bool:
-        raise ValueError("support ROI must match the plane shape.")
-    if not isinstance(max_radius, int) or isinstance(max_radius, bool) or max_radius < 1:
-        raise ValueError("support max radius must be a positive integer.")
-    values = center.new_zeros(
-        neighbors.shape[0],
-        max_radius,
-        center.shape[0],
-        2,
-        dtype=torch.float32,
-    )
-    valid = torch.zeros_like(values, dtype=torch.bool)
-    roi_float = roi.to(torch.float32)
-    masked_center = center.detach() * roi_float
-    masked_neighbors = neighbors * roi_float
-    epsilon = torch.finfo(torch.float32).eps
-    for radius in range(1, max_radius + 1):
-        valid_roi = _erode_roi(roi, radius)
-        if not bool(valid_roi.any()):
-            continue
-        weights = valid_roi.to(torch.float32)
-        area = weights.sum()
-        floor = area.rsqrt()
-        kernel = 2 * radius + 1
-        dilated_center = F.max_pool2d(
-            masked_center,
-            kernel_size=kernel,
-            stride=1,
-            padding=radius,
-        )
-        dilated_neighbors = F.max_pool2d(
-            masked_neighbors,
-            kernel_size=kernel,
-            stride=1,
-            padding=radius,
-        )
-
-        neighbor_mass = (neighbors * weights).sum(dim=(-2, -1))
-        center_baseline = (dilated_center * weights).sum(dim=(-2, -1)) / area
-        forward_raw = (
-            neighbors * dilated_center.unsqueeze(0) * weights
-        ).sum(dim=(-2, -1)) / neighbor_mass.clamp_min(epsilon)
-        forward_scale = 1.0 - center_baseline
-        forward = (forward_raw - center_baseline) / forward_scale.clamp_min(
-            epsilon
-        )
-        forward_valid = (neighbor_mass > epsilon) & (forward_scale > floor)
-
-        center_mass = (center.detach() * weights).sum(dim=(-2, -1))
-        neighbor_baseline = (
-            dilated_neighbors * weights
-        ).sum(dim=(-2, -1)) / area
-        backward_raw = (
-            center.detach().unsqueeze(0) * dilated_neighbors * weights
-        ).sum(dim=(-2, -1)) / center_mass.clamp_min(epsilon).unsqueeze(0)
-        backward_scale = 1.0 - neighbor_baseline
-        backward = (backward_raw - neighbor_baseline) / backward_scale.clamp_min(
-            epsilon
-        )
-        backward_valid = (center_mass.unsqueeze(0) > epsilon) & (
-            backward_scale > floor
-        )
-
-        values[:, radius - 1, :, SUPPORT_FORWARD] = forward
-        values[:, radius - 1, :, SUPPORT_BACKWARD] = backward
-        valid[:, radius - 1, :, SUPPORT_FORWARD] = forward_valid
-        valid[:, radius - 1, :, SUPPORT_BACKWARD] = backward_valid
-    return values, valid
-
-
-def morphology_descriptor(probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    if probs.ndim != 3 or not probs.is_floating_point():
-        raise ValueError("descriptor probabilities must have shape [C, H, W].")
-    if mask.shape != probs.shape[1:] or mask.dtype != torch.bool:
-        raise ValueError("descriptor mask must match the probability plane.")
-    if mask.device != probs.device or not bool(mask.any()):
-        raise ValueError("descriptor mask must be non-empty and share the device.")
-    values = probs.float()
-    weights = mask.to(torch.float32)
-    fractions = (values * weights).sum(dim=(-2, -1)) / weights.sum()
-    descriptors = [fractions[:-1]]
-    for dimension in (1, 2):
-        left = [slice(None), slice(None), slice(None)]
-        right = [slice(None), slice(None), slice(None)]
-        left[dimension] = slice(None, -1)
-        right[dimension] = slice(1, None)
-        left_mask = [slice(None), slice(None)]
-        right_mask = [slice(None), slice(None)]
-        left_mask[dimension - 1] = slice(None, -1)
-        right_mask[dimension - 1] = slice(1, None)
-        pair_mask = mask[tuple(left_mask)] & mask[tuple(right_mask)]
-        if bool(pair_mask.any()):
-            change = 0.5 * (
-                values[tuple(left)] - values[tuple(right)]
-            ).abs().sum(dim=0)
-            density = change[pair_mask].mean().reshape(1)
-        else:
-            density = values.new_zeros(1)
-        descriptors.append(density)
-    return torch.cat(descriptors).detach()
-
-
-def matching_descriptor(probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Use one categorical representation and include the ROI measurement scale."""
-    if probs.ndim != 3 or not probs.is_floating_point():
-        raise ValueError("matching probabilities must have shape [C, H, W].")
-    labels = probs.argmax(dim=0)
-    hard = F.one_hot(labels, num_classes=probs.shape[0]).movedim(-1, 0)
-    morphology = morphology_descriptor(hard.to(torch.float32), mask)
-    points = mask.nonzero()
-    height = points[:, 0].amax() - points[:, 0].amin() + 1
-    width = points[:, 1].amax() - points[:, 1].amin() + 1
-    geometry = torch.stack(
-        (
-            mask.to(torch.float32).mean(),
-            height.to(torch.float32) / mask.shape[0],
-            width.to(torch.float32) / mask.shape[1],
-            mask.all().to(torch.float32),
-        )
-    ).to(device=probs.device)
-    return torch.cat((morphology, geometry)).detach()
-
-
-def relation_penalty(
-    curve: RelationCurve,
-    target: RelationTarget,
-    *,
-    phase_weight: float,
-    support_weight: float,
-    direction_reduction: Literal["mean", "max"],
-) -> RelationPenalty:
-    _validate_penalty(curve, target, phase_weight, support_weight, direction_reduction)
-    zero = curve.values.sum() * 0.0
-    floor = 1.0 / math.sqrt(max(curve.roi_pixels, 1))
-    phase_values, phase_active = _directional_feature_loss(
-        curve.values,
-        curve.valid.unsqueeze(-1).unsqueeze(-1),
-        target.lower,
-        target.upper,
-        target.valid.unsqueeze(-1).unsqueeze(-1),
-        target.weights,
-        floor,
-        group_feature_dims=(-2, -1),
-    )
-    support_values, support_active = _directional_feature_loss(
-        curve.support,
-        curve.support_valid,
-        target.support_lower,
-        target.support_upper,
-        target.support_valid,
-        target.support_weights,
-        floor,
-        group_feature_dims=(-2, -1),
-    )
-    phase = _reduce_directions(phase_values, phase_active, direction_reduction, zero)
-    support = _reduce_directions(
-        support_values,
-        support_active,
-        direction_reduction,
-        zero,
-    )
-    combined = []
-    combined_active = []
-    for direction in (MINUS_DIRECTION, PLUS_DIRECTION):
-        components = []
-        weights = []
-        if bool(phase_active[direction]) and phase_weight > 0.0:
-            components.append(phase_values[direction])
-            weights.append(phase_weight)
-        if bool(support_active[direction]) and support_weight > 0.0:
-            components.append(support_values[direction])
-            weights.append(support_weight)
-        if components:
-            combined.append(
-                sum(
-                    weight * value
-                    for weight, value in zip(weights, components, strict=True)
-                )
-                / sum(weights)
-            )
-            combined_active.append(True)
-        else:
-            combined.append(zero)
-            combined_active.append(False)
-    combined_values = torch.stack(combined)
-    active = torch.tensor(
-        combined_active,
-        device=curve.values.device,
-        dtype=torch.bool,
-    )
-    loss = _reduce_directions(combined_values, active, direction_reduction, zero)
-    ood = float(target.ood_weight)
-    phase_distance = target.weights
-    support_distance = target.support_weights.sum(dim=1)
-    distance_components = []
-    distance_component_weights = []
-    if bool(phase_distance.sum() > 0.0) and phase_weight > 0.0:
-        distance_components.append(phase_distance)
-        distance_component_weights.append(phase_weight)
-    if bool(support_distance.sum() > 0.0) and support_weight > 0.0:
-        distance_components.append(support_distance)
-        distance_component_weights.append(support_weight)
-    if distance_components:
-        distance_weights = sum(
-            weight * value
-            for weight, value in zip(
-                distance_component_weights,
-                distance_components,
-                strict=True,
-            )
-        ) / sum(distance_component_weights)
-        distance_weights = distance_weights / distance_weights.sum().clamp_min(
-            torch.finfo(distance_weights.dtype).eps
-        )
-    else:
-        distance_weights = target.weights.new_zeros(target.weights.shape)
-    return RelationPenalty(
-        loss=ood * loss,
-        phase=ood * phase,
-        support=ood * support,
-        minus=ood * combined_values[MINUS_DIRECTION],
-        plus=ood * combined_values[PLUS_DIRECTION],
-        distance_weights=distance_weights,
-    )
-
-
-def relation_interval_loss(
-    curve: RelationCurve,
-    target: RelationTarget,
-    *,
-    phase_weight: float = 0.75,
-    support_weight: float = 0.25,
-    direction_reduction: Literal["mean", "max"] = "mean",
-) -> torch.Tensor:
-    return relation_penalty(
-        curve,
-        target,
-        phase_weight=phase_weight,
-        support_weight=support_weight,
-        direction_reduction=direction_reduction,
-    ).loss
-
-
-def _directional_feature_loss(
-    values: torch.Tensor,
-    curve_valid: torch.Tensor,
-    lower: torch.Tensor,
-    upper: torch.Tensor,
-    target_valid: torch.Tensor,
-    group_weights: torch.Tensor,
-    floor: float,
-    *,
-    group_feature_dims: tuple[int, ...],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if values.shape[1:] != lower.shape or lower.shape != upper.shape:
-        raise ValueError("relation values and interval target shapes must match.")
-    valid = curve_valid & target_valid.unsqueeze(0)
-    width = (upper - lower).clamp_min(floor)
-    violation = (F.relu(lower - values) + F.relu(values - upper)) / width
-    valid_float = valid.to(violation.dtype)
-    numerator = (violation * valid_float).sum(dim=group_feature_dims)
-    denominator = valid_float.sum(dim=group_feature_dims)
-    per_group = numerator / denominator.clamp_min(1.0)
-    group_valid = denominator > 0.0
-    weights = group_weights.unsqueeze(0) * group_valid
-    group_dims = tuple(range(1, weights.ndim))
-    weights = weights / weights.sum(dim=group_dims, keepdim=True).clamp_min(
-        torch.finfo(weights.dtype).eps
-    )
-    directional = (weights * per_group).sum(dim=group_dims)
-    active = group_valid.any(dim=group_dims) & (group_weights.sum() > 0.0)
-    return directional, active
-
-
-def _reduce_directions(
-    values: torch.Tensor,
-    active: torch.Tensor,
-    reduction: Literal["mean", "max"],
-    zero: torch.Tensor,
-) -> torch.Tensor:
-    selected = values[active]
-    if not selected.numel():
-        return zero
-    return selected.mean() if reduction == "mean" else selected.max()
-
-
-def _learned_group_weights(
-    midpoint: torch.Tensor,
-    spread: torch.Tensor,
-    coverage: torch.Tensor,
-    group_valid: torch.Tensor,
-    floor: float,
-    *,
-    feature_dims: tuple[int, ...],
-    feature_valid: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if feature_valid is None:
-        signal = midpoint.abs().mean(dim=feature_dims)
-        width = spread.mean(dim=feature_dims)
-        sample_coverage = coverage
-    else:
-        mask = feature_valid.to(midpoint.dtype)
-        count = mask.sum(dim=feature_dims).clamp_min(1.0)
-        signal = (midpoint.abs() * mask).sum(dim=feature_dims) / count
-        width = (spread * mask).sum(dim=feature_dims) / count
-        sample_coverage = (coverage * mask).sum(dim=feature_dims) / count
-    sampling_noise = 0.5 * floor
-    raw = (signal - sampling_noise).clamp_min(0.0) / (
-        signal + width + sampling_noise
-    ).clamp_min(torch.finfo(signal.dtype).eps)
-    raw = raw * sample_coverage * group_valid
-    total = raw.sum()
-    return raw / total if bool(total > 0.0) else torch.zeros_like(raw)
-
-
-def _erode_roi(roi: torch.Tensor, radius: int) -> torch.Tensor:
-    outside = (~roi).to(torch.float32).unsqueeze(0).unsqueeze(0)
-    padded = F.pad(outside, (radius, radius, radius, radius), value=1.0)
-    near_outside = F.max_pool2d(
-        padded,
-        kernel_size=2 * radius + 1,
-        stride=1,
-    )
-    return near_outside[0, 0] == 0.0
-
-
-def _validate_penalty(
-    curve: RelationCurve,
-    target: RelationTarget,
-    phase_weight: float,
-    support_weight: float,
-    direction_reduction: str,
-) -> None:
-    if curve.values.ndim != 4 or curve.values.shape[0] != 2:
-        raise ValueError("phase relation curve must have two directions.")
-    if curve.valid.shape != curve.values.shape[:2]:
-        raise ValueError("phase relation validity must match directions and distances.")
-    if curve.support.ndim != 5 or curve.support.shape[0] != 2:
-        raise ValueError("support relation curve has an invalid shape.")
-    if curve.support_valid.shape != curve.support.shape:
-        raise ValueError("support relation validity must match its values.")
-    if target.weights.shape != curve.valid.shape[1:]:
-        raise ValueError("phase relation weights must match distances.")
-    if target.valid.shape != curve.valid.shape[1:]:
-        raise ValueError("phase target validity must match distances.")
-    if target.support_weights.shape != curve.support.shape[1:3]:
-        raise ValueError("support weights must match distance and radius.")
-    if target.support_valid.shape != curve.support.shape[1:]:
-        raise ValueError("support target validity must match its features.")
-    for name, value in (
-        ("phase_weight", phase_weight),
-        ("support_weight", support_weight),
-    ):
-        if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not math.isfinite(value)
-            or value < 0.0
-        ):
-            raise ValueError(f"{name} must be finite and non-negative.")
-    if phase_weight + support_weight <= 0.0:
-        raise ValueError("at least one relation component weight must be positive.")
-    if direction_reduction not in ("mean", "max"):
-        raise ValueError("direction_reduction must be 'mean' or 'max'.")

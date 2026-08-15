@@ -60,6 +60,21 @@ from src.train.weights import save_checkpoint, save_weights
 from src.utils import save_yaml
 
 
+def test_build_models_keeps_legacy_single_and_enables_multiscale(
+    tmp_path: Path,
+) -> None:
+    cfg = _config(tmp_path)
+
+    legacy, _, _ = build_models(cfg)
+    cfg["model"]["anchor_adapter"] = "multiscale"
+    multiscale, _, _ = build_models(cfg)
+
+    assert legacy.anchor_adapter == "single"
+    assert len(legacy.anchor_pyramid) == 0
+    assert multiscale.anchor_adapter == "multiscale"
+    assert len(multiscale.anchor_pyramid) == 1
+
+
 def test_ema_weights_generate_categorical_volume(
     tmp_path: Path,
 ) -> None:
@@ -112,6 +127,7 @@ def test_anchor_aware_weights_accept_soft_plane_condition(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
+    cfg["model"]["anchor_adapter"] = "multiscale"
     cfg["anchor"]["training_probability"] = 0.5
     run_dir = tmp_path / "run" / "anchored"
     run_dir.mkdir(parents=True)
@@ -120,6 +136,8 @@ def test_anchor_aware_weights_accept_soft_plane_condition(
     ema = build_ema(denoiser)
     with torch.no_grad():
         ema.anchor_input.weight.fill_(0.01)
+        for projection in ema.anchor_pyramid:
+            projection.weight.fill_(0.01)
     weights = save_weights(run_dir, ema)
     generator = load_generator(weights, device=torch.device("cpu"))
     anchor = PlaneAnchor(
@@ -823,9 +841,7 @@ def test_final_anchor_step_preserves_same_rng_baseline_in_far_field() -> None:
         ) -> torch.Tensor:
             del timestep, latent, domain
             logits = (
-                current.mean(dim=(2, 3, 4), keepdim=True)
-                .expand_as(current)
-                .clone()
+                current.mean(dim=(2, 3, 4), keepdim=True).expand_as(current).clone()
             )
             if anchor_image is not None and anchor_mask is not None:
                 logits = logits + 2.0 * anchor_image * anchor_mask
@@ -1060,9 +1076,7 @@ def test_anchor_residual_blur_early_rejects_invalid_values(
     generator = _generator(_AnchorTraceModel(), Diffusion(3))
 
     with pytest.raises(ValueError, match="anchor_residual_blur_early"):
-        generator.generate_probs(
-            anchor_residual_blur_early=anchor_residual_blur_early
-        )
+        generator.generate_probs(anchor_residual_blur_early=anchor_residual_blur_early)
 
 
 @pytest.mark.parametrize("release", (None, True, "everywhere"))

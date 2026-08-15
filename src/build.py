@@ -149,6 +149,7 @@ def build_denoiser(
         latent_channels=model["latent_channels"],
         num_domains=num_domains,
         gradient_checkpointing=checkpointing,
+        anchor_adapter=model.get("anchor_adapter", "single"),
     )
 
 
@@ -379,6 +380,18 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             relation_direction_reduction=relation.get(
                 "direction_reduction",
                 "mean",
+            ),
+            relation_min_support_pixels=relation.get(
+                "min_support_pixels",
+                8,
+            ),
+            relation_min_phase_fraction=relation.get(
+                "min_phase_fraction",
+                0.001,
+            ),
+            relation_min_chance_gap=relation.get(
+                "min_chance_gap",
+                0.02,
             ),
         ),
     )

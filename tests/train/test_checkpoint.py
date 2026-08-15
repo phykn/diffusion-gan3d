@@ -4,6 +4,7 @@ import pytest
 import torch
 from torch import nn
 
+from src.model.denoiser import Denoiser3D
 from src.train.ema import build_ema, update_ema
 from src.train.weights import (
     CHECKPOINT_DIR,
@@ -21,6 +22,18 @@ class _BufferedModel(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.full((2,), 2.0))
         self.register_buffer("counter", torch.tensor(3))
+
+
+def _multiscale_denoiser() -> Denoiser3D:
+    return Denoiser3D(
+        num_phases=2,
+        base_channels=4,
+        channel_multipliers=(1, 2, 4),
+        embedding_channels=8,
+        latent_channels=4,
+        num_domains=1,
+        anchor_adapter="multiscale",
+    )
 
 
 def test_model_file_contains_only_ema_weights(tmp_path: Path) -> None:
@@ -44,6 +57,24 @@ def test_model_file_contains_only_ema_weights(tmp_path: Path) -> None:
     for name, value in values.items():
         assert torch.equal(value, expected[name])
     assert not tuple(tmp_path.glob("critic_*.pt"))
+
+
+def test_multiscale_adapter_checkpoint_is_tensor_only_and_loads_strictly(
+    tmp_path: Path,
+) -> None:
+    source = _multiscale_denoiser()
+    with torch.no_grad():
+        for index, projection in enumerate(source.anchor_pyramid, start=1):
+            projection.weight.fill_(float(index))
+
+    path = save_weights(tmp_path, source)
+    saved = torch.load(path, map_location="cpu", weights_only=True)
+    restored = _multiscale_denoiser()
+    load_weights(path, restored)
+
+    assert saved.keys() == source.state_dict().keys()
+    assert all(isinstance(value, torch.Tensor) for value in saved.values())
+    _assert_same_state(restored, source)
 
 
 def test_training_weights_load_independently(
@@ -120,6 +151,19 @@ def test_numbered_checkpoint_preserves_complete_weight_set(tmp_path: Path) -> No
     assert all((root / name).is_file() for name in CRITIC_FILES)
     assert (root / CRITIC_C_FILE).is_file()
     assert not tuple((tmp_path / CHECKPOINT_DIR).glob(".*.tmp"))
+    expected_states = {
+        "generator.pt": source.state_dict(),
+        **{
+            name: critics[str(axis)].state_dict()
+            for axis, name in enumerate(CRITIC_FILES)
+        },
+        CRITIC_C_FILE: connectivity.state_dict(),
+    }
+    for name, expected in expected_states.items():
+        saved = torch.load(root / name, map_location="cpu", weights_only=True)
+        assert saved.keys() == expected.keys()
+        assert all(isinstance(value, torch.Tensor) for value in saved.values())
+        assert all(torch.equal(saved[key], value) for key, value in expected.items())
     with pytest.raises(FileExistsError, match="already exists"):
         save_checkpoint(
             tmp_path,

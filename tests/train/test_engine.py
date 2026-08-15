@@ -1222,6 +1222,14 @@ def test_relation_loss_uses_diffusion_signal_weight_in_generator_total() -> None
     def relation_loss(probs, condition, visible, *, domain):
         del condition, visible, domain
         zero = probs.sum() * 0.0
+        phase_weights = probs.new_zeros(7, 2)
+        phase_weights[:2] = probs.new_tensor(((0.75, 0.25), (0.25, 0.75)))
+        support_weights = probs.new_zeros(7, 2)
+        support_weights[0] = 1.0
+        diagnostics = probs.new_zeros(7, 2)
+        diagnostics[0] = probs.new_tensor((0.3, 0.2))
+        displacement = probs.new_full((7, 2, 2), -1.0)
+        displacement[0] = 1.0
         return RelationLoss(
             loss=zero + 2.0,
             phase=zero + 1.5,
@@ -1235,6 +1243,17 @@ def test_relation_loss_uses_diffusion_signal_weight_in_generator_total() -> None
             ood_rejections=0,
             missing_references=0,
             distance_weights=probs.new_tensor((0.75, 0.25, 0, 0, 0, 0, 0)),
+            phase_distance_weights=phase_weights,
+            support_distance_weights=support_weights,
+            correlation_strength=diagnostics,
+            uncertainty=0.5 * diagnostics,
+            displacement_quantile=displacement,
+            dilation_radius=diagnostics.sign(),
+            valid_ratio_by_phase=probs.new_tensor((1.0, 0.5)),
+            support_forward=zero + 0.2,
+            support_backward=zero + 0.3,
+            long_range=zero + 1.5,
+            matched_reference_count=10.0 * diagnostics.sign(),
         )
 
     with (
@@ -1263,6 +1282,16 @@ def test_relation_loss_uses_diffusion_signal_weight_in_generator_total() -> None
     assert metrics.relation_minus_loss == 0.75
     assert metrics.relation_plus_loss == 1.25
     assert metrics.relation_distance_weights[:2] == (0.75, 0.25)
+    assert metrics.relation_phase_distance_weights[0] == (0.75, 0.25)
+    assert metrics.relation_support_distance_weights[0] == (1.0, 1.0)
+    assert metrics.relation_correlation_strength[0] == pytest.approx((0.3, 0.2))
+    assert metrics.relation_displacement_quantiles[0][0] == (1.0, 1.0)
+    assert metrics.relation_dilation_radii[0] == (1.0, 1.0)
+    assert metrics.relation_valid_ratio_by_phase == (1.0, 0.5)
+    assert metrics.relation_support_forward_loss == pytest.approx(0.2)
+    assert metrics.relation_support_backward_loss == pytest.approx(0.3)
+    assert metrics.relation_long_range_loss == pytest.approx(1.5)
+    assert metrics.relation_matched_reference_counts[0] == (10.0, 10.0)
     assert math.isclose(metrics.generator_total, expected, rel_tol=1e-5)
 
 

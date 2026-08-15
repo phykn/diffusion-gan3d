@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import torch
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -120,6 +121,14 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "loss/relation_support": metrics.relation_support_loss,
         "loss/relation_minus": metrics.relation_minus_loss,
         "loss/relation_plus": metrics.relation_plus_loss,
+        "loss/relation_support_forward": metrics.relation_support_forward_loss,
+        "loss/relation_support_backward": (metrics.relation_support_backward_loss),
+        "loss/relation_long_range": metrics.relation_long_range_loss,
+        "relation/support_forward_violation": (metrics.relation_support_forward_loss),
+        "relation/support_backward_violation": (metrics.relation_support_backward_loss),
+        "relation/long_range_violation": metrics.relation_long_range_loss,
+        "relation/raw_loss": metrics.relation_loss,
+        "relation/weighted_loss": metrics.relation_weighted_loss,
         "train/transition": metrics.transition,
         "train/volume_size": metrics.volume_size,
         "train/domain": metrics.domain,
@@ -132,9 +141,7 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "train/relation_domain_matches": metrics.relation_domain_matches,
         "train/relation_shared_matches": metrics.relation_shared_matches,
         "train/relation_ood_rejections": metrics.relation_ood_rejections,
-        "train/relation_missing_references": (
-            metrics.relation_missing_references
-        ),
+        "train/relation_missing_references": (metrics.relation_missing_references),
         "train/relation_match_rate": (
             metrics.relation_matches / max(metrics.relation_queries, 1)
         ),
@@ -180,6 +187,7 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
             weighted_distance,
             step,
         )
+    _write_relation_profiles(writer, step, metrics)
 
     states = ("both", "anchor_only", "vf_only", "joint_null")
     for name, fraction in zip(
@@ -218,3 +226,142 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         writer.add_scalar(f"conditioning/vf_target_std_{phase}", target_std, step)
         writer.add_scalar(f"conditioning/vf_soft_{phase}", soft, step)
         writer.add_scalar(f"conditioning/vf_hard_{phase}", hard, step)
+
+
+def _write_relation_profiles(
+    writer: SummaryWriter,
+    step: int,
+    metrics: Metrics,
+) -> None:
+    if not metrics.relation_matches or not metrics.relation_phase_distance_weights:
+        return
+    long_weights = torch.tensor(
+        metrics.relation_phase_distance_weights,
+        dtype=torch.float32,
+    )
+    support_weights = _matrix_or_default(
+        metrics.relation_support_distance_weights,
+        long_weights,
+    )
+    strength = _matrix_or_default(
+        metrics.relation_correlation_strength,
+        long_weights,
+    )
+    uncertainty = _matrix_or_default(metrics.relation_uncertainty, long_weights)
+    radii = _matrix_or_default(
+        metrics.relation_dilation_radii,
+        long_weights,
+        fill=-1.0,
+    )
+    displacement = torch.tensor(
+        metrics.relation_displacement_quantiles,
+        dtype=torch.float32,
+    )
+    expected_displacement = (*long_weights.shape, 2)
+    if displacement.shape != expected_displacement:
+        displacement = torch.full(expected_displacement, -1.0)
+    reference_counts = _matrix_or_default(
+        metrics.relation_matched_reference_counts,
+        long_weights,
+    )
+    valid_ratios = tuple(metrics.relation_valid_ratio_by_phase)
+    if len(valid_ratios) != long_weights.shape[1]:
+        valid_ratios = (0.0,) * long_weights.shape[1]
+    distances = torch.arange(
+        1,
+        long_weights.shape[0] + 1,
+        dtype=torch.float32,
+    )
+    writer.add_image(
+        "relation/normalized_weight_by_phase_distance",
+        long_weights.transpose(0, 1),
+        step,
+        dataformats="HW",
+    )
+    writer.add_image(
+        "relation/support_weight_by_phase_distance",
+        support_weights.transpose(0, 1),
+        step,
+        dataformats="HW",
+    )
+    _write_nonnegative_profile_image(
+        writer,
+        "relation/correlation_strength_by_phase_distance",
+        strength,
+        step,
+    )
+    valid_reference_counts = reference_counts > 0.0
+    writer.add_scalar(
+        "relation/matched_reference_count",
+        (
+            reference_counts[valid_reference_counts].mean()
+            if bool(valid_reference_counts.any())
+            else 0.0
+        ),
+        step,
+    )
+    _write_nonnegative_profile_image(
+        writer,
+        "relation/uncertainty_by_phase_distance",
+        uncertainty,
+        step,
+    )
+    _write_nonnegative_profile_image(
+        writer,
+        "relation/dilation_radius_by_phase_distance",
+        radii,
+        step,
+    )
+    for direction, name in enumerate(("forward", "backward")):
+        _write_nonnegative_profile_image(
+            writer,
+            f"relation/displacement_{name}_by_phase_distance",
+            displacement[..., direction],
+            step,
+        )
+    _write_nonnegative_profile_image(
+        writer,
+        "relation/matched_reference_count_by_phase_distance",
+        reference_counts,
+        step,
+    )
+    for phase in range(long_weights.shape[1]):
+        writer.add_scalar(
+            f"relation/weighted_distance_phase_{phase}",
+            (distances * long_weights[:, phase]).sum(),
+            step,
+        )
+        writer.add_scalar(
+            f"relation/valid_ratio_phase_{phase}",
+            valid_ratios[phase],
+            step,
+        )
+
+
+def _write_nonnegative_profile_image(
+    writer: SummaryWriter,
+    tag: str,
+    values: torch.Tensor,
+    step: int,
+) -> None:
+    visible = values.clamp_min(0.0)
+    scale = visible.max().clamp_min(1.0)
+    writer.add_image(
+        tag,
+        (visible / scale).transpose(0, 1),
+        step,
+        dataformats="HW",
+    )
+    writer.add_scalar(f"{tag}_scale", scale, step)
+
+
+def _matrix_or_default(
+    values: tuple[tuple[float, ...], ...],
+    reference: torch.Tensor,
+    *,
+    fill: float = 0.0,
+) -> torch.Tensor:
+    matrix = torch.tensor(values, dtype=torch.float32)
+    if matrix.shape == reference.shape:
+        return matrix
+    return torch.full_like(reference, fill)

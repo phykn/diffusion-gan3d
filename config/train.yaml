@@ -26,6 +26,8 @@ model:
   latent_channels: 64
   critic_channels: [32, 64, 128, 256]
   gradient_checkpointing: true
+  # Omit or set single for legacy weights; multiscale adds zero-init encoder paths.
+  anchor_adapter: multiscale
 
 diffusion:
   timesteps: 10
@@ -72,7 +74,13 @@ relation:
   loss_weight: 0.02
   phase_weight: 0.75
   support_weight: 0.25
+  # Compute guard only: the frozen prior selects radius 0..cap per phase and
+  # distance. Overflow disables that support term instead of clamping it.
   support_max_radius: 2
+  min_support_pixels: 8
+  min_phase_fraction: 0.001
+  # Also rejects dominant-phase support whose chance baseline exceeds 0.98.
+  min_chance_gap: 0.02
   direction_reduction: mean
   bank_capacity_per_axis: 64
   profiles_per_axis: 4

@@ -54,7 +54,13 @@ coarse loss preserves the supplied section's phase layout, while a low-weight
 pixel loss lets exact boundaries adapt. Both losses, the connectivity loss, and
 teacher promotion are disabled for samples whose anchor was removed by CFG
 dropout. Coarse pooling cells are weighted by their observed coverage, so a
-one-pixel partial-anchor edge cannot outweigh a fully observed cell. The optional
+one-pixel partial-anchor edge cannot outweigh a fully observed cell. With
+`model.anchor_adapter: multiscale`, the original observed phases and mask are
+pooled independently at every encoder scale. Mask normalization preserves a
+thin or partial plane, while zero-initialized projections preserve the original
+generator path at initialization. Omitting this setting selects the legacy
+single-scale adapter so existing weight files remain strictly loadable with
+their original run configuration. The optional
 relation loss stores only relation curves and morphology descriptors from a full
 anchor/VF-free EMA diffusion sample—never generated images. Before anchor
 training begins, one EMA snapshot is held fixed until this bank is complete; the
@@ -62,8 +68,13 @@ bank then remains frozen. It measures both chance-corrected phase covariance and
 lateral-movement-tolerant support continuation at every available distance.
 Minus and plus directions are penalized separately so failure on one side cannot
 be hidden by the other. Reference crops follow the training anchor ROI shapes,
-use the same hard morphology descriptor as observed anchors, learn their useful
-distance range from the data, and stop gradients through the anchor plane. Domain
+use the same hard morphology descriptor as observed anchors, and stop gradients
+through the anchor plane. Each phase learns its own distance profile from excess
+dependence divided by natural reference variability. A hard-morphology
+displacement histogram selects a phase- and distance-specific support radius;
+movement beyond the configured compute cap disables only that support term rather
+than forcing it to the cap. Rare and near-certain phases are excluded with
+numerical mass and chance-baseline guards. Domain
 curves are used only for axes actually observed in that domain; otherwise training
 falls back to a balanced shared bank built from domains that own the axis. An
 out-of-distribution descriptor gate disables unsuitable shared matches instead of
@@ -161,7 +172,10 @@ python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 
 
 Generator scripts default to `--domain 0` and the `guidance` value in `config/gen.yaml`. Paper scripts require explicit weights and record input provenance.
 
-`generator.pt` is the latest weight; `checkpoint_every_steps` preserves numbered sets under `checkpoints/step_XXXXXXXX/`.
+`generator.pt` is the latest weight; `checkpoint_every_steps` preserves numbered
+sets under `checkpoints/step_XXXXXXXX/`. Every `.pt` file is an independent model
+`state_dict` containing tensors only. Optimizer state, training step metadata, and
+trainer-side relation-bank statistics are never embedded in these weight files.
 
 ## Development
 
