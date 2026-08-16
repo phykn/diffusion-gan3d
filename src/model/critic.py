@@ -151,7 +151,6 @@ class ConnectivityCritic2D(_Critic2D):
         channels: Sequence[int],
         embedding_channels: int,
         num_domains: int,
-        reversal_invariant: bool = True,
         gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__(
@@ -161,10 +160,6 @@ class ConnectivityCritic2D(_Critic2D):
             num_domains=num_domains,
             gradient_checkpointing=gradient_checkpointing,
         )
-        if not isinstance(reversal_invariant, bool):
-            raise TypeError("reversal_invariant must be a boolean.")
-
-        self.reversal_invariant = reversal_invariant
         self.axis_embedding = nn.Embedding(3, embedding_channels)
         self.axis_mlp = nn.Sequential(
             nn.Linear(embedding_channels, embedding_channels),
@@ -187,8 +182,6 @@ class ConnectivityCritic2D(_Critic2D):
             raise ValueError("axes must contain only 0, 1, or 2.")
 
         forward = self.score_once(triplets, axes, domain)
-        if not self.reversal_invariant:
-            return forward
         reverse = self.score_once(triplets.flip(1), axes, domain)
         return CriticScores(
             logits_global=(forward.logits_global + reverse.logits_global) * 0.5,

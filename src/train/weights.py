@@ -39,6 +39,23 @@ def save_all_weights(
     return save_weights(root, model)
 
 
+def load_all_weights(
+    run_dir: str | Path,
+    model: nn.Module,
+    average: nn.Module,
+    critics: nn.ModuleDict,
+    connectivity_critic: nn.Module,
+) -> None:
+    check_critics(critics)
+    root = Path(run_dir)
+    generator = load_state(root / GENERATOR_FILE)
+    model.load_state_dict(generator, strict=True)
+    average.load_state_dict(generator, strict=True)
+    for axis in sorted(int(value) for value in critics):
+        load_weights(root / CRITIC_FILES[axis], critics[str(axis)])
+    load_weights(root / CRITIC_C_FILE, connectivity_critic)
+
+
 def save_checkpoint(
     run_dir: str | Path,
     step: int,

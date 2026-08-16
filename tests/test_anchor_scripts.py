@@ -3,7 +3,6 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pytest
 import tifffile
 import torch
@@ -12,9 +11,11 @@ from src.build import build_models
 from src.config import GenerationSettings
 from src.evaluate import (
     BoundaryQuality,
+    SliceSmoothness,
     measure_boundaries,
     measure_distance_changes,
     measure_distance_divergence,
+    measure_slice_smoothness,
 )
 from src.train.weights import save_weights
 from src.utils import save_yaml
@@ -26,16 +27,13 @@ ROOT = Path(__file__).resolve().parents[1]
     "count",
     (0, 1, 3, 8),
 )
-def test_anchor_check_script_runs_with_fixed_volume(
+def test_anchor_check_script_runs_with_generated_reference(
     count: int,
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
-    volume_path = tmp_path / "volume_000.tiff"
     output_path = tmp_path / f"generated_{count}.tiff"
-    volume = (np.indices((8, 8, 8)).sum(axis=0) % 3).astype(np.uint8)
-    tifffile.imwrite(volume_path, volume)
 
     cfg = _config(tmp_path)
     run_dir = tmp_path / "run"
@@ -56,8 +54,6 @@ def test_anchor_check_script_runs_with_fixed_volume(
             filename,
             "--weight",
             str(weights),
-            "--gt",
-            str(volume_path),
             "--count",
             str(count),
             "--out",
@@ -72,21 +68,23 @@ def test_anchor_check_script_runs_with_fixed_volume(
     assert tifffile.imread(output_path).shape == (8, 8, 8)
 
     output = capsys.readouterr().out
-    assert "Shape    : 8 × 8 × 8" in output
-    assert f"Anchors  : {count} planes" in output
-    assert "Anchor match      :" in output
-    assert "Margin  : 8 per outer face" in output
-    assert "Complete volume :" in output
-    assert "Phase IoU" in output
-    assert "Anchor boundary" in output
-    assert "Anchor sides" in output
-    assert "Ordinary planes" in output
+    assert "Input   : 8 x 8 x 8, cpu" in output
+    assert f"Anchors : {count} planes on axis 0" in output
+    assert "Anchor match  :" in output
+    assert "Smoothness" in output
+    assert "Surface bumps" in output
+    assert "Volume match" not in output
+    assert "Phase IoU" not in output
+    assert "Boundary ratio" not in output
+    assert "Distance change" not in output
+    assert "Coverage" not in output
+    assert "Phase recall" not in output
     if count == 0:
-        assert "Anchor sides       : n/a" in output
-        assert "Distance profile" not in output
+        assert "Anchor effect" not in output
+        assert "strength 0.90" not in output
     else:
-        assert "Distance profile" in output
-        assert "Distance  0" in output
+        assert "Anchor effect" in output
+        assert "strength 0.90" in output
     assert "Indices" not in output
     assert "Center slice" not in output
 
@@ -109,6 +107,17 @@ def test_anchor_graph_uses_nearest_selected_plane() -> None:
     assert module.select_display_index(64, (10, 32, 53)) == 32
 
 
+def test_anchor_effect_profile_reports_parameter_free_distances() -> None:
+    module = _load_script("03_check_anchor.py")
+
+    assert module.format_profile((0.2, 0.4, 0.8)) == (
+        "anchor 20.00%, mean 46.67%, farthest 80.00% at distance 2"
+    )
+    assert module.format_profile((0.2, 0.4, None)) == (
+        "anchor 20.00%, mean 30.00%, farthest 40.00% at distance 1"
+    )
+
+
 def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -120,6 +129,7 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     class FakeGenerator:
         patch_size = 4
         num_phases = 3
+        default_margin = 8
 
         class diffusion:
             timesteps = 10
@@ -129,7 +139,6 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
             *,
             anchors,
             anchor_strength,
-            anchor_sigma,
             guidance,
             domain,
             margin,
@@ -138,7 +147,6 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
                 (
                     anchors,
                     anchor_strength,
-                    anchor_sigma,
                     guidance,
                     domain,
                     margin,
@@ -152,11 +160,6 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
         "load_generation_settings",
         lambda: GenerationSettings(),
     )
-    monkeypatch.setattr(
-        module,
-        "load_volume",
-        lambda *_args, **_kwargs: torch.zeros((4, 4, 4), dtype=torch.uint8),
-    )
     monkeypatch.setattr(module, "show_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(
@@ -168,8 +171,6 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
             str(tmp_path / "generator.pt"),
             "--domain",
             "1",
-            "--gt",
-            str(tmp_path / "gt.tiff"),
             "--count",
             "3",
             "--anchor-strength",
@@ -182,9 +183,67 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     module.main()
 
     output = capsys.readouterr().out
-    assert calls == [((), 0.0, 2.0, 1.75, 1, 8)]
-    assert "Anchors  : 0 planes" in output
-    assert "Conditioning : none" in output
+    assert calls == [
+        ((), 0.0, 1.75, 1, 8),
+        ((), 0.0, 1.75, 1, 8),
+        ((), 0.0, 1.75, 1, 8),
+    ]
+    assert "Anchors : 0 planes on axis 0" in output
+    assert "Guidance" not in output
+
+
+def test_anchor_check_uses_generated_reference_and_same_rng_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_script("03_check_anchor.py")
+    reference = torch.arange(64, dtype=torch.uint8).reshape(4, 4, 4) % 3
+    calls = []
+
+    class FakeGenerator:
+        patch_size = 4
+        num_phases = 3
+        default_margin = 8
+
+        def generate(self, *, anchors, **_kwargs):
+            calls.append((anchors, float(torch.rand(()))))
+            return reference.clone() if len(calls) == 1 else torch.zeros_like(reference)
+
+    monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
+    monkeypatch.setattr(
+        module,
+        "load_generation_settings",
+        lambda: GenerationSettings(),
+    )
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [
+            "03_check_anchor.py",
+            "--weight",
+            str(tmp_path / "generator.pt"),
+            "--seed",
+            "17",
+            "--axis",
+            "1",
+            "--count",
+            "1",
+            "--no-view",
+        ],
+    )
+
+    module.main()
+
+    assert len(calls) == 3
+    assert calls[0][0] == ()
+    assert len(calls[1][0]) == 1
+    anchor = calls[1][0][0]
+    assert anchor.axis == 1
+    assert anchor.index == 2
+    assert torch.equal(anchor.image, reference.movedim(1, 0)[2])
+    assert calls[2][0] == ()
+    assert calls[1][1] == calls[2][1]
 
 
 @pytest.mark.parametrize(
@@ -205,17 +264,13 @@ def test_unconditioned_check_routes_only_domain_condition(
     class FakeGenerator:
         patch_size = 4
         num_phases = 3
+        default_margin = 8
 
         def generate(self, *, vf, domain, margin):
             calls.append((vf, domain, margin))
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
-    monkeypatch.setattr(
-        module,
-        "load_generation_settings",
-        lambda: GenerationSettings(),
-    )
     monkeypatch.setattr(module, "show_slices", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(
@@ -237,8 +292,8 @@ def test_unconditioned_check_routes_only_domain_condition(
 
     assert calls == [(None, domain, 8)]
     output = capsys.readouterr().out
-    assert f"Domain  : {domain}" in output
-    assert "Anchor/VF : none" in output
+    assert f"domain {domain}, cpu" in output
+    assert "Anchor/VF" not in output
 
 
 def test_anchor_boundary_quality_compares_both_sides_with_ordinary_planes() -> None:
@@ -267,6 +322,61 @@ def test_anchor_boundary_quality_is_empty_without_anchors() -> None:
     quality = measure_boundaries(vol, (), axis=0, num_phases=2)
 
     assert quality == BoundaryQuality(None, None, None, None, None)
+
+
+def test_slice_smoothness_detects_a_delayed_jump() -> None:
+    baseline = torch.zeros((5, 2, 2), dtype=torch.uint8)
+    baseline[1:, 0, 0] = 1
+    baseline[2:, 0, 1] = 1
+    baseline[3:, 1, 0] = 1
+    baseline[4:, 1, 1] = 1
+    abrupt = torch.zeros_like(baseline)
+    abrupt[3:] = 1
+
+    quality = measure_slice_smoothness(abrupt, (1,), axis=0, baseline=baseline)
+
+    assert quality.acceleration_p95 == pytest.approx(1.0)
+    assert quality.acceleration_max == pytest.approx(1.0)
+    assert quality.baseline_p95 == pytest.approx(0.0)
+    assert quality.baseline_max == pytest.approx(0.0)
+    assert quality.p95_ratio is None
+    assert quality.max_ratio is None
+    assert quality.reversal_rate == pytest.approx(0.0)
+    assert quality.baseline_reversal_rate == pytest.approx(0.0)
+    assert quality.reversal_ratio is None
+    assert quality.peak_index == 2
+    assert quality.peak_anchor_distance == 1
+
+
+def test_slice_smoothness_counts_one_slice_bumps() -> None:
+    vol = torch.zeros((3, 2, 2), dtype=torch.uint8)
+    vol[1, 0, 0] = 1
+
+    quality = measure_slice_smoothness(vol, (), axis=0)
+
+    assert quality.reversal_rate == pytest.approx(0.25)
+
+
+def test_slice_smoothness_is_empty_for_two_slices() -> None:
+    quality = measure_slice_smoothness(
+        torch.zeros((2, 3, 3), dtype=torch.uint8),
+        (),
+        axis=0,
+    )
+
+    assert quality == SliceSmoothness(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 
 
 def test_anchor_distance_profile_groups_slice_changes_by_nearest_anchor() -> None:
@@ -326,61 +436,60 @@ def _config(root: Path) -> dict:
     return {
         "data": {
             "domains": {0: {axis: (root / str(axis),) for axis in (0, 1, 2)}},
+            "num_phase": 3,
+            "crop_partial": False,
             "crop_size": 16,
             "input_size": 8,
-            "num_phases": 3,
             "augment": False,
             "augment_prob": 1.0,
+            "domain_prob": 1.0,
             "batch_size": 2,
             "num_workers": 0,
         },
         "model": {
-            "base_channels": 4,
-            "channel_multipliers": (1, 2),
-            "embedding_channels": 8,
-            "latent_channels": 4,
-            "critic_channels": (4, 8),
-            "gradient_checkpointing": False,
+            "grad_checkpoint": False,
+            "generator": {
+                "channels": [4, 8],
+                "condition_channels": 8,
+                "latent_channels": 4,
+            },
+            "critic": {
+                "channels": [4, 8],
+                "local_loss_weight": 0.5,
+                "r1_weight": 0.0,
+                "r1_interval": 2,
+            },
         },
-        "diffusion": {"timesteps": 1, "beta_min": 0.1, "beta_max": 2.0},
+        "diffusion": {"steps": 1, "beta_min": 0.1, "beta_max": 2.0},
         "anchor": {
+            "multiscale_input": False,
             "start_step": 0,
             "ramp_steps": 0,
-            "training_probability": 1.0,
-            "loss_weight": 1.0,
+            "train_prob": 1.0,
+            "cross_domain_prob": 0.0,
+            "pixel_weight": 0.05,
+            "connectivity": {
+                "volume_count": 1,
+                "refresh_every": 500,
+                "weight": 0.0,
+                "phase_transition_weight": 0.0,
+            },
         },
-        "conditioning": {
-            "cfg_dropout": {
-                "drop_each_prob": 0.05,
-                "single_condition_drop_prob": 0.1,
-            }
-        },
-        "connectivity": {
-            "loss_weight": 0.0,
-            "normal_transition_loss_weight": 0.0,
-            "bank_size": 1,
-            "refresh": 500,
-            "reversal_invariant": True,
-        },
-        "vf": {
-            "loss_weight": 1.0,
-        },
+        "vf": {"max_samples": 4, "weight": 1.0},
+        "condition_dropout": {"joint_each_prob": 0.05},
         "optim": {
-            "denoiser_lr": 1e-3,
+            "generator_lr": 1e-3,
             "critic_lr": 1e-3,
-            "beta1": 0.0,
-            "beta2": 0.9,
-            "r1_gamma": 0.0,
-            "r1_interval": 2,
-            "local_loss_weight": 0.5,
+            "adam_betas": [0.0, 0.9],
+            "ema_decay": 0.9,
         },
         "train": {
-            "total_steps": 1,
+            "init_weights": None,
+            "steps": 1,
             "volume_batch_size": 1,
-            "slice_pairs_per_axis": 2,
-            "mixed_precision": False,
-            "ema_decay": 0.9,
-            "save_every_steps": 1,
-            "checkpoint_every_steps": 1,
+            "pairs_per_axis": 2,
+            "amp": False,
+            "update_weights_every": 1,
+            "archive_every": 1,
         },
     }

@@ -70,6 +70,7 @@ def test_main_prints_plan_before_scaled_generation(
     class FakeGenerator:
         patch_size = 4
         num_phases = 3
+        default_margin = 0
 
     class FakeScaled:
         stats = None
@@ -101,7 +102,7 @@ def test_main_prints_plan_before_scaled_generation(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda: GenerationSettings(margin=0),
+        lambda: GenerationSettings(),
     )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: scaled)
     monkeypatch.setattr(module, "show_slices", lambda *args, **kwargs: None)
@@ -135,10 +136,10 @@ def test_main_prints_plan_before_scaled_generation(
         ("plan", (6, 6, 6), 1),
         ("generate", (2, 2, 2), 1, 1.0, 1),
     ]
-    assert output.index("State memory") < output.index("Status     : scaling")
-    assert "Fusion memory: 8.00 KiB" in output
-    assert "CUDA total   : 18.00 KiB" in output
-    assert "CPU total    : 18.30 KiB" in output
+    assert output.index("Plan    :") < output.index("Scaling...")
+    assert "Plan    : 2 × 2 × 2 tiles (8 total), overlap 1, cpu" in output
+    assert "Memory  : CUDA 18.00 KiB, CPU 18.30 KiB" in output
+    assert "Fusion memory" not in output
     assert not (weights.parent / "scaled_4x4x4.tiff").exists()
 
 
@@ -154,6 +155,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
     class FakeGenerator:
         patch_size = 4
         num_phases = 3
+        default_margin = 0
 
         def generate(self, *, guidance, domain, margin):
             events.append(("base", guidance, domain, margin))
@@ -186,7 +188,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda: GenerationSettings(margin=0),
+        lambda: GenerationSettings(),
     )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(
@@ -221,5 +223,5 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
         ("base", 1.75, 2, 0),
         ("scaled", 8, True, 1.75, 2),
     ]
-    assert "Base       : unanchored" in output
+    assert "Base    : generating unanchored volume..." in output
     assert "anchor planes" not in output

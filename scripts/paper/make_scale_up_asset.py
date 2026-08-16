@@ -78,7 +78,8 @@ def main() -> None:
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
     overlap = settings.overlap
-    base_margin = settings.margin
+    generator = load_generator(weights, device=device)
+    base_margin = generator.default_margin
     provenance = build_provenance(
         weights,
         guidance,
@@ -99,7 +100,6 @@ def main() -> None:
     output = OUTPUT_DIR / "05-scale-up.png"
     metadata = output.with_suffix(".json")
     validate_output_paths(provenance, (output, metadata))
-    generator = load_generator(weights, device=device)
     anchor = load_center_roi(generator.patch_size)
     anchor_index = generator.patch_size // 2
     torch.manual_seed(SEED)

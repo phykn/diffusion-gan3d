@@ -7,7 +7,7 @@ from matplotlib.colors import ListedColormap, to_rgb
 from PIL import Image, ImageDraw
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-VOLUME_PATH = PROJECT_ROOT / "scripts" / "gt_128.tiff"
+VOLUME_PATH = PROJECT_ROOT / "scripts" / "gt.tiff"
 SAMPLE_PATH = PROJECT_ROOT / "data" / "sample.png"
 OUTPUT_DIR = PROJECT_ROOT / "assets" / "paper"
 PHASE_COLORS = ("#000000", "#9E9E9E")
@@ -19,7 +19,7 @@ ROI_POSITIONS = ((18, 16), (281, 58), (536, 24))
 def main() -> None:
     volume = np.asarray(tifffile.imread(VOLUME_PATH))
     if volume.ndim != 3 or volume.dtype != np.uint8:
-        raise ValueError("gt_128.tiff must be a 3D uint8 phase volume.")
+        raise ValueError("gt.tiff must be a 3D uint8 phase volume.")
 
     colors = [to_rgb(color) for color in PHASE_COLORS]
     if int(volume.max()) >= len(colors):

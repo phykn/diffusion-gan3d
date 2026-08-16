@@ -40,8 +40,9 @@ from src.evaluate import (
     tortuosity,
     voxel_accuracy,
 )
+from src.generate import Generator
 
-REFERENCE_PATH = PROJECT_ROOT / "scripts" / "gt_128.tiff"
+REFERENCE_PATH = PROJECT_ROOT / "scripts" / "gt.tiff"
 TEMP_DIR = PROJECT_ROOT / "temp"
 MANIFEST_PATH = TEMP_DIR / "anchor_sweep_manifest.json"
 COUNTS = (128, 64, 32, 16, 8, 4, 2, 1, 0)
@@ -74,6 +75,9 @@ def main() -> None:
     weights = args.weight.resolve()
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    generator = load_generator(weights, device=device)
+    margin = generator.default_margin
     generation = {
         "seed": SEED,
         "domain": args.domain,
@@ -81,7 +85,7 @@ def main() -> None:
         "anchor_counts": list(COUNTS),
         "reference_shape": list(reference.shape),
         "pore_phase": PORE_PHASE,
-        "margin": settings.margin,
+        "margin": margin,
     }
     provenance = build_provenance(
         weights,
@@ -127,10 +131,17 @@ def main() -> None:
         generation_times = load_generation_times(csv_path)
     else:
         generation_times = generate_volumes(
-            reference, weights, guidance, args.domain, settings.margin
+            reference,
+            generator,
+            weights,
+            guidance,
+            args.domain,
+            margin,
         )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    del generator
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     reference_slices = get_slices(reference, AXIS)
     fid = make_fid_metric(
         reference_slices,
@@ -216,13 +227,13 @@ def main() -> None:
 
 def generate_volumes(
     reference: np.ndarray,
+    generator: Generator,
     weights: Path,
     guidance: float,
     domain: int,
     margin: int,
 ) -> dict[int, float]:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    generator = load_generator(weights, device=device)
+    device = generator.device
     if (
         generator.patch_size != reference.shape[0]
         or reference.shape != (generator.patch_size,) * 3

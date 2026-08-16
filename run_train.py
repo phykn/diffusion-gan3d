@@ -47,10 +47,10 @@ def main() -> None:
     save_yaml(run_dir / "train.yaml", cfg)
     run_training(
         trainer,
-        steps=cfg["train"]["total_steps"],
-        save_every=cfg["train"]["save_every_steps"],
+        steps=cfg["train"]["steps"],
+        save_every=cfg["train"]["update_weights_every"],
         run_dir=run_dir,
-        checkpoint_every=cfg["train"].get("checkpoint_every_steps"),
+        checkpoint_every=cfg["train"].get("archive_every"),
     )
 
 

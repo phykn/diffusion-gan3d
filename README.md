@@ -31,17 +31,18 @@ data:
       0: [data/domain_1/axis_0]
       1: [data/domain_1/axis_1]
       2: [data/domain_1/axis_2]
-  domain_dropout: 0.2
+  domain_prob: 0.8
 ~~~
 
 Folders listed under one axis are pooled within that domain. Training uniformly
 samples one target domain per step. An axis present in the target domain uses
 that domain's data. A missing axis uniformly borrows from domains that provide
-that axis and removes the domain condition for that critic. `domain_dropout`
-also removes the domain condition from complete training steps with the given
-probability, teaching the shared network path without adding a common domain ID.
+that axis and removes the domain condition for that critic. `domain_prob` is the
+probability of retaining the target-domain condition for a complete training
+step; the remaining probability teaches the shared path without adding a common
+domain ID.
 Volume-fraction targets always use only the target domain. Anchors normally use
-an owned axis; a bounded `anchor.shared_axis_probability` can instead present a
+an owned axis; `anchor.cross_domain_prob` can instead present a
 borrowed missing-axis section as an external/shared anchor. Incompatible
 borrowed sections fall back to an owned anchor rather than borrowing another
 domain's volume fraction.
@@ -50,28 +51,49 @@ provides all three axes, all three critics are trained and saved; if the entire
 configuration contains only axis 0, only `critic_0.pt` is created.
 
 Anchor training separates appearance from continuation. A mask-normalized
-coarse loss preserves the supplied section's phase layout, while a low-weight
-pixel loss lets exact boundaries adapt. Both losses and the connectivity loss
+coarse loss preserves every supplied section's phase layout, while a low-weight
+pixel loss is applied only to the original measured section so its exact
+boundaries can still adapt. Measured and EMA-derived coarse groups are averaged
+separately, so adding more generated planes cannot drown out the measured root.
+Both losses and the connectivity loss
 are disabled for samples whose anchor was removed by CFG
 dropout. Coarse pooling cells are weighted by their observed coverage, so a
-one-pixel partial-anchor edge cannot outweigh a fully observed cell. With
-`model.anchor_multiscale: true`, the original observed phases and mask are
+one-pixel partial-anchor edge cannot outweigh a fully observed cell. Its pooling
+scale is the power-of-two encoder scale nearest the geometric midpoint between
+input and bottleneck resolutions; it therefore follows the model depth without
+another setting. With
+`anchor.multiscale_input: true`, the original observed phases and mask are
 pooled independently at every encoder scale. Mask normalization preserves a
 thin or partial plane, while zero-initialized projections preserve the original
 generator path at initialization. Setting it to false selects the original
 input-only path.
 
-Before anchor training begins, a fixed EMA snapshot generates complete
-anchor/VF-free 3D volumes for a frozen prior bank. During anchor training, the
-connectivity critic compares at most seven three-slice windows: one containing
-the anchor and up to two general windows from each of the three axes. Anchor and
-general groups receive equal loss weight, so broader coverage does not dilute the
-anchor boundary. Reference windows are sampled from the frozen volumes. A domain
-uses its own prior for axes
-it owns and falls back to provider-domain volumes only for a missing axis. After
-the initial bank is complete, each domain periodically adds one volume from the
-current EMA and evicts its oldest volume. This rolling update changes the prior
-gradually without a second full-size bank or an abrupt global replacement.
+The real single-anchor path is learned first. Once its ramp is complete, one
+fixed EMA snapshot generates a small bank of conditional 3D completions. Every
+completion is rooted in a visible measured section, and that original section is
+stored separately; VF is omitted so the bank captures continuation rather than a
+particular composition target. The raw EMA volume remains the relation reference.
+Only when constructing a multi-plane condition is the measured root overlaid on a
+temporary copy, which keeps cross-axis intersections coherent without teaching an
+artificial pasted seam as a real relation. Training then alternates real single anchors with
+conditions assembled from one coherent bank volume. The latter always retain the
+measured root and add a scale-balanced number of planes, possibly from different
+axes. The maximum plane count and sampling stride follow the generator's encoder
+downsampling factor, so this adds no tuning option.
+
+The connectivity critic compares at most seven three-slice windows. It reserves
+one available general window per axis, uses supplied-plane windows next, and
+fills any remaining budget with extra general windows. Anchor and general groups
+receive equal loss weight, so using more anchors does not increase the objective
+or critic cost.
+Reference windows are sampled from the conditional completions. A domain uses
+its own prior for axes it owns and falls back to provider-domain volumes only for
+a missing axis. After the initial bank is complete, each domain periodically
+adds one conditional completion from the current EMA and evicts its oldest
+volume. This rolling update changes the prior gradually without a second
+full-size bank or an abrupt global replacement.
+Because section folders identify an axis but not a signed normal direction, the
+connectivity critic always averages forward and reversed triplet scores.
 
 The critic does not receive raw logits or raw slices. EMA references and student
 outputs are converted to hard categorical phase images, and each three-slice
@@ -79,12 +101,20 @@ window becomes three bounded images: the first phase change, the second phase
 change, and the change in those two changes. The student uses a straight-through
 categorical conversion, so the critic sees the same representation on both sides
 while gradients still reach the generator. This learns image-level continuation
-without copying a teacher volume voxel by voxel. The existing normal-transition
-loss remains as a small aggregate guardrail.
+without copying a teacher volume voxel by voxel. Real-data 2D critics separately
+guard marginal appearance, so an EMA completion contributes relations rather than
+becoming the visual target. The existing normal-transition loss remains as a
+small aggregate guardrail.
 
-Set `data.allow_partial_crop: true` to train from a section whose height or
-width is smaller than `crop_size`. Each available dimension is cropped to at
-most `crop_size` and resized with the common `input_size / crop_size` scale, so
+`condition_dropout.joint_each_prob` assigns the same probability to anchor-null,
+VF-null, and joint-null states when both conditions exist. When VF is the only
+condition, its null probability is derived as twice that value, preserving the
+same marginal visibility without a second dropout setting.
+
+Set `data.crop_partial: true` to train from a section whose height or width is
+smaller than `data.crop_size`. Each available dimension is cropped to at most
+`data.crop_size` and resized with the common
+`data.input_size / data.crop_size` scale, so
 the aspect ratio and physical voxel scale are preserved. The critic compares a
 generated section window with the same rectangular shape. Each batch uses one
 axis folder selected uniformly, regardless of its image count, so folders under
@@ -120,59 +150,66 @@ base = generator.generate(anchors=(anchor,), domain=0)
 volume = ScaledGenerator(generator).generate(
     blocks=(3, 3, 3),
     overlap=8,
-    margin=8,
     base=base,
     domain=0,
 )
 ```
 
-Single-domain weights default to domain 0; multi-domain weights should specify a domain. Direct generation produces `input_size³`. Scale-up length per axis is `input_size + (blocks - 1) × (input_size - 2 × overlap)`, so 128-sized blocks with three blocks and overlap eight produce `352³`. Direct, anchor, and scale-up generation add the configured margin beyond every outer face and return only the requested center, reducing zero-padding artifacts at the volume boundary. `overlap` applies only to scale-up.
+Single-domain weights default to domain 0; multi-domain weights should specify a domain. Direct generation produces `data.input_size³`. Scale-up length per axis is `data.input_size + (blocks - 1) × (data.input_size - 2 × overlap)`, so 128-sized blocks with three blocks and overlap eight produce `352³`. Direct, anchor, and scale-up generation add one model downsampling cell beyond every outer face and return only the requested center, reducing zero-padding artifacts at the volume boundary. Low-level APIs and Script `04` retain an explicit `margin` override for controlled comparisons. `overlap` applies only to scale-up.
 
 Shared generation defaults live in [`config/gen.yaml`](config/gen.yaml); CLI values override them:
 
 ```yaml
 guidance: 1.0
 overlap: 8
-margin: 8
 ```
 
 `anchor_strength=0` disables anchor conditioning. With anchors enabled, generation
 keeps separate baseline and anchor trajectories from the same initial noise. Both
 trajectories share every step's latent and posterior noise. All anchor planes are
 passed in one joint conditional prediction, and its logit residual is blended
-through a Gaussian spatial window controlled by `anchor_sigma` before decoding.
+through a Gaussian spatial window before decoding. The Gaussian width is the
+3D diagonal of one model downsampling cell, `sqrt(3) * downsample_factor`; the
+current four-level model therefore uses approximately `13.86` voxels.
 After each posterior update, the anchor trajectory is kept intact near the anchor
 and tapered back to the baseline over a wide cosine window. This fixed coupling
 preserves the same-RNG baseline exactly in the far field through the final step.
-Context guidance is stronger early and reduces during cleanup, while plane
-guidance rises toward the final step. The defaults (`anchor_strength=1`,
-`anchor_sigma=2`) favor similar conditional structure over exact plane
-reconstruction.
-Script `03` reports
-slice-change rates for distances zero through 24 from the nearest anchor to make
-displaced transition seams visible. `guidance=1` is the standard conditional path;
-pass `--compare-unconditioned` to Script `03` to report distance-wise voxel
-divergence from a same-RNG unconditioned generation. This adds one generation pass.
+Context guidance follows the diffusion schedule: it starts at the natural
+two-prediction residual scale $\sqrt{2}$ and tapers to the noise remaining at the
+final reverse transition. Plane guidance rises toward the final step. The default
+`anchor_strength=0.90` and model-derived spatial width spread the adaptation across
+multiple slices instead of fitting the anchor through a narrow transition.
+Script `03` reports slice-change rates for distances zero through 24 from the
+nearest anchor. It also reports the first-difference change curve's second
+difference, including its p95 and largest bend, to expose both distributed
+roughness and isolated transition jumps. Script `03` always generates a same-RNG
+unconditioned baseline and reports distance-wise voxel divergence from it. The
+parameter-free effect summary reports divergence at the anchor, its mean over the
+complete axis, and the farthest observed distance. Its
+three passes are an unconditional reference, a separate conditioned trajectory,
+and that trajectory's same-RNG baseline. `--seed` makes the full comparison
+reproducible. `guidance=1` is the standard conditional path.
 Validate non-default guidance with weights trained using condition dropout. See
 [`PAPER.md`](PAPER.md) for details.
 
 
 Run the diagnostic scripts with an explicit generator weight. Script `03`
-always requires a GT volume; script `04` requires one when `--count` is positive
-and `--anchor-strength` is nonzero. The GT TIFF must be `uint8`, contain valid
-phase labels, and exactly match the model's cubic input size; diagnostics never
-resize a reference volume implicitly:
+first generates an unconditional reference volume, takes anchors from it, and
+uses a separate random trajectory for the conditioned sample. Script `04`
+requires a GT volume when `--count` is positive and `--anchor-strength` is
+nonzero. Supplied GT TIFFs must be `uint8`, contain valid phase labels, and
+exactly match the model's cubic input size; diagnostics never resize them:
 
 ```bash
 python scripts/01_check_dataset.py
 python scripts/02_check_generated.py --weight run/<run-id>/generator.pt --domain 0
-python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3 --anchor-strength 1 --anchor-sigma 2
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --count 3
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0
 ```
 
 Generator scripts default to `--domain 0`. Conditional Scripts `03` and `04` use the `guidance` value in `config/gen.yaml`; Script `02` has no anchor or phase-fraction condition, so it exposes no guidance option. Paper scripts require explicit weights and record input provenance.
 
-`generator.pt` is the latest weight; `checkpoint_every_steps` preserves numbered
+`generator.pt` is the latest weight; `train.archive_every` preserves numbered
 sets under `checkpoints/step_XXXXXXXX/`. Every `.pt` file is an independent model
 `state_dict` containing tensors only. Optimizer state, training step metadata, and
 trainer-side frozen prior volumes are never embedded in these weight files.

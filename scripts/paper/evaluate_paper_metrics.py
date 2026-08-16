@@ -46,9 +46,10 @@ from src.evaluate import (
     tortuosity,
     voxel_accuracy,
 )
+from src.generate import Generator
 from src.scale import ScaledGenerator
 
-REFERENCE_PATH = PROJECT_ROOT / "scripts" / "gt_128.tiff"
+REFERENCE_PATH = PROJECT_ROOT / "scripts" / "gt.tiff"
 TEMP_DIR = PROJECT_ROOT / "temp"
 VOLUME_DIR = TEMP_DIR / "paper_metrics"
 RAW_CSV = TEMP_DIR / "paper_metrics_raw.csv"
@@ -107,6 +108,9 @@ def main() -> None:
     weights = args.weight.resolve()
     generation_settings = load_generation_settings()
     guidance = generation_settings.guidance if args.guidance is None else args.guidance
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    generator = load_generator(weights, device=device)
+    margin = generator.default_margin
     generation = {
         "conditions": list(CONDITIONS[1:]),
         "domain": args.domain,
@@ -117,7 +121,7 @@ def main() -> None:
         "scale_blocks": list(SCALE_BLOCKS),
         "scale_overlap": generation_settings.overlap,
         "scale_margin": SCALE_MARGIN,
-        "margin": generation_settings.margin,
+        "margin": margin,
         "scale_output_shape": list(
             scale_output_shape(patch_size, generation_settings.overlap)
         ),
@@ -159,10 +163,13 @@ def main() -> None:
             guidance,
             args.domain,
             generation_settings.overlap,
-            generation_settings.margin,
+            margin,
+            generator,
         )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    del generator
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     raw_rows, reference_fid, fid_scores = compute_fid_scores(
         real_reference,
         reference,
@@ -243,9 +250,9 @@ def generate_volumes(
     domain: int,
     scale_overlap: int,
     margin: int,
+    generator: Generator,
 ) -> dict[tuple[str, int], float]:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    generator = load_generator(weights, device=device)
+    device = generator.device
     patch_size = generator.patch_size
     if reference.shape != (patch_size,) * 3:
         raise ValueError("GT reference must match the generator patch size.")

@@ -1,8 +1,10 @@
 from .anchor import (
     BoundaryQuality,
+    SliceSmoothness,
     measure_boundaries,
     measure_distance_changes,
     measure_distance_divergence,
+    measure_slice_smoothness,
 )
 from .connect import (
     continuation_delta,
@@ -36,6 +38,7 @@ from .tau import tortuosity
 __all__ = (
     "BoundaryQuality",
     "SeamQuality",
+    "SliceSmoothness",
     "continuation_delta",
     "continuation_error",
     "fid_score",
@@ -46,6 +49,7 @@ __all__ = (
     "measure_distance_changes",
     "measure_distance_divergence",
     "measure_seams",
+    "measure_slice_smoothness",
     "metric_images",
     "percolating_fraction",
     "percolating_fractions",

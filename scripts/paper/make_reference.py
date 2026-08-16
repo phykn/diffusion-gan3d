@@ -21,7 +21,7 @@ from src.config import load_generation_settings
 
 REFERENCE_SIZE = 128
 SEED = 10_000
-OUTPUT = PROJECT_ROOT / "scripts" / "gt_128.tiff"
+OUTPUT = PROJECT_ROOT / "scripts" / "gt.tiff"
 MANIFEST = PROJECT_ROOT / "temp" / "paper_reference_manifest.json"
 
 
@@ -39,19 +39,20 @@ def main() -> None:
     weights = args.weight.resolve()
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    generator = load_generator(weights, device=device)
+    margin = generator.default_margin
     provenance = build_provenance(
         weights,
         guidance,
         generation={
             "seed": SEED,
             "domain": args.domain,
-            "margin": settings.margin,
+            "margin": margin,
             "output_size": REFERENCE_SIZE,
         },
     )
     validate_output_paths(provenance, (OUTPUT, MANIFEST))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    generator = load_generator(weights, device=device)
     if generator.patch_size != REFERENCE_SIZE:
         raise ValueError(
             f"paper reference requires patch size {REFERENCE_SIZE}, "
@@ -65,7 +66,7 @@ def main() -> None:
         generator.generate(
             guidance=guidance,
             domain=args.domain,
-            margin=settings.margin,
+            margin=margin,
         )
         .to(torch.uint8)
         .numpy()

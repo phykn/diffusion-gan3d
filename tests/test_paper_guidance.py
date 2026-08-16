@@ -77,14 +77,13 @@ def test_paper_metrics_reports_mean_pore_percolation() -> None:
 
 def test_overlap_ablation_preflights_without_the_default_outer_margin() -> None:
     module = _load_script("evaluate_overlap_ablation.py")
-    settings = module.load_generation_settings()
-    assert settings.margin == 8
     assert module.ABLATION_MARGIN == 0
 
     generator = SimpleNamespace(
         patch_size=128,
         num_phases=2,
         device=torch.device("cpu"),
+        default_margin=8,
         model=SimpleNamespace(
             downsample_factor=8,
             input=SimpleNamespace(out_channels=16),
@@ -104,7 +103,7 @@ def test_overlap_ablation_preflights_without_the_default_outer_margin() -> None:
     default_margin_plan = scaled._generation_plan(
         output_shape,
         module.OVERLAPS[0],
-        settings.margin,
+        generator.default_margin,
     )
     assert default_margin_plan.grid != module.BLOCKS
 
@@ -442,6 +441,7 @@ def test_anchor_asset_writes_generation_sidecar(
 
     class FakeGenerator:
         patch_size = 4
+        default_margin = 8
 
         def generate(self, *, anchors, guidance, domain, margin):
             assert len(anchors) == 1
@@ -511,6 +511,7 @@ def test_scale_asset_writes_generation_sidecar(
 
     class FakeGenerator:
         patch_size = 4
+        default_margin = 8
 
         def generate(self, *, anchors, guidance, domain, margin):
             assert len(anchors) == 1
@@ -549,7 +550,7 @@ def test_scale_asset_writes_generation_sidecar(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda: SimpleNamespace(guidance=1.0, overlap=0, margin=8),
+        lambda: SimpleNamespace(guidance=1.0, overlap=0),
     )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(

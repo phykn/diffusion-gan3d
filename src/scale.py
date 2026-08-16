@@ -162,12 +162,13 @@ class ScaledGenerator:
         progress: bool = True,
         guidance: float = 1.0,
         domain: int | None = None,
-        margin: int = 8,
+        margin: int | None = None,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
             raise TypeError("progress must be a boolean.")
         guidance = validate_guidance(guidance)
+        margin = self.generator.default_margin if margin is None else margin
         output_shape = self.parse_shape(shape)
         plan = self._generation_plan(
             output_shape,
@@ -226,12 +227,13 @@ class ScaledGenerator:
         shape: int | Sequence[int] | None = None,
         guidance: float = 1.0,
         domain: int | None = None,
-        margin: int = 8,
+        margin: int | None = None,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
             raise TypeError("progress must be a boolean.")
         guidance = validate_guidance(guidance)
+        margin = self.generator.default_margin if margin is None else margin
         if blocks is None:
             if shape is None:
                 raise TypeError("blocks must be provided.")

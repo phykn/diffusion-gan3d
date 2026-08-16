@@ -16,7 +16,7 @@ from .model.denoiser import Denoiser3D
 from .train.augment import CriticAugment
 from .train.ema import build_ema
 from .train.engine import Trainer, TrainerComponents, TrainerSettings
-from .train.weights import load_weights
+from .train.weights import load_all_weights, load_weights
 from .utils import load_yaml
 
 
@@ -52,13 +52,25 @@ def get_data_axes(data: Mapping[str, object]) -> tuple[int, ...]:
     )
 
 
-def get_anchor_multiscale(model: Mapping[str, object]) -> bool:
-    if "anchor_adapter" in model:
-        raise ValueError("model.anchor_adapter was removed; use anchor_multiscale.")
-    value = model.get("anchor_multiscale", False)
-    if not isinstance(value, bool):
-        raise TypeError("model.anchor_multiscale must be a boolean.")
-    return value
+def get_generator_channels(model: Mapping[str, object]) -> tuple[int, tuple[int, ...]]:
+    generator = model["generator"]
+    if not isinstance(generator, Mapping):
+        raise TypeError("model.generator must be a mapping.")
+    channels = generator["channels"]
+    if isinstance(channels, (str, bytes)) or not isinstance(channels, Sequence):
+        raise TypeError("model.generator.channels must be a sequence.")
+    values = tuple(channels)
+    if not values or any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 1
+        for value in values
+    ):
+        raise ValueError("model.generator.channels must contain positive integers.")
+    base = values[0]
+    if any(value % base for value in values):
+        raise ValueError(
+            "model.generator.channels must be integer multiples of its first value."
+        )
+    return base, tuple(value // base for value in values)
 
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
@@ -117,7 +129,7 @@ def build_datasets(cfg: dict) -> dict[int, dict[int, SliceDataset]]:
                 path_groups,
                 crop_size=data["crop_size"],
                 patch_size=data["input_size"],
-                allow_partial_crop=data.get("allow_partial_crop", False),
+                allow_partial_crop=data["crop_partial"],
             )
             for axis, path_groups in find_slice_groups(folders).items()
         }
@@ -147,19 +159,20 @@ def build_denoiser(
 ) -> Denoiser3D:
     data = cfg["data"]
     model = cfg["model"]
+    generator = model["generator"]
+    anchor = cfg["anchor"]
     num_domains = len(get_domains(data))
-    checkpointing = (
-        model["gradient_checkpointing"] if checkpointing is None else checkpointing
-    )
+    checkpointing = model["grad_checkpoint"] if checkpointing is None else checkpointing
+    base_channels, multipliers = get_generator_channels(model)
     return Denoiser3D(
-        num_phases=data["num_phases"],
-        base_channels=model["base_channels"],
-        channel_multipliers=model["channel_multipliers"],
-        embedding_channels=model["embedding_channels"],
-        latent_channels=model["latent_channels"],
+        num_phases=data["num_phase"],
+        base_channels=base_channels,
+        channel_multipliers=multipliers,
+        embedding_channels=generator["condition_channels"],
+        latent_channels=generator["latent_channels"],
         num_domains=num_domains,
         gradient_checkpointing=checkpointing,
-        anchor_multiscale=get_anchor_multiscale(model),
+        anchor_multiscale=anchor["multiscale_input"],
     )
 
 
@@ -168,28 +181,28 @@ def build_models(
 ) -> tuple[Denoiser3D, nn.ModuleDict, ConnectivityCritic2D]:
     data = cfg["data"]
     model = cfg["model"]
-    connectivity = cfg["connectivity"]
+    generator = model["generator"]
+    critic = model["critic"]
     num_domains = len(get_domains(data))
     denoiser = build_denoiser(cfg)
     critics = nn.ModuleDict(
         {
             str(axis): PairCritic2D(
-                num_phases=data["num_phases"],
-                channels=model["critic_channels"],
-                embedding_channels=model["embedding_channels"],
+                num_phases=data["num_phase"],
+                channels=critic["channels"],
+                embedding_channels=generator["condition_channels"],
                 num_domains=num_domains,
-                gradient_checkpointing=model["gradient_checkpointing"],
+                gradient_checkpointing=model["grad_checkpoint"],
             )
             for axis in get_data_axes(data)
         }
     )
     connectivity_critic = ConnectivityCritic2D(
-        num_phases=data["num_phases"],
-        channels=model["critic_channels"],
-        embedding_channels=model["embedding_channels"],
+        num_phases=data["num_phase"],
+        channels=critic["channels"],
+        embedding_channels=generator["condition_channels"],
         num_domains=num_domains,
-        reversal_invariant=connectivity["reversal_invariant"],
-        gradient_checkpointing=model["gradient_checkpointing"],
+        gradient_checkpointing=model["grad_checkpoint"],
     )
     return denoiser, critics, connectivity_critic
 
@@ -205,10 +218,10 @@ def build_optimizers(
     torch.optim.Optimizer,
 ]:
     optim = cfg["optim"]
-    betas = (optim["beta1"], optim["beta2"])
+    betas = tuple(optim["adam_betas"])
     denoiser_optim = torch.optim.Adam(
         denoiser.parameters(),
-        lr=optim["denoiser_lr"],
+        lr=optim["generator_lr"],
         betas=betas,
     )
     critic_optims = {
@@ -230,7 +243,7 @@ def build_optimizers(
 def build_diffusion(cfg: dict) -> Diffusion:
     diffusion = cfg["diffusion"]
     return Diffusion(
-        diffusion["timesteps"],
+        diffusion["steps"],
         diffusion["beta_min"],
         diffusion["beta_max"],
     )
@@ -254,14 +267,14 @@ def load_generator(
     data = cfg["data"]
     model = cfg["model"]
     train = cfg["train"]
-    use_amp = train["mixed_precision"] and device.type == "cuda"
+    use_amp = train["amp"] and device.type == "cuda"
     return Generator(
         denoiser,
         build_diffusion(cfg).to(device),
         device=device,
         patch_size=data["input_size"],
-        num_phases=data["num_phases"],
-        latent_channels=model["latent_channels"],
+        num_phases=data["num_phase"],
+        latent_channels=model["generator"]["latent_channels"],
         use_amp=use_amp,
     )
 
@@ -270,9 +283,11 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     train = cfg["train"]
     data = cfg["data"]
     model = cfg["model"]
+    generator = model["generator"]
+    critic = model["critic"]
     anchor = cfg["anchor"]
-    connectivity = cfg["connectivity"]
-    conditioning = cfg["conditioning"]["cfg_dropout"]
+    connectivity = anchor["connectivity"]
+    conditioning = cfg["condition_dropout"]
     vf = cfg["vf"]
     optim = cfg["optim"]
     anchor_start_step, anchor_ramp_steps = get_schedule_steps(
@@ -285,12 +300,22 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         anchor=anchor,
         connectivity=connectivity,
         anchor_start_step=anchor_start_step,
+        anchor_ramp_steps=anchor_ramp_steps,
     )
     denoiser, critics, connectivity_critic = build_models(cfg)
     denoiser = denoiser.to(device)
     critics = critics.to(device)
     connectivity_critic = connectivity_critic.to(device)
     ema = build_ema(denoiser)
+    initial_weights = train.get("init_weights")
+    if initial_weights is not None:
+        load_all_weights(
+            initial_weights,
+            denoiser,
+            ema,
+            critics,
+            connectivity_critic,
+        )
     denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
         denoiser,
         critics,
@@ -299,9 +324,9 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     )
     critic_augment = CriticAugment(
         data.get("augment", False),
-        prob=data.get("augment_prob", 1.0),
+        prob=data["augment_prob"],
     )
-    use_amp = train["mixed_precision"] and device.type == "cuda"
+    use_amp = train["amp"] and device.type == "cuda"
     datasets = build_datasets(cfg)
     streams = {
         domain_id: {
@@ -333,34 +358,27 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         ),
         settings=TrainerSettings(
             volume_batch_size=train["volume_batch_size"],
-            num_phases=data["num_phases"],
+            num_phases=data["num_phase"],
             patch_size=data["input_size"],
-            slice_pairs_per_axis=train["slice_pairs_per_axis"],
-            ema_decay=train["ema_decay"],
-            r1_gamma=optim["r1_gamma"],
-            r1_interval=optim["r1_interval"],
-            critic_local_weight=optim["local_loss_weight"],
-            anchor_training_probability=anchor["training_probability"],
+            slice_pairs_per_axis=train["pairs_per_axis"],
+            ema_decay=optim["ema_decay"],
+            r1_gamma=critic["r1_weight"],
+            r1_interval=critic["r1_interval"],
+            critic_local_weight=critic["local_loss_weight"],
+            anchor_training_probability=anchor["train_prob"],
             anchor_start_step=anchor_start_step,
             anchor_ramp_steps=anchor_ramp_steps,
-            anchor_loss_weight=anchor["loss_weight"],
-            anchor_pool_size=anchor.get("coarse_pool_size", 4),
-            anchor_coarse_loss_weight=anchor.get("coarse_loss_weight", 0.0),
-            anchor_pixel_loss_weight=anchor.get("pixel_loss_weight", 1.0),
-            anchor_shared_axis_probability=anchor.get(
-                "shared_axis_probability",
-                0.0,
-            ),
-            connectivity_weight=connectivity["loss_weight"],
-            normal_transition_weight=connectivity["normal_transition_loss_weight"],
-            connectivity_bank_size=connectivity["bank_size"],
-            connectivity_refresh_steps=connectivity["refresh"],
-            vf_loss_weight=vf["loss_weight"],
-            vf_target_average_max_samples=vf.get("target_average_max_samples", 1),
-            domain_dropout=data.get("domain_dropout", 0.0),
-            cfg_drop_each_probability=conditioning["drop_each_prob"],
-            cfg_single_drop_probability=conditioning["single_condition_drop_prob"],
-            latent_channels=model["latent_channels"],
+            anchor_pixel_loss_weight=anchor["pixel_weight"],
+            anchor_shared_axis_probability=anchor["cross_domain_prob"],
+            connectivity_weight=connectivity["weight"],
+            normal_transition_weight=connectivity["phase_transition_weight"],
+            connectivity_bank_size=connectivity["volume_count"],
+            connectivity_refresh_steps=connectivity["refresh_every"],
+            vf_loss_weight=vf["weight"],
+            vf_target_average_max_samples=vf["max_samples"],
+            domain_dropout=1.0 - data["domain_prob"],
+            cfg_drop_each_probability=conditioning["joint_each_prob"],
+            latent_channels=generator["latent_channels"],
             amp_enabled=use_amp,
         ),
     )
@@ -373,11 +391,9 @@ def validate_prior_capacity(
     anchor: dict,
     connectivity: dict,
     anchor_start_step: int,
+    anchor_ramp_steps: int,
 ) -> None:
-    anchor_active = (
-        anchor["training_probability"] > 0.0
-        and anchor_start_step < train["total_steps"]
-    )
+    anchor_active = anchor["train_prob"] > 0.0 and anchor_start_step < train["steps"]
     if not anchor_active:
         return
     if train["volume_batch_size"] > data["batch_size"]:
@@ -385,15 +401,12 @@ def validate_prior_capacity(
             "train.volume_batch_size must not exceed data.batch_size when "
             "anchor training is enabled."
         )
-    if (
-        connectivity["loss_weight"] <= 0.0
-        and connectivity["normal_transition_loss_weight"] <= 0.0
-    ):
+    if connectivity["weight"] <= 0.0 and connectivity["phase_transition_weight"] <= 0.0:
         return
 
-    bank_size = connectivity["bank_size"]
+    bank_size = connectivity["volume_count"]
     if not isinstance(bank_size, int) or isinstance(bank_size, bool) or bank_size < 1:
-        raise ValueError("connectivity.bank_size must be a positive integer.")
+        raise ValueError("anchor.connectivity.volume_count must be a positive integer.")
     volume_batch_size = train["volume_batch_size"]
     if (
         not isinstance(volume_batch_size, int)
@@ -402,11 +415,14 @@ def validate_prior_capacity(
     ):
         raise ValueError("train.volume_batch_size must be a positive integer.")
     build_steps = len(get_domains(data)) * math.ceil(bank_size / volume_batch_size)
-    available_steps = train["total_steps"] - anchor_start_step
-    required_steps = build_steps + 1
+    available_steps = train["steps"] - anchor_start_step
+    # The conditional prior is collected only after the real-anchor ramp has
+    # completed. One following step is then needed before a ready bank can be
+    # sampled as a multi-plane condition.
+    required_steps = max(anchor_ramp_steps, 1) + build_steps
     if available_steps < required_steps:
         raise ValueError(
             "training must leave enough steps after anchor.start_step to fill "
-            "every connectivity prior bank and leave one anchor-eligible step; "
+            "every conditional prior bank and leave one multi-anchor-eligible step; "
             f"need {required_steps}, got {available_steps}."
         )

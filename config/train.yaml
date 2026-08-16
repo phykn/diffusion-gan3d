@@ -1,88 +1,77 @@
-# augment presets:
-#   false        Disable augmentation.
-#   isotropic    Allow all rotations and reflections.
-#   anisotropic  Preserve directions; allow only left-right flips.
-
 data:
   domains:
     0:
       0: [data]
       1: [data]
       2: [data]
-  num_phases: 2
+
+  num_phase: 2
+  crop_partial: true
   crop_size: 128
   input_size: 128
-  allow_partial_crop: true
+
   augment: isotropic
   augment_prob: 0.5
+  domain_prob: 0.8
+
   batch_size: 8
   num_workers: 0
-  domain_dropout: 0.2
 
 model:
-  base_channels: 16
-  channel_multipliers: [1, 2, 4, 4]
-  embedding_channels: 128
-  latent_channels: 64
-  critic_channels: [32, 64, 128, 256]
-  gradient_checkpointing: true
-  # False keeps the original input-only anchor path.
-  anchor_multiscale: true
+  grad_checkpoint: true
+
+  generator:
+    channels: [16, 32, 64, 64]
+    condition_channels: 128
+    latent_channels: 64
+
+  critic:
+    channels: [32, 64, 128, 256]
+    local_loss_weight: 0.5
+    r1_weight: 0.2
+    r1_interval: 16
 
 diffusion:
-  timesteps: 10
+  steps: 10
   beta_min: 0.1
   beta_max: 20.0
 
 anchor:
-  start_step: 3000
-  ramp_steps: 6000
-  training_probability: 0.80
-  # Occasionally treat a provider-domain section as an external anchor for a
-  # target domain that does not own that axis. Target-domain VF remains local.
-  shared_axis_probability: 0.20
-  loss_weight: 1.0
-  coarse_pool_size: 4
-  coarse_loss_weight: 1.0
-  pixel_loss_weight: 0.05
+  multiscale_input: true
 
-conditioning:
-  cfg_dropout:
-    # With both conditions, each of anchor-null, VF-null, and joint-null uses 5%.
-    drop_each_prob: 0.05
-    # Before anchors start, VF alone is dropped on 10% of samples.
-    single_condition_drop_prob: 0.10
+  start_step: 0
+  ramp_steps: 500
+  train_prob: 0.80
+  cross_domain_prob: 0.20
 
-connectivity:
-  # Frozen anchor/VF-free EMA volumes used as the continuation reference.
-  # Complete uint8 EMA volumes stored per domain.
-  bank_size: 16
-  # Replace the oldest volume with one current EMA sample at this interval.
-  refresh: 500
-  reversal_invariant: true
-  loss_weight: 0.25
-  normal_transition_loss_weight: 0.10
+  pixel_weight: 0.05
+
+  connectivity:
+    volume_count: 16
+    refresh_every: 500
+    weight: 0.25
+    phase_transition_weight: 0.10
 
 vf:
-  loss_weight: 1.0
-  # Average a random 1..N empirical crop VFs. This reduces single-crop noise
-  # without collapsing the conditioning range to the full-batch mean.
-  target_average_max_samples: 4
+  max_samples: 4
+  weight: 1.0
+
+condition_dropout:
+  joint_each_prob: 0.05
 
 optim:
-  denoiser_lr: 0.00016
+  generator_lr: 0.00016
   critic_lr: 0.0001
-  beta1: 0.5
-  beta2: 0.9
-  r1_gamma: 0.2
-  r1_interval: 16
-  local_loss_weight: 0.5
+  adam_betas: [0.5, 0.9]
+  ema_decay: 0.999
 
 train:
-  total_steps: 20000
+  init_weights: run/08161634
+  steps: 20000
+
   volume_batch_size: 1
-  slice_pairs_per_axis: 16
-  mixed_precision: true
-  ema_decay: 0.999
-  save_every_steps: 100
-  checkpoint_every_steps: 5000
+  pairs_per_axis: 16
+  amp: true
+
+  update_weights_every: 100
+  archive_every: 5000

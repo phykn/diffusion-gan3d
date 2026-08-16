@@ -14,18 +14,12 @@ from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.config import load_generation_settings
 from src.evaluate import (
-    BoundaryQuality,
-    measure_boundaries,
-    measure_distance_changes,
+    SliceSmoothness,
     measure_distance_divergence,
-    phase_iou,
-    phase_recall,
+    measure_slice_smoothness,
     voxel_accuracy,
 )
-from src.volume import load_volume, save_volume
-
-AXIS = 0
-DISTANCE_PROFILE_RADIUS = 24
+from src.volume import save_volume
 
 
 def main() -> None:
@@ -43,10 +37,17 @@ def main() -> None:
         help="numeric domain ID (default: 0)",
     )
     parser.add_argument(
-        "--gt",
-        type=Path,
-        required=True,
-        help="ground-truth TIFF volume used to build anchors",
+        "--seed",
+        type=int,
+        default=0,
+        help="reproducible diagnostic seed (default: 0)",
+    )
+    parser.add_argument(
+        "--axis",
+        type=int,
+        choices=(0, 1, 2),
+        default=0,
+        help="anchor plane axis (default: 0)",
     )
     parser.add_argument(
         "--count",
@@ -57,14 +58,8 @@ def main() -> None:
     parser.add_argument(
         "--anchor-strength",
         type=unit_interval,
-        default=1.0,
-        help="normalized anchor prediction strength from 0 to 1 (default: 1)",
-    )
-    parser.add_argument(
-        "--anchor-sigma",
-        type=positive_float,
-        default=2.0,
-        help="Gaussian anchor influence radius in voxels (default: 2)",
+        default=0.90,
+        help="normalized anchor prediction strength from 0 to 1 (default: 0.90)",
     )
     parser.add_argument(
         "--guidance",
@@ -82,9 +77,9 @@ def main() -> None:
         help="show the complete generated phase volume in Napari",
     )
     parser.add_argument(
-        "--compare-unconditioned",
+        "--no-view",
         action="store_true",
-        help="also generate the same-RNG unconditioned baseline",
+        help="skip interactive visualization",
     )
     args = parser.parse_args()
     if args.count < 0:
@@ -93,127 +88,91 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight = args.weight
-    print("\nAnchor generation")
-    print("-----------------")
-    print(f"Weight  : {Path(weight).resolve()}")
-    print(f"GT      : {args.gt.resolve()}", flush=True)
+    print(f"\nWeights : {Path(weight).resolve()}")
 
     generator = load_generator(weight, device=device)
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
     if anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
-    target = load_volume(
-        args.gt,
-        shape=(generator.patch_size,) * 3,
-        num_phases=generator.num_phases,
+    torch.manual_seed(args.seed)
+    print("Generating reference...", flush=True)
+    target = generator.generate(
+        anchors=(),
+        anchor_strength=0.0,
+        guidance=guidance,
+        domain=args.domain,
+        margin=generator.default_margin,
     )
-    target_slices = get_slices(target, AXIS)
+    target_slices = get_slices(target, args.axis)
     indices = select_indices(target_slices.shape[0], anchor_count)
     anchors = tuple(
-        PlaneAnchor(image=target_slices[index], axis=AXIS, index=index)
+        PlaneAnchor(image=target_slices[index], axis=args.axis, index=index)
         for index in indices
     )
     print_selection(
         shape=tuple(target.shape),
         device=device,
-        axis=AXIS,
+        axis=args.axis,
         indices=indices,
     )
-    mode = "learned conditional anchors" if indices else "none"
-    print(f"Conditioning : {mode}")
     if indices:
-        print(f"Anchor strength : {args.anchor_strength:.2f}")
-        print(f"Anchor sigma    : {args.anchor_sigma:g} voxels")
-    print(f"Margin  : {settings.margin} per outer face")
-    print("Status   : generating...", flush=True)
+        print(f"Guidance : strength {args.anchor_strength:.2f}")
+    print("Generating conditioned sample...", flush=True)
 
-    cpu_rng = torch.random.get_rng_state() if args.compare_unconditioned else None
-    cuda_rng = (
-        torch.cuda.get_rng_state_all()
-        if args.compare_unconditioned and device.type == "cuda"
-        else None
-    )
+    cpu_rng = torch.random.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
 
     gen = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
-        anchor_sigma=args.anchor_sigma,
         guidance=guidance,
         domain=args.domain,
-        margin=settings.margin,
+        margin=generator.default_margin,
     )
-    print("Status   : complete", flush=True)
-    baseline = None
-    if args.compare_unconditioned and indices:
-        assert cpu_rng is not None
-        torch.random.set_rng_state(cpu_rng)
-        if cuda_rng is not None:
-            torch.cuda.set_rng_state_all(cuda_rng)
-        print("Baseline : generating same-RNG unconditioned volume...", flush=True)
-        baseline = generator.generate(
-            anchor_strength=0.0,
-            guidance=guidance,
-            domain=args.domain,
-            margin=settings.margin,
-        )
-        print("Baseline : complete", flush=True)
+    torch.random.set_rng_state(cpu_rng)
+    if cuda_rng is not None:
+        torch.cuda.set_rng_state_all(cuda_rng)
+    print("Generating same-RNG baseline...", flush=True)
+    baseline = generator.generate(
+        anchors=(),
+        anchor_strength=0.0,
+        guidance=guidance,
+        domain=args.domain,
+        margin=generator.default_margin,
+    )
     if args.out is not None:
         save_volume(gen, args.out)
-        print(f"Output   : {args.out.resolve()}", flush=True)
-    gen_slices = get_slices(gen, AXIS)
-    vol_acc = voxel_accuracy(gen, target)
+        print(f"Saved   : {args.out.resolve()}", flush=True)
+    gen_slices = get_slices(gen, args.axis)
     if indices:
         selected = torch.tensor(indices, dtype=torch.long)
         target_sel = target_slices.index_select(0, selected)
         gen_sel = gen_slices.index_select(0, selected)
         anchor_acc = voxel_accuracy(gen_sel, target_sel)
-        score_gen = gen_sel
-        score_ref = target_sel
     else:
         anchor_acc = None
-        score_gen = gen
-        score_ref = target
     index = select_display_index(generator.patch_size, indices)
     target_plane = target_slices[index]
     gen_plane = gen_slices[index]
     mismatch = gen_plane != target_plane
     slice_acc = voxel_accuracy(gen_plane, target_plane)
-    iou = phase_iou(score_gen, score_ref, generator.num_phases)
-    recall = phase_recall(score_gen, score_ref, generator.num_phases)
-    boundary = measure_boundaries(
+    baseline_profile = measure_distance_divergence(
         gen,
+        baseline,
         indices,
-        AXIS,
-        generator.num_phases,
+        args.axis,
+        generator.patch_size - 1,
     )
-    distance_profile = measure_distance_changes(
-        gen,
-        indices,
-        AXIS,
-        DISTANCE_PROFILE_RADIUS,
-    )
-    baseline_profile = (
-        ()
-        if baseline is None
-        else measure_distance_divergence(
-            gen,
-            baseline,
-            indices,
-            AXIS,
-            DISTANCE_PROFILE_RADIUS,
-        )
-    )
+    smoothness = measure_slice_smoothness(gen, indices, args.axis, baseline)
 
     print_quality(
         anchor_acc=anchor_acc,
-        vol_acc=vol_acc,
-        iou=iou,
-        recall=recall,
-        boundary=boundary,
-        distance_profile=distance_profile,
         baseline_profile=baseline_profile,
+        smoothness=smoothness,
     )
+    if args.no_view:
+        return
     if args.napari:
         show_napari(gen)
     else:
@@ -223,7 +182,7 @@ def main() -> None:
             gen_plane,
             mismatch,
             indices=indices,
-            axis=AXIS,
+            axis=args.axis,
             index=index,
             num_phases=generator.num_phases,
             accuracy=slice_acc,
@@ -247,13 +206,6 @@ def unit_interval(value: str) -> float:
     return parsed
 
 
-def positive_float(value: str) -> float:
-    parsed = float(value)
-    if not np.isfinite(parsed) or parsed <= 0.0:
-        raise argparse.ArgumentTypeError("value must be a positive finite number")
-    return parsed
-
-
 def select_display_index(size: int, indices: tuple[int, ...]) -> int:
     center = size // 2
     if not indices:
@@ -267,62 +219,63 @@ def print_selection(
     axis: int,
     indices: tuple[int, ...],
 ) -> None:
-    depth = shape[axis]
-    coverage = len(indices) / depth
-    print(f"Shape    : {' × '.join(map(str, shape))}")
-    print(f"Device   : {device}")
-    print(f"Anchors  : {len(indices)} planes")
-    print(f"Coverage : {coverage:.2%} ({len(indices)} / {depth} slices)")
-    print(f"Axis     : {axis}")
+    print(f"Input   : {' x '.join(map(str, shape))}, {device}")
+    print(f"Anchors : {len(indices)} planes on axis {axis}")
 
 
 def print_quality(
     anchor_acc: float | None,
-    vol_acc: float,
-    iou: list[float],
-    recall: list[float],
-    boundary: BoundaryQuality,
-    distance_profile: tuple[float | None, ...],
     baseline_profile: tuple[float | None, ...] = (),
+    smoothness: SliceSmoothness | None = None,
 ) -> None:
     print("\nQuality")
-    print("-------")
     score = "n/a" if anchor_acc is None else f"{anchor_acc:7.2%}"
-    print(f"Anchor match      : {score}")
-    print(f"Complete volume : {vol_acc:7.2%}")
-    print(f"Phase IoU       : {format_scores(iou)}")
-    print(f"Phase recall    : {format_scores(recall)}")
-    print("\nAnchor boundary")
-    print("---------------")
-    print(f"Anchor sides       : {format_score(boundary.anchor_change)}")
-    print(f"Ordinary planes    : {format_score(boundary.ordinary_change)}")
-    print(f"Change ratio       : {format_value(boundary.change_ratio)}")
-    print(f"Transition TV      : {format_value(boundary.transition_tv)}")
-    print(f"Continuation delta : {format_value(boundary.continuation_delta)}")
-    if distance_profile:
-        print("\nDistance profile")
-        print("----------------")
-        for distance, change in enumerate(distance_profile):
-            print(f"Distance {distance:2d} : {format_score(change)}")
+    print(f"Anchor match  : {score}")
+    if smoothness is not None:
+        distance = (
+            "n/a"
+            if smoothness.peak_anchor_distance is None
+            else str(smoothness.peak_anchor_distance)
+        )
+        print(
+            "Smoothness    : "
+            f"p95 {format_ratio(smoothness.p95_ratio)}, "
+            f"peak {format_ratio(smoothness.max_ratio)} at distance {distance}"
+        )
+        if smoothness.reversal_rate is not None:
+            print(
+                "Surface bumps : "
+                f"{smoothness.reversal_rate:.2%} vs baseline "
+                f"{format_percent(smoothness.baseline_reversal_rate)} "
+                f"({format_ratio(smoothness.reversal_ratio)})"
+            )
     if baseline_profile:
-        print("\nSame-RNG baseline divergence")
-        print("----------------------------")
-        for distance, change in enumerate(baseline_profile):
-            print(f"Distance {distance:2d} : {format_score(change)}")
+        print(f"Anchor effect  : {format_profile(baseline_profile)}")
 
 
-def format_scores(values: tuple[float, ...]) -> str:
-    return "  ".join(
-        f"phase {phase}: {value:.2%}" for phase, value in enumerate(values)
+def format_profile(
+    values: tuple[float | None, ...],
+) -> str:
+    valid = [
+        (distance, value) for distance, value in enumerate(values) if value is not None
+    ]
+    if not valid:
+        return "n/a"
+    anchor = next((value for distance, value in valid if distance == 0), None)
+    mean = sum(value for _, value in valid) / len(valid)
+    distance, farthest = valid[-1]
+    return (
+        f"anchor {format_percent(anchor)}, mean {format_percent(mean)}, "
+        f"farthest {format_percent(farthest)} at distance {distance}"
     )
 
 
-def format_score(value: float | None) -> str:
+def format_percent(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2%}"
 
 
-def format_value(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.4f}"
+def format_ratio(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f}x"
 
 
 def show_result(

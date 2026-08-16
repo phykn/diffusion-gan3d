@@ -52,6 +52,8 @@ def main() -> None:
     weights = args.weight.resolve()
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
+    generator = load_generator(weights, device=device)
+    margin = generator.default_margin
     provenance = build_provenance(
         weights,
         guidance,
@@ -59,7 +61,7 @@ def main() -> None:
             "seed": SEED,
             "domain": args.domain,
             "axis": AXIS,
-            "margin": settings.margin,
+            "margin": margin,
             "source_roi_left_top": list(ROI_POSITIONS[1]),
             "source_crop_size": CROP_SIZE,
         },
@@ -68,7 +70,6 @@ def main() -> None:
     output = OUTPUT_DIR / "04-anchor-conditioning.png"
     metadata = output.with_suffix(".json")
     validate_output_paths(provenance, (output, metadata))
-    generator = load_generator(weights, device=device)
     anchor = load_center_roi(generator.patch_size)
     index = generator.patch_size // 2
     torch.manual_seed(SEED)
@@ -86,7 +87,7 @@ def main() -> None:
         anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=index),),
         guidance=guidance,
         domain=args.domain,
-        margin=settings.margin,
+        margin=margin,
     )
     generated = volume.select(AXIS, index)
     matches = int((generated == anchor).sum())

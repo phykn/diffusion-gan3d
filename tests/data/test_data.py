@@ -280,6 +280,8 @@ class DomainDataTest(unittest.TestCase):
             cfg = {
                 "data": {
                     "domains": {0: {0: [folder]}},
+                    "num_phase": 2,
+                    "crop_partial": False,
                     "crop_size": 4,
                     "input_size": 4,
                 }
@@ -308,6 +310,8 @@ class DomainDataTest(unittest.TestCase):
             cfg = {
                 "data": {
                     "domains": domains,
+                    "num_phase": 2,
+                    "crop_partial": False,
                     "crop_size": 4,
                     "input_size": 4,
                 }
@@ -342,9 +346,10 @@ class DomainDataTest(unittest.TestCase):
             cfg = {
                 "data": {
                     "domains": {0: folders},
+                    "num_phase": 2,
+                    "crop_partial": True,
                     "crop_size": 4,
                     "input_size": 4,
-                    "allow_partial_crop": True,
                 }
             }
 
@@ -377,9 +382,10 @@ class DomainDataTest(unittest.TestCase):
             cfg = {
                 "data": {
                     "domains": {0: folders},
+                    "num_phase": 2,
+                    "crop_partial": True,
                     "crop_size": 4,
                     "input_size": 4,
-                    "allow_partial_crop": True,
                 }
             }
 

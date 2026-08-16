@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch import nn
 
+from src.anchor import PlaneAnchor, build_anchors
 from src.build import build_models, build_optimizers
 from src.diffusion import Diffusion
 from src.model.domain import NULL_DOMAIN
@@ -41,11 +42,12 @@ TrainConfig = Config
 
 def AnchorConfig(**values):
     cfg = Config(
-        training_probability=0.0,
+        multiscale_input=False,
+        train_prob=0.0,
         start_step=0,
         ramp_steps=0,
-        loss_weight=0.0,
-        shared_axis_probability=0.0,
+        cross_domain_prob=0.0,
+        pixel_weight=0.05,
     )
     cfg.update(values)
     return cfg
@@ -57,23 +59,19 @@ def VfConfig(**values):
 
 def ConnectivityConfig(**values):
     cfg = Config(
-        loss_weight=0.0,
-        normal_transition_loss_weight=0.0,
-        bank_size=1,
-        refresh=500,
-        reversal_invariant=True,
+        weight=0.0,
+        phase_transition_weight=0.0,
+        volume_count=1,
+        refresh_every=500,
     )
     cfg.update(values)
     return cfg
 
 
 def ConditioningConfig(**values):
-    dropout = Config(
-        drop_each_prob=0.0,
-        single_condition_drop_prob=0.0,
-    )
-    dropout.update(values)
-    return Config(cfg_dropout=dropout)
+    cfg = Config(joint_each_prob=0.0)
+    cfg.update(values)
+    return cfg
 
 
 def sample_pairs(
@@ -313,6 +311,7 @@ def test_initial_prior_build_selects_each_incomplete_domain() -> None:
     trainer = object.__new__(Trainer)
     trainer.prior_required = True
     trainer.anchor_start_step = 4
+    trainer.anchor_ramp_steps = 0
     trainer.num_domains = 3
     trainer.connect = Mock(prior_ready=False)
     trainer.connect.needs_prior.side_effect = lambda domain: domain in (1, 2)
@@ -332,6 +331,34 @@ def test_initial_prior_build_selects_each_incomplete_domain() -> None:
     trainer.connect.prior_ready = True
     assert trainer.select_target_domain(5) == 2
     trainer.sample_target_domain.assert_called_once_with()
+
+
+def test_ready_prior_starts_alternation_and_skipped_request_does_not_toggle() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.anchor_training_probability = 0.5
+    trainer.use_prior_next = True
+    trainer.volume_batch_size = 1
+    trainer.device = torch.device("cpu")
+    mask = torch.ones(1, 1, 2, 2, 2, dtype=torch.bool)
+    axis_masks = torch.ones(1, 3, 2, 2, 2, dtype=torch.bool)
+    trainer.connect = Mock(prior_ready=True)
+    trainer.connect.sample_prior_condition.return_value = Mock(
+        condition="prior",
+        observed_mask=mask,
+        observed_axis_masks=axis_masks,
+    )
+    trainer.sample_real_anchor = Mock(return_value=Mock(source="real"))
+
+    with patch("src.train.engine.torch.rand", return_value=torch.tensor(0.9)):
+        assert trainer.sample_anchor({}, 2, domain=0, owned_axes=()) is None
+    assert trainer.use_prior_next
+
+    trainer.anchor_training_probability = 1.0
+    sources = [
+        trainer.sample_anchor({}, 2, domain=0, owned_axes=()).source for _ in range(3)
+    ]
+
+    assert sources == ["prior", "real", "prior"]
 
 
 def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
@@ -365,9 +392,8 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         model,
         optim,
         anchor=AnchorConfig(
-            training_probability=1.0,
-            loss_weight=1.0,
-            shared_axis_probability=1.0,
+            train_prob=1.0,
+            cross_domain_prob=1.0,
         ),
     )
     denoiser, critics, connectivity_critic = build_models(cfg)
@@ -585,8 +611,7 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
         model,
         optim,
         anchor=AnchorConfig(
-            training_probability=1.0,
-            loss_weight=1.0,
+            train_prob=1.0,
         ),
     )
     denoiser, critics, connectivity_critic = build_models(cfg)
@@ -890,10 +915,15 @@ def test_incompatible_shared_anchor_falls_back_to_an_owned_axis() -> None:
 def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
     trainer, denoiser, streams = _conditioning_trainer(
         anchored=False,
-        cfg_single_drop_probability=1.0,
+        cfg_drop_each_probability=0.1,
+    )
+    hidden = ConditionPresence(
+        anchor=torch.zeros(1, dtype=torch.bool),
+        vf=torch.zeros(1, dtype=torch.bool),
     )
 
     with (
+        patch.object(trainer, "sample_condition_presence", return_value=hidden),
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
             denoiser,
@@ -922,7 +952,6 @@ def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
     trainer.volume_batch_size = 4
     trainer.device = torch.device("cpu")
     trainer.cfg_drop_each_probability = 0.1
-    trainer.cfg_single_drop_probability = 0.2
 
     with patch(
         "src.train.engine.torch.rand",
@@ -935,12 +964,37 @@ def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
     assert presence.fractions() == (0.25, 0.25, 0.25, 0.25)
 
 
+def test_single_condition_dropout_matches_joint_marginal_visibility() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.volume_batch_size = 2
+    trainer.device = torch.device("cpu")
+    trainer.cfg_drop_each_probability = 0.1
+
+    with patch(
+        "src.train.engine.torch.rand",
+        return_value=torch.tensor((0.19, 0.21)),
+    ):
+        presence = trainer.sample_condition_presence(has_anchor=False)
+
+    assert presence.anchor.tolist() == [False, False]
+    assert presence.vf.tolist() == [False, True]
+
+
 def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
         connectivity_weight=0.25,
     )
-    trainer.connect.record_prior(torch.zeros(1, 3, 8, 8, 8), 0)
+    observed = build_anchors(
+        (PlaneAnchor(torch.zeros(8, 8, dtype=torch.uint8), axis=0, index=4),),
+        batch_size=1,
+        num_phases=3,
+        volume_size=8,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    assert observed is not None
+    trainer.connect.record_prior(torch.zeros(1, 3, 8, 8, 8), observed, 0)
     dropped = ConditionPresence(
         anchor=torch.tensor((False,)),
         vf=torch.tensor((True,)),
@@ -1012,7 +1066,7 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
     assert math.isclose(metrics.vf_loss, 0.0, abs_tol=1e-7)
 
 
-def test_unconditional_warmup_populates_reference_before_anchor_connectivity() -> None:
+def test_real_anchor_ramp_builds_and_refreshes_conditional_prior() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
         anchor_start_step=1,
@@ -1020,15 +1074,18 @@ def test_unconditional_warmup_populates_reference_before_anchor_connectivity() -
     )
     trainer.prior_refresh_steps = 2
 
-    with patch.object(
-        trainer.diffusion,
-        "sample",
-        wraps=trainer.diffusion.sample,
-    ) as prior_samples:
+    with (
+        patch.object(
+            trainer.diffusion,
+            "sample",
+            wraps=trainer.diffusion.sample,
+        ) as prior_samples,
+        patch("src.train.prior._log_uniform_count", return_value=4),
+    ):
         warmup = trainer.step(0, transition=0)
-        prior = trainer.step(1, transition=0)
+        initial = trainer.step(1, transition=0)
         connectivity_before = _parameters(trainer.connectivity_critic)
-        anchored = trainer.step(2, transition=0)
+        multi = trainer.step(2, transition=0)
         refreshed = trainer.step(3, transition=0)
 
     assert prior_samples.call_count == 2
@@ -1037,28 +1094,34 @@ def test_unconditional_warmup_populates_reference_before_anchor_connectivity() -
     assert warmup.prior_volumes == 0
     assert warmup.generator_connectivity == 0.0
     assert warmup.critic_connectivity == 0.0
-    assert prior.anchor_ramp == 0.0
-    assert prior.prior_volumes == 1
-    assert prior.prior_ready
-    assert anchored.anchor_ramp == 1.0
-    assert anchored.anchor_planes == 1
-    assert anchored.connectivity_triplets == 7
-    assert anchored.generator_connectivity > 0.0
-    assert anchored.critic_connectivity > 0.0
+    assert initial.anchor_ramp == 1.0
+    assert initial.anchor_planes == 1
+    assert initial.prior_volumes == 1
+    assert initial.prior_ready
+    assert initial.connectivity_triplets == 7
+    assert multi.anchor_ramp == 1.0
+    assert multi.anchor_planes == 4
+    assert multi.connectivity_triplets == 7
+    assert multi.generator_connectivity > 0.0
+    assert multi.critic_connectivity > 0.0
     assert refreshed.anchor_ramp == 1.0
     assert refreshed.anchor_planes == 1
     assert refreshed.prior_updates == 1
+    for call in prior_samples.call_args_list:
+        conditions = call.args[3]
+        assert bool(conditions["anchor_mask"].any())
+        assert not bool(conditions["vf_present"].any())
     assert _changed(connectivity_before, trainer.connectivity_critic)
     assert all(
         parameter.requires_grad
         for parameter in trainer.connectivity_critic.parameters()
     )
     assert math.isclose(
-        anchored.generator_total,
-        anchored.generator
-        + 0.25 * anchored.generator_connectivity
-        + anchored.anchor_loss
-        + anchored.vf_loss,
+        multi.generator_total,
+        multi.generator
+        + 0.25 * multi.generator_connectivity
+        + multi.anchor_loss
+        + multi.vf_loss,
         rel_tol=1e-5,
     )
 
@@ -1170,7 +1233,6 @@ def _conditioning_trainer(
     connectivity_weight: float = 0.0,
     normal_transition_weight: float = 0.0,
     cfg_drop_each_probability: float = 0.0,
-    cfg_single_drop_probability: float = 0.0,
     axes: tuple[int, ...] = (0, 1, 2),
 ) -> tuple[Trainer, nn.Module, dict[int, _ConstantStream]]:
     data = DataConfig(
@@ -1202,18 +1264,16 @@ def _conditioning_trainer(
         model,
         optim,
         anchor=AnchorConfig(
-            training_probability=1.0 if anchored else 0.0,
+            train_prob=1.0 if anchored else 0.0,
             start_step=anchor_start_step,
             ramp_steps=anchor_ramp_steps,
-            loss_weight=1.0 if anchored else 0.0,
         ),
         connectivity=ConnectivityConfig(
-            loss_weight=connectivity_weight,
-            normal_transition_loss_weight=normal_transition_weight,
+            weight=connectivity_weight,
+            phase_transition_weight=normal_transition_weight,
         ),
         conditioning=ConditioningConfig(
-            drop_each_prob=cfg_drop_each_probability,
-            single_condition_drop_prob=cfg_single_drop_probability,
+            joint_each_prob=cfg_drop_each_probability,
         ),
     )
     denoiser, critics, connectivity_critic = build_models(cfg)
@@ -1264,7 +1324,7 @@ def _make_trainer(
     connectivity_optim,
     device,
 ) -> Trainer:
-    use_amp = cfg.train.mixed_precision and device.type == "cuda"
+    use_amp = cfg.train.amp and device.type == "cuda"
     return Trainer(
         components=TrainerComponents(
             denoiser=denoiser,
@@ -1281,32 +1341,27 @@ def _make_trainer(
         ),
         settings=TrainerSettings(
             volume_batch_size=cfg.train.volume_batch_size,
-            num_phases=cfg.data.num_phases,
+            num_phases=cfg.data.num_phase,
             patch_size=cfg.data.input_size,
-            slice_pairs_per_axis=cfg.train.slice_pairs_per_axis,
-            ema_decay=cfg.train.ema_decay,
-            r1_gamma=cfg.optim.r1_gamma,
-            r1_interval=cfg.optim.r1_interval,
-            critic_local_weight=cfg.optim.local_loss_weight,
-            anchor_training_probability=cfg.anchor.training_probability,
+            slice_pairs_per_axis=cfg.train.pairs_per_axis,
+            ema_decay=cfg.optim.ema_decay,
+            r1_gamma=cfg.model.critic.r1_weight,
+            r1_interval=cfg.model.critic.r1_interval,
+            critic_local_weight=cfg.model.critic.local_loss_weight,
+            anchor_training_probability=cfg.anchor.train_prob,
             anchor_start_step=cfg.anchor.start_step,
             anchor_ramp_steps=cfg.anchor.ramp_steps,
-            anchor_loss_weight=cfg.anchor.loss_weight,
-            anchor_shared_axis_probability=cfg.anchor.get(
-                "shared_axis_probability",
-                0.0,
-            ),
-            connectivity_weight=cfg.connectivity.loss_weight,
-            normal_transition_weight=(cfg.connectivity.normal_transition_loss_weight),
-            connectivity_bank_size=cfg.connectivity.bank_size,
-            connectivity_refresh_steps=cfg.connectivity.refresh,
-            vf_loss_weight=cfg.vf.loss_weight,
-            domain_dropout=cfg.data.get("domain_dropout", 0.0),
-            cfg_drop_each_probability=(cfg.conditioning.cfg_dropout.drop_each_prob),
-            cfg_single_drop_probability=(
-                cfg.conditioning.cfg_dropout.single_condition_drop_prob
-            ),
-            latent_channels=cfg.model.latent_channels,
+            anchor_shared_axis_probability=cfg.anchor.cross_domain_prob,
+            anchor_pixel_loss_weight=cfg.anchor.pixel_weight,
+            connectivity_weight=cfg.anchor.connectivity.weight,
+            normal_transition_weight=(cfg.anchor.connectivity.phase_transition_weight),
+            connectivity_bank_size=cfg.anchor.connectivity.volume_count,
+            connectivity_refresh_steps=cfg.anchor.connectivity.refresh_every,
+            vf_loss_weight=cfg.vf.weight,
+            vf_target_average_max_samples=cfg.vf.max_samples,
+            domain_dropout=1.0 - cfg.data.domain_prob,
+            cfg_drop_each_probability=cfg.condition_dropout.joint_each_prob,
+            latent_channels=cfg.model.generator.latent_channels,
             amp_enabled=use_amp,
         ),
     )
@@ -1322,31 +1377,63 @@ def _config(
     vf: VfConfig | None = None,
     conditioning: Config | None = None,
 ) -> TrainConfig:
+    anchor = AnchorConfig() if anchor is None else anchor
+    anchor["connectivity"] = (
+        ConnectivityConfig() if connectivity is None else connectivity
+    )
     return TrainConfig(
-        data=data,
-        model=model,
+        data=DataConfig(
+            domains=data.domains,
+            num_phase=data.num_phases,
+            crop_partial=data.get("allow_partial_crop", False),
+            crop_size=data.crop_size,
+            input_size=data.input_size,
+            augment=data.get("augment", False),
+            augment_prob=data.get("augment_prob", 0.0),
+            domain_prob=1.0 - data.get("domain_dropout", 0.0),
+            batch_size=data.batch_size,
+            num_workers=data.get("num_workers", 0),
+        ),
+        model=ModelConfig(
+            grad_checkpoint=model.gradient_checkpointing,
+            generator=Config(
+                channels=[
+                    model.base_channels * multiplier
+                    for multiplier in model.channel_multipliers
+                ],
+                condition_channels=model.embedding_channels,
+                latent_channels=model.latent_channels,
+            ),
+            critic=Config(
+                channels=model.critic_channels,
+                local_loss_weight=optim.local_loss_weight,
+                r1_weight=optim.r1_gamma,
+                r1_interval=optim.r1_interval,
+            ),
+        ),
         diffusion=DiffusionConfig(
-            timesteps=2,
+            steps=2,
             beta_min=0.1,
             beta_max=2.0,
         ),
-        anchor=AnchorConfig() if anchor is None else anchor,
-        connectivity=(ConnectivityConfig() if connectivity is None else connectivity),
-        conditioning=(ConditioningConfig() if conditioning is None else conditioning),
-        vf=(
-            VfConfig(
-                loss_weight=1.0,
-            )
-            if vf is None
-            else vf
+        anchor=anchor,
+        condition_dropout=(
+            ConditioningConfig() if conditioning is None else conditioning
         ),
-        optim=optim,
-        train=LoopConfig(
-            total_steps=1,
-            volume_batch_size=1,
-            slice_pairs_per_axis=2,
-            mixed_precision=False,
+        vf=(VfConfig(max_samples=1, weight=1.0) if vf is None else vf),
+        optim=OptimConfig(
+            generator_lr=optim.denoiser_lr,
+            critic_lr=optim.critic_lr,
+            adam_betas=[optim.beta1, optim.beta2],
             ema_decay=0.9,
-            save_every_steps=1,
+        ),
+        train=LoopConfig(
+            init_weights=None,
+            steps=1,
+            volume_batch_size=1,
+            pairs_per_axis=2,
+            amp=False,
+            update_weights_every=1,
+            archive_every=1,
         ),
     )

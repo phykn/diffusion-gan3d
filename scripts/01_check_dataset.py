@@ -42,7 +42,7 @@ def main() -> None:
                 img,
                 cmap="gray",
                 vmin=-0.5,
-                vmax=cfg["data"]["num_phases"] - 0.5,
+                vmax=cfg["data"]["num_phase"] - 0.5,
                 interpolation="nearest",
             )
             panels[row, col].set_title(f"axis {axis}")

@@ -15,7 +15,7 @@ from ..diffusion import Diffusion
 from ..model.denoiser import Denoiser3D
 from ..model.domain import NULL_DOMAIN
 from . import vf
-from .anchor_loss import soft_anchor_loss
+from .anchor_loss import pool_size_from_downsampling, soft_anchor_loss
 from .augment import CriticAugment
 from .connect import Connectivity, TripletBatch, normal_transition_loss
 from .ema import update_ema
@@ -101,6 +101,8 @@ class DenoiserBatch:
     logits: torch.Tensor
     clean_probs: torch.Tensor
     anchor: AnchorCondition | None
+    anchor_observed_mask: torch.Tensor | None
+    anchor_observed_axis_masks: torch.Tensor | None
     anchor_present: torch.Tensor
     anchor_ramp: float
     target_vf: torch.Tensor
@@ -116,6 +118,7 @@ class StepPreparation:
     real: dict[int, torch.Tensor]
     selection: "AnchorSelection | None"
     anchor: AnchorCondition | None
+    prior_anchor: AnchorCondition | None
     target_vf: torch.Tensor
     presence: "ConditionPresence"
     model_conditions: dict[str, torch.Tensor]
@@ -126,7 +129,9 @@ class StepPreparation:
 @dataclass(frozen=True)
 class AnchorSelection:
     condition: AnchorCondition
-    source: Literal["real", "shared"]
+    observed_mask: torch.Tensor
+    observed_axis_masks: torch.Tensor
+    source: Literal["real", "shared", "prior"]
 
 
 @dataclass(frozen=True)
@@ -200,19 +205,15 @@ class TrainerSettings:
     anchor_training_probability: float
     anchor_start_step: int
     anchor_ramp_steps: int
-    anchor_loss_weight: float
     connectivity_weight: float
     normal_transition_weight: float
     connectivity_bank_size: int
     connectivity_refresh_steps: int
     vf_loss_weight: float
     cfg_drop_each_probability: float
-    cfg_single_drop_probability: float
     latent_channels: int
     amp_enabled: bool
     domain_dropout: float = 0.0
-    anchor_pool_size: int = 4
-    anchor_coarse_loss_weight: float = 0.0
     anchor_pixel_loss_weight: float = 1.0
     anchor_shared_axis_probability: float = 0.0
     vf_target_average_max_samples: int = 1
@@ -258,7 +259,6 @@ class TrainerSettings:
             "slice_pairs_per_axis": self.slice_pairs_per_axis,
             "r1_interval": self.r1_interval,
             "latent_channels": self.latent_channels,
-            "anchor_pool_size": self.anchor_pool_size,
             "vf_target_average_max_samples": self.vf_target_average_max_samples,
             "connectivity_bank_size": self.connectivity_bank_size,
         }
@@ -280,7 +280,6 @@ class TrainerSettings:
         values = {
             "anchor_training_probability": self.anchor_training_probability,
             "cfg_drop_each_probability": self.cfg_drop_each_probability,
-            "cfg_single_drop_probability": self.cfg_single_drop_probability,
             "domain_dropout": self.domain_dropout,
             "anchor_shared_axis_probability": (self.anchor_shared_axis_probability),
         }
@@ -297,8 +296,6 @@ class TrainerSettings:
         values = {
             "r1_gamma": self.r1_gamma,
             "critic_local_weight": self.critic_local_weight,
-            "anchor_loss_weight": self.anchor_loss_weight,
-            "anchor_coarse_loss_weight": self.anchor_coarse_loss_weight,
             "anchor_pixel_loss_weight": self.anchor_pixel_loss_weight,
             "connectivity_weight": self.connectivity_weight,
             "normal_transition_weight": self.normal_transition_weight,
@@ -351,13 +348,12 @@ class Trainer:
         self.anchor_training_probability = float(settings.anchor_training_probability)
         self.anchor_start_step = settings.anchor_start_step
         self.anchor_ramp_steps = settings.anchor_ramp_steps
-        self.anchor_effective_start_step: int | None = None
         self.anchor_shared_axis_probability = float(
             settings.anchor_shared_axis_probability
         )
-        self.anchor_loss_weight = settings.anchor_loss_weight
-        self.anchor_pool_size = settings.anchor_pool_size
-        self.anchor_coarse_loss_weight = settings.anchor_coarse_loss_weight
+        self.anchor_pool_size = pool_size_from_downsampling(
+            self.denoiser.downsample_factor
+        )
         self.anchor_pixel_loss_weight = settings.anchor_pixel_loss_weight
         self.connectivity_weight = settings.connectivity_weight
         self.normal_transition_weight = settings.normal_transition_weight
@@ -372,6 +368,7 @@ class Trainer:
             num_domains=self.num_domains,
             patch_size=settings.patch_size,
             bank_size=settings.connectivity_bank_size,
+            plane_stride=self.denoiser.downsample_factor,
             owned_axes=owned_axes,
         )
         self.prior_refresh_steps = settings.connectivity_refresh_steps
@@ -379,10 +376,10 @@ class Trainer:
         self.last_prior_refresh_steps: list[int | None] = [
             None for _ in range(self.num_domains)
         ]
+        self.use_prior_next = True
         self.vf_loss_weight = settings.vf_loss_weight
         self.vf_target_average_max_samples = settings.vf_target_average_max_samples
         self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
-        self.cfg_single_drop_probability = float(settings.cfg_single_drop_probability)
         self.domain_dropout = float(settings.domain_dropout)
         self.latent_channels = settings.latent_channels
         self.amp_enabled = settings.amp_enabled
@@ -486,6 +483,16 @@ class Trainer:
                 logits=logits,
                 clean_probs=clean_probs,
                 anchor=anchor,
+                anchor_observed_mask=(
+                    None
+                    if prepared.selection is None
+                    else prepared.selection.observed_mask
+                ),
+                anchor_observed_axis_masks=(
+                    None
+                    if prepared.selection is None
+                    else prepared.selection.observed_axis_masks
+                ),
                 anchor_present=presence.anchor,
                 anchor_ramp=ramp,
                 target_vf=target_vf,
@@ -534,18 +541,28 @@ class Trainer:
         )
         vf_pool = vf.build_pool(own_batches, num_phases=self.num_phases)
         ramp = self.get_anchor_ramp(step)
+        prior_anchor = (
+            self.sample_real_anchor(
+                batches,
+                self.patch_size,
+                owned_axes=tuple(own_batches),
+            ).condition
+            if self.should_record_prior(step, domain)
+            else None
+        )
         selection = (
             None
             if ramp == 0.0
             else self.sample_anchor(
                 batches,
                 self.patch_size,
+                domain=domain,
                 owned_axes=tuple(own_batches),
             )
         )
         if (
             selection is not None
-            and selection.source == "shared"
+            and selection.source in ("shared", "prior")
             and not vf.anchor_is_compatible(
                 selection.condition,
                 vf_pool,
@@ -584,6 +601,7 @@ class Trainer:
             real=batches,
             selection=selection,
             anchor=anchor,
+            prior_anchor=prior_anchor,
             target_vf=target_vf,
             presence=presence,
             model_conditions=model_conditions,
@@ -764,13 +782,13 @@ class Trainer:
     def select_target_domain(self, step: int) -> int:
         if (
             self.prior_required
-            and step >= self.anchor_start_step
+            and self.anchor_schedule_complete(step)
             and not self.connect.prior_ready
         ):
             for domain in range(self.num_domains):
                 if self.connect.needs_prior(domain):
                     return domain
-            raise RuntimeError("connectivity prior readiness is inconsistent.")
+            raise RuntimeError("conditional prior readiness is inconsistent.")
         return self.sample_target_domain()
 
     def get_batches(
@@ -880,7 +898,9 @@ class Trainer:
             anchor = ~(joint_null | anchor_null)
             vf = ~(joint_null | vf_null)
         else:
-            vf = random >= self.cfg_single_drop_probability
+            # Match the marginal visibility of either condition in the four-state
+            # joint CFG distribution: joint-null plus its own null state.
+            vf = random >= 2.0 * self.cfg_drop_each_probability
         return ConditionPresence(anchor=anchor, vf=vf)
 
     @staticmethod
@@ -904,23 +924,22 @@ class Trainer:
     def get_anchor_ramp(self, step: int) -> float:
         if step < self.anchor_start_step:
             return 0.0
-        if self.prior_required and not self.connect.prior_ready:
-            return 0.0
-        if self.anchor_effective_start_step is None:
-            self.anchor_effective_start_step = step
-        start_step = self.anchor_effective_start_step
         if self.anchor_ramp_steps == 0:
             return 1.0
         return min(
-            (step - start_step + 1) / self.anchor_ramp_steps,
+            (step - self.anchor_start_step + 1) / self.anchor_ramp_steps,
             1.0,
         )
+
+    def anchor_schedule_complete(self, step: int) -> bool:
+        return self.get_anchor_ramp(step) >= 1.0
 
     def sample_anchor(
         self,
         batches: dict[int, torch.Tensor],
         volume_size: int,
         *,
+        domain: int,
         owned_axes: tuple[int, ...] | None = None,
     ) -> AnchorSelection | None:
         probability = self.anchor_training_probability
@@ -928,6 +947,22 @@ class Trainer:
             return None
         if probability < 1.0 and not bool(torch.rand(()) < probability):
             return None
+        if self.connect.prior_ready and self.use_prior_next:
+            self.use_prior_next = False
+            sampled = self.connect.sample_prior_condition(
+                domain,
+                batch_size=self.volume_batch_size,
+                device=self.device,
+                dtype=torch.float32,
+            )
+            return AnchorSelection(
+                condition=sampled.condition,
+                observed_mask=sampled.observed_mask,
+                observed_axis_masks=sampled.observed_axis_masks,
+                source="prior",
+            )
+        if self.connect.prior_ready:
+            self.use_prior_next = True
         return self.sample_real_anchor(
             batches,
             volume_size,
@@ -992,7 +1027,21 @@ class Trainer:
             raise RuntimeError("real anchor construction returned no condition.")
         return AnchorSelection(
             condition=condition,
+            observed_mask=condition.mask,
+            observed_axis_masks=condition.axis_masks,
             source="shared" if use_shared else "real",
+        )
+
+    def should_record_prior(self, step: int, domain: int) -> bool:
+        if not self.prior_required or not self.anchor_schedule_complete(step):
+            return False
+        if not self.connect.prior_ready:
+            return self.connect.needs_prior(domain)
+        if self.prior_refresh_steps == 0:
+            return False
+        last_refresh = self.last_prior_refresh_steps[domain]
+        return (
+            last_refresh is not None and step - last_refresh >= self.prior_refresh_steps
         )
 
     @torch.no_grad()
@@ -1005,38 +1054,28 @@ class Trainer:
         if not self.prior_required or step < self.anchor_start_step:
             return
 
+        observed = prepared.prior_anchor
+        if observed is None:
+            return
+
         initial = not self.connect.prior_ready
         if initial and self.prior_denoiser is None:
             self.prior_denoiser = copy.deepcopy(self.ema_denoiser)
             self.prior_denoiser.eval().requires_grad_(False)
         if initial:
-            if not self.connect.needs_prior(prepared.domain):
-                return
             denoiser = self.prior_denoiser
             batch_size = self.volume_batch_size
         else:
-            if self.prior_refresh_steps == 0:
-                return
-            last_refresh = self.last_prior_refresh_steps[prepared.domain]
-            if last_refresh is None:
-                self.last_prior_refresh_steps[prepared.domain] = step
-                return
-            if step - last_refresh < self.prior_refresh_steps:
-                return
             denoiser = self.ema_denoiser
             batch_size = 1
         assert denoiser is not None
         conditions = {
-            name: values[:batch_size]
-            for name, values in prepared.model_conditions.items()
-            if name not in ("anchor_image", "anchor_mask")
+            "domain": self.make_domain(prepared.domain, batch_size),
+            "vf": torch.zeros_like(prepared.target_vf[:batch_size]),
+            "vf_present": torch.zeros_like(prepared.presence.vf[:batch_size]),
+            "anchor_image": observed.image[:batch_size],
+            "anchor_mask": observed.mask[:batch_size],
         }
-        conditions["domain"] = self.make_domain(
-            prepared.domain,
-            batch_size,
-        )
-        conditions["vf"] = torch.zeros_like(prepared.target_vf[:batch_size])
-        conditions["vf_present"] = torch.zeros_like(prepared.presence.vf[:batch_size])
         devices = [self.device] if self.device.type == "cuda" else []
         with torch.random.fork_rng(devices=devices):
             shape = (
@@ -1055,11 +1094,11 @@ class Trainer:
                     conditions,
                 )
             if initial:
-                self.connect.record_prior(prediction, prepared.domain)
+                self.connect.record_prior(prediction, observed, prepared.domain)
                 if not self.connect.needs_prior(prepared.domain):
                     self.last_prior_refresh_steps[prepared.domain] = step
             else:
-                self.connect.refresh_prior(prediction, prepared.domain)
+                self.connect.refresh_prior(prediction, observed, prepared.domain)
                 self.last_prior_refresh_steps[prepared.domain] = step
         if initial and self.connect.prior_ready:
             self.prior_denoiser = None
@@ -1340,8 +1379,9 @@ class Trainer:
                         batch.anchor,
                         batch.anchor_present,
                         pool_size=self.anchor_pool_size,
-                        coarse_weight=self.anchor_coarse_loss_weight,
                         pixel_weight=self.anchor_pixel_loss_weight,
+                        observed_mask=batch.anchor_observed_mask,
+                        observed_axis_masks=batch.anchor_observed_axis_masks,
                     )
                     anchor_loss = anchor_result.total
                     anchor_coarse = anchor_result.coarse
@@ -1358,7 +1398,7 @@ class Trainer:
                     * (
                         self.connectivity_weight * connectivity_loss
                         + self.normal_transition_weight * normal_loss
-                        + self.anchor_loss_weight * anchor_loss
+                        + anchor_loss
                     )
                     + self.vf_loss_weight * vf_loss
                 )

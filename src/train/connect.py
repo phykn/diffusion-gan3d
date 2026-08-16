@@ -1,4 +1,3 @@
-from collections import deque
 from dataclasses import dataclass
 
 import torch
@@ -6,10 +5,10 @@ import torch.nn.functional as F
 
 from .. import AXES
 from ..anchor import AnchorCondition
+from .prior import ConditionalPrior, PriorCondition
 
 TRIPLETS_PER_AXIS = 2
 TRIPLETS_PER_STEP = 1 + len(AXES) * TRIPLETS_PER_AXIS
-MATCH_CANDIDATES = 4
 
 
 @dataclass(frozen=True)
@@ -140,64 +139,6 @@ def balanced_group_mean(
     return torch.stack(means).mean()
 
 
-class _PriorBank:
-    def __init__(self, max_items: int) -> None:
-        if (
-            not isinstance(max_items, int)
-            or isinstance(max_items, bool)
-            or max_items < 1
-        ):
-            raise ValueError("prior bank size must be a positive integer.")
-        self.max_items = max_items
-        self.storage_bytes = 0
-        self._volume_bytes: int | None = None
-        self._items: deque[torch.Tensor] = deque()
-
-    def __len__(self) -> int:
-        return len(self._items)
-
-    @property
-    def ready(self) -> bool:
-        return len(self._items) >= self.max_items
-
-    @property
-    def items(self) -> tuple[torch.Tensor, ...]:
-        return tuple(self._items)
-
-    def add(self, labels: torch.Tensor, num_phases: int) -> None:
-        if labels.ndim != 4 or len(set(labels.shape[1:])) != 1:
-            raise ValueError("prior labels must have shape [B, S, S, S].")
-        for values in labels:
-            if self.ready:
-                return
-            stored = values.detach().to(device="cpu", dtype=torch.uint8).contiguous()
-            if int(stored.max()) >= num_phases:
-                raise ValueError("prior labels contain a phase outside num_phases.")
-            volume_bytes = stored.numel() * stored.element_size()
-            if self._volume_bytes is None:
-                self._volume_bytes = volume_bytes
-            elif self._volume_bytes != volume_bytes:
-                raise ValueError("prior bank volume shapes must remain fixed.")
-            self._items.append(stored.clone())
-            self.storage_bytes += volume_bytes
-
-    def replace_oldest(self, labels: torch.Tensor, num_phases: int) -> None:
-        if not self.ready:
-            raise RuntimeError("the initial prior must be complete before refresh.")
-        if labels.ndim != 4 or labels.shape[0] != 1:
-            raise ValueError("a rolling refresh must contain exactly one volume.")
-        stored = labels[0].detach().to(device="cpu", dtype=torch.uint8).contiguous()
-        if int(stored.max()) >= num_phases:
-            raise ValueError("prior labels contain a phase outside num_phases.")
-        volume_bytes = stored.numel() * stored.element_size()
-        if self._volume_bytes != volume_bytes:
-            raise ValueError("prior bank volume shapes must remain fixed.")
-        removed = self._items.popleft()
-        self.storage_bytes -= removed.numel() * removed.element_size()
-        self._items.append(stored.clone())
-        self.storage_bytes += volume_bytes
-
-
 class Connectivity:
     def __init__(
         self,
@@ -207,6 +148,7 @@ class Connectivity:
         patch_size: int,
         bank_size: int,
         owned_axes: dict[int, tuple[int, ...]],
+        plane_stride: int = 1,
     ) -> None:
         for name, value in (
             ("num_phases", num_phases),
@@ -215,54 +157,69 @@ class Connectivity:
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{name} must be a positive integer.")
-        if num_phases > 256:
-            raise ValueError("uint8 prior storage supports at most 256 phases.")
-        if set(owned_axes) != set(range(num_domains)):
-            raise ValueError("owned axes must cover every domain.")
-        for axes in owned_axes.values():
-            if not axes or any(axis not in AXES for axis in axes):
-                raise ValueError("every domain must own valid axes.")
-
         self.num_phases = num_phases
+        self.num_domains = num_domains
         self.patch_size = patch_size
-        self.owned_axes = {domain: tuple(axes) for domain, axes in owned_axes.items()}
-        # One prior store, partitioned by concrete domain so owned-axis style is
-        # not mixed with provider-only context.
-        self._domain_banks = tuple(_PriorBank(bank_size) for _ in range(num_domains))
-        self.prior_updates = 0
+        self.prior = ConditionalPrior(
+            num_phases=num_phases,
+            num_domains=num_domains,
+            patch_size=patch_size,
+            volume_count=bank_size,
+            plane_stride=plane_stride,
+            owned_axes=owned_axes,
+        )
 
     @property
     def prior_count(self) -> int:
-        return sum(map(len, self._domain_banks))
+        return self.prior.count
 
     @property
     def prior_storage_bytes(self) -> int:
-        return sum(bank.storage_bytes for bank in self._domain_banks)
+        return self.prior.storage_bytes
 
     @property
     def prior_ready(self) -> bool:
-        return all(bank.ready for bank in self._domain_banks)
+        return self.prior.ready
+
+    @property
+    def prior_updates(self) -> int:
+        return self.prior.updates
 
     def needs_prior(self, domain: int) -> bool:
-        self._check_domain(domain)
-        return not self._domain_banks[domain].ready
+        return self.prior.needs(domain)
 
-    def record_prior(self, prediction: torch.Tensor, domain: int) -> None:
-        self._check_domain(domain)
-        self._check_volume(prediction)
-        self._domain_banks[domain].add(
-            self._hard_labels(prediction),
-            self.num_phases,
-        )
+    def record_prior(
+        self,
+        prediction: torch.Tensor,
+        observed: AnchorCondition,
+        domain: int,
+    ) -> None:
+        self.prior.record(prediction, observed, domain)
 
-    def refresh_prior(self, prediction: torch.Tensor, domain: int) -> None:
-        self._check_domain(domain)
-        self._check_volume(prediction)
-        self._domain_banks[domain].replace_oldest(
-            self._hard_labels(prediction),
-            self.num_phases,
+    def refresh_prior(
+        self,
+        prediction: torch.Tensor,
+        observed: AnchorCondition,
+        domain: int,
+    ) -> None:
+        self.prior.refresh(prediction, observed, domain)
+
+    def sample_prior_condition(
+        self,
+        domain: int,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        generator: torch.Generator | None = None,
+    ) -> PriorCondition:
+        return self.prior.sample_condition(
+            domain,
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+            generator=generator,
         )
-        self.prior_updates += 1
 
     def match_anchor(
         self,
@@ -274,11 +231,9 @@ class Connectivity:
     ) -> tuple[TripletBatch, TripletBatch]:
         self._check_domain(domain)
         categorical = self._straight_through(prediction)
-        candidates = self._limit_triplets(
-            self._sample_anchor_triplets(categorical, condition),
-            1,
-        )
-        if len(candidates):
+        anchors = self._sample_anchor_triplets(categorical, condition)
+        if len(anchors):
+            general = self._empty_triplets(categorical)
             for axis in AXES:
                 extra = self._sample_random_triplets(
                     categorical,
@@ -286,7 +241,19 @@ class Connectivity:
                     axis=axis,
                     condition=condition,
                 )
-                candidates = self._concat(candidates, extra)
+                general = self._concat(general, extra)
+            reserve = int(general.axes.unique().numel())
+            anchors = self._limit_triplets(
+                anchors,
+                TRIPLETS_PER_STEP - reserve,
+            )
+            general = self._limit_general_triplets(
+                general,
+                TRIPLETS_PER_STEP - len(anchors),
+            )
+            candidates = self._concat(anchors, general)
+        else:
+            candidates = anchors
         real, matched = self._sample_prior_matches(
             candidates,
             domain,
@@ -316,8 +283,7 @@ class Connectivity:
                 continue
             choices = []
             choice_fractions = []
-            for _ in range(MATCH_CANDIDATES):
-                volume = volumes[self._random_index(len(volumes), generator)]
+            for volume in volumes:
                 triplet = self._sample_prior_triplet(volume, axis, generator)
                 choices.append(triplet)
                 choice_fractions.append(
@@ -352,15 +318,7 @@ class Connectivity:
         )
 
     def _prior_volumes(self, domain: int, axis: int) -> tuple[torch.Tensor, ...]:
-        self._check_axis(axis)
-        if axis in self.owned_axes[domain] and self._domain_banks[domain].ready:
-            return self._domain_banks[domain].items
-        return tuple(
-            volume
-            for source, bank in enumerate(self._domain_banks)
-            if axis in self.owned_axes[source] and bank.ready
-            for volume in bank.items
-        )
+        return self.prior.volumes(domain, axis)
 
     def _sample_prior_triplet(
         self,
@@ -534,6 +492,37 @@ class Connectivity:
         order = torch.randperm(len(batch), device=batch.values.device)[:limit]
         return batch.index_select(order)
 
+    @staticmethod
+    def _limit_general_triplets(batch: TripletBatch, limit: int) -> TripletBatch:
+        if limit <= 0:
+            return Connectivity._limit_triplets(batch, 0)
+        if len(batch) <= limit:
+            return batch
+        selected = []
+        for axis in AXES:
+            candidates = (batch.axes == axis).nonzero().flatten()
+            if candidates.numel() and len(selected) < limit:
+                choice = torch.randint(
+                    candidates.numel(),
+                    (),
+                    device=batch.values.device,
+                )
+                selected.append(candidates[choice])
+        remaining = limit - len(selected)
+        if remaining:
+            chosen = torch.stack(selected)
+            available = torch.ones(
+                len(batch), device=batch.values.device, dtype=torch.bool
+            )
+            available[chosen] = False
+            candidates = available.nonzero().flatten()
+            order = torch.randperm(
+                len(candidates),
+                device=batch.values.device,
+            )[:remaining]
+            selected.extend(candidates.index_select(0, order))
+        return batch.index_select(torch.stack(selected))
+
     def _straight_through(self, prediction: torch.Tensor) -> torch.Tensor:
         self._check_volume(prediction)
         hard = (
@@ -544,10 +533,6 @@ class Connectivity:
         values = hard.mul(2.0).sub(1.0)
         return values + (prediction - prediction.detach())
 
-    def _hard_labels(self, prediction: torch.Tensor) -> torch.Tensor:
-        self._check_volume(prediction)
-        return prediction.detach().argmax(dim=1)
-
     def _check_volume(self, volume: torch.Tensor) -> None:
         if volume.ndim != 5 or volume.shape[1] != self.num_phases:
             raise ValueError("volume must have shape [B, C, D, H, W].")
@@ -555,7 +540,7 @@ class Connectivity:
     def _check_domain(self, domain: int) -> None:
         if not isinstance(domain, int) or isinstance(domain, bool):
             raise TypeError("domain must be an integer.")
-        if not 0 <= domain < len(self._domain_banks):
+        if not 0 <= domain < self.num_domains:
             raise ValueError("domain is outside the prior bank.")
 
     @staticmethod

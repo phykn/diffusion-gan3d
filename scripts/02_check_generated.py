@@ -9,7 +9,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.build import load_generator
-from src.config import load_generation_settings
 from src.volume import save_volume
 
 
@@ -41,29 +40,25 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight = args.weight
-    print("\nGeneration")
-    print("----------")
-    print(f"Weight  : {weight.resolve()}", flush=True)
+    print(f"\nWeights : {weight.resolve()}", flush=True)
 
     generator = load_generator(weight, device=device)
-    settings = load_generation_settings()
     shape = (generator.patch_size,) * 3
-    print(f"Shape   : {' × '.join(map(str, shape))}")
-    print(f"Device  : {device}")
-    print(f"Domain  : {args.domain}")
-    print("Anchor/VF : none")
-    print(f"Margin  : {settings.margin} per outer face")
-    print("Status  : generating...", flush=True)
+    print(
+        f"Generate: {' × '.join(map(str, shape))}, domain {args.domain}, {device}",
+        flush=True,
+    )
 
     vol = generator.generate(
         vf=None,
         domain=args.domain,
-        margin=settings.margin,
+        margin=generator.default_margin,
     )
-    print("Status  : complete", flush=True)
     if args.out is not None:
         save_volume(vol, args.out)
-        print(f"Output  : {args.out.resolve()}", flush=True)
+        print(f"Saved   : {args.out.resolve()}", flush=True)
+    else:
+        print("Complete", flush=True)
     if args.napari:
         show_napari(vol)
     else:

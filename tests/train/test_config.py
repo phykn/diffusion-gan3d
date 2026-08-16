@@ -51,11 +51,10 @@ def test_generation_settings_use_gen_yaml(
         lambda path: {
             "guidance": 1.5,
             "overlap": 12,
-            "margin": 6,
         },
     )
 
-    assert load_generation_settings() == GenerationSettings(1.5, 12, 6)
+    assert load_generation_settings() == GenerationSettings(1.5, 12)
 
 
 def test_generation_settings_support_missing_values(
@@ -70,16 +69,36 @@ def test_repository_generation_config_has_expected_defaults() -> None:
     assert load_generation_settings() == GenerationSettings()
 
 
-def test_repository_training_config_uses_soft_anchor_and_ema_image_prior() -> None:
+def test_repository_training_config_uses_soft_anchor_and_conditional_ema_prior() -> (
+    None
+):
     cfg = load_yaml(ROOT / "config" / "train.yaml")
 
-    assert cfg["model"]["anchor_multiscale"] is True
-    assert cfg["anchor"]["shared_axis_probability"] == 0.20
-    assert cfg["anchor"]["coarse_loss_weight"] == 1.0
-    assert cfg["anchor"]["pixel_loss_weight"] == 0.05
-    assert cfg["connectivity"]["bank_size"] == 16
-    assert cfg["connectivity"]["refresh"] == 500
-    assert cfg["vf"]["target_average_max_samples"] == 4
+    assert tuple(cfg) == (
+        "data",
+        "model",
+        "diffusion",
+        "anchor",
+        "vf",
+        "condition_dropout",
+        "optim",
+        "train",
+    )
+    assert tuple(cfg["model"]) == ("grad_checkpoint", "generator", "critic")
+    assert "connectivity" not in cfg
+    assert "conditioning" not in cfg
+    assert cfg["data"]["domain_prob"] == 0.8
+    assert cfg["anchor"]["multiscale_input"] is True
+    assert cfg["anchor"]["cross_domain_prob"] == 0.20
+    assert "pool_size" not in cfg["anchor"]
+    assert "coarse_weight" not in cfg["anchor"]
+    assert cfg["anchor"]["pixel_weight"] == 0.05
+    assert cfg["anchor"]["connectivity"]["volume_count"] == 16
+    assert cfg["anchor"]["connectivity"]["refresh_every"] == 500
+    assert "reverse_invariant" not in cfg["anchor"]["connectivity"]
+    assert tuple(cfg["condition_dropout"]) == ("joint_each_prob",)
+    assert cfg["vf"]["max_samples"] == 4
+    assert cfg["train"]["init_weights"] == "run/08161634"
     assert "relation" not in cfg
 
 

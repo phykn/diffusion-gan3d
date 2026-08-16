@@ -9,12 +9,11 @@ from .utils import load_yaml
 class GenerationSettings:
     guidance: float = 1.0
     overlap: int = 8
-    margin: int = 8
 
 
 def load_generation_settings() -> GenerationSettings:
     section = load_yaml(Path(__file__).resolve().parents[1] / "config" / "gen.yaml")
-    unknown = section.keys() - {"guidance", "overlap", "margin"}
+    unknown = section.keys() - {"guidance", "overlap"}
     if unknown:
         names = ", ".join(sorted(unknown))
         raise ValueError(f"unknown generation setting: {names}")
@@ -29,8 +28,7 @@ def load_generation_settings() -> GenerationSettings:
     ):
         raise ValueError("guidance must be between zero and 10000.")
     overlap = _non_negative_int(section.get("overlap", 8), "overlap")
-    margin = _non_negative_int(section.get("margin", 8), "margin")
-    return GenerationSettings(float(guidance), overlap, margin)
+    return GenerationSettings(float(guidance), overlap)
 
 
 def _non_negative_int(value: object, name: str) -> int:

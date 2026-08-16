@@ -5,7 +5,6 @@ from pathlib import Path
 from time import perf_counter
 
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
@@ -82,7 +81,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
     parser.add_argument(
         "--margin",
         type=non_negative_int,
-        help="voxels discarded from every outer face (default: config/gen.yaml)",
+        help="voxels discarded from every outer face (default: model-derived)",
     )
     parser.add_argument(
         "--count",
@@ -92,14 +91,8 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
     parser.add_argument(
         "--anchor-strength",
         type=unit_interval,
-        default=1.0,
-        help="normalized base anchor prediction strength (default: 1)",
-    )
-    parser.add_argument(
-        "--anchor-sigma",
-        type=positive_float,
-        default=2.0,
-        help="Gaussian base anchor influence radius in voxels (default: 2)",
+        default=0.90,
+        help="normalized base anchor prediction strength (default: 0.90)",
     )
     parser.add_argument(
         "--guidance",
@@ -115,6 +108,11 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
         "--napari",
         action="store_true",
         help="show the complete scaled phase volume in Napari",
+    )
+    parser.add_argument(
+        "--no-view",
+        action="store_true",
+        help="skip interactive visualization",
     )
     args = parser.parse_args()
     if args.count is not None and args.count < 0:
@@ -138,11 +136,10 @@ def generate_base(
     if anchor_count is not None and anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
     if anchor_count is None:
-        print("Base       : none")
+        print("Base    : none")
         return BaseResult(None, None, (), None)
     if anchor_count == 0:
-        print("Base       : unanchored")
-        print("Status     : generating base...", flush=True)
+        print("Base    : generating unanchored volume...", flush=True)
         base = generator.generate(
             guidance=args.guidance,
             domain=args.domain,
@@ -161,13 +158,10 @@ def generate_base(
     anchors = tuple(
         PlaneAnchor(image=slices[index], axis=AXIS, index=index) for index in indices
     )
-    print(f"Base       : {len(indices)} anchor planes")
-    print(f"GT         : {args.gt.resolve()}")
-    print("Status     : generating base...", flush=True)
+    print(f"Base    : generating with {len(indices)} anchor planes...", flush=True)
     base = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
-        anchor_sigma=args.anchor_sigma,
         guidance=args.guidance,
         domain=args.domain,
         margin=args.margin,
@@ -257,16 +251,12 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight = args.weight
-    print("\nScale-up generation")
-    print("-------------------")
-    print(f"Weight     : {weight.resolve()}", flush=True)
-    if args.gt is not None:
-        print(f"GT         : {args.gt.resolve()}")
+    print(f"\nWeights : {weight.resolve()}", flush=True)
 
     generator = load_generator(weight, device=device)
     settings = load_generation_settings()
     overlap = settings.overlap if args.overlap is None else args.overlap
-    margin = settings.margin if args.margin is None else args.margin
+    margin = generator.default_margin if args.margin is None else args.margin
     guidance = settings.guidance if args.guidance is None else args.guidance
     args.guidance = guidance
     args.margin = margin
@@ -275,20 +265,14 @@ def main() -> None:
     generation_shape = tuple(size + 2 * margin for size in shape)
     plan = scaled.plan(generation_shape, overlap)
     print_plan(plan, device)
-    print(f"Output shape : {' × '.join(map(str, shape))}")
-    print(f"Margin       : {margin} per outer face")
+    print(f"Output  : {' × '.join(map(str, shape))}, margin {margin}")
     base_result = generate_base(parser, args, generator, anchor_count)
     base = base_result.volume
     target = base_result.target
     indices = base_result.indices
     base_acc = base_result.accuracy
 
-    conditioning = "soft base" if base is not None else "none"
-    print(f"Conditioning : {conditioning}")
-    postprocess = f"center crop ({margin} voxels per outer face)" if margin else "none"
-    print(f"Postprocess  : {postprocess}")
-
-    print("Status     : scaling...", flush=True)
+    print("Scaling...", flush=True)
 
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -307,10 +291,9 @@ def main() -> None:
     stats = scaled.stats
     assert stats is not None
     elapsed = perf_counter() - start
-    print("Status     : complete", flush=True)
     if args.out is not None:
         save_volume(vol, args.out)
-        print(f"Output     : {args.out.resolve()}", flush=True)
+        print(f"Saved   : {args.out.resolve()}", flush=True)
     assessment = assess_result(
         vol,
         base_result,
@@ -323,37 +306,29 @@ def main() -> None:
     scaled_acc = assessment.scaled_accuracy
     base_match = assessment.base_match
     base_interior_match = assessment.base_interior_match
-    interior_quality = assessment.interior_quality
     center = assessment.center
     print("\nQuality")
-    print("-------")
-    print(f"Phase VF    : {format_phases(vfs)}")
-    print(f"Seam change ratio  : {format_axes(quality.change_ratio)}")
-    print(f"Transition TV      : {format_axes(quality.transition_tv)}")
-    print(f"Continuation delta : {format_axes(quality.continuation_delta)}")
+    print(f"Phase VF        : {format_phases(vfs)}")
+    print(f"Seam ratio      : {format_axes(quality.change_ratio)}")
+    print(f"Seam continuity : {format_axes(quality.continuation_delta)}")
     if base is not None:
-        print("\nBase")
-        print("----")
-        print(f"Base interior match : {format_score(base_interior_match)}")
+        print(f"Base interior   : {format_score(base_interior_match)}")
         if target is None:
-            print(f"Whole base match    : {format_score(base_match)}")
+            print(f"Whole base      : {format_score(base_match)}")
         else:
-            print(f"Anchor match before : {format_score(base_acc)}")
-            print(f"Anchor match after  : {format_score(scaled_acc)}")
-        assert interior_quality is not None
-        print(f"Base boundary change : {format_axes(interior_quality.change_ratio)}")
-        print(f"Base boundary TV     : {format_axes(interior_quality.transition_tv)}")
-        print(
-            f"Base continuity      : {format_axes(interior_quality.continuation_delta)}"
-        )
+            print(
+                "Anchor match   : "
+                f"{format_score(base_acc)} → {format_score(scaled_acc)}"
+            )
 
-    print("\nPerformance")
-    print("-----------")
-    print(f"Elapsed     : {elapsed:.1f} s")
+    performance = f"Elapsed : {elapsed:.1f} s"
     if device.type == "cuda":
         peak = torch.cuda.max_memory_allocated(device) / 1024**3
-        print(f"Peak memory : {peak:.2f} GiB")
+        performance += f", peak {peak:.2f} GiB"
+    print(performance)
 
+    if args.no_view:
+        return
     if args.napari:
         show_napari(vol)
     elif base is not None and center is not None:
@@ -399,29 +374,15 @@ def unit_interval(value: str) -> float:
     return parsed
 
 
-def positive_float(value: str) -> float:
-    parsed = float(value)
-    if not np.isfinite(parsed) or parsed <= 0.0:
-        raise argparse.ArgumentTypeError("value must be a positive finite number")
-    return parsed
-
-
 def print_plan(plan: ScalePlan, device: torch.device) -> None:
-    print(f"Generation shape : {' × '.join(map(str, plan.shape))}")
-    print(f"Generation grid  : {' × '.join(map(str, plan.grid))}")
-    print(f"Tile count       : {plan.tile_count}")
-    print(f"Tile size        : {plan.tile_size}")
-    print(f"Stride       : {plan.stride}")
-    print(f"Overlap      : {plan.overlap} per shared face")
-    print("Internal seams: " + " × ".join(str(len(axis)) for axis in plan.seams))
-    print(f"State memory : {format_bytes(plan.states_bytes)}")
-    print(f"Fusion memory: {format_bytes(plan.fusion_bytes)}")
-    print(f"Input memory : {format_bytes(plan.tile_bytes)}")
-    print(f"Workspace    : {format_bytes(plan.workspace_bytes)}")
-    print(f"CUDA total   : {format_bytes(plan.cuda_bytes)}")
-    print(f"CPU total    : {format_bytes(plan.cpu_bytes)}")
-    print(f"Output size  : {format_bytes(plan.output_bytes)}")
-    print(f"Device       : {device}")
+    print(
+        f"Plan    : {' × '.join(map(str, plan.grid))} tiles "
+        f"({plan.tile_count} total), overlap {plan.overlap}, {device}"
+    )
+    print(
+        f"Memory  : CUDA {format_bytes(plan.cuda_bytes)}, "
+        f"CPU {format_bytes(plan.cpu_bytes)}"
+    )
 
 
 def format_bytes(size: int) -> str:

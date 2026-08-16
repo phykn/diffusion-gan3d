@@ -84,7 +84,7 @@ class _SpatialAnchorDenoiser:
         correction = residual.mul(weight)
         plane_scale, context_scale = self.temporal_scales(
             time,
-            self.generator.diffusion.timesteps,
+            self.generator.diffusion.alpha_bars,
         )
         plane_scale = plane_scale.view(-1, 1, 1, 1, 1)
         context_scale = context_scale.view(-1, 1, 1, 1, 1)
@@ -100,14 +100,18 @@ class _SpatialAnchorDenoiser:
     @staticmethod
     def temporal_scales(
         time: torch.Tensor,
-        timesteps: int,
+        alpha_bars: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        timesteps = alpha_bars.numel() - 1
         if timesteps == 1:
             progress = torch.ones_like(time, dtype=torch.float32)
         else:
             progress = 1.0 - time.to(torch.float32) / (timesteps - 1)
         plane = 0.5 + 0.5 * progress.square()
-        context = 0.6 * (1.0 - progress) + 0.15 * progress
+        alpha_bars = alpha_bars.to(device=time.device, dtype=torch.float32)
+        initial = torch.sqrt(torch.full_like(progress, 2.0))
+        final = (1.0 - alpha_bars[1]).clamp_min(0.0).sqrt()
+        context = torch.lerp(initial, final, progress)
         return plane, context
 
 
@@ -168,9 +172,7 @@ class _CoupledAnchorSampler:
                 latent,
                 **conditions,
             )
-            posterior_noise = (
-                None if transition == 0 else torch.randn_like(base_state)
-            )
+            posterior_noise = None if transition == 0 else torch.randn_like(base_state)
             base_next = generator.diffusion.sample_posterior(
                 base_state,
                 base_pred,
@@ -211,6 +213,15 @@ class Generator:
         self.num_phases = num_phases
         self.latent_channels = latent_channels
         self.use_amp = use_amp
+        factor = getattr(model, "downsample_factor", None)
+        if factor is None:
+            if isinstance(model, Denoiser3D):
+                raise AttributeError("Denoiser3D must expose downsample_factor.")
+            factor = 1
+        if not isinstance(factor, int) or isinstance(factor, bool) or factor < 1:
+            raise ValueError("model.downsample_factor must be a positive integer.")
+        self.default_margin = factor
+        self.default_anchor_sigma = math.sqrt(3.0) * factor
 
     def predict(
         self,
@@ -321,15 +332,16 @@ class Generator:
         anchors: Sequence[PlaneAnchor] = (),
         vf: Sequence[float] | None = None,
         size: int | None = None,
-        anchor_strength: float = 1.0,
+        anchor_strength: float = 0.90,
         guidance: float = 1.0,
         domain: int | None = None,
-        margin: int = 8,
-        anchor_sigma: float = 2.0,
+        margin: int | None = None,
+        anchor_sigma: float | None = None,
     ) -> torch.Tensor:
         size = self.patch_size if size is None else size
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
             raise ValueError("size must be a positive integer.")
+        margin = self.default_margin if margin is None else margin
         if not isinstance(margin, int) or isinstance(margin, bool) or margin < 0:
             raise ValueError("margin must be a non-negative integer.")
         if (
@@ -340,6 +352,9 @@ class Generator:
         ):
             raise ValueError("anchor_strength must be between zero and one.")
         anchor_strength = float(anchor_strength)
+        anchor_sigma = (
+            self.default_anchor_sigma if anchor_sigma is None else anchor_sigma
+        )
         if (
             not isinstance(anchor_sigma, (int, float))
             or isinstance(anchor_sigma, bool)
@@ -497,9 +512,7 @@ class Generator:
                 before = (start - coords[axis]).clamp_min(0.0)
                 after = (coords[axis] - (start + length - 1)).clamp_min(0.0)
                 distance_sq = distance_sq + (before + after).square()
-            phase = (
-                distance_sq.sqrt().sub(inner_radius).div(width).clamp_(0.0, 1.0)
-            )
+            phase = distance_sq.sqrt().sub(inner_radius).div(width).clamp_(0.0, 1.0)
             taper = phase.mul(math.pi).cos_().add_(1.0).mul_(0.5)
             weight = torch.maximum(weight, taper)
         return weight.unsqueeze(0).unsqueeze(0)
@@ -583,11 +596,11 @@ class Generator:
         anchors: Sequence[PlaneAnchor] = (),
         vf: Sequence[float] | None = None,
         size: int | None = None,
-        anchor_strength: float = 1.0,
+        anchor_strength: float = 0.90,
         guidance: float = 1.0,
         domain: int | None = None,
-        margin: int = 8,
-        anchor_sigma: float = 2.0,
+        margin: int | None = None,
+        anchor_sigma: float | None = None,
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,
@@ -610,11 +623,11 @@ class Generator:
         anchors: Sequence[PlaneAnchor] = (),
         vf: Sequence[float] | None = None,
         size: int | None = None,
-        anchor_strength: float = 1.0,
+        anchor_strength: float = 0.90,
         guidance: float = 1.0,
         domain: int | None = None,
-        margin: int = 8,
-        anchor_sigma: float = 2.0,
+        margin: int | None = None,
+        anchor_sigma: float | None = None,
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,

@@ -66,7 +66,7 @@ def test_build_models_uses_boolean_anchor_multiscale(
     cfg = _config(tmp_path)
 
     single, _, _ = build_models(cfg)
-    cfg["model"]["anchor_multiscale"] = True
+    cfg["anchor"]["multiscale_input"] = True
     multiscale, _, _ = build_models(cfg)
 
     assert not single.anchor_multiscale
@@ -75,11 +75,11 @@ def test_build_models_uses_boolean_anchor_multiscale(
     assert len(multiscale.anchor_pyramid) == 1
 
 
-def test_build_models_rejects_removed_anchor_adapter(tmp_path: Path) -> None:
+def test_build_models_rejects_non_multiple_generator_channels(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
-    cfg["model"]["anchor_adapter"] = "multiscale"
+    cfg["model"]["generator"]["channels"] = [4, 7]
 
-    with pytest.raises(ValueError, match="was removed"):
+    with pytest.raises(ValueError, match="multiples"):
         build_models(cfg)
 
 
@@ -106,10 +106,10 @@ def test_ema_weights_generate_categorical_volume(
     )
     assert vol.shape == (8, 8, 8)
     assert vol.dtype == torch.uint8
-    assert int(vol.max()) < cfg["data"]["num_phases"]
+    assert int(vol.max()) < cfg["data"]["num_phase"]
     assert conditioned.shape == (8, 8, 8)
     assert conditioned.dtype == torch.uint8
-    assert int(conditioned.max()) < cfg["data"]["num_phases"]
+    assert int(conditioned.max()) < cfg["data"]["num_phase"]
 
 
 def test_generator_loads_numbered_checkpoint_with_run_config(tmp_path: Path) -> None:
@@ -135,8 +135,8 @@ def test_anchor_aware_weights_accept_soft_plane_condition(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
-    cfg["model"]["anchor_multiscale"] = True
-    cfg["anchor"]["training_probability"] = 0.5
+    cfg["anchor"]["multiscale_input"] = True
+    cfg["anchor"]["train_prob"] = 0.5
     run_dir = tmp_path / "run" / "anchored"
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
@@ -151,7 +151,7 @@ def test_anchor_aware_weights_accept_soft_plane_condition(
     anchor = PlaneAnchor(
         image=torch.randint(
             0,
-            cfg["data"]["num_phases"],
+            cfg["data"]["num_phase"],
             (8, 8),
         ),
         axis=1,
@@ -165,14 +165,14 @@ def test_anchor_aware_weights_accept_soft_plane_condition(
 
     assert vol.shape == (8, 8, 8)
     assert vol.dtype == torch.uint8
-    assert int(vol.max()) < cfg["data"]["num_phases"]
+    assert int(vol.max()) < cfg["data"]["num_phase"]
 
 
 def test_generator_accepts_anchors_when_training_never_reaches_start(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
-    cfg["anchor"]["start_step"] = cfg["train"]["total_steps"]
+    cfg["anchor"]["start_step"] = cfg["train"]["steps"]
     run_dir = tmp_path / "run" / "unanchored"
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
@@ -190,17 +190,17 @@ def test_generator_accepts_anchors_when_training_never_reaches_start(
 
     assert volume.shape == (8, 8, 8)
     assert volume.dtype == torch.uint8
-    assert int(volume.max()) < cfg["data"]["num_phases"]
+    assert int(volume.max()) < cfg["data"]["num_phase"]
 
 
 def test_build_trainer_rejects_anchor_batch_larger_than_real_batch(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
-    cfg["anchor"]["training_probability"] = 1.0
+    cfg["anchor"]["train_prob"] = 1.0
     cfg["train"]["volume_batch_size"] = 3
 
-    with pytest.raises(ValueError, match="volume_batch_size.*data.batch_size"):
+    with pytest.raises(ValueError, match="volume_batch.*data.batch_size"):
         build_trainer(cfg, torch.device("cpu"))
 
 
@@ -208,55 +208,85 @@ def test_build_trainer_rejects_empty_prior_bank(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
-    cfg["anchor"]["training_probability"] = 1.0
-    cfg["connectivity"]["loss_weight"] = 1.0
-    cfg["connectivity"]["bank_size"] = 0
+    cfg["anchor"]["train_prob"] = 1.0
+    cfg["anchor"]["connectivity"]["weight"] = 1.0
+    cfg["anchor"]["connectivity"]["volume_count"] = 0
 
-    with pytest.raises(ValueError, match="bank_size.*positive integer"):
+    with pytest.raises(ValueError, match="anchor.connectivity.volume_count"):
         build_trainer(cfg, torch.device("cpu"))
 
 
 def test_prior_capacity_accepts_one_volume(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
-    cfg["anchor"]["training_probability"] = 1.0
-    cfg["connectivity"]["loss_weight"] = 1.0
-    cfg["connectivity"]["bank_size"] = 1
+    cfg["anchor"]["train_prob"] = 1.0
+    cfg["anchor"]["connectivity"]["weight"] = 1.0
+    cfg["anchor"]["connectivity"]["volume_count"] = 1
     cfg["data"]["input_size"] = 128
 
     validate_prior_capacity(
         data=cfg["data"],
         train=cfg["train"],
         anchor=cfg["anchor"],
-        connectivity=cfg["connectivity"],
+        connectivity=cfg["anchor"]["connectivity"],
         anchor_start_step=0,
+        anchor_ramp_steps=0,
     )
 
 
-def test_prior_capacity_requires_time_to_fill_each_domain_and_train_anchor(
+def test_prior_capacity_requires_time_to_fill_each_domain_and_sample_multi_anchor(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
     cfg["data"]["domains"][1] = cfg["data"]["domains"][0]
-    cfg["anchor"].update(training_probability=1.0, start_step=4)
-    cfg["connectivity"].update(loss_weight=1.0, bank_size=3)
-    cfg["train"].update(total_steps=8, volume_batch_size=2)
+    cfg["anchor"].update(train_prob=1.0, start_step=4)
+    cfg["anchor"]["connectivity"].update(weight=1.0, volume_count=3)
+    cfg["train"].update(steps=8, volume_batch_size=2)
 
-    with pytest.raises(ValueError, match="fill every connectivity prior bank"):
+    with pytest.raises(ValueError, match="fill every conditional prior bank"):
         validate_prior_capacity(
             data=cfg["data"],
             train=cfg["train"],
             anchor=cfg["anchor"],
-            connectivity=cfg["connectivity"],
+            connectivity=cfg["anchor"]["connectivity"],
             anchor_start_step=4,
+            anchor_ramp_steps=0,
         )
 
-    cfg["train"]["total_steps"] = 9
+    cfg["train"]["steps"] = 9
     validate_prior_capacity(
         data=cfg["data"],
         train=cfg["train"],
         anchor=cfg["anchor"],
-        connectivity=cfg["connectivity"],
+        connectivity=cfg["anchor"]["connectivity"],
         anchor_start_step=4,
+        anchor_ramp_steps=0,
+    )
+
+
+def test_prior_capacity_includes_real_anchor_ramp(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    cfg["anchor"].update(train_prob=1.0, start_step=2, ramp_steps=4)
+    cfg["anchor"]["connectivity"].update(weight=1.0, volume_count=2)
+    cfg["train"].update(steps=7, volume_batch_size=1)
+
+    with pytest.raises(ValueError, match="leave one multi-anchor-eligible step"):
+        validate_prior_capacity(
+            data=cfg["data"],
+            train=cfg["train"],
+            anchor=cfg["anchor"],
+            connectivity=cfg["anchor"]["connectivity"],
+            anchor_start_step=2,
+            anchor_ramp_steps=4,
+        )
+
+    cfg["train"]["steps"] = 8
+    validate_prior_capacity(
+        data=cfg["data"],
+        train=cfg["train"],
+        anchor=cfg["anchor"],
+        connectivity=cfg["anchor"]["connectivity"],
+        anchor_start_step=2,
+        anchor_ramp_steps=4,
     )
 
 
@@ -378,8 +408,9 @@ def test_scaled_sampling_reuses_domain_for_every_tile_and_step() -> None:
     assert all(call.domain is model.calls[0].domain for call in model.calls)
 
 
-def test_direct_generation_uses_eight_voxels_of_outer_context() -> None:
+def test_direct_generation_uses_the_model_downsample_factor_as_margin() -> None:
     model = _TraceModel()
+    model.downsample_factor = 8
     generator = _generator(model, Diffusion(1))
 
     volume = _GENERATOR_GENERATE(generator)
@@ -390,6 +421,7 @@ def test_direct_generation_uses_eight_voxels_of_outer_context() -> None:
 
 def test_direct_anchor_coordinates_survive_margin_crop() -> None:
     model = _AnchorTraceModel()
+    model.downsample_factor = 8
     generator = _generator(model, Diffusion(1))
     anchor = PlaneAnchor(
         image=torch.ones((4, 4), dtype=torch.long),
@@ -408,6 +440,16 @@ def test_direct_anchor_coordinates_survive_margin_crop() -> None:
     assert mask.shape == (20, 20, 20)
     assert int(mask.sum()) == 16
     assert torch.all(mask[9, 8:12, 8:12])
+
+
+def test_generator_derives_anchor_width_from_one_coarse_3d_cell() -> None:
+    model = _TraceModel()
+    model.downsample_factor = 4
+
+    generator = _generator(model, Diffusion(1))
+
+    assert generator.default_margin == 4
+    assert generator.default_anchor_sigma == pytest.approx(math.sqrt(3.0) * 4)
 
 
 def test_guidance_one_preserves_default_rng_path() -> None:
@@ -810,17 +852,29 @@ def test_anchor_coupling_weight_has_plateau_and_wide_cosine_taper() -> None:
 
 def test_anchor_timing_separates_plane_fidelity_from_context() -> None:
     time = torch.tensor((9, 0))
+    diffusion = Diffusion(10)
 
-    plane, context = _SpatialAnchorDenoiser.temporal_scales(time, 10)
+    plane, context = _SpatialAnchorDenoiser.temporal_scales(
+        time,
+        diffusion.alpha_bars,
+    )
 
     torch.testing.assert_close(plane, torch.tensor((0.5, 1.0)))
-    torch.testing.assert_close(context, torch.tensor((0.6, 0.15)))
+    expected_final = (1.0 - diffusion.alpha_bars[1]).sqrt()
+    torch.testing.assert_close(
+        context,
+        torch.stack((torch.tensor(2.0).sqrt(), expected_final)),
+    )
+    single_diffusion = Diffusion(1)
     single_plane, single_context = _SpatialAnchorDenoiser.temporal_scales(
         torch.zeros(1, dtype=torch.long),
-        1,
+        single_diffusion.alpha_bars,
     )
     torch.testing.assert_close(single_plane, torch.ones(1))
-    torch.testing.assert_close(single_context, torch.full((1,), 0.15))
+    torch.testing.assert_close(
+        single_context,
+        (1.0 - single_diffusion.alpha_bars[1]).sqrt().view(1),
+    )
 
 
 def test_final_anchor_step_preserves_same_rng_baseline_in_far_field() -> None:
@@ -928,8 +982,12 @@ def test_anchor_prediction_residual_is_gaussian_blended_before_posterior() -> No
         device=torch.device("cpu"),
     )
     expected_logits = torch.zeros((1, 3, 4, 4, 4))
-    temporal = torch.full_like(weight, 0.15)
-    temporal[:, :, 1] = 1.0
+    plane, context = _SpatialAnchorDenoiser.temporal_scales(
+        torch.zeros(1, dtype=torch.long),
+        diffusion.alpha_bars,
+    )
+    temporal = torch.full_like(weight, float(context.item()))
+    temporal[:, :, 1] = float(plane.item())
     expected_logits[:, :1].copy_(weight * temporal)
     expected = Denoiser3D.decode(expected_logits)
     assert torch.allclose(diffusion.calls[1].clean, expected)
@@ -1145,10 +1203,10 @@ def test_scaled_generator_uses_default_overlap() -> None:
     assert scaled.stats.overlap == 8
 
 
-def test_scaled_generation_crops_eight_voxels_from_every_outer_face() -> None:
-    scaled = ScaledGenerator(
-        _generator(_PhaseModel(phase=1), Diffusion(1), patch_size=32)
-    )
+def test_scaled_generation_uses_model_derived_outer_margin() -> None:
+    model = _PhaseModel(phase=1)
+    model.downsample_factor = 8
+    scaled = ScaledGenerator(_generator(model, Diffusion(1), patch_size=32))
 
     volume = _SCALED_GENERATE(
         scaled,
@@ -2483,58 +2541,60 @@ def _config(root: Path) -> dict:
     return {
         "data": {
             "domains": {0: {axis: [root / str(axis)] for axis in (0, 1, 2)}},
+            "num_phase": 3,
+            "crop_partial": False,
             "crop_size": 8,
             "input_size": 8,
-            "num_phases": 3,
+            "augment": False,
+            "augment_prob": 0.0,
+            "domain_prob": 1.0,
             "batch_size": 2,
             "num_workers": 0,
         },
         "model": {
-            "base_channels": 4,
-            "channel_multipliers": (1, 2),
-            "embedding_channels": 8,
-            "latent_channels": 4,
-            "critic_channels": (4, 8),
-            "gradient_checkpointing": False,
+            "grad_checkpoint": False,
+            "generator": {
+                "channels": [4, 8],
+                "condition_channels": 8,
+                "latent_channels": 4,
+            },
+            "critic": {
+                "channels": [4, 8],
+                "local_loss_weight": 0.5,
+                "r1_weight": 0.0,
+                "r1_interval": 2,
+            },
         },
-        "diffusion": {"timesteps": 2, "beta_min": 0.1, "beta_max": 2.0},
+        "diffusion": {"steps": 2, "beta_min": 0.1, "beta_max": 2.0},
         "anchor": {
-            "training_probability": 0.0,
+            "multiscale_input": False,
             "start_step": 0,
             "ramp_steps": 0,
-            "loss_weight": 0.0,
+            "train_prob": 0.0,
+            "cross_domain_prob": 0.0,
+            "pixel_weight": 0.05,
+            "connectivity": {
+                "volume_count": 1,
+                "refresh_every": 500,
+                "weight": 0.0,
+                "phase_transition_weight": 0.0,
+            },
         },
-        "conditioning": {
-            "cfg_dropout": {
-                "drop_each_prob": 0.0,
-                "single_condition_drop_prob": 0.0,
-            }
-        },
-        "connectivity": {
-            "loss_weight": 0.0,
-            "normal_transition_loss_weight": 0.0,
-            "bank_size": 1,
-            "refresh": 500,
-            "reversal_invariant": True,
-        },
-        "vf": {
-            "loss_weight": 1.0,
-        },
+        "vf": {"max_samples": 4, "weight": 1.0},
+        "condition_dropout": {"joint_each_prob": 0.0},
         "optim": {
-            "denoiser_lr": 1e-3,
+            "generator_lr": 1e-3,
             "critic_lr": 1e-3,
-            "beta1": 0.0,
-            "beta2": 0.9,
-            "r1_gamma": 0.0,
-            "r1_interval": 2,
-            "local_loss_weight": 0.5,
+            "adam_betas": [0.0, 0.9],
+            "ema_decay": 0.9,
         },
         "train": {
-            "total_steps": 10,
+            "init_weights": None,
+            "steps": 10,
             "volume_batch_size": 1,
-            "slice_pairs_per_axis": 2,
-            "mixed_precision": False,
-            "ema_decay": 0.9,
-            "save_every_steps": 1,
+            "pairs_per_axis": 2,
+            "amp": False,
+            "update_weights_every": 1,
+            "archive_every": 10,
         },
     }

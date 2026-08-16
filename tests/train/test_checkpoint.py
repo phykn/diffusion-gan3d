@@ -10,6 +10,7 @@ from src.train.weights import (
     CHECKPOINT_DIR,
     CRITIC_C_FILE,
     CRITIC_FILES,
+    load_all_weights,
     load_weights,
     save_all_weights,
     save_checkpoint,
@@ -113,6 +114,38 @@ def test_training_weights_load_independently(
     load_weights(tmp_path / CRITIC_C_FILE, connectivity)
 
     _assert_same_state(denoiser, source)
+    for axis in range(3):
+        _assert_same_state(critics[str(axis)], source_critics[str(axis)])
+    _assert_same_state(connectivity, source_connectivity)
+
+
+def test_training_initialization_loads_generator_ema_and_critics(
+    tmp_path: Path,
+) -> None:
+    source = nn.Linear(3, 2)
+    source_critics = nn.ModuleDict({str(axis): nn.Linear(2, 1) for axis in range(3)})
+    source_connectivity = nn.Linear(4, 1)
+    save_all_weights(
+        tmp_path,
+        source,
+        source_critics,
+        source_connectivity,
+    )
+    denoiser = nn.Linear(3, 2)
+    average = nn.Linear(3, 2)
+    critics = nn.ModuleDict({str(axis): nn.Linear(2, 1) for axis in range(3)})
+    connectivity = nn.Linear(4, 1)
+
+    load_all_weights(
+        tmp_path,
+        denoiser,
+        average,
+        critics,
+        connectivity,
+    )
+
+    _assert_same_state(denoiser, source)
+    _assert_same_state(average, source)
     for axis in range(3):
         _assert_same_state(critics[str(axis)], source_critics[str(axis)])
     _assert_same_state(connectivity, source_connectivity)
