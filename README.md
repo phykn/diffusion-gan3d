@@ -86,12 +86,18 @@ Set `data.allow_partial_crop: true` to train from a section whose height or
 width is smaller than `crop_size`. Each available dimension is cropped to at
 most `crop_size` and resized with the common `input_size / crop_size` scale, so
 the aspect ratio and physical voxel scale are preserved. The critic compares a
-    generated section window with the same rectangular shape. Each batch uses one
-    axis folder selected uniformly, regardless of its image count, so folders under
-    the same domain and axis may use different shapes. Omitting the option, or setting
+generated section window with the same rectangular shape. Each batch uses one
+axis folder selected uniformly, regardless of its image count, so folders under
+the same domain and axis may use different shapes. Omitting the option, or setting
 it to `false`, keeps the strict error for
 undersized images.
 Physical resolution must remain consistent across the dataset.
+
+To create a synthetic example dataset from [`config/simul.yaml`](config/simul.yaml):
+
+```bash
+python gen_data.py
+```
 
 ```bash
 python run_train.py --device cuda
@@ -147,13 +153,15 @@ slice-change rates for distances zero through 24 from the nearest anchor to make
 displaced transition seams visible. `guidance=1` is the standard conditional path;
 pass `--compare-unconditioned` to Script `03` to report distance-wise voxel
 divergence from a same-RNG unconditioned generation. This adds one generation pass.
-validate non-default guidance with weights trained using condition dropout. See
+Validate non-default guidance with weights trained using condition dropout. See
 [`PAPER.md`](PAPER.md) for details.
 
 
 Run the diagnostic scripts with an explicit generator weight. Script `03`
 always requires a GT volume; script `04` requires one when `--count` is positive
-and `--anchor-strength` is nonzero:
+and `--anchor-strength` is nonzero. The GT TIFF must be `uint8`, contain valid
+phase labels, and exactly match the model's cubic input size; diagnostics never
+resize a reference volume implicitly:
 
 ```bash
 python scripts/01_check_dataset.py
@@ -162,7 +170,7 @@ python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0
 ```
 
-Generator scripts default to `--domain 0` and the `guidance` value in `config/gen.yaml`. Paper scripts require explicit weights and record input provenance.
+Generator scripts default to `--domain 0`. Conditional Scripts `03` and `04` use the `guidance` value in `config/gen.yaml`; Script `02` has no anchor or phase-fraction condition, so it exposes no guidance option. Paper scripts require explicit weights and record input provenance.
 
 `generator.pt` is the latest weight; `checkpoint_every_steps` preserves numbered
 sets under `checkpoints/step_XXXXXXXX/`. Every `.pt` file is an independent model

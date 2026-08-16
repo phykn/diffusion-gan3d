@@ -1,13 +1,10 @@
 import argparse
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import tifffile
 import torch
-import torch.nn.functional as F
 from matplotlib.colors import ListedColormap
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -17,26 +14,18 @@ from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.config import load_generation_settings
 from src.evaluate import (
-    continuation_delta,
-    phase_change_rate,
+    BoundaryQuality,
+    measure_boundaries,
+    measure_distance_changes,
+    measure_distance_divergence,
     phase_iou,
     phase_recall,
-    transition_counts,
-    transition_tv,
     voxel_accuracy,
 )
+from src.volume import load_volume, save_volume
 
 AXIS = 0
 DISTANCE_PROFILE_RADIUS = 24
-
-
-@dataclass(frozen=True)
-class BoundaryQuality:
-    anchor_change: float | None
-    ordinary_change: float | None
-    change_ratio: float | None
-    transition_tv: float | None
-    continuation_delta: float | None
 
 
 def main() -> None:
@@ -116,7 +105,7 @@ def main() -> None:
         parser.error(f"--count must be at most {generator.patch_size}.")
     target = load_volume(
         args.gt,
-        patch_size=generator.patch_size,
+        shape=(generator.patch_size,) * 3,
         num_phases=generator.num_phases,
     )
     target_slices = get_slices(target, AXIS)
@@ -171,6 +160,7 @@ def main() -> None:
         print("Baseline : complete", flush=True)
     if args.out is not None:
         save_volume(gen, args.out)
+        print(f"Output   : {args.out.resolve()}", flush=True)
     gen_slices = get_slices(gen, AXIS)
     vol_acc = voxel_accuracy(gen, target)
     if indices:
@@ -335,100 +325,6 @@ def format_value(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.4f}"
 
 
-def measure_boundaries(
-    vol: torch.Tensor,
-    indices: tuple[int, ...],
-    axis: int,
-    num_phases: int,
-) -> BoundaryQuality:
-    slices = get_slices(vol, axis)
-    pair_count = slices.shape[0] - 1
-    boundary_indices = sorted(
-        {
-            pair
-            for index in indices
-            for pair in (index - 1, index)
-            if 0 <= pair < pair_count
-        }
-    )
-    boundary_set = set(boundary_indices)
-    ordinary_indices = [pair for pair in range(pair_count) if pair not in boundary_set]
-    if not boundary_indices or not ordinary_indices:
-        return BoundaryQuality(None, None, None, None, None)
-
-    boundary_counts = transition_counts(
-        slices[boundary_indices],
-        slices[[index + 1 for index in boundary_indices]],
-        num_phases,
-    )
-    ordinary_counts = transition_counts(
-        slices[ordinary_indices],
-        slices[[index + 1 for index in ordinary_indices]],
-        num_phases,
-    )
-    boundary_change = phase_change_rate(boundary_counts)
-    ordinary_change = phase_change_rate(ordinary_counts)
-    ratio = None if ordinary_change == 0.0 else boundary_change / ordinary_change
-    tv_value = transition_tv(boundary_counts, ordinary_counts)
-    continuation_value = continuation_delta(boundary_counts, ordinary_counts)
-    return BoundaryQuality(
-        boundary_change,
-        ordinary_change,
-        ratio,
-        tv_value,
-        continuation_value,
-    )
-
-
-def measure_distance_changes(
-    vol: torch.Tensor,
-    indices: tuple[int, ...],
-    axis: int,
-    max_distance: int,
-) -> tuple[float | None, ...]:
-    if not indices:
-        return ()
-    slices = get_slices(vol, axis)
-    buckets: list[list[int]] = [[] for _ in range(max_distance + 1)]
-    for pair in range(slices.shape[0] - 1):
-        distance = min(
-            min(abs(pair - index), abs(pair + 1 - index)) for index in indices
-        )
-        if distance <= max_distance:
-            buckets[distance].append(pair)
-    profile = []
-    for pairs in buckets:
-        if not pairs:
-            profile.append(None)
-            continue
-        left = slices[pairs]
-        right = slices[[pair + 1 for pair in pairs]]
-        profile.append(float((left != right).to(torch.float32).mean()))
-    return tuple(profile)
-
-
-def measure_distance_divergence(
-    anchored: torch.Tensor,
-    baseline: torch.Tensor,
-    indices: tuple[int, ...],
-    axis: int,
-    max_distance: int,
-) -> tuple[float | None, ...]:
-    if not indices:
-        return ()
-    anchored_slices = get_slices(anchored, axis)
-    baseline_slices = get_slices(baseline, axis)
-    changes = (anchored_slices != baseline_slices).to(torch.float32).mean((1, 2))
-    positions = torch.arange(anchored_slices.shape[0], dtype=torch.long)
-    anchors = torch.tensor(indices, dtype=torch.long)
-    distances = (positions[:, None] - anchors[None, :]).abs().amin(dim=1)
-    profile = []
-    for distance in range(max_distance + 1):
-        selected = changes[distances == distance]
-        profile.append(None if selected.numel() == 0 else float(selected.mean()))
-    return tuple(profile)
-
-
 def show_result(
     vol: torch.Tensor,
     target: torch.Tensor,
@@ -447,7 +343,7 @@ def show_result(
 
     comparisons = (
         (target, "1. Input anchor" if indices else "1. Reference center", False),
-        (gen, "2. Bridge-conditioned output", False),
+        (gen, "2. Anchor-conditioned output", False),
         (mismatch, "3. Difference (red = mismatch)", True),
     )
     for panel, (img, title, difference) in zip(
@@ -531,35 +427,6 @@ def show_result(
     plt.show()
 
 
-def load_volume(
-    path: Path,
-    patch_size: int,
-    num_phases: int,
-) -> torch.Tensor:
-    if not path.is_file():
-        raise FileNotFoundError(f"anchor volume was not found: {path}")
-    vol = np.asarray(tifffile.imread(path))
-    if vol.ndim != 3 or vol.size == 0:
-        raise ValueError("anchor volume must be a non-empty 3D array.")
-    if vol.dtype != np.uint8:
-        raise ValueError(
-            f"anchor volume must contain uint8 phases, got {vol.dtype}: {path}"
-        )
-    if int(vol.max()) >= num_phases:
-        raise ValueError(
-            f"anchor volume must contain phases from 0 to {num_phases - 1}."
-        )
-
-    tensor = torch.from_numpy(np.array(vol, copy=True)).long()
-    if vol.shape != (patch_size, patch_size, patch_size):
-        tensor = F.interpolate(
-            tensor[None, None].to(torch.float32),
-            size=(patch_size, patch_size, patch_size),
-            mode="nearest",
-        )[0, 0].to(torch.long)
-    return tensor
-
-
 def get_slices(vol: torch.Tensor, axis: int) -> torch.Tensor:
     if vol.ndim != 3:
         raise ValueError("volume must have shape [D, H, W].")
@@ -575,12 +442,6 @@ def show_napari(vol: torch.Tensor) -> None:
     viewer.add_labels(vol.numpy(), name="generated phases")
     viewer.dims.ndisplay = 3
     napari.run()
-
-
-def save_volume(vol: torch.Tensor, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(path, vol.detach().cpu().to(torch.uint8).numpy())
-    print(f"Output   : {path.resolve()}", flush=True)
 
 
 if __name__ == "__main__":

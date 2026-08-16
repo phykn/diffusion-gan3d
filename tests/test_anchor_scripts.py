@@ -10,7 +10,12 @@ import torch
 
 from src.build import build_models
 from src.config import GenerationSettings
-from src.generate import Generator
+from src.evaluate import (
+    BoundaryQuality,
+    measure_boundaries,
+    measure_distance_changes,
+    measure_distance_divergence,
+)
 from src.train.weights import save_weights
 from src.utils import save_yaml
 
@@ -29,7 +34,7 @@ def test_anchor_check_script_runs_with_fixed_volume(
 ) -> None:
     volume_path = tmp_path / "volume_000.tiff"
     output_path = tmp_path / f"generated_{count}.tiff"
-    volume = (np.indices((10, 12, 14)).sum(axis=0) % 3).astype(np.uint8)
+    volume = (np.indices((8, 8, 8)).sum(axis=0) % 3).astype(np.uint8)
     tifffile.imwrite(volume_path, volume)
 
     cfg = _config(tmp_path)
@@ -183,15 +188,15 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
 
 
 @pytest.mark.parametrize(
-    ("extra_args", "expected", "domain"),
-    (((), 1.0, 0), (("--guidance", "1.5", "--domain", "2"), 1.5, 2)),
+    ("extra_args", "domain"),
+    (((), 0), (("--domain", "2"), 2)),
 )
-def test_unconditioned_check_routes_guidance(
+def test_unconditioned_check_routes_only_domain_condition(
     extra_args: tuple[str, ...],
-    expected: float,
     domain: int,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     module = _load_script("02_check_generated.py")
     calls = []
@@ -201,8 +206,8 @@ def test_unconditioned_check_routes_guidance(
         patch_size = 4
         num_phases = 3
 
-        def generate(self, *, vf, guidance, domain, margin):
-            calls.append((vf, guidance, domain, margin))
+        def generate(self, *, vf, domain, margin):
+            calls.append((vf, domain, margin))
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
@@ -230,42 +235,13 @@ def test_unconditioned_check_routes_guidance(
     assert output_path.is_file()
     assert tifffile.imread(output_path).shape == (4, 4, 4)
 
-    assert calls == [(None, expected, domain, 8)]
-
-
-def test_unconditioned_check_propagates_generator_guidance_validation(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    module = _load_script("02_check_generated.py")
-    generator = Generator.__new__(Generator)
-    generator.patch_size = 4
-
-    monkeypatch.setattr(module, "load_generator", lambda _path, device: generator)
-    monkeypatch.setattr(
-        module,
-        "load_generation_settings",
-        lambda: GenerationSettings(),
-    )
-    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(
-        module.sys,
-        "argv",
-        [
-            "02_check_generated.py",
-            "--weight",
-            str(tmp_path / "generator.pt"),
-            "--guidance",
-            "-0.1",
-        ],
-    )
-
-    with pytest.raises(ValueError, match="guidance must be"):
-        module.main()
+    assert calls == [(None, domain, 8)]
+    output = capsys.readouterr().out
+    assert f"Domain  : {domain}" in output
+    assert "Anchor/VF : none" in output
 
 
 def test_anchor_boundary_quality_compares_both_sides_with_ordinary_planes() -> None:
-    module = _load_script("03_check_anchor.py")
     checker = torch.tensor([[0, 1], [0, 1]], dtype=torch.uint8)
     vol = torch.stack(
         (
@@ -276,7 +252,7 @@ def test_anchor_boundary_quality_compares_both_sides_with_ordinary_planes() -> N
         )
     )
 
-    quality = module.measure_boundaries(vol, (2,), axis=0, num_phases=2)
+    quality = measure_boundaries(vol, (2,), axis=0, num_phases=2)
 
     assert quality.anchor_change == pytest.approx(0.75)
     assert quality.ordinary_change == pytest.approx(0.5)
@@ -286,16 +262,14 @@ def test_anchor_boundary_quality_compares_both_sides_with_ordinary_planes() -> N
 
 
 def test_anchor_boundary_quality_is_empty_without_anchors() -> None:
-    module = _load_script("03_check_anchor.py")
     vol = torch.zeros((4, 2, 2), dtype=torch.uint8)
 
-    quality = module.measure_boundaries(vol, (), axis=0, num_phases=2)
+    quality = measure_boundaries(vol, (), axis=0, num_phases=2)
 
-    assert quality == module.BoundaryQuality(None, None, None, None, None)
+    assert quality == BoundaryQuality(None, None, None, None, None)
 
 
 def test_anchor_distance_profile_groups_slice_changes_by_nearest_anchor() -> None:
-    module = _load_script("03_check_anchor.py")
     checker = torch.tensor([[0, 1], [0, 1]], dtype=torch.uint8)
     vol = torch.stack(
         (
@@ -306,7 +280,7 @@ def test_anchor_distance_profile_groups_slice_changes_by_nearest_anchor() -> Non
         )
     )
 
-    profile = module.measure_distance_changes(
+    profile = measure_distance_changes(
         vol,
         (2,),
         axis=0,
@@ -319,13 +293,12 @@ def test_anchor_distance_profile_groups_slice_changes_by_nearest_anchor() -> Non
 
 
 def test_anchor_divergence_profile_compares_same_distance_slices() -> None:
-    module = _load_script("03_check_anchor.py")
     baseline = torch.zeros((5, 2, 2), dtype=torch.uint8)
     anchored = baseline.clone()
     anchored[2] = 1
     anchored[1, 0] = 1
 
-    profile = module.measure_distance_divergence(
+    profile = measure_distance_divergence(
         anchored,
         baseline,
         (2,),

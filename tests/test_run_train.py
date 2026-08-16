@@ -104,7 +104,7 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
 
 
 @pytest.mark.parametrize("axes", ((0, 1, 2), (0,)))
-def test_cpu_entrypoint_saves_one_complete_step(
+def test_cpu_entrypoint_saves_complete_anchor_run(
     tmp_path: Path,
     axes: tuple[int, ...],
 ) -> None:
@@ -191,7 +191,8 @@ def test_cpu_entrypoint_saves_one_complete_step(
                 "local_loss_weight": 0.5,
             },
             "train": {
-                "total_steps": 1,
+                # Step one builds the prior; step two exercises anchor training.
+                "total_steps": 2,
                 "volume_batch_size": 1,
                 "slice_pairs_per_axis": 2,
                 "mixed_precision": False,

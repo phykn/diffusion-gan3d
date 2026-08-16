@@ -6,9 +6,7 @@ from time import perf_counter
 
 import matplotlib.pyplot as plt
 import numpy as np
-import tifffile
 import torch
-import torch.nn.functional as F
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
 
@@ -19,23 +17,15 @@ from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.config import load_generation_settings
 from src.evaluate import (
-    continuation_delta,
-    phase_change_rate,
+    SeamQuality,
+    measure_seams,
     phase_fractions,
-    transition_counts,
-    transition_tv,
     voxel_accuracy,
 )
 from src.scale import ScaledGenerator, ScalePlan
+from src.volume import load_volume, save_volume
 
 AXIS = 0
-
-
-@dataclass(frozen=True)
-class SeamQuality:
-    change_ratio: tuple[float | None, float | None, float | None]
-    transition_tv: tuple[float | None, float | None, float | None]
-    continuation_delta: tuple[float | None, float | None, float | None]
 
 
 @dataclass(frozen=True)
@@ -163,8 +153,8 @@ def generate_base(
     assert args.gt is not None
     target = load_volume(
         args.gt,
-        generator.patch_size,
-        generator.num_phases,
+        shape=(generator.patch_size,) * 3,
+        num_phases=generator.num_phases,
     )
     slices = target.movedim(AXIS, 0)
     indices = select_indices(slices.shape[0], anchor_count)
@@ -320,6 +310,7 @@ def main() -> None:
     print("Status     : complete", flush=True)
     if args.out is not None:
         save_volume(vol, args.out)
+        print(f"Output     : {args.out.resolve()}", flush=True)
     assessment = assess_result(
         vol,
         base_result,
@@ -387,12 +378,6 @@ def main() -> None:
         show_slices(vol, generator.num_phases)
 
 
-def save_volume(vol: torch.Tensor, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(path, vol.detach().cpu().to(torch.uint8).numpy())
-    print(f"Output     : {path.resolve()}", flush=True)
-
-
 def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
@@ -422,13 +407,13 @@ def positive_float(value: str) -> float:
 
 
 def print_plan(plan: ScalePlan, device: torch.device) -> None:
-    print(f"Output shape : {' × '.join(map(str, plan.shape))}")
-    print(f"Blocks       : {' × '.join(map(str, plan.grid))}")
-    print(f"Block count  : {plan.tile_count}")
-    print(f"Block size   : {plan.tile_size}")
+    print(f"Generation shape : {' × '.join(map(str, plan.shape))}")
+    print(f"Generation grid  : {' × '.join(map(str, plan.grid))}")
+    print(f"Tile count       : {plan.tile_count}")
+    print(f"Tile size        : {plan.tile_size}")
     print(f"Stride       : {plan.stride}")
-    print(f"Margin       : {plan.overlap} per shared face")
-    print("Boundaries   : " + " × ".join(str(len(axis)) for axis in plan.seams))
+    print(f"Overlap      : {plan.overlap} per shared face")
+    print("Internal seams: " + " × ".join(str(len(axis)) for axis in plan.seams))
     print(f"State memory : {format_bytes(plan.states_bytes)}")
     print(f"Fusion memory: {format_bytes(plan.fusion_bytes)}")
     print(f"Input memory : {format_bytes(plan.tile_bytes)}")
@@ -446,29 +431,6 @@ def format_bytes(size: int) -> str:
             return f"{value:.2f} {unit}"
         value /= 1024.0
     raise RuntimeError("unreachable")
-
-
-def load_volume(path: Path, patch_size: int, num_phases: int) -> torch.Tensor:
-    if not path.is_file():
-        raise FileNotFoundError(f"anchor volume was not found: {path}")
-    vol = np.asarray(tifffile.imread(path))
-    if vol.ndim != 3 or vol.size == 0:
-        raise ValueError("anchor volume must be a non-empty 3D array.")
-    if vol.dtype != np.uint8:
-        raise ValueError(f"anchor volume must contain uint8 phases: {path}")
-    if int(vol.max()) >= num_phases:
-        raise ValueError(
-            f"anchor volume must contain phases from 0 to {num_phases - 1}."
-        )
-
-    tensor = torch.from_numpy(np.array(vol, copy=True)).long()
-    if tensor.shape != (patch_size, patch_size, patch_size):
-        tensor = F.interpolate(
-            tensor[None, None].to(torch.float32),
-            size=(patch_size, patch_size, patch_size),
-            mode="nearest",
-        )[0, 0].to(torch.long)
-    return tensor
 
 
 def select_indices(size: int, count: int) -> tuple[int, ...]:
@@ -496,90 +458,6 @@ def get_accuracy(
     actual = vol.movedim(axis, 0).index_select(0, idx)
     expected = target.movedim(axis, 0).index_select(0, idx)
     return voxel_accuracy(actual, expected)
-
-
-def measure_seams(
-    vol: torch.Tensor,
-    seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
-    band_size: int,
-    num_phases: int,
-) -> SeamQuality:
-    changes = []
-    tvs = []
-    deltas = []
-    for axis, positions in enumerate(seams):
-        if not positions:
-            changes.append(None)
-            tvs.append(None)
-            deltas.append(None)
-            continue
-        pair_count = vol.shape[axis] - 1
-        width = max(1, min(band_size, 4))
-        band_idx = sorted(
-            {
-                idx
-                for pos in positions
-                for idx in range(
-                    max(0, pos - width),
-                    min(pair_count, pos + width),
-                )
-            }
-        )
-        band_set = set(band_idx)
-        inner_idx = [idx for idx in range(pair_count) if idx not in band_set]
-        if len(inner_idx) > 64:
-            selected = np.linspace(0, len(inner_idx) - 1, num=64, dtype=int)
-            inner_idx = [inner_idx[idx] for idx in selected]
-        selected_idx = sorted(band_set | set(inner_idx))
-        inner_set = set(inner_idx)
-        inner_rates = []
-        band_rates = {}
-        inner_counts = torch.zeros(
-            num_phases,
-            num_phases,
-            dtype=torch.float64,
-        )
-        band_counts = {}
-        for idx in selected_idx:
-            prev = vol.select(axis, idx)
-            curr = vol.select(axis, idx + 1)
-            stride = max(1, int(np.ceil(max(prev.shape) / 512)))
-            prev = prev[::stride, ::stride]
-            curr = curr[::stride, ::stride]
-            counts = transition_counts(prev, curr, num_phases)
-            rate = phase_change_rate(counts)
-            if idx in band_set:
-                band_rates[idx] = rate
-                band_counts[idx] = counts
-            elif idx in inner_set:
-                inner_rates.append(rate)
-                inner_counts.add_(counts)
-
-        if not inner_rates or not band_idx:
-            changes.append(None)
-            tvs.append(None)
-            deltas.append(None)
-            continue
-        inner_rate = float(torch.tensor(inner_rates).median())
-        if inner_rate > 0.0:
-            ratios = torch.tensor([band_rates[idx] for idx in band_idx]) / inner_rate
-            changes.append(float(ratios[(ratios - 1.0).abs().argmax()]))
-        else:
-            changes.append(None)
-
-        axis_tv = []
-        axis_delta = []
-        for idx in band_idx:
-            seam_counts = band_counts[idx]
-            axis_tv.append(transition_tv(seam_counts, inner_counts))
-            axis_delta.append(continuation_delta(seam_counts, inner_counts))
-        tvs.append(max(axis_tv))
-        deltas.append(max(axis_delta))
-    return SeamQuality(
-        change_ratio=tuple(changes),
-        transition_tv=tuple(tvs),
-        continuation_delta=tuple(deltas),
-    )
 
 
 def show_slices(

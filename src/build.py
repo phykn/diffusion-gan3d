@@ -1,3 +1,4 @@
+import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -393,3 +394,19 @@ def validate_prior_capacity(
     bank_size = connectivity["bank_size"]
     if not isinstance(bank_size, int) or isinstance(bank_size, bool) or bank_size < 1:
         raise ValueError("connectivity.bank_size must be a positive integer.")
+    volume_batch_size = train["volume_batch_size"]
+    if (
+        not isinstance(volume_batch_size, int)
+        or isinstance(volume_batch_size, bool)
+        or volume_batch_size < 1
+    ):
+        raise ValueError("train.volume_batch_size must be a positive integer.")
+    build_steps = len(get_domains(data)) * math.ceil(bank_size / volume_batch_size)
+    available_steps = train["total_steps"] - anchor_start_step
+    required_steps = build_steps + 1
+    if available_steps < required_steps:
+        raise ValueError(
+            "training must leave enough steps after anchor.start_step to fill "
+            "every connectivity prior bank and leave one anchor-eligible step; "
+            f"need {required_steps}, got {available_steps}."
+        )

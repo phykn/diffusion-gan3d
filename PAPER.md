@@ -72,23 +72,24 @@ h_A=\mathrm{Conv}_{3D}\!\left(
 \right).
 $$
 
-Zero initialization leaves the unconditioned mapping unchanged at the start of training. The anchor is provided at every reverse step, and constrained labels are optimized with masked cross-entropy,
+The current default also injects the anchor at every deeper encoder scale. For each target feature shape, it independently average-pools $\mathrm{onehot}(Y)\odot M$ and $M$, divides the pooled labels by nonzero mask coverage, appends that continuous coverage channel, and applies a separate zero-initialized $1\times1\times1$ projection. Thus a thin or partial plane does not disappear through ordinary zero-padded downsampling, while every added anchor path still leaves the unconditioned mapping unchanged at initialization. The same anchor is provided at every reverse step.
+
+The training loss preserves coarse morphology more strongly than exact boundaries: it applies mask-normalized in-plane pooling with a $4\times4$ window, weights partially observed pooling cells by their coverage, and retains only a low-weight full-resolution cross-entropy term,
 
 $$
 \mathcal{L}_{\mathrm{anchor}}
-=-\frac{1}{|M|}\sum_{v:M(v)=1}
-\log p_\theta\!\left(Y(v)\mid x_{t+1},t,z_t,c_A\right).
+=\mathcal{L}_{\mathrm{pool4}}+0.05\,\mathcal{L}_{\mathrm{pixel}}.
 $$
 
-Correct labels alone do not ensure a compatible neighborhood. At the final transition ($t=0$), a separate critic evaluates three-plane stacks that span an anchor along its normal direction and supplies $\mathcal{L}_{\mathrm{conn}}$. Its reference stacks are axis-matched triplets replayed from unconditional generated volumes, so the loss regularizes an anchored neighborhood toward the model's baseline continuation rather than toward measured 3D connectivity.
+Correct labels alone do not ensure a compatible neighborhood. At the final transition ($t=0$), a separate critic supplies $\mathcal{L}_{\mathrm{conn}}$. It receives bounded categorical change images derived from three consecutive planes rather than raw logits: the two adjacent phase changes and the change between those changes. Each anchored update includes one anchor-spanning triplet and may add general triplets from all three axes; the anchor and general groups receive equal aggregate weight.
 
-A separate teacher-volume bank stores volumes generated from real single-plane anchors. After the anchor ramp, a multi-plane teacher condition may sample several mutually registered planes from one stored volume, subject to a density limit, minimum same-axis spacing, and optional mixed axes. Keeping this bank separate from the triplet replay avoids treating unrelated real 2D sections as registered slices of one volume.
+Reference triplets come from per-domain, anchor- and phase-fraction-free EMA volumes. The prior bank is filled from one fixed EMA snapshot before anchor training. During anchor training, one current-EMA volume periodically replaces the oldest volume for the selected domain. The student therefore learns image-level continuation from unconditional 3D samples without reconstructing a teacher image or volume voxel by voxel.
 
-At inference, $c_A$ is supplied to the denoiser at every reverse transition with a user-controlled strength. Sampling starts from the same ordinary noise state as unconditioned generation, applies the standard reverse posterior, and returns a phase-wise argmax after the final transition. The sampler does not initialize constrained voxels from $q(x_T\mid Y)$, clamp intermediate clean predictions, or overwrite final labels. Anchor agreement is therefore a measured learned-conditioning outcome rather than a sampler invariant.
+At inference, baseline and anchor trajectories start from the same ordinary noise and share every transition's latent vector and posterior noise. On the anchor trajectory, the sampler subtracts the plain logits from one joint multi-anchor conditional prediction, applies this residual through a Gaussian spatial weight, and decodes only after the logit correction. Plane guidance increases toward the final transition while surrounding-context guidance decreases. After each posterior update, a fixed spatial coupling keeps the anchor trajectory locally and tapers to the same-RNG baseline in the far field. The sampler does not initialize constrained voxels from $q(x_T\mid Y)$, clamp intermediate clean predictions, or overwrite final labels. Anchor agreement is therefore a measured learned-conditioning outcome rather than a sampler invariant.
 
 ### 3.4 Phase-fraction conditioning and training objective
 
-An optional phase-fraction vector $v\in\Delta^{K-1}$, with $v_k\geq0$ and $\sum_k v_k=1$, specifies the desired composition. Non-negative user inputs are normalized to this simplex before sampling. Its embedding conditions the denoiser, while predicted mean fractions $\hat{p}$ receive
+An optional phase-fraction vector $v\in\Delta^{K-1}$, with $v_k\geq0$ and $\sum_k v_k=1$, specifies the desired composition. Non-negative user inputs are normalized to this simplex before sampling. During training, each target averages a random one to four empirical crop fractions from the selected target domain; provider-domain crops borrowed for missing axes never enter this pool. Its embedding conditions the denoiser, while predicted mean fractions $\hat{p}$ receive
 
 $$
 \mathcal{L}_{\mathrm{vf}}=\frac{1}{2}\sum_{k=0}^{K-1}|\hat{p}_k-v_k|.
@@ -112,7 +113,7 @@ Anchor conditions are requested for 80% of eligible training samples. When ancho
 
 ### 3.5 Fixed-block shared-state tiled scale-up
 
-Let $P=128$ be the fixed block input size and $o$ the margin reserved inside each block on every shared face. Adjacent blocks start $P-2o$ voxels apart, so their predictions share a $2o$-voxel fusion band. For $b$ blocks, the output length is $P+(b-1)(P-2o)$. Every denoiser call therefore uses the same $P^3$ shape seen during training. At every reverse transition, one newly sampled latent vector $z_t$ is shared by all blocks. A separable cosine-taper window $w_k$ then fuses their overlapping predictions:
+Let $P=128$ be the fixed block input size and $o$ the overlap reserved inside each block on every shared face. Adjacent blocks start $P-2o$ voxels apart, so their predictions share a $2o$-voxel fusion band. For $b$ blocks, the requested output length is $P+(b-1)(P-2o)$. Every denoiser call therefore uses the same $P^3$ shape seen during training. At every reverse transition, one newly sampled latent vector $z_t$ is shared by all blocks. A separable cosine-taper window $w_k$ then fuses their overlapping predictions:
 
 $$
 \bar{x}_0(v)=
@@ -120,7 +121,7 @@ $$
 {\sum_k w_k(v)}.
 $$
 
-The reverse posterior updates the shared global state only after fusion, so adjacent blocks exchange information throughout denoising rather than being stitched after generation. Margins exist only on faces shared by blocks. Outermost faces use unit weight and receive no padding, external halo, or periodic wrap.
+The reverse posterior updates the shared global state only after fusion, so adjacent blocks exchange information throughout denoising rather than being stitched after generation. Fusion windows taper only on shared tile faces, while outermost faces use unit weight and there is no periodic wrap. The public sampler can optionally add an outer context margin $m$: it runs the same shared-state process on a shape expanded by $2m$ and center-crops the requested output afterward. That context can require more actual tiles than the requested block grid. The fixed 27-tile paper evaluation sets $m=0$.
 
 When a base volume $B$ is supplied, define its signed one-hot field as $b(v)=2\,\mathrm{onehot}(B(v))-1$ and keep one fixed noise field $\epsilon_B$. The corresponding fixed-noise forward realization is
 
@@ -154,9 +155,9 @@ Evaluation uses 64 randomly sampled real crops. A fixed unconditioned 128³ seed
 
 ### 4.2 Training and implementation
 
-All reported results use the immutable 20,000-step EMA checkpoint from run 08111303, domain 0, with guidance scale 1.0.
+All reported results use the immutable 20,000-step EMA checkpoint from run 08111303, domain 0, with guidance scale 1.0. That archived checkpoint predates the current anchor loss, rolling unconditional EMA prior, and coupled logit-space sampler described in Section 3.3. The unchanged values below are historical results and do not evaluate the revised training path without retraining and regeneration.
 
-Training always used 128³ volumes, 16 section pairs per axis, and real-section batch size 8. Adam learning rates were $1.6\times10^{-4}$ for the denoiser and $1.0\times10^{-4}$ for the critics. Training used mixed precision, EMA decay 0.999, 10 diffusion transitions, and an R1 penalty every 16 steps. Anchor conditioning started at step 3,000 and ramped for 6,000 steps. Anchors were requested on 80% of eligible steps, and multi-plane teacher conditions were sampled after the ramp. The fixed-block sampler is an inference procedure and does not require a second model.
+The archived run and the current default configuration both use 128³ volumes, 16 section pairs per axis, and real-section batch size 8. Adam learning rates are $1.6\times10^{-4}$ for the denoiser and $1.0\times10^{-4}$ for the critics. Training uses mixed precision, EMA decay 0.999, 10 diffusion transitions, and an R1 penalty every 16 steps. Anchor conditioning starts at step 3,000, ramps for 6,000 steps, and is requested on 80% of eligible steps. In the current implementation, the unconditional EMA prior bank is initialized at the anchor phase and then refreshed one volume at a time; it does not create multi-plane teacher conditions. The fixed-block sampler is an inference procedure and does not require a second model.
 
 ### 4.3 Evaluation protocols
 
@@ -164,7 +165,7 @@ The single-plane examples in Figures 4 and 6 use the 128 × 128 crop at $(\mathr
 
 The phase-fraction-conditioned samples receive the synthetic reference fractions $(0.3487196,0.6512804)$ as an oracle target. Only this one target is tested.
 
-The scale-up evaluation uses 3 × 3 × 3 fixed 128³ blocks with eight-voxel inward margins. It produces a 352³ volume with shared boundaries at coordinates 120 and 232 on every axis.
+The scale-up evaluation uses 3 × 3 × 3 fixed 128³ blocks with eight-voxel inward overlaps and no outer context margin. The 27-tile plan produces a 352³ volume with shared boundaries at coordinates 120 and 232 on every axis.
 
 ### 4.4 Metrics
 

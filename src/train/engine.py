@@ -14,6 +14,7 @@ from ..dataset import BatchStream
 from ..diffusion import Diffusion
 from ..model.denoiser import Denoiser3D
 from ..model.domain import NULL_DOMAIN
+from . import vf
 from .anchor_loss import soft_anchor_loss
 from .augment import CriticAugment
 from .connect import Connectivity, TripletBatch, normal_transition_loss
@@ -126,8 +127,6 @@ class StepPreparation:
 class AnchorSelection:
     condition: AnchorCondition
     source: Literal["real", "shared"]
-    seeds: tuple[PlaneAnchor, ...] = ()
-    target_vf: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -523,7 +522,7 @@ class Trainer:
         ):
             raise ValueError("transition is outside the diffusion schedule.")
 
-        domain = self.sample_target_domain()
+        domain = self.select_target_domain(step)
         model_domain = self.sample_domain_condition(domain)
         batch_domains = self.select_batch_domains(domain)
         batches = self.get_batches(domain, batch_domains)
@@ -533,7 +532,7 @@ class Trainer:
             model_domain,
             batch_domains,
         )
-        vf_pool = self.get_vf_pool(own_batches)
+        vf_pool = vf.build_pool(own_batches, num_phases=self.num_phases)
         ramp = self.get_anchor_ramp(step)
         selection = (
             None
@@ -547,7 +546,12 @@ class Trainer:
         if (
             selection is not None
             and selection.source == "shared"
-            and not self.anchor_has_compatible_vf(selection.condition, vf_pool)
+            and not vf.anchor_is_compatible(
+                selection.condition,
+                vf_pool,
+                batch_size=self.volume_batch_size,
+                num_phases=self.num_phases,
+            )
         ):
             selection = self.sample_real_anchor(
                 own_batches,
@@ -555,10 +559,13 @@ class Trainer:
                 owned_axes=tuple(own_batches),
             )
         anchor = None if selection is None else selection.condition
-        target_vf, resample_rate = self.resolve_target_vf(
-            selection,
+        target_vf, resample_rate = vf.sample_target(
             vf_pool,
             anchor,
+            batch_size=self.volume_batch_size,
+            num_phases=self.num_phases,
+            device=self.device,
+            max_samples=self.vf_target_average_max_samples,
         )
         presence = self.sample_condition_presence(anchor is not None)
         model_conditions = self.make_model_conditions(
@@ -598,7 +605,7 @@ class Trainer:
         connectivity_fake: TripletBatch,
         clean_probs: torch.Tensor,
     ) -> Metrics:
-        target_values, soft_values, hard_values, hard_mae = self.summarize_vfs(
+        target_values, soft_values, hard_values, hard_mae = vf.summarize(
             clean_probs,
             prepared.target_vf,
             prepared.presence.vf,
@@ -655,16 +662,6 @@ class Trainer:
                 and bool(presence.anchor.any())
             ),
         )
-
-    def resolve_target_vf(
-        self,
-        selection: AnchorSelection | None,
-        pool: torch.Tensor,
-        anchor: AnchorCondition | None,
-    ) -> tuple[torch.Tensor, float]:
-        if selection is not None and selection.target_vf is not None:
-            return self.validate_target_vf(selection.target_vf), 0.0
-        return self.sample_target_vf(pool, anchor)
 
     def make_connectivity_triplets(
         self,
@@ -764,6 +761,18 @@ class Trainer:
     def sample_target_domain(self) -> int:
         return int(torch.randint(self.num_domains, ()).item())
 
+    def select_target_domain(self, step: int) -> int:
+        if (
+            self.prior_required
+            and step >= self.anchor_start_step
+            and not self.connect.prior_ready
+        ):
+            for domain in range(self.num_domains):
+                if self.connect.needs_prior(domain):
+                    return domain
+            raise RuntimeError("connectivity prior readiness is inconsistent.")
+        return self.sample_target_domain()
+
     def get_batches(
         self,
         domain: int,
@@ -850,150 +859,6 @@ class Trainer:
                 for image, row, col in zip(images, top, left, strict=True)
             ]
         )
-
-    def get_vf_pool(self, batches: dict[int, torch.Tensor]) -> torch.Tensor:
-        if not batches or not set(batches).issubset(AXES):
-            raise ValueError("batches must contain at least one valid axis.")
-        if any(
-            not isinstance(images, torch.Tensor) or images.ndim != 3
-            for images in batches.values()
-        ):
-            raise ValueError("training crops must have shape [B, H, W].")
-        batch_sizes = {images.shape[0] for images in batches.values()}
-        if len(batch_sizes) != 1 or not batch_sizes or next(iter(batch_sizes)) < 1:
-            raise ValueError(
-                "each available axis must provide the same non-empty crop batch."
-            )
-
-        values = []
-        for images in batches.values():
-            if images.numel() == 0:
-                raise ValueError("training crops must not be empty.")
-            labels = images.to(torch.long)
-            lower, upper = torch.aminmax(labels)
-            if int(lower) < 0 or int(upper) >= self.num_phases:
-                raise ValueError("training images contain a phase outside num_phases.")
-            batch = labels.shape[0]
-            offsets = torch.arange(
-                batch,
-                device=labels.device,
-                dtype=labels.dtype,
-            ).mul_(self.num_phases)
-            encoded = labels.flatten(1).add(offsets[:, None])
-            counts = torch.bincount(
-                encoded.flatten(),
-                minlength=batch * self.num_phases,
-            ).reshape(batch, self.num_phases)
-            fractions = counts.to(torch.float32).div_(
-                labels.shape[-2] * labels.shape[-1]
-            )
-            values.append(fractions)
-        return torch.cat(values, dim=0)
-
-    def validate_target_vf(self, target: torch.Tensor) -> torch.Tensor:
-        if not isinstance(target, torch.Tensor) or not target.is_floating_point():
-            raise TypeError("target VF must be a floating-point tensor.")
-        expected = (self.volume_batch_size, self.num_phases)
-        if target.shape != expected:
-            raise ValueError(f"target VF must have shape {expected}.")
-        target = target.to(device=self.device, dtype=torch.float32)
-        if not bool(torch.isfinite(target).all()) or bool((target < 0.0).any()):
-            raise ValueError("target VF values must be finite and non-negative.")
-        sums = target.sum(dim=1)
-        if not torch.allclose(sums, torch.ones_like(sums), atol=1e-5, rtol=0.0):
-            raise ValueError("target VF rows must sum to one.")
-        return target
-
-    def sample_target_vf(
-        self,
-        pool: torch.Tensor,
-        anchor: AnchorCondition | None,
-    ) -> tuple[torch.Tensor, float]:
-        if (
-            not isinstance(pool, torch.Tensor)
-            or not pool.is_floating_point()
-            or pool.ndim != 2
-            or pool.shape[0] < 1
-            or pool.shape[1] != self.num_phases
-        ):
-            raise ValueError("VF pool must have shape [N, num_phases].")
-        pool = pool.to(device=self.device, dtype=torch.float32)
-        max_samples = min(self.vf_target_average_max_samples, pool.shape[0])
-        sample_counts = (
-            torch.ones(
-                self.volume_batch_size,
-                device=self.device,
-                dtype=torch.long,
-            )
-            if max_samples == 1
-            else torch.randint(
-                1,
-                max_samples + 1,
-                (self.volume_batch_size,),
-                device=self.device,
-            )
-        )
-        indices = torch.randint(
-            pool.shape[0],
-            (self.volume_batch_size, max_samples),
-            device=self.device,
-        )
-        active = (
-            torch.arange(max_samples, device=self.device)[None] < sample_counts[:, None]
-        )
-        target = (
-            (pool[indices] * active[..., None]).sum(dim=1).div_(sample_counts[:, None])
-        )
-        resampled = 0
-        if anchor is not None:
-            if anchor.target.shape[0] != self.volume_batch_size:
-                raise ValueError("anchor and generated volume batches must match.")
-            required = self.anchor_minimum_vfs(anchor)
-            for batch, minimum in enumerate(required):
-                valid = (pool + 1e-7 >= minimum).all(dim=1).nonzero().flatten()
-                if not len(valid):
-                    raise ValueError(
-                        "anchor phase minima are incompatible with every empirical "
-                        "VF target."
-                    )
-                if not bool((target[batch] + 1e-7 >= minimum).all()):
-                    choices = torch.randint(
-                        len(valid),
-                        (int(sample_counts[batch]),),
-                        device=self.device,
-                    )
-                    target[batch] = pool[valid.index_select(0, choices)].mean(dim=0)
-                    resampled += 1
-        target = self.validate_target_vf(target)
-        return target, resampled / self.volume_batch_size
-
-    def anchor_has_compatible_vf(
-        self,
-        anchor: AnchorCondition,
-        pool: torch.Tensor,
-    ) -> bool:
-        """Whether every anchor sample fits at least one target-domain VF."""
-        required = self.anchor_minimum_vfs(anchor)
-        pool = pool.to(device=required.device, dtype=torch.float32)
-        compatible = (pool.unsqueeze(0) + 1e-7 >= required.unsqueeze(1)).all(dim=2)
-        return bool(compatible.any(dim=1).all())
-
-    def anchor_minimum_vfs(self, anchor: AnchorCondition) -> torch.Tensor:
-        if anchor.target.shape[0] != self.volume_batch_size:
-            raise ValueError("anchor and generated volume batches must match.")
-        voxel_count = math.prod(anchor.target.shape[1:])
-        required = []
-        for labels, mask in zip(
-            anchor.target,
-            anchor.mask[:, 0].to(torch.bool),
-            strict=True,
-        ):
-            counts = torch.bincount(
-                labels[mask].to(torch.long),
-                minlength=self.num_phases,
-            ).to(torch.float32)
-            required.append(counts / voxel_count)
-        return torch.stack(required)
 
     def sample_condition_presence(self, has_anchor: bool) -> ConditionPresence:
         if not isinstance(has_anchor, bool):
@@ -1125,19 +990,9 @@ class Trainer:
         )
         if condition is None:
             raise RuntimeError("real anchor construction returned no condition.")
-        seeds = tuple(
-            PlaneAnchor(
-                image=selected[batch],
-                axis=axis,
-                index=plane_index,
-                position=position,
-            )
-            for batch in range(self.volume_batch_size)
-        )
         return AnchorSelection(
             condition=condition,
             source="shared" if use_shared else "real",
-            seeds=seeds,
         )
 
     @torch.no_grad()
@@ -1419,7 +1274,7 @@ class Trainer:
         adversarial = float(loss.detach())
         r1_value = 0.0
         if apply_r1:
-            r1 = get_critic_r1(real_score, (real,))
+            r1 = get_critic_r1(real_score, (real,), fake.anchor_flags)
             penalty = r1.combine(self.critic_local_weight)
             r1_value = float(penalty.detach())
             loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
@@ -1526,44 +1381,6 @@ class Trainer:
             anchor_pixel=float(anchor_pixel.detach()),
             anchor_accuracy=float(anchor_accuracy.detach()),
             vf=float(vf_loss.detach()),
-        )
-
-    @staticmethod
-    def summarize_vfs(
-        probs: torch.Tensor,
-        target: torch.Tensor,
-        present: torch.Tensor,
-    ) -> tuple[
-        tuple[float, ...],
-        tuple[float, ...],
-        tuple[float, ...],
-        float,
-    ]:
-        if present.dtype != torch.bool or present.shape != (probs.shape[0],):
-            raise ValueError("VF presence must be a boolean tensor with shape [B].")
-        values = probs.detach().to(torch.float32)
-        target_values = target.detach().to(torch.float32).mean(dim=0)
-        if bool(present.any()):
-            values = values[present]
-            selected_target = target[present].to(torch.float32)
-            soft_values = values.mean(dim=(0, 2, 3, 4))
-            phases = values.argmax(dim=1)
-            hard_per_sample = (
-                F.one_hot(phases, num_classes=values.shape[1])
-                .to(torch.float32)
-                .mean(dim=(1, 2, 3))
-            )
-            hard_values = hard_per_sample.mean(dim=0)
-            hard_mae = (hard_per_sample - selected_target).abs().mean()
-        else:
-            soft_values = torch.zeros_like(target_values)
-            hard_values = torch.zeros_like(target_values)
-            hard_mae = torch.zeros((), device=values.device)
-        return (
-            tuple(float(value) for value in target_values),
-            tuple(float(value) for value in soft_values),
-            tuple(float(value) for value in hard_values),
-            float(hard_mae),
         )
 
     def update_target_stats(

@@ -35,6 +35,7 @@ from src.config import load_generation_settings
 from src.scale import ScaledGenerator
 
 BLOCKS = (3, 3, 3)
+SCALE_MARGIN = 0
 
 
 @dataclass(frozen=True)
@@ -77,7 +78,7 @@ def main() -> None:
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
     overlap = settings.overlap
-    margin = settings.margin
+    base_margin = settings.margin
     provenance = build_provenance(
         weights,
         guidance,
@@ -88,7 +89,8 @@ def main() -> None:
             "blocks": list(BLOCKS),
             "scale_geometry": "fixed_blocks_inward_margins",
             "overlap": overlap,
-            "margin": margin,
+            "base_margin": base_margin,
+            "margin": SCALE_MARGIN,
             "source_roi_left_top": list(ROI_POSITIONS[1]),
             "source_crop_size": CROP_SIZE,
         },
@@ -111,18 +113,19 @@ def main() -> None:
     print(f"Guidance: {guidance}")
     print(f"Blocks  : {BLOCKS}")
     print(f"Overlap : {overlap}")
-    print(f"Margin  : {margin}")
+    print(f"Base margin : {base_margin}")
+    print(f"Scale margin: {SCALE_MARGIN}")
     print("Status  : generating anchored base...", flush=True)
     base = generator.generate(
         anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=anchor_index),),
         guidance=guidance,
         domain=args.domain,
-        margin=margin,
+        margin=base_margin,
     )
 
     scaled = ScaledGenerator(generator)
     shape = scaled.shape_from_blocks(BLOCKS, overlap)
-    plan = scaled.plan(tuple(size + 2 * margin for size in shape), overlap)
+    plan = scaled.plan(shape, overlap)
     print(f"Shape   : {shape}")
     print(f"Tiles   : {plan.tile_count}")
     print("Status  : scaling...", flush=True)
@@ -130,7 +133,7 @@ def main() -> None:
     volume = scaled.generate(
         blocks=BLOCKS,
         overlap=overlap,
-        margin=margin,
+        margin=SCALE_MARGIN,
         base=base,
         progress=False,
         guidance=guidance,
@@ -163,7 +166,7 @@ def main() -> None:
                 "scale_plan": {
                     "blocks": list(BLOCKS),
                     "overlap": overlap,
-                    "margin": margin,
+                    "margin": SCALE_MARGIN,
                     "block_size": plan.tile_size,
                     "stride": plan.stride,
                     "shape": list(plan.shape),

@@ -27,7 +27,7 @@ def load_generation_settings() -> GenerationSettings:
         or guidance < 0.0
         or guidance > 10_000.0
     ):
-        raise ValueError("generation.guidance must be between zero and 10000.")
+        raise ValueError("guidance must be between zero and 10000.")
     overlap = _non_negative_int(section.get("overlap", 8), "overlap")
     margin = _non_negative_int(section.get("margin", 8), "margin")
     return GenerationSettings(float(guidance), overlap, margin)
@@ -35,7 +35,7 @@ def load_generation_settings() -> GenerationSettings:
 
 def _non_negative_int(value: object, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError(f"generation.{name} must be a non-negative integer.")
+        raise ValueError(f"{name} must be a non-negative integer.")
     return value
 
 

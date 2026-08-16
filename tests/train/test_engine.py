@@ -8,10 +8,10 @@ import pytest
 import torch
 from torch import nn
 
-from src.anchor import PlaneAnchor, build_anchors
 from src.build import build_models, build_optimizers
 from src.diffusion import Diffusion
 from src.model.domain import NULL_DOMAIN
+from src.train import vf
 from src.train.augment import CriticAugment
 from src.train.connect import TripletBatch
 from src.train.ema import build_ema
@@ -74,12 +74,6 @@ def ConditioningConfig(**values):
     )
     dropout.update(values)
     return Config(cfg_dropout=dropout)
-
-
-def get_vf_pool(batches, num_phases):
-    trainer = object.__new__(Trainer)
-    trainer.num_phases = num_phases
-    return trainer.get_vf_pool(batches)
 
 
 def sample_pairs(
@@ -166,87 +160,6 @@ def test_anchor_transitions_prioritize_the_final_step() -> None:
     ) as randint:
         assert trainer.sample_transition(anchored=False) == 6
         randint.assert_called_once_with(11, ())
-
-
-def test_get_vf_pool_preserves_each_axis_crop_as_an_empirical_target() -> None:
-    batches = {
-        0: torch.tensor([[[0, 0], [1, 1]], [[2, 2], [2, 2]]]),
-        1: torch.tensor([[[1, 1], [1, 2]], [[0, 1], [2, 2]]]),
-        2: torch.tensor([[[0, 0], [0, 0]], [[0, 1], [1, 2]]]),
-    }
-    expected = torch.tensor(
-        (
-            (0.5, 0.5, 0.0),
-            (0.0, 0.0, 1.0),
-            (0.0, 0.75, 0.25),
-            (0.25, 0.25, 0.5),
-            (1.0, 0.0, 0.0),
-            (0.25, 0.5, 0.25),
-        )
-    )
-
-    vfs = get_vf_pool(batches, 3)
-
-    assert torch.equal(vfs, expected)
-
-
-def test_empirical_vf_target_resamples_for_anchor_minima_and_rejects_no_match() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.num_phases = 2
-    trainer.volume_batch_size = 1
-    trainer.device = torch.device("cpu")
-    trainer.vf_target_average_max_samples = 1
-    condition = build_anchors(
-        (PlaneAnchor(torch.ones(2, 2, dtype=torch.uint8), axis=0, index=0),),
-        batch_size=1,
-        num_phases=2,
-        volume_size=2,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-        reconcile=False,
-    )
-    assert condition is not None
-    pool = torch.tensor(((0.75, 0.25), (0.5, 0.5)))
-
-    with patch(
-        "src.train.engine.torch.randint",
-        side_effect=(torch.tensor(((0,),)), torch.tensor((0,))),
-    ):
-        target, resample_rate = trainer.sample_target_vf(pool, condition)
-
-    assert torch.equal(target, pool[1:])
-    assert resample_rate == 1.0
-
-    with (
-        patch("src.train.engine.torch.randint", return_value=torch.tensor(((0,),))),
-        pytest.raises(ValueError, match="incompatible"),
-    ):
-        trainer.sample_target_vf(pool[:1], condition)
-
-
-def test_empirical_vf_target_averages_a_random_number_of_crops() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.num_phases = 2
-    trainer.volume_batch_size = 1
-    trainer.device = torch.device("cpu")
-    trainer.vf_target_average_max_samples = 4
-    pool = torch.tensor(
-        (
-            (1.0, 0.0),
-            (0.5, 0.5),
-            (0.0, 1.0),
-            (0.25, 0.75),
-        )
-    )
-
-    with patch(
-        "src.train.engine.torch.randint",
-        side_effect=(torch.tensor((3,)), torch.tensor(((0, 1, 2, 3),))),
-    ):
-        target, resample_rate = trainer.sample_target_vf(pool, None)
-
-    assert torch.allclose(target, torch.tensor(((0.5, 0.5),)))
-    assert resample_rate == 0.0
 
 
 def test_sample_pairs_centers_half_the_patches_on_focus() -> None:
@@ -394,6 +307,31 @@ def test_domain_dropout_probability_controls_the_model_condition() -> None:
 
     trainer.domain_dropout = 1.0
     assert trainer.sample_domain_condition(2) == NULL_DOMAIN
+
+
+def test_initial_prior_build_selects_each_incomplete_domain() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.prior_required = True
+    trainer.anchor_start_step = 4
+    trainer.num_domains = 3
+    trainer.connect = Mock(prior_ready=False)
+    trainer.connect.needs_prior.side_effect = lambda domain: domain in (1, 2)
+    trainer.sample_target_domain = Mock(return_value=2)
+
+    assert trainer.select_target_domain(3) == 2
+    trainer.sample_target_domain.assert_called_once_with()
+
+    trainer.sample_target_domain.reset_mock()
+    assert trainer.select_target_domain(4) == 1
+    trainer.sample_target_domain.assert_not_called()
+    assert trainer.connect.needs_prior.call_args_list[-2:] == [
+        ((0,),),
+        ((1,),),
+    ]
+
+    trainer.connect.prior_ready = True
+    assert trainer.select_target_domain(5) == 2
+    trainer.sample_target_domain.assert_called_once_with()
 
 
 def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
@@ -720,18 +658,19 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     )
     vf_batch_ids = []
     critic_batch_ids = []
+    original_build_pool = vf.build_pool
     original_update_critics = trainer.update_critics
 
-    def track_vfs(batches):
+    def track_vfs(batches, num_phases):
         vf_batch_ids.extend(id(batches[axis]) for axis in (0, 1, 2))
-        return get_vf_pool(batches, trainer.num_phases)
+        return original_build_pool(batches, num_phases)
 
     def track_critics(transition, fake, batches, step, domain):
         critic_batch_ids.extend(id(batches[axis]) for axis in (0, 1, 2))
         return original_update_critics(transition, fake, batches, step, domain)
 
     with (
-        patch.object(trainer, "get_vf_pool", side_effect=track_vfs),
+        patch.object(vf, "build_pool", side_effect=track_vfs),
         patch.object(trainer, "update_critics", side_effect=track_critics),
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
@@ -756,9 +695,9 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     assert len(predict_logits.call_args_list) == 2
     assert all(vf is vfs[0] for vf in vfs)
     assert vfs[0].shape == (1, 3)
-    expected_pool = get_vf_pool(
+    expected_pool = vf.build_pool(
         {axis: streams[axis].images for axis in (0, 1, 2)},
-        3,
+        num_phases=3,
     )
     assert any(torch.allclose(vfs[0][0], target) for target in expected_pool)
     assert vf_batch_ids == critic_batch_ids
@@ -894,8 +833,14 @@ def test_real_anchor_preserves_a_rectangular_observation() -> None:
 
     selection = trainer.sample_real_anchor(batches, volume_size=8)
 
-    assert selection.seeds[0].image.shape == (4, 8)
-    assert int(selection.condition.mask.sum()) == 4 * 8
+    condition = selection.condition
+    coords = condition.mask[0, 0].nonzero()
+    spans = tuple(
+        int(coords[:, dim].max() - coords[:, dim].min() + 1) for dim in range(3)
+    )
+    assert condition.image.shape == (1, 3, 8, 8, 8)
+    assert sorted(spans) == [1, 4, 8]
+    assert int(condition.mask.sum()) == 4 * 8
 
 
 def test_incompatible_shared_anchor_falls_back_to_an_owned_axis() -> None:
@@ -908,7 +853,7 @@ def test_incompatible_shared_anchor_falls_back_to_an_owned_axis() -> None:
     own = torch.zeros(1, 8, 8, dtype=torch.long)
     borrowed = torch.ones(1, 8, 8, dtype=torch.long)
     batches = {0: own, 1: borrowed}
-    pool = trainer.get_vf_pool({0: own})
+    pool = vf.build_pool({0: own}, num_phases=2)
 
     shared = trainer.sample_real_anchor(
         batches,
@@ -917,14 +862,26 @@ def test_incompatible_shared_anchor_falls_back_to_an_owned_axis() -> None:
     )
 
     assert shared.source == "shared"
-    assert not trainer.anchor_has_compatible_vf(shared.condition, pool)
+    assert not vf.anchor_is_compatible(
+        shared.condition,
+        pool,
+        batch_size=1,
+        num_phases=2,
+    )
 
     fallback = trainer.sample_real_anchor(
         {0: own},
         volume_size=8,
         owned_axes=(0,),
     )
-    target, _ = trainer.resolve_target_vf(fallback, pool, fallback.condition)
+    target, _ = vf.sample_target(
+        pool,
+        fallback.condition,
+        batch_size=1,
+        num_phases=2,
+        device=torch.device("cpu"),
+        max_samples=1,
+    )
 
     assert fallback.source == "real"
     assert target.tolist() == [[1.0, 0.0]]
@@ -1040,7 +997,7 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
 
     with (
         patch.object(trainer, "sample_anchor", return_value=selection),
-        patch.object(trainer, "sample_target_vf", return_value=(target, 0.0)),
+        patch.object(vf, "sample_target", return_value=(target, 0.0)),
         patch.object(
             trainer,
             "generate_pair",

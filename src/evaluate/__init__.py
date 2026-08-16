@@ -1,3 +1,9 @@
+from .anchor import (
+    BoundaryQuality,
+    measure_boundaries,
+    measure_distance_changes,
+    measure_distance_divergence,
+)
 from .connect import (
     continuation_delta,
     continuation_error,
@@ -24,15 +30,22 @@ from .label import (
     phase_recall,
     voxel_accuracy,
 )
+from .scale import SeamQuality, measure_seams
 from .tau import tortuosity
 
 __all__ = (
+    "BoundaryQuality",
+    "SeamQuality",
     "continuation_delta",
     "continuation_error",
     "fid_score",
     "kid_score",
     "make_fid_metric",
     "make_kid_metric",
+    "measure_boundaries",
+    "measure_distance_changes",
+    "measure_distance_divergence",
+    "measure_seams",
     "metric_images",
     "percolating_fraction",
     "percolating_fractions",

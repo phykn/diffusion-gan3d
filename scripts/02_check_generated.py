@@ -3,7 +3,6 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import tifffile
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +10,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.build import load_generator
 from src.config import load_generation_settings
+from src.volume import save_volume
 
 
 def main() -> None:
@@ -26,11 +26,6 @@ def main() -> None:
         type=int,
         default=0,
         help="numeric domain ID (default: 0)",
-    )
-    parser.add_argument(
-        "--guidance",
-        type=float,
-        help="classifier-free guidance scale (default: config/gen.yaml)",
     )
     parser.add_argument(
         "--out",
@@ -52,23 +47,23 @@ def main() -> None:
 
     generator = load_generator(weight, device=device)
     settings = load_generation_settings()
-    guidance = settings.guidance if args.guidance is None else args.guidance
     shape = (generator.patch_size,) * 3
     print(f"Shape   : {' × '.join(map(str, shape))}")
     print(f"Device  : {device}")
-    print("Conditioning : none")
+    print(f"Domain  : {args.domain}")
+    print("Anchor/VF : none")
     print(f"Margin  : {settings.margin} per outer face")
     print("Status  : generating...", flush=True)
 
     vol = generator.generate(
         vf=None,
-        guidance=guidance,
         domain=args.domain,
         margin=settings.margin,
     )
     print("Status  : complete", flush=True)
     if args.out is not None:
         save_volume(vol, args.out)
+        print(f"Output  : {args.out.resolve()}", flush=True)
     if args.napari:
         show_napari(vol)
     else:
@@ -109,12 +104,6 @@ def show_napari(vol: torch.Tensor) -> None:
     viewer.add_labels(vol.numpy(), name="generated phases")
     viewer.dims.ndisplay = 3
     napari.run()
-
-
-def save_volume(vol: torch.Tensor, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(path, vol.detach().cpu().to(torch.uint8).numpy())
-    print(f"Output  : {path.resolve()}", flush=True)
 
 
 if __name__ == "__main__":

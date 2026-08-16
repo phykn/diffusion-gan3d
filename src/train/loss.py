@@ -75,12 +75,14 @@ def _group_mean(values: torch.Tensor, groups: torch.Tensor | None) -> torch.Tens
 def get_critic_r1(
     scores: CriticScores,
     real_inputs: Sequence[torch.Tensor],
+    groups: torch.Tensor | None = None,
 ) -> HeadLoss:
     return HeadLoss(
-        global_loss=get_r1(scores.logits_global, real_inputs),
+        global_loss=get_r1(scores.logits_global, real_inputs, groups),
         local_loss=get_r1(
             scores.logits_local.mean(dim=(-2, -1)),
             real_inputs,
+            groups,
         ),
     )
 
@@ -88,6 +90,7 @@ def get_critic_r1(
 def get_r1(
     logits: torch.Tensor,
     inputs: Sequence[torch.Tensor],
+    groups: torch.Tensor | None = None,
 ) -> torch.Tensor:
     grads = torch.autograd.grad(
         outputs=logits.sum(),
@@ -99,4 +102,4 @@ def get_r1(
     norm = torch.zeros(batch, device=logits.device)
     for grad in grads:
         norm = norm + grad.square().reshape(batch, -1).sum(1)
-    return norm.mean()
+    return _group_mean(norm, groups)

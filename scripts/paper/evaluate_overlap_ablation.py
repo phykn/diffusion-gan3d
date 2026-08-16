@@ -1,6 +1,5 @@
 import argparse
 import csv
-import importlib
 import json
 import sys
 from pathlib import Path
@@ -22,11 +21,13 @@ from provenance import (
 
 from src.build import load_generator
 from src.config import load_generation_settings
-from src.scale import ScaledGenerator
+from src.evaluate import measure_seams
+from src.scale import ScaledGenerator, ScalePlan
 
 OVERLAPS = (0, 4, 8, 12, 16)
 SEEDS = tuple(range(20_260_808, 20_260_813))
 BLOCKS = (2, 1, 1)
+ABLATION_MARGIN = 0
 SEAM_EXCLUSION_RADIUS = 4
 TEMP_DIR = PROJECT_ROOT / "temp"
 RAW_CSV = TEMP_DIR / "overlap_ablation_raw.csv"
@@ -58,7 +59,7 @@ def main() -> None:
             "blocks": list(BLOCKS),
             "scale_geometry": "fixed_blocks_inward_margins",
             "default_overlap": settings.overlap,
-            "margin": settings.margin,
+            "margin": ABLATION_MARGIN,
             "seam_exclusion_radius": SEAM_EXCLUSION_RADIUS,
         },
     )
@@ -70,7 +71,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
     scaled = ScaledGenerator(generator)
-    diagnostic = importlib.import_module("scripts.04_check_scale_up")
+    plans = prepare_plans(scaled)
     rows: list[dict[str, float | int]] = []
 
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -80,6 +81,7 @@ def main() -> None:
     print(f"Weights : {weights}")
     print(f"Device  : {device}")
     print(f"Guidance: {guidance}")
+    print(f"Margin  : {ABLATION_MARGIN}")
     for seed in SEEDS:
         for overlap in OVERLAPS:
             set_seed(seed, device)
@@ -91,7 +93,7 @@ def main() -> None:
             volume = scaled.generate(
                 blocks=BLOCKS,
                 overlap=overlap,
-                margin=settings.margin,
+                margin=ABLATION_MARGIN,
                 progress=False,
                 guidance=guidance,
                 domain=args.domain,
@@ -101,9 +103,12 @@ def main() -> None:
             elapsed = perf_counter() - start
             assert scaled.stats is not None
             plan = scaled.stats
-            if len(plan.seams[0]) != 1 or plan.seams[1:] != ((), ()):
-                raise RuntimeError("two-block ablation must produce one axis-0 seam.")
-            quality = diagnostic.measure_seams(
+            expected_plan = plans[overlap]
+            if plan.grid != expected_plan.grid or plan.seams != expected_plan.seams:
+                raise RuntimeError(
+                    "generated scale plan differs from its preflight plan."
+                )
+            quality = measure_seams(
                 volume,
                 plan.seams,
                 overlap,
@@ -146,7 +151,7 @@ def main() -> None:
                 "seeds": list(SEEDS),
                 "overlaps": list(OVERLAPS),
                 "default_overlap": settings.overlap,
-                "margin": settings.margin,
+                "margin": ABLATION_MARGIN,
                 "blocks": list(BLOCKS),
                 "output_shapes": {
                     str(overlap): list(scaled.shape_from_blocks(BLOCKS, overlap))
@@ -174,6 +179,21 @@ def main() -> None:
     print(f"Summary : {SUMMARY_CSV.resolve()}")
     print(f"Manifest: {MANIFEST.resolve()}")
     print(f"Figure  : {FIGURE.resolve()}")
+
+
+def prepare_plans(scaled: ScaledGenerator) -> dict[int, ScalePlan]:
+    plans = {}
+    for overlap in OVERLAPS:
+        shape = scaled.shape_from_blocks(BLOCKS, overlap)
+        plan = scaled.plan(shape, overlap)
+        if plan.grid != BLOCKS or len(plan.seams[0]) != 1 or plan.seams[1:] != ((), ()):
+            raise RuntimeError(
+                "two-block ablation must preflight to grid (2, 1, 1) with "
+                f"one axis-0 seam; overlap {overlap} produced grid {plan.grid} "
+                f"and seams {plan.seams}."
+            )
+        plans[overlap] = plan
+    return plans
 
 
 def set_seed(seed: int, device: torch.device) -> None:

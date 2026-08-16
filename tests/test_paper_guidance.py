@@ -75,6 +75,65 @@ def test_paper_metrics_reports_mean_pore_percolation() -> None:
     assert module.mean_percolation(volume) == pytest.approx(expected)
 
 
+def test_overlap_ablation_preflights_without_the_default_outer_margin() -> None:
+    module = _load_script("evaluate_overlap_ablation.py")
+    settings = module.load_generation_settings()
+    assert settings.margin == 8
+    assert module.ABLATION_MARGIN == 0
+
+    generator = SimpleNamespace(
+        patch_size=128,
+        num_phases=2,
+        device=torch.device("cpu"),
+        model=SimpleNamespace(
+            downsample_factor=8,
+            input=SimpleNamespace(out_channels=16),
+        ),
+    )
+    scaled = module.ScaledGenerator(generator)
+    plans = module.prepare_plans(scaled)
+
+    assert set(plans) == set(module.OVERLAPS)
+    assert all(plan.grid == module.BLOCKS for plan in plans.values())
+    assert all(
+        len(plan.seams[0]) == 1 and plan.seams[1:] == ((), ())
+        for plan in plans.values()
+    )
+
+    output_shape = scaled.shape_from_blocks(module.BLOCKS, module.OVERLAPS[0])
+    default_margin_plan = scaled._generation_plan(
+        output_shape,
+        module.OVERLAPS[0],
+        settings.margin,
+    )
+    assert default_margin_plan.grid != module.BLOCKS
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ("evaluate_paper_metrics.py", "make_scale_up_asset.py"),
+)
+def test_fixed_block_paper_scale_disables_outer_margin(filename: str) -> None:
+    module = _load_script(filename)
+    calls = [
+        node
+        for node in ast.walk(_tree(filename))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "generate"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "scaled"
+    ]
+
+    assert module.SCALE_MARGIN == 0
+    assert len(calls) == 1
+    margin = next(
+        keyword.value for keyword in calls[0].keywords if keyword.arg == "margin"
+    )
+    assert isinstance(margin, ast.Name)
+    assert margin.id == "SCALE_MARGIN"
+
+
 def test_anchor_sweep_pore_output_contract() -> None:
     source = (PAPER_DIR / "evaluate_anchor_sweep.py").read_text(encoding="utf-8")
 
@@ -457,7 +516,7 @@ def test_scale_asset_writes_generation_sidecar(
             assert len(anchors) == 1
             assert guidance == 1.75
             assert domain == 0
-            assert margin == 0
+            assert margin == 8
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     class FakeScaled:
@@ -490,7 +549,7 @@ def test_scale_asset_writes_generation_sidecar(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda: SimpleNamespace(guidance=1.0, overlap=0, margin=0),
+        lambda: SimpleNamespace(guidance=1.0, overlap=0, margin=8),
     )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(
@@ -528,5 +587,7 @@ def test_scale_asset_writes_generation_sidecar(
     assert metadata["seed"] == module.SEED
     assert metadata["generation"]["blocks"] == [3, 3, 3]
     assert metadata["generation"]["domain"] == 0
+    assert metadata["generation"]["base_margin"] == 8
+    assert metadata["generation"]["margin"] == 0
     assert metadata["scale_plan"]["tile_count"] == 27
     assert metadata["output"]["shape"] == [12, 12, 12]

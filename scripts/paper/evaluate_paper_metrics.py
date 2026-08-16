@@ -64,6 +64,7 @@ REAL_REFERENCE_SEED = 10_000
 REAL_EVALUATION_SEEDS = (20_000, 20_001, 20_002, 20_003)
 TAUFACTOR_CONVERGENCE = 1e-3
 SCALE_BLOCKS = (3, 3, 3)
+SCALE_MARGIN = 0
 
 CONDITIONS = (
     "Real 2D crops",
@@ -115,7 +116,7 @@ def main() -> None:
         "scale_geometry": "fixed_blocks_inward_margins",
         "scale_blocks": list(SCALE_BLOCKS),
         "scale_overlap": generation_settings.overlap,
-        "scale_margin": generation_settings.margin,
+        "scale_margin": SCALE_MARGIN,
         "margin": generation_settings.margin,
         "scale_output_shape": list(
             scale_output_shape(patch_size, generation_settings.overlap)
@@ -225,7 +226,7 @@ def main() -> None:
         reference_tortuosity=reference_tortuosity,
         reference_percolation=reference_percolation,
         scale_overlap=generation_settings.overlap,
-        scale_margin=generation_settings.margin,
+        scale_margin=SCALE_MARGIN,
         output=MANIFEST_PATH,
     )
     print(f"Raw metrics : {RAW_CSV.resolve()}")
@@ -241,7 +242,7 @@ def generate_volumes(
     guidance: float,
     domain: int,
     scale_overlap: int,
-    scale_margin: int,
+    margin: int,
 ) -> dict[tuple[str, int], float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = load_generator(weights, device=device)
@@ -273,14 +274,14 @@ def generate_volumes(
                     vf=None,
                     guidance=guidance,
                     domain=domain,
-                    margin=scale_margin,
+                    margin=margin,
                 )
             elif condition == "3D (phase-fraction conditioned)":
                 volume = generator.generate(
                     vf=(target_porosity, 1.0 - target_porosity),
                     guidance=guidance,
                     domain=domain,
-                    margin=scale_margin,
+                    margin=margin,
                 )
             elif condition in anchor_map:
                 count = anchor_map[condition]
@@ -296,7 +297,7 @@ def generate_volumes(
                     anchors=anchors,
                     guidance=guidance,
                     domain=domain,
-                    margin=scale_margin,
+                    margin=margin,
                 )
             elif condition == "3D (scale-up)":
                 base = generator.generate(
@@ -309,13 +310,13 @@ def generate_volumes(
                     ),
                     guidance=guidance,
                     domain=domain,
-                    margin=scale_margin,
+                    margin=margin,
                 )
                 scaled = ScaledGenerator(generator)
                 volume = scaled.generate(
                     blocks=SCALE_BLOCKS,
                     overlap=scale_overlap,
-                    margin=scale_margin,
+                    margin=SCALE_MARGIN,
                     base=base,
                     progress=False,
                     guidance=guidance,

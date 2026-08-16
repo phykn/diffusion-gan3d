@@ -1,4 +1,3 @@
-import importlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +7,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from src import scale_storage
 from src.anchor import PlaneAnchor
 from src.build import (
     build_models,
@@ -16,12 +16,14 @@ from src.build import (
     validate_prior_capacity,
 )
 from src.diffusion import Diffusion
+from src.evaluate import measure_seams
 from src.generate import (
     Generator,
     _SpatialAnchorDenoiser,
 )
 from src.model.denoiser import Denoiser3D
-from src.scale import ScaledGenerator, TileBuffer, VolumeState
+from src.scale import ScaledGenerator
+from src.scale_storage import TileBuffer, VolumeState
 
 _SCALED_GENERATE = ScaledGenerator.generate
 _SCALED_GENERATE_PROBS = ScaledGenerator.generate_probs
@@ -227,6 +229,34 @@ def test_prior_capacity_accepts_one_volume(tmp_path: Path) -> None:
         anchor=cfg["anchor"],
         connectivity=cfg["connectivity"],
         anchor_start_step=0,
+    )
+
+
+def test_prior_capacity_requires_time_to_fill_each_domain_and_train_anchor(
+    tmp_path: Path,
+) -> None:
+    cfg = _config(tmp_path)
+    cfg["data"]["domains"][1] = cfg["data"]["domains"][0]
+    cfg["anchor"].update(training_probability=1.0, start_step=4)
+    cfg["connectivity"].update(loss_weight=1.0, bank_size=3)
+    cfg["train"].update(total_steps=8, volume_batch_size=2)
+
+    with pytest.raises(ValueError, match="fill every connectivity prior bank"):
+        validate_prior_capacity(
+            data=cfg["data"],
+            train=cfg["train"],
+            anchor=cfg["anchor"],
+            connectivity=cfg["connectivity"],
+            anchor_start_step=4,
+        )
+
+    cfg["train"]["total_steps"] = 9
+    validate_prior_capacity(
+        data=cfg["data"],
+        train=cfg["train"],
+        anchor=cfg["anchor"],
+        connectivity=cfg["connectivity"],
+        anchor_start_step=4,
     )
 
 
@@ -1366,9 +1396,9 @@ def test_auto_storage_uses_cuda_only_with_workspace_margin(
     scaled = ScaledGenerator(generator)
     plan = scaled.plan(64, overlap=0)
     monkeypatch.setattr(
-        ScaledGenerator,
+        scale_storage,
         "get_available_memory",
-        staticmethod(lambda: 2 * plan.cpu_bytes),
+        lambda: 2 * plan.cpu_bytes,
     )
     monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
     monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 0)
@@ -1396,9 +1426,9 @@ def test_auto_storage_counts_reclaimable_cuda_cache(
     scaled = ScaledGenerator(generator)
     plan = scaled.plan(64, overlap=0)
     monkeypatch.setattr(
-        ScaledGenerator,
+        scale_storage,
         "get_available_memory",
-        staticmethod(lambda: 2 * plan.cpu_bytes),
+        lambda: 2 * plan.cpu_bytes,
     )
     monkeypatch.setattr(
         torch.cuda,
@@ -1419,6 +1449,29 @@ def test_auto_storage_counts_reclaimable_cuda_cache(
     assert scaled.select_storage(plan, "auto") == "cuda"
 
 
+def test_storage_selection_uses_storage_module_memory_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = _generator(_ControlledModel(), Diffusion(1))
+    generator.device = torch.device("cuda")
+    scaled = ScaledGenerator(generator)
+    plan = scaled.plan(64, overlap=0)
+    checked = []
+    monkeypatch.setattr(
+        scale_storage,
+        "get_cuda_available_memory",
+        lambda _device: 2 * plan.cuda_bytes,
+    )
+    monkeypatch.setattr(
+        scale_storage,
+        "check_cpu_memory",
+        checked.append,
+    )
+
+    assert scaled.select_storage(plan, "auto") == "cuda"
+    assert checked == [plan.output_bytes]
+
+
 def test_probability_output_bytes_are_counted_for_cuda_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1431,9 +1484,9 @@ def test_probability_output_bytes_are_counted_for_cuda_storage(
     assert plan.cuda_bytes <= int(free * 0.8)
     assert plan.cuda_bytes + output_bytes > int(free * 0.8)
     monkeypatch.setattr(
-        ScaledGenerator,
+        scale_storage,
         "get_available_memory",
-        staticmethod(lambda: 2 * plan.cpu_bytes),
+        lambda: 2 * plan.cpu_bytes,
     )
     monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
     monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 0)
@@ -1506,9 +1559,9 @@ def test_cpu_generation_checks_memory_before_allocating(
     scaled = ScaledGenerator(_generator(_ControlledModel(), Diffusion(1)))
     plan = scaled.plan(4, overlap=0)
     monkeypatch.setattr(
-        ScaledGenerator,
+        scale_storage,
         "get_available_memory",
-        staticmethod(lambda: plan.cpu_bytes),
+        lambda: plan.cpu_bytes,
     )
 
     def reject_allocation(*args, **kwargs):
@@ -1948,10 +2001,9 @@ def test_scaled_generation_validates_shape_overlap_and_progress() -> None:
 
 
 def test_scale_quality_skips_axes_without_seams() -> None:
-    module = importlib.import_module("scripts.04_check_scale_up")
     vol = torch.arange(12 * 8 * 8, dtype=torch.long).reshape(12, 8, 8) % 3
 
-    quality = module.measure_seams(
+    quality = measure_seams(
         vol.to(torch.uint8),
         ((6,), (), ()),
         4,
