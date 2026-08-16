@@ -233,15 +233,7 @@ class Connectivity:
         categorical = self._straight_through(prediction)
         anchors = self._sample_anchor_triplets(categorical, condition)
         if len(anchors):
-            general = self._empty_triplets(categorical)
-            for axis in AXES:
-                extra = self._sample_random_triplets(
-                    categorical,
-                    TRIPLETS_PER_AXIS,
-                    axis=axis,
-                    condition=condition,
-                )
-                general = self._concat(general, extra)
+            general = self._sample_general_triplets(categorical, condition)
             reserve = int(general.axes.unique().numel())
             anchors = self._limit_triplets(
                 anchors,
@@ -260,6 +252,24 @@ class Connectivity:
             generator=generator,
         )
         return real, candidates.index_select(matched)
+
+    def _sample_general_triplets(
+        self,
+        volume: torch.Tensor,
+        condition: AnchorCondition,
+    ) -> TripletBatch:
+        general = self._empty_triplets(volume)
+        for axis in AXES:
+            general = self._concat(
+                general,
+                self._sample_random_triplets(
+                    volume,
+                    TRIPLETS_PER_AXIS,
+                    axis=axis,
+                    condition=condition,
+                ),
+            )
+        return general
 
     def _sample_prior_matches(
         self,

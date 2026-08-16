@@ -181,40 +181,13 @@ class ConditionalPrior:
         conditions = []
         observed_conditions = []
         for entry in entries:
-            labels = entry.labels.clone()
-            _overlay_observed(labels, entry.observed)
-            planes = [entry.observed]
-            candidates = self._plane_candidates(entry.observed, generator)
-            if count > 1 and candidates:
-                order = torch.randperm(len(candidates), generator=generator)
-                for choice in order[: count - 1].tolist():
-                    axis, index = candidates[choice]
-                    planes.append(
-                        PlaneAnchor(
-                            image=labels.select(axis, index),
-                            axis=axis,
-                            index=index,
-                        )
-                    )
-            condition = build_anchors(
-                tuple(planes),
-                batch_size=1,
-                num_phases=self.num_phases,
-                volume_size=self.patch_size,
+            condition, observed = self._sample_entry_condition(
+                entry,
+                count=count,
                 device=device,
                 dtype=dtype,
-                reconcile=False,
+                generator=generator,
             )
-            observed = build_anchors(
-                (entry.observed,),
-                batch_size=1,
-                num_phases=self.num_phases,
-                volume_size=self.patch_size,
-                device=device,
-                dtype=dtype,
-            )
-            if condition is None or observed is None:
-                raise RuntimeError("prior anchor construction returned no condition.")
             conditions.append(condition)
             observed_conditions.append(observed)
         return PriorCondition(
@@ -222,6 +195,65 @@ class ConditionalPrior:
             torch.cat(tuple(value.mask for value in observed_conditions)),
             torch.cat(tuple(value.axis_masks for value in observed_conditions)),
         )
+
+    def _sample_entry_condition(
+        self,
+        entry: _Entry,
+        *,
+        count: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        generator: torch.Generator | None,
+    ) -> tuple[AnchorCondition, AnchorCondition]:
+        labels = entry.labels.clone()
+        _overlay_observed(labels, entry.observed)
+        planes = [entry.observed]
+        candidates = self._plane_candidates(entry.observed, generator)
+        if count > 1 and candidates:
+            order = torch.randperm(len(candidates), generator=generator)
+            for choice in order[: count - 1].tolist():
+                axis, index = candidates[choice]
+                planes.append(
+                    PlaneAnchor(
+                        image=labels.select(axis, index),
+                        axis=axis,
+                        index=index,
+                    )
+                )
+
+        condition = self._build_condition(
+            tuple(planes),
+            device=device,
+            dtype=dtype,
+            reconcile=False,
+        )
+        observed = self._build_condition(
+            (entry.observed,),
+            device=device,
+            dtype=dtype,
+        )
+        return condition, observed
+
+    def _build_condition(
+        self,
+        planes: tuple[PlaneAnchor, ...],
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        reconcile: bool = True,
+    ) -> AnchorCondition:
+        condition = build_anchors(
+            planes,
+            batch_size=1,
+            num_phases=self.num_phases,
+            volume_size=self.patch_size,
+            device=device,
+            dtype=dtype,
+            reconcile=reconcile,
+        )
+        if condition is None:
+            raise RuntimeError("prior anchor construction returned no condition.")
+        return condition
 
     def _entries(
         self,

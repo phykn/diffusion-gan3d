@@ -113,7 +113,6 @@ class DenoiserBatch:
 class StepPreparation:
     transition: int
     domain: int
-    model_domain: int
     critic_domains: dict[int, int]
     real: dict[int, torch.Tensor]
     selection: "AnchorSelection | None"
@@ -403,9 +402,7 @@ class Trainer:
         real = prepared.real
         critic_domains = prepared.critic_domains
         anchor = prepared.anchor
-        target_vf = prepared.target_vf
         presence = prepared.presence
-        ramp = prepared.anchor_ramp
         self.record_prior_reference(
             step=step,
             prepared=prepared,
@@ -421,23 +418,13 @@ class Trainer:
             volume_size,
         )
         clean_probs = (prediction + 1.0) * 0.5
-        visible_axis_masks = (
-            None
-            if anchor is None
-            else anchor.axis_masks & presence.anchor.reshape(-1, 1, 1, 1, 1)
+        fake = self._sample_fake_pairs(
+            previous,
+            current,
+            real,
+            anchor,
+            presence.anchor,
         )
-        fake = {
-            axis: self.critic_augment.apply_pair(
-                *self.sample_pairs(
-                    previous,
-                    current,
-                    axis,
-                    axis_masks=visible_axis_masks,
-                    crop_shape=tuple(real[axis].shape[-2:]),
-                ),
-            )
-            for axis in self.active_axes
-        }
 
         connectivity_real, connectivity_fake = self.make_connectivity_triplets(
             prediction,
@@ -473,30 +460,14 @@ class Trainer:
         else:
             critic_connectivity, connectivity_r1 = 0.0, 0.0
         denoiser_update = self.update_denoiser(
-            DenoiserBatch(
-                transition=transition,
+            self._make_denoiser_batch(
+                prepared=prepared,
                 connectivity_domains=connectivity_domains,
-                critic_domains=critic_domains,
                 fake=fake,
                 connectivity_real=connectivity_real,
                 connectivity_fake=connectivity_fake,
                 logits=logits,
                 clean_probs=clean_probs,
-                anchor=anchor,
-                anchor_observed_mask=(
-                    None
-                    if prepared.selection is None
-                    else prepared.selection.observed_mask
-                ),
-                anchor_observed_axis_masks=(
-                    None
-                    if prepared.selection is None
-                    else prepared.selection.observed_axis_masks
-                ),
-                anchor_present=presence.anchor,
-                anchor_ramp=ramp,
-                target_vf=target_vf,
-                vf_present=presence.vf,
             )
         )
         return self.finish_step(
@@ -510,6 +481,66 @@ class Trainer:
             connectivity_r1=connectivity_r1,
             connectivity_fake=connectivity_fake,
             clean_probs=clean_probs,
+        )
+
+    def _sample_fake_pairs(
+        self,
+        previous: torch.Tensor,
+        current: torch.Tensor,
+        real: dict[int, torch.Tensor],
+        anchor: AnchorCondition | None,
+        anchor_present: torch.Tensor,
+    ) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+        visible_axis_masks = (
+            None
+            if anchor is None
+            else anchor.axis_masks & anchor_present.reshape(-1, 1, 1, 1, 1)
+        )
+        return {
+            axis: self.critic_augment.apply_pair(
+                *self.sample_pairs(
+                    previous,
+                    current,
+                    axis,
+                    axis_masks=visible_axis_masks,
+                    crop_shape=tuple(real[axis].shape[-2:]),
+                ),
+            )
+            for axis in self.active_axes
+        }
+
+    @staticmethod
+    def _make_denoiser_batch(
+        *,
+        prepared: StepPreparation,
+        connectivity_domains: torch.Tensor,
+        fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        connectivity_real: TripletBatch,
+        connectivity_fake: TripletBatch,
+        logits: torch.Tensor,
+        clean_probs: torch.Tensor,
+    ) -> DenoiserBatch:
+        selection = prepared.selection
+        return DenoiserBatch(
+            transition=prepared.transition,
+            connectivity_domains=connectivity_domains,
+            critic_domains=prepared.critic_domains,
+            fake=fake,
+            connectivity_real=connectivity_real,
+            connectivity_fake=connectivity_fake,
+            logits=logits,
+            clean_probs=clean_probs,
+            anchor=prepared.anchor,
+            anchor_observed_mask=(
+                None if selection is None else selection.observed_mask
+            ),
+            anchor_observed_axis_masks=(
+                None if selection is None else selection.observed_axis_masks
+            ),
+            anchor_present=prepared.presence.anchor,
+            anchor_ramp=prepared.anchor_ramp,
+            target_vf=prepared.target_vf,
+            vf_present=prepared.presence.vf,
         )
 
     def prepare_step(
@@ -596,7 +627,6 @@ class Trainer:
         return StepPreparation(
             transition=transition,
             domain=domain,
-            model_domain=model_domain,
             critic_domains=critic_domains,
             real=batches,
             selection=selection,
