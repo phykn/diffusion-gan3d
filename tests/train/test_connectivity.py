@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from src.anchor import PlaneAnchor, build_anchors
 from src.model.critic import ConnectivityCritic2D, connectivity_images
 from src.train.connect import Connectivity, TripletBatch, normal_transition_loss
+from src.train.prior import PriorReference
 
 
 def test_prior_bank_stores_complete_cpu_uint8_volumes_and_freezes() -> None:
@@ -168,7 +169,7 @@ def test_endpoint_anchors_use_only_real_consecutive_slices() -> None:
     fake = connect._sample_anchor_triplets(
         connect._straight_through(prediction),
         _condition(seeds, num_phases=size, volume_size=size),
-    )
+    ).triplets
     hard = fake.values.argmax(dim=2)
 
     assert fake.axes.tolist() == [0, 0]
@@ -260,6 +261,69 @@ def test_many_anchors_keep_general_axis_coverage_within_fixed_budget() -> None:
     assert len(fake) == 7
     assert int(fake.anchor_flags.sum()) == 4
     assert set(fake.axes[~fake.anchor_flags].tolist()) == {0, 1, 2}
+
+
+def test_observed_root_is_never_dropped_from_the_anchor_budget() -> None:
+    size = 15
+    coordinates = torch.meshgrid(
+        *(torch.arange(size) for _ in range(3)),
+        indexing="ij",
+    )
+    labels = sum(coordinates).remainder(3).unsqueeze(0)
+    prediction = _prediction_from_labels(labels, num_phases=3)
+    connect = _connectivity(num_phases=3, patch_size=size)
+    anchors = tuple(
+        PlaneAnchor(labels[0].select(axis, index).to(torch.uint8), axis, index)
+        for axis in range(3)
+        for index in (2, 7, 12)
+    )
+    condition = _condition(anchors, num_phases=3, volume_size=size)
+    observed = _condition((anchors[1],), num_phases=3, volume_size=size)
+
+    located = connect._sample_anchor_triplets(
+        connect._straight_through(prediction),
+        condition,
+        observed.axis_masks,
+    )
+    limited = connect._limit_anchor_triplets(located, 4)
+
+    assert int(limited.observed.sum()) == 1
+    assert (0, 0, 7) in limited.locations
+
+
+def test_pseudo_plane_uses_its_exact_source_triplet() -> None:
+    size = 9
+    labels = torch.zeros(1, size, size, size, dtype=torch.long)
+    prediction = _prediction_from_labels(labels, num_phases=2)
+    connect = _connectivity(num_phases=2, patch_size=size, volumes=1)
+    _record_prior(connect, prediction, 0)
+    anchors = (
+        PlaneAnchor(labels[0, 2].to(torch.uint8), axis=0, index=2),
+        PlaneAnchor(labels[0, 5].to(torch.uint8), axis=0, index=5),
+    )
+    condition = _condition(anchors, num_phases=2, volume_size=size)
+    observed = _condition((anchors[0],), num_phases=2, volume_size=size)
+    source = torch.zeros(3, size, size, dtype=torch.uint8)
+    source[1].fill_(1)
+    reference = PriorReference(
+        axis=0,
+        index=5,
+        values=source,
+        center_slot=1,
+    )
+
+    real, fake = connect.match_anchor(
+        prediction,
+        condition,
+        0,
+        observed_axis_masks=observed.axis_masks,
+        references=((reference,),),
+    )
+
+    expected = _triplet_values(source.unsqueeze(0), num_phases=2)[0]
+    assert fake.anchor_flags[:2].tolist() == [True, True]
+    assert torch.equal(real.values[1], expected)
+    assert int(real.center_slots[1]) == reference.center_slot
 
 
 def test_connectivity_images_are_phase_changes_and_discrete_bend() -> None:

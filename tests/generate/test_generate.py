@@ -830,24 +830,53 @@ def test_anchor_strength_scales_gaussian_prediction_weight_not_anchor_mask() -> 
     assert weight[0, 0, 3, 0, 0] < weight[0, 0, 0, 0, 0]
 
 
-def test_anchor_coupling_weight_has_plateau_and_wide_cosine_taper() -> None:
+def test_anchor_coupling_reuses_the_normalized_guidance_gaussian() -> None:
     anchor = PlaneAnchor(
         image=torch.zeros(48, 48, dtype=torch.long),
         axis=0,
         index=24,
     )
-
-    weight = Generator.make_anchor_coupling_weight(
+    guidance = Generator.make_anchor_weight(
         (anchor,),
         48,
-        inner_radius=6.0,
-        outer_radius=20.0,
+        sigma=6.0,
+        strength=0.75,
         device=torch.device("cpu"),
-    )[0, 0, :, 0, 0]
+    )
+    coupling = Generator.make_anchor_coupling_weight(guidance, 0.75)
 
-    assert weight[18:31].tolist() == pytest.approx([1.0] * 13)
-    assert weight[12] > weight[8] > weight[4]
-    assert weight[4] == pytest.approx(0.0)
+    torch.testing.assert_close(coupling, guidance / 0.75)
+    weight = coupling[0, 0, :, 0, 0]
+    assert weight[24] == pytest.approx(1.0)
+    assert weight[18] > weight[12] > weight[4]
+
+
+def test_default_coupling_leaves_baseline_in_128_voxel_far_field() -> None:
+    size = 128
+    sigma = math.sqrt(3.0) * 8
+    strength = 0.90
+
+    def coupling(indices: tuple[int, ...]) -> torch.Tensor:
+        anchors = tuple(
+            PlaneAnchor(torch.zeros(size, size, dtype=torch.long), 0, index)
+            for index in indices
+        )
+        guidance = Generator.make_anchor_weight(
+            anchors,
+            size,
+            sigma=sigma,
+            strength=strength,
+            device=torch.device("cpu"),
+        )
+        return Generator.make_anchor_coupling_weight(guidance, strength)
+
+    one = coupling((64,))
+    three = coupling((21, 64, 106))
+
+    assert float(one.min()) < 1e-4
+    assert float(three.min()) < 0.5
+    assert float(one.max()) == pytest.approx(1.0)
+    assert float(three.max()) == pytest.approx(1.0)
 
 
 def test_anchor_timing_separates_plane_fidelity_from_context() -> None:

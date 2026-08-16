@@ -397,11 +397,8 @@ class Generator:
                     device=self.device,
                 )
                 coupling_weight = self.make_anchor_coupling_weight(
-                    shifted_anchors,
-                    generation_size,
-                    inner_radius=anchor_sigma * 3.0,
-                    outer_radius=anchor_sigma * 10.0,
-                    device=self.device,
+                    anchor_weight,
+                    anchor_strength,
                 )
         conditions = {"domain": self.prepare_domain(domain)}
         if vf is not None:
@@ -477,45 +474,20 @@ class Generator:
 
     @staticmethod
     def make_anchor_coupling_weight(
-        anchors: Sequence[PlaneAnchor],
-        volume_size: int,
-        inner_radius: float,
-        outer_radius: float,
-        *,
-        device: torch.device,
+        anchor_weight: torch.Tensor,
+        anchor_strength: float,
     ) -> torch.Tensor:
-        """Keep the anchor trajectory locally, then taper to the baseline."""
-        shape = (volume_size, volume_size, volume_size)
-        coords = [
-            torch.arange(volume_size, device=device, dtype=torch.float32).view(
-                tuple(volume_size if dim == axis else 1 for dim in range(3))
-            )
-            for axis in range(3)
-        ]
-        weight = torch.zeros(shape, device=device, dtype=torch.float32)
-        width = outer_radius - inner_radius
-        for anchor in anchors:
-            height, plane_width = anchor.image.shape[-2:]
-            if anchor.position is None:
-                row = (volume_size - height) // 2
-                col = (volume_size - plane_width) // 2
-            else:
-                row, col = anchor.position
-            remaining = [axis for axis in range(3) if axis != anchor.axis]
-            distance_sq = (coords[anchor.axis] - anchor.index).square()
-            for axis, start, length in zip(
-                remaining,
-                (row, col),
-                (height, plane_width),
-                strict=True,
-            ):
-                before = (start - coords[axis]).clamp_min(0.0)
-                after = (coords[axis] - (start + length - 1)).clamp_min(0.0)
-                distance_sq = distance_sq + (before + after).square()
-            phase = distance_sq.sqrt().sub(inner_radius).div(width).clamp_(0.0, 1.0)
-            taper = phase.mul(math.pi).cos_().add_(1.0).mul_(0.5)
-            weight = torch.maximum(weight, taper)
-        return weight.unsqueeze(0).unsqueeze(0)
+        """Reuse the normalized guidance Gaussian for trajectory coupling."""
+        if anchor_weight.ndim != 5 or anchor_weight.shape[1] != 1:
+            raise ValueError("anchor weight must have shape [B, 1, D, H, W].")
+        if (
+            not isinstance(anchor_strength, (int, float))
+            or isinstance(anchor_strength, bool)
+            or not math.isfinite(anchor_strength)
+            or anchor_strength <= 0.0
+        ):
+            raise ValueError("anchor strength must be a positive finite number.")
+        return anchor_weight.div(float(anchor_strength)).clamp(0.0, 1.0)
 
     @staticmethod
     def offset_anchors(

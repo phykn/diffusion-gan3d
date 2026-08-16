@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -17,9 +18,26 @@ ROI_POSITIONS = ((18, 16), (281, 58), (536, 24))
 
 
 def main() -> None:
-    volume = np.asarray(tifffile.imread(VOLUME_PATH))
+    parser = argparse.ArgumentParser(
+        description="Render the core paper figures from a generated reference volume."
+    )
+    parser.add_argument(
+        "--reference",
+        type=Path,
+        default=VOLUME_PATH,
+        help="3D uint8 label TIFF created by make_reference.py",
+    )
+    args = parser.parse_args()
+    reference = args.reference.resolve()
+    if not reference.is_file():
+        raise FileNotFoundError(
+            f"reference volume does not exist: {reference}. "
+            "Run make_reference.py first or pass --reference."
+        )
+
+    volume = np.asarray(tifffile.imread(reference))
     if volume.ndim != 3 or volume.dtype != np.uint8:
-        raise ValueError("gt.tiff must be a 3D uint8 phase volume.")
+        raise ValueError("reference must be a 3D uint8 phase volume.")
 
     colors = [to_rgb(color) for color in PHASE_COLORS]
     if int(volume.max()) >= len(colors):

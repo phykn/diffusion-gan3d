@@ -65,6 +65,18 @@ def _keywords(call: ast.Call) -> dict[str, ast.expr]:
     }
 
 
+def test_make_assets_help_does_not_require_a_reference_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script("make_assets.py")
+    monkeypatch.setattr(sys, "argv", ["make_assets.py", "--help"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        module.main()
+
+    assert exit_info.value.code == 0
+
+
 def test_paper_metrics_reports_mean_pore_percolation() -> None:
     module = _load_script("evaluate_paper_metrics.py")
     volume = np.zeros((4, 4, 4), dtype=np.uint8)

@@ -24,6 +24,7 @@ from .loss import (
     get_critic_r1,
     get_generator_loss,
 )
+from .prior import PriorReferences
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,7 @@ class AnchorSelection:
     observed_mask: torch.Tensor
     observed_axis_masks: torch.Tensor
     source: Literal["real", "shared", "prior"]
+    prior_references: PriorReferences = ()
 
 
 @dataclass(frozen=True)
@@ -426,12 +428,17 @@ class Trainer:
             presence.anchor,
         )
 
+        selection = prepared.selection
         connectivity_real, connectivity_fake = self.make_connectivity_triplets(
             prediction,
             anchor,
             transition,
             prepared.domain,
             presence.anchor,
+            observed_axis_masks=(
+                None if selection is None else selection.observed_axis_masks
+            ),
+            references=(() if selection is None else selection.prior_references),
         )
         connectivity_domains = self.get_connectivity_domains(
             prepared.critic_domains,
@@ -718,6 +725,9 @@ class Trainer:
         transition: int,
         domain: int,
         visible: torch.Tensor | None = None,
+        *,
+        observed_axis_masks: torch.Tensor | None = None,
+        references: PriorReferences = (),
     ) -> tuple[TripletBatch, TripletBatch]:
         empty = TripletBatch(
             values=prediction.new_empty(
@@ -733,8 +743,16 @@ class Trainer:
         anchor = self.visible_anchor(anchor, visible)
         if not bool(anchor.mask.any()):
             return empty, empty
+        if observed_axis_masks is not None and visible is not None:
+            observed_axis_masks = observed_axis_masks & visible.reshape(-1, 1, 1, 1, 1)
 
-        real, fake = self.connect.match_anchor(prediction, anchor, domain)
+        real, fake = self.connect.match_anchor(
+            prediction,
+            anchor,
+            domain,
+            observed_axis_masks=observed_axis_masks,
+            references=references,
+        )
         real_values, fake_values = self.critic_augment.apply_together(
             (real.values, fake.values),
         )
@@ -990,6 +1008,7 @@ class Trainer:
                 observed_mask=sampled.observed_mask,
                 observed_axis_masks=sampled.observed_axis_masks,
                 source="prior",
+                prior_references=sampled.references,
             )
         if self.connect.prior_ready:
             self.use_prior_next = True
@@ -1015,10 +1034,8 @@ class Trainer:
         shared_axes = tuple(axis for axis in batches if axis not in owned_axes)
         use_shared = (
             bool(shared_axes)
-            and getattr(self, "anchor_shared_axis_probability", 0.0) > 0.0
-            and bool(
-                torch.rand(()) < getattr(self, "anchor_shared_axis_probability", 0.0)
-            )
+            and self.anchor_shared_axis_probability > 0.0
+            and bool(torch.rand(()) < self.anchor_shared_axis_probability)
         )
         axes = shared_axes if use_shared else owned_axes
         axis = axes[int(torch.randint(len(axes), ()).item())]

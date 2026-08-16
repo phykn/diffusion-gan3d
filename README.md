@@ -81,17 +81,19 @@ measured root and add a scale-balanced number of planes, possibly from different
 axes. The maximum plane count and sampling stride follow the generator's encoder
 downsampling factor, so this adds no tuning option.
 
-The connectivity critic compares at most seven three-slice windows. It reserves
-one available general window per axis, uses supplied-plane windows next, and
-fills any remaining budget with extra general windows. Anchor and general groups
-receive equal loss weight, so using more anchors does not increase the objective
-or critic cost.
-Reference windows are sampled from the conditional completions. A domain uses
-its own prior for axes it owns and falls back to provider-domain volumes only for
-a missing axis. After the initial bank is complete, each domain periodically
-adds one conditional completion from the current EMA and evicts its oldest
-volume. This rolling update changes the prior gradually without a second
-full-size bank or an abrupt global replacement.
+With the usual one-root volume batch, the connectivity critic compares at most
+seven three-slice windows. It reserves one available general window per axis and
+always retains every measured-root window before sampling additional
+generated-plane windows. Each generated plane keeps the exact three-slice source
+window from its conditional EMA completion. Fresh measured roots and general
+windows, which have no aligned source, fall back to phase-fraction-matched prior
+windows. Anchor and general groups receive equal loss weight, so using more
+anchors does not increase the objective under the
+usual one-root batch. A domain uses its own prior for axes it owns and falls back
+to provider-domain volumes only for a missing axis. After the initial bank is
+complete, each domain periodically adds one conditional completion from the
+current EMA and evicts its oldest volume. This rolling update changes the prior
+gradually without a second full-size bank or an abrupt global replacement.
 Because section folders identify an axis but not a signed normal direction, the
 connectivity critic always averages forward and reversed triplet scores.
 
@@ -171,9 +173,10 @@ passed in one joint conditional prediction, and its logit residual is blended
 through a Gaussian spatial window before decoding. The Gaussian width is the
 3D diagonal of one model downsampling cell, `sqrt(3) * downsample_factor`; the
 current four-level model therefore uses approximately `13.86` voxels.
-After each posterior update, the anchor trajectory is kept intact near the anchor
-and tapered back to the baseline over a wide cosine window. This fixed coupling
-preserves the same-RNG baseline exactly in the far field through the final step.
+After each posterior update, the same normalized Gaussian also couples the anchor
+trajectory back to the baseline. Coupling is one on the supplied plane and
+decays with the same model-derived Gaussian width, so distant regions remain
+baseline-dominant without a second pair of spatial-radius settings.
 Context guidance follows the diffusion schedule: it starts at the natural
 two-prediction residual scale $\sqrt{2}$ and tapers to the noise remaining at the
 final reverse transition. Plane guidance rises toward the final step. The default

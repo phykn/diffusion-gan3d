@@ -346,6 +346,7 @@ def test_ready_prior_starts_alternation_and_skipped_request_does_not_toggle() ->
         condition="prior",
         observed_mask=mask,
         observed_axis_masks=axis_masks,
+        references=(),
     )
     trainer.sample_real_anchor = Mock(return_value=Mock(source="real"))
 

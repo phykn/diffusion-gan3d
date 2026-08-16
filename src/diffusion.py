@@ -33,14 +33,11 @@ class Diffusion(nn.Module):
             timesteps + 1,
             dtype=torch.float64,
         )
-        log_alpha_bars = (
-            -0.5 * (beta_max - beta_min) * time.square() - beta_min * time
-        )
+        log_alpha_bars = -0.5 * (beta_max - beta_min) * time.square() - beta_min * time
         minimum_log = math.log(torch.finfo(torch.float32).tiny)
         if float(log_alpha_bars[-1]) < minimum_log:
             raise ValueError(
-                "diffusion schedule is not representable in float32; "
-                "reduce beta_max."
+                "diffusion schedule is not representable in float32; reduce beta_max."
             )
         alpha_bars = log_alpha_bars.exp()
         alphas = torch.ones_like(alpha_bars)

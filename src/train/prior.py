@@ -8,10 +8,46 @@ from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
 
 
 @dataclass(frozen=True)
+class PriorReference:
+    axis: int
+    index: int
+    values: torch.Tensor
+    center_slot: int
+
+    def __post_init__(self) -> None:
+        if self.axis not in AXES:
+            raise ValueError("prior reference axis must be 0, 1, or 2.")
+        if self.values.ndim != 3 or self.values.shape[0] != 3:
+            raise ValueError("prior reference values must have shape [3, H, W].")
+        if self.values.device.type != "cpu" or self.values.dtype != torch.uint8:
+            raise ValueError("prior reference values must be CPU uint8 labels.")
+        if self.center_slot not in (0, 1, 2):
+            raise ValueError("prior reference center slot must be zero, one, or two.")
+
+    @property
+    def location(self) -> tuple[int, int]:
+        return self.axis, self.index
+
+
+PriorReferences = tuple[tuple[PriorReference, ...], ...]
+
+
+@dataclass(frozen=True)
 class PriorCondition:
     condition: AnchorCondition
     observed_mask: torch.Tensor
     observed_axis_masks: torch.Tensor
+    references: PriorReferences
+
+    def __post_init__(self) -> None:
+        batch_size = self.condition.mask.shape[0]
+        if len(self.references) != batch_size:
+            raise ValueError("prior references must be grouped by batch item.")
+        if any(
+            len(references) != self.condition.planes - 1
+            for references in self.references
+        ):
+            raise ValueError("every generated prior plane needs one source reference.")
 
 
 @dataclass(frozen=True)
@@ -106,6 +142,9 @@ class ConditionalPrior:
         self.patch_size = patch_size
         self.plane_stride = plane_stride
         self.owned_axes = {domain: tuple(axes) for domain, axes in owned_axes.items()}
+        self.axes = tuple(
+            sorted({axis for axes in owned_axes.values() for axis in axes})
+        )
         self._banks = tuple(_Bank(volume_count) for _ in range(num_domains))
         self.updates = 0
 
@@ -180,8 +219,9 @@ class ConditionalPrior:
         count = _log_uniform_count(max_planes, generator)
         conditions = []
         observed_conditions = []
+        references = []
         for entry in entries:
-            condition, observed = self._sample_entry_condition(
+            condition, observed, entry_references = self._sample_entry_condition(
                 entry,
                 count=count,
                 device=device,
@@ -190,10 +230,12 @@ class ConditionalPrior:
             )
             conditions.append(condition)
             observed_conditions.append(observed)
+            references.append(entry_references)
         return PriorCondition(
             _concat_conditions(tuple(conditions)),
             torch.cat(tuple(value.mask for value in observed_conditions)),
             torch.cat(tuple(value.axis_masks for value in observed_conditions)),
+            tuple(references),
         )
 
     def _sample_entry_condition(
@@ -204,10 +246,15 @@ class ConditionalPrior:
         device: torch.device,
         dtype: torch.dtype,
         generator: torch.Generator | None,
-    ) -> tuple[AnchorCondition, AnchorCondition]:
+    ) -> tuple[
+        AnchorCondition,
+        AnchorCondition,
+        tuple[PriorReference, ...],
+    ]:
         labels = entry.labels.clone()
         _overlay_observed(labels, entry.observed)
         planes = [entry.observed]
+        references = []
         candidates = self._plane_candidates(entry.observed, generator)
         if count > 1 and candidates:
             order = torch.randperm(len(candidates), generator=generator)
@@ -220,6 +267,7 @@ class ConditionalPrior:
                         index=index,
                     )
                 )
+                references.append(_extract_reference(entry.labels, axis, index))
 
         condition = self._build_condition(
             tuple(planes),
@@ -232,7 +280,7 @@ class ConditionalPrior:
             device=device,
             dtype=dtype,
         )
-        return condition, observed
+        return condition, observed, tuple(references)
 
     def _build_condition(
         self,
@@ -286,7 +334,7 @@ class ConditionalPrior:
         generator: torch.Generator | None,
     ) -> list[tuple[int, int]]:
         candidates = []
-        for axis in AXES:
+        for axis in self.axes:
             offset = _random_index(self.plane_stride, generator)
             for index in range(offset, self.patch_size, self.plane_stride):
                 if (
@@ -360,6 +408,23 @@ def _overlay_observed(labels: torch.Tensor, observed: PlaneAnchor) -> None:
         row : row + height,
         col : col + width,
     ].copy_(observed.image)
+
+
+def _extract_reference(
+    labels: torch.Tensor,
+    axis: int,
+    index: int,
+) -> PriorReference:
+    moved = labels.movedim(axis, 0)
+    if moved.shape[0] < 3:
+        raise ValueError("prior volume needs at least three slices per axis.")
+    start = min(max(index - 1, 0), moved.shape[0] - 3)
+    return PriorReference(
+        axis=axis,
+        index=index,
+        values=moved[start : start + 3].contiguous().clone(),
+        center_slot=index - start,
+    )
 
 
 def _concat_conditions(conditions: tuple[AnchorCondition, ...]) -> AnchorCondition:

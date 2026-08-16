@@ -73,6 +73,8 @@ def test_sampling_uses_distinct_ready_entries_for_batch_items() -> None:
     assert set(roots.tolist()) == {0.0, 1.0}
     assert sampled.condition.image.shape[0] == 2
     assert torch.equal(sampled.condition.mask, sampled.observed_mask)
+    assert len(sampled.references) == 2
+    assert all(not references for references in sampled.references)
 
 
 def test_variable_plane_count_keeps_only_the_real_plane_in_observed_mask() -> None:
@@ -153,6 +155,12 @@ def test_cross_axis_planes_remain_coherent_after_observed_overlay() -> None:
     assert sampled.condition.conflicts == 0
     assert torch.equal(sampled.condition.target[0][selected], expected[selected])
     assert all(bool(sampled.condition.axis_masks[0, axis].any()) for axis in range(3))
+    assert {(value.axis, value.index) for value in sampled.references[0]} == {
+        (0, 0),
+        (1, 2),
+        (2, 4),
+    }
+    assert all(not bool(value.values.any()) for value in sampled.references[0])
 
 
 def test_refresh_is_fifo_and_keeps_storage_bounded() -> None:
@@ -204,6 +212,26 @@ def test_owned_axis_does_not_borrow_while_its_domain_bank_is_incomplete() -> Non
     assert not prior._banks[0].ready
     assert prior._banks[1].ready
     assert prior.volumes(0, 0) == ()
+
+
+def test_plane_candidates_use_only_axes_present_in_the_training_data() -> None:
+    prior = ConditionalPrior(
+        num_phases=2,
+        num_domains=1,
+        patch_size=8,
+        volume_count=1,
+        plane_stride=2,
+        owned_axes={0: (0,)},
+    )
+    observed = PlaneAnchor(torch.zeros(8, 8, dtype=torch.uint8), axis=0, index=4)
+
+    candidates = prior._plane_candidates(
+        observed,
+        torch.Generator().manual_seed(1),
+    )
+
+    assert candidates
+    assert {axis for axis, _ in candidates} == {0}
 
 
 def _prior(

@@ -130,9 +130,7 @@ def percolation_errors(
     return tuple(float(value) for value in (predicted_values - target_values).abs())
 
 
-def percolation_error(
-    predicted, target
-) -> float:
+def percolation_error(predicted, target) -> float:
     """Return the mean absolute percolating-fraction error over three axes."""
     errors = percolation_errors(predicted, target)
     return sum(errors) / len(errors)

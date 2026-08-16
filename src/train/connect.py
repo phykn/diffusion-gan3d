@@ -5,7 +5,12 @@ import torch.nn.functional as F
 
 from .. import AXES
 from ..anchor import AnchorCondition
-from .prior import ConditionalPrior, PriorCondition
+from .prior import (
+    ConditionalPrior,
+    PriorCondition,
+    PriorReference,
+    PriorReferences,
+)
 
 TRIPLETS_PER_AXIS = 2
 TRIPLETS_PER_STEP = 1 + len(AXES) * TRIPLETS_PER_AXIS
@@ -51,6 +56,29 @@ class TripletBatch:
             axes=self.axes.index_select(0, indices),
             center_slots=self.center_slots.index_select(0, indices),
             anchor_flags=self.anchor_flags.index_select(0, indices),
+        )
+
+
+@dataclass(frozen=True)
+class _LocatedTriplets:
+    triplets: TripletBatch
+    locations: tuple[tuple[int, int, int], ...]
+    observed: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if len(self.locations) != len(self.triplets):
+            raise ValueError("triplet locations must match the triplet batch.")
+        if self.observed.shape != (len(self.triplets),):
+            raise ValueError("observed flags must match the triplet batch.")
+        if self.observed.dtype != torch.bool:
+            raise ValueError("observed flags must use boolean dtype.")
+
+    def index_select(self, indices: torch.Tensor) -> "_LocatedTriplets":
+        selected = indices.tolist()
+        return _LocatedTriplets(
+            self.triplets.index_select(indices),
+            tuple(self.locations[index] for index in selected),
+            self.observed.index_select(0, indices),
         )
 
 
@@ -227,31 +255,73 @@ class Connectivity:
         condition: AnchorCondition,
         domain: int,
         *,
+        observed_axis_masks: torch.Tensor | None = None,
+        references: PriorReferences = (),
         generator: torch.Generator | None = None,
     ) -> tuple[TripletBatch, TripletBatch]:
         self._check_domain(domain)
         categorical = self._straight_through(prediction)
-        anchors = self._sample_anchor_triplets(categorical, condition)
-        if len(anchors):
-            general = self._sample_general_triplets(categorical, condition)
-            reserve = int(general.axes.unique().numel())
-            anchors = self._limit_triplets(
-                anchors,
-                TRIPLETS_PER_STEP - reserve,
-            )
-            general = self._limit_general_triplets(
-                general,
-                TRIPLETS_PER_STEP - len(anchors),
-            )
-            candidates = self._concat(anchors, general)
-        else:
-            candidates = anchors
+        located = self._sample_anchor_triplets(
+            categorical,
+            condition,
+            observed_axis_masks,
+        )
+        candidates, source_references = self._prepare_candidates(
+            categorical,
+            condition,
+            located,
+            references,
+        )
         real, matched = self._sample_prior_matches(
             candidates,
             domain,
+            source_references=source_references,
             generator=generator,
         )
         return real, candidates.index_select(matched)
+
+    def _prepare_candidates(
+        self,
+        volume: torch.Tensor,
+        condition: AnchorCondition,
+        located: _LocatedTriplets,
+        references: PriorReferences,
+    ) -> tuple[TripletBatch, dict[int, PriorReference]]:
+        if not len(located.triplets):
+            return located.triplets, {}
+
+        general = self._sample_general_triplets(volume, condition)
+        general_reserve = int(general.axes.unique().numel())
+        budget = max(
+            TRIPLETS_PER_STEP,
+            int(located.observed.sum()) + general_reserve,
+        )
+        located = self._limit_anchor_triplets(
+            located,
+            budget - general_reserve,
+        )
+        source_references = self._source_references(located, references)
+        general = self._limit_general_triplets(
+            general,
+            budget - len(located.triplets),
+        )
+        return self._concat(located.triplets, general), source_references
+
+    @staticmethod
+    def _source_references(
+        triplets: _LocatedTriplets,
+        references: PriorReferences,
+    ) -> dict[int, PriorReference]:
+        by_location = {
+            (batch, *reference.location): reference
+            for batch, batch_references in enumerate(references)
+            for reference in batch_references
+        }
+        return {
+            index: by_location[location]
+            for index, location in enumerate(triplets.locations)
+            if location in by_location
+        }
 
     def _sample_general_triplets(
         self,
@@ -276,9 +346,13 @@ class Connectivity:
         target: TripletBatch,
         domain: int,
         *,
+        source_references: dict[int, PriorReference] | None = None,
         generator: torch.Generator | None,
     ) -> tuple[TripletBatch, torch.Tensor]:
+        if source_references is None:
+            source_references = {}
         selected = []
+        center_slots = []
         indices = []
         target_fractions = (
             ((target.values.detach().to(torch.float32) + 1.0) * 0.5)
@@ -288,6 +362,12 @@ class Connectivity:
         for index, (axis, fraction) in enumerate(
             zip(target.axes.tolist(), target_fractions, strict=True)
         ):
+            reference = source_references.get(index)
+            if reference is not None:
+                selected.append(self._reference_triplet(reference))
+                center_slots.append(reference.center_slot)
+                indices.append(index)
+                continue
             volumes = self._prior_volumes(domain, axis)
             if not volumes:
                 continue
@@ -303,6 +383,7 @@ class Connectivity:
                 [(value - fraction).abs().mean() for value in choice_fractions]
             )
             selected.append(choices[int(distances.argmin())])
+            center_slots.append(1)
             indices.append(index)
 
         if not selected:
@@ -317,8 +398,8 @@ class Connectivity:
                     dtype=target.values.dtype,
                 ),
                 axes=metadata.axes,
-                center_slots=torch.ones(
-                    len(selected),
+                center_slots=torch.tensor(
+                    center_slots,
                     device=target.values.device,
                     dtype=torch.long,
                 ),
@@ -326,6 +407,11 @@ class Connectivity:
             ),
             matched,
         )
+
+    def _reference_triplet(self, reference: PriorReference) -> torch.Tensor:
+        if reference.values.shape[1:] != (self.patch_size, self.patch_size):
+            raise ValueError("prior reference must match the connectivity patch size.")
+        return self._labels_to_triplets(reference.values)
 
     def _prior_volumes(self, domain: int, axis: int) -> tuple[torch.Tensor, ...]:
         return self.prior.volumes(domain, axis)
@@ -348,6 +434,9 @@ class Connectivity:
             top : top + self.patch_size,
             left : left + self.patch_size,
         ]
+        return self._labels_to_triplets(values)
+
+    def _labels_to_triplets(self, values: torch.Tensor) -> torch.Tensor:
         return (
             F.one_hot(values.to(torch.long), num_classes=self.num_phases)
             .movedim(-1, 1)
@@ -360,16 +449,23 @@ class Connectivity:
         self,
         volume: torch.Tensor,
         condition: AnchorCondition,
-    ) -> TripletBatch:
+        observed_axis_masks: torch.Tensor | None = None,
+    ) -> _LocatedTriplets:
         self._check_volume(volume)
         if condition.axis_masks.shape != (volume.shape[0], 3, *volume.shape[2:]):
             raise ValueError("anchor axis masks must match the generated volume.")
         if condition.mask.shape != (volume.shape[0], 1, *volume.shape[2:]):
             raise ValueError("anchor mask must match the generated volume.")
+        if observed_axis_masks is None:
+            observed_axis_masks = torch.zeros_like(condition.axis_masks)
+        if observed_axis_masks.shape != condition.axis_masks.shape:
+            raise ValueError("observed axis masks must match the anchor condition.")
 
         triplets = []
         axes = []
         center_slots = []
+        locations = []
+        observed = []
         occupied: set[tuple[int, int, int, int, int]] = set()
         for batch in range(volume.shape[0]):
             for axis in AXES:
@@ -408,19 +504,35 @@ class Connectivity:
                     triplets.append(values)
                     axes.append(axis)
                     center_slots.append(index_value - start)
+                    locations.append((batch, axis, index_value))
+                    observed.append(
+                        bool(observed_axis_masks[batch, axis, index_value].any())
+                    )
 
         if not triplets:
-            return self._empty_triplets(volume)
-        return TripletBatch(
-            values=torch.stack(triplets),
-            axes=torch.tensor(axes, device=volume.device, dtype=torch.long),
-            center_slots=torch.tensor(
-                center_slots,
-                device=volume.device,
-                dtype=torch.long,
+            return _LocatedTriplets(
+                self._empty_triplets(volume),
+                (),
+                torch.empty(0, device=volume.device, dtype=torch.bool),
+            )
+        return _LocatedTriplets(
+            TripletBatch(
+                values=torch.stack(triplets),
+                axes=torch.tensor(axes, device=volume.device, dtype=torch.long),
+                center_slots=torch.tensor(
+                    center_slots,
+                    device=volume.device,
+                    dtype=torch.long,
+                ),
+                anchor_flags=torch.ones(
+                    len(triplets),
+                    device=volume.device,
+                    dtype=torch.bool,
+                ),
             ),
-            anchor_flags=torch.ones(
-                len(triplets),
+            tuple(locations),
+            torch.tensor(
+                observed,
                 device=volume.device,
                 dtype=torch.bool,
             ),
@@ -496,16 +608,32 @@ class Connectivity:
         )
 
     @staticmethod
-    def _limit_triplets(batch: TripletBatch, limit: int) -> TripletBatch:
-        if len(batch) <= limit:
+    def _limit_anchor_triplets(
+        batch: _LocatedTriplets,
+        limit: int,
+    ) -> _LocatedTriplets:
+        if len(batch.triplets) <= limit:
             return batch
-        order = torch.randperm(len(batch), device=batch.values.device)[:limit]
-        return batch.index_select(order)
+        observed = batch.observed.nonzero().flatten()
+        if len(observed) > limit:
+            raise ValueError("the triplet budget must preserve every observed root.")
+        pseudo = (~batch.observed).nonzero().flatten()
+        remaining = limit - len(observed)
+        if remaining:
+            order = torch.randperm(
+                len(pseudo),
+                device=batch.triplets.values.device,
+            )[:remaining]
+            selected = torch.cat((observed, pseudo.index_select(0, order)))
+        else:
+            selected = observed
+        return batch.index_select(selected)
 
     @staticmethod
     def _limit_general_triplets(batch: TripletBatch, limit: int) -> TripletBatch:
         if limit <= 0:
-            return Connectivity._limit_triplets(batch, 0)
+            empty = torch.empty(0, device=batch.values.device, dtype=torch.long)
+            return batch.index_select(empty)
         if len(batch) <= limit:
             return batch
         selected = []
@@ -552,11 +680,6 @@ class Connectivity:
             raise TypeError("domain must be an integer.")
         if not 0 <= domain < self.num_domains:
             raise ValueError("domain is outside the prior bank.")
-
-    @staticmethod
-    def _check_axis(axis: int) -> None:
-        if not isinstance(axis, int) or isinstance(axis, bool) or axis not in AXES:
-            raise ValueError("axis must be 0, 1, or 2.")
 
     @staticmethod
     def _window_start(index: int, size: int) -> int:
