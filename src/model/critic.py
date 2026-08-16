@@ -202,4 +202,17 @@ class ConnectivityCritic2D(_Critic2D):
         domain: torch.Tensor,
     ) -> CriticScores:
         embedding = self.axis_mlp(self.axis_embedding(axes)).to(dtype=triplets.dtype)
-        return self.score(triplets.flatten(1, 2), embedding, domain)
+        return self.score(
+            connectivity_images(triplets).flatten(1, 2), embedding, domain
+        )
+
+
+def connectivity_images(triplets: torch.Tensor) -> torch.Tensor:
+    """Represent two phase changes and their discrete bend as images."""
+    if triplets.ndim != 5 or triplets.shape[1] != 3:
+        raise ValueError("triplets must have shape [B, 3, C, H, W].")
+    phases = (triplets + 1.0) * 0.5
+    first = phases[:, 1] - phases[:, 0]
+    second = phases[:, 2] - phases[:, 1]
+    bend = (second - first) * 0.5
+    return torch.stack((first, second, bend), dim=1)

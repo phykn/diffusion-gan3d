@@ -14,7 +14,7 @@ from src.model.denoiser import Denoiser3D
 def _denoiser(
     *,
     checkpointing: bool = False,
-    anchor_adapter: str = "single",
+    anchor_multiscale: bool = False,
 ) -> Denoiser3D:
     return Denoiser3D(
         num_phases=3,
@@ -24,7 +24,7 @@ def _denoiser(
         latent_channels=4,
         num_domains=2,
         gradient_checkpointing=checkpointing,
-        anchor_adapter=anchor_adapter,
+        anchor_multiscale=anchor_multiscale,
     )
 
 
@@ -223,7 +223,7 @@ class Denoiser3DTest(unittest.TestCase):
             embedding_channels=8,
             latent_channels=4,
             num_domains=2,
-            anchor_adapter="multiscale",
+            anchor_multiscale=True,
         )
         inputs = torch.randn(1, 3, 8, 8, 8)
         time = torch.zeros(1)
@@ -289,7 +289,7 @@ class Denoiser3DTest(unittest.TestCase):
         torch.manual_seed(7)
         single = _denoiser()
         torch.manual_seed(7)
-        multiscale = _denoiser(anchor_adapter="multiscale")
+        multiscale = _denoiser(anchor_multiscale=True)
 
         multiscale_state = multiscale.state_dict()
         for name, value in single.state_dict().items():
@@ -323,9 +323,9 @@ class Denoiser3DTest(unittest.TestCase):
         torch.testing.assert_close(pooled[0, -1, 0, 0, 1], torch.tensor(1.0))
         self.assertEqual(float(pooled[0, :, 1, 1, 1].abs().sum()), 0.0)
 
-    def test_anchor_adapter_rejects_unknown_mode(self):
-        with self.assertRaisesRegex(ValueError, "anchor_adapter"):
-            _denoiser(anchor_adapter="unknown")
+    def test_anchor_multiscale_requires_boolean(self):
+        with self.assertRaisesRegex(TypeError, "anchor_multiscale"):
+            _denoiser(anchor_multiscale="multiscale")  # type: ignore[arg-type]
 
     def test_anchor_adapter_requires_paired_inputs(self):
         model = _denoiser()

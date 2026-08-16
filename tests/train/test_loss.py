@@ -54,12 +54,51 @@ def test_logistic_losses_average_each_head_before_weighting() -> None:
     )
 
 
+def test_critic_loss_allows_different_real_and_fake_batch_sizes() -> None:
+    real = CriticScores(
+        logits_global=torch.linspace(-1.0, 1.0, 8),
+        logits_local=torch.linspace(-2.0, 2.0, 32).reshape(8, 2, 2),
+    )
+    fake = CriticScores(
+        logits_global=torch.linspace(-1.5, 1.5, 16),
+        logits_local=torch.linspace(-3.0, 3.0, 64).reshape(16, 2, 2),
+    )
+
+    loss = get_critic_loss(real, fake)
+
+    assert torch.allclose(
+        loss.global_loss,
+        F.softplus(-real.logits_global).mean()
+        + F.softplus(fake.logits_global).mean(),
+    )
+    assert torch.allclose(
+        loss.local_loss,
+        F.softplus(-real.logits_local).mean()
+        + F.softplus(fake.logits_local).mean(),
+    )
+
+
 def test_r1_aggregation_is_independent_of_patch_count() -> None:
     small = _r1_penalty(2)
     large = _r1_penalty(16)
 
     assert torch.allclose(small, large)
     assert torch.allclose(small, torch.tensor(8.5))
+
+
+def test_connectivity_groups_receive_equal_weight_despite_unequal_counts() -> None:
+    logits = torch.tensor((0.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0))
+    scores = CriticScores(
+        logits_global=logits,
+        logits_local=logits[:, None, None],
+    )
+    groups = torch.tensor((True, False, False, False, False, False, False))
+
+    loss = get_generator_loss(scores, groups)
+    expected = 0.5 * (F.softplus(-logits[0]) + F.softplus(-logits[1]))
+
+    assert torch.allclose(loss.global_loss, expected)
+    assert torch.allclose(loss.local_loss, expected)
 
 
 def test_r1_heads_do_not_cancel_opposite_gradients() -> None:

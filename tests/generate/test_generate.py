@@ -13,13 +13,11 @@ from src.build import (
     build_models,
     build_trainer,
     load_generator,
-    validate_anchor_capacity,
+    validate_prior_capacity,
 )
 from src.diffusion import Diffusion
 from src.generate import (
     Generator,
-    _CoupledAnchorSampler,
-    _SpatialAnchorAxis,
     _SpatialAnchorDenoiser,
 )
 from src.model.denoiser import Denoiser3D
@@ -32,7 +30,7 @@ _GENERATOR_GENERATE_PROBS = Generator.generate_probs
 
 
 @pytest.fixture(autouse=True)
-def preserve_legacy_generation_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+def preserve_generation_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
     def generate(self, *args, **kwargs):
         kwargs.setdefault("margin", 0)
         return _SCALED_GENERATE(self, *args, **kwargs)
@@ -60,19 +58,27 @@ from src.train.weights import save_checkpoint, save_weights
 from src.utils import save_yaml
 
 
-def test_build_models_keeps_legacy_single_and_enables_multiscale(
+def test_build_models_uses_boolean_anchor_multiscale(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
 
-    legacy, _, _ = build_models(cfg)
-    cfg["model"]["anchor_adapter"] = "multiscale"
+    single, _, _ = build_models(cfg)
+    cfg["model"]["anchor_multiscale"] = True
     multiscale, _, _ = build_models(cfg)
 
-    assert legacy.anchor_adapter == "single"
-    assert len(legacy.anchor_pyramid) == 0
-    assert multiscale.anchor_adapter == "multiscale"
+    assert not single.anchor_multiscale
+    assert len(single.anchor_pyramid) == 0
+    assert multiscale.anchor_multiscale
     assert len(multiscale.anchor_pyramid) == 1
+
+
+def test_build_models_rejects_removed_anchor_adapter(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    cfg["model"]["anchor_adapter"] = "multiscale"
+
+    with pytest.raises(ValueError, match="was removed"):
+        build_models(cfg)
 
 
 def test_ema_weights_generate_categorical_volume(
@@ -127,7 +133,7 @@ def test_anchor_aware_weights_accept_soft_plane_condition(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
-    cfg["model"]["anchor_adapter"] = "multiscale"
+    cfg["model"]["anchor_multiscale"] = True
     cfg["anchor"]["training_probability"] = 0.5
     run_dir = tmp_path / "run" / "anchored"
     run_dir.mkdir(parents=True)
@@ -196,27 +202,30 @@ def test_build_trainer_rejects_anchor_batch_larger_than_real_batch(
         build_trainer(cfg, torch.device("cpu"))
 
 
-def test_build_trainer_rejects_teacher_bank_smaller_than_one_largest_entry(
+def test_build_trainer_rejects_empty_prior_bank(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
     cfg["anchor"]["training_probability"] = 1.0
-    cfg["data"]["input_size"] = 128
+    cfg["connectivity"]["loss_weight"] = 1.0
+    cfg["connectivity"]["bank_size"] = 0
 
-    with pytest.raises(ValueError, match="one largest teacher volume"):
+    with pytest.raises(ValueError, match="bank_size.*positive integer"):
         build_trainer(cfg, torch.device("cpu"))
 
 
-def test_anchor_capacity_accepts_one_largest_teacher_entry(tmp_path: Path) -> None:
+def test_prior_capacity_accepts_one_volume(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     cfg["anchor"]["training_probability"] = 1.0
-    cfg["anchor"]["teacher_bank_size_mib"] = 2.02
+    cfg["connectivity"]["loss_weight"] = 1.0
+    cfg["connectivity"]["bank_size"] = 1
     cfg["data"]["input_size"] = 128
 
-    validate_anchor_capacity(
+    validate_prior_capacity(
         data=cfg["data"],
         train=cfg["train"],
         anchor=cfg["anchor"],
+        connectivity=cfg["connectivity"],
         anchor_start_step=0,
     )
 
@@ -769,41 +778,19 @@ def test_anchor_coupling_weight_has_plateau_and_wide_cosine_taper() -> None:
     assert weight[4] == pytest.approx(0.0)
 
 
-def test_anchor_coupling_release_never_changes_far_field_or_core_by_default() -> None:
-    weight = torch.tensor((0.0, 0.25, 0.5, 0.75, 1.0))
-
-    fixed = _CoupledAnchorSampler.apply_release(weight, 1.0, "off")
-    shell = _CoupledAnchorSampler.apply_release(weight, 1.0, "shell")
-    legacy = _CoupledAnchorSampler.apply_release(weight, 1.0, "global")
-
-    assert torch.equal(fixed, weight)
-    assert shell[0] == 0.0
-    assert shell[-1] == 1.0
-    assert bool((shell[1:-1] > weight[1:-1]).all())
-    assert torch.equal(legacy, torch.ones_like(weight))
-
-
-def test_split_temporal_profile_separates_plane_fidelity_from_context() -> None:
+def test_anchor_timing_separates_plane_fidelity_from_context() -> None:
     time = torch.tensor((9, 0))
 
-    plane, context = _SpatialAnchorDenoiser.temporal_scales(time, 10, "split")
-    legacy_plane, legacy_context = _SpatialAnchorDenoiser.temporal_scales(
-        time,
-        10,
-        "legacy",
-    )
+    plane, context = _SpatialAnchorDenoiser.temporal_scales(time, 10)
 
     torch.testing.assert_close(plane, torch.tensor((0.5, 1.0)))
     torch.testing.assert_close(context, torch.tensor((0.6, 0.15)))
-    torch.testing.assert_close(legacy_plane, torch.tensor((2.0, 0.5)))
-    torch.testing.assert_close(legacy_context, legacy_plane)
     single_plane, single_context = _SpatialAnchorDenoiser.temporal_scales(
         torch.zeros(1, dtype=torch.long),
         1,
-        "legacy",
     )
     torch.testing.assert_close(single_plane, torch.ones(1))
-    torch.testing.assert_close(single_context, single_plane)
+    torch.testing.assert_close(single_context, torch.full((1,), 0.15))
 
 
 def test_final_anchor_step_preserves_same_rng_baseline_in_far_field() -> None:
@@ -861,23 +848,14 @@ def test_final_anchor_step_preserves_same_rng_baseline_in_far_field() -> None:
     torch.manual_seed(41)
     baseline = generator.generate_probs(size=16)
     torch.manual_seed(41)
-    fixed = generator.generate_probs(
+    anchored = generator.generate_probs(
         anchors=(anchor,),
         size=16,
         anchor_sigma=0.25,
-        anchor_coupling_release="off",
-    )
-    torch.manual_seed(41)
-    legacy = generator.generate_probs(
-        anchors=(anchor,),
-        size=16,
-        anchor_sigma=0.25,
-        anchor_coupling_release="global",
     )
 
-    torch.testing.assert_close(fixed[:, 0, 0, 0], baseline[:, 0, 0, 0])
-    assert not torch.allclose(fixed[:, 8, 8, 8], baseline[:, 8, 8, 8])
-    assert not torch.allclose(legacy[:, 0, 0, 0], baseline[:, 0, 0, 0])
+    torch.testing.assert_close(anchored[:, 0, 0, 0], baseline[:, 0, 0, 0])
+    assert not torch.allclose(anchored[:, 8, 8, 8], baseline[:, 8, 8, 8])
 
 
 def test_anchor_prediction_residual_is_gaussian_blended_before_posterior() -> None:
@@ -934,74 +912,6 @@ def test_anchor_prediction_residual_is_gaussian_blended_before_posterior() -> No
     )
 
 
-def test_anchor_prediction_residual_is_smoothed_along_plane_normal() -> None:
-    class AnchorImageModel(torch.nn.Module):
-        def predict_logits(
-            self,
-            current: torch.Tensor,
-            timestep: torch.Tensor,
-            latent: torch.Tensor,
-            *,
-            domain: torch.Tensor,
-            anchor_image: torch.Tensor | None = None,
-            anchor_mask: torch.Tensor | None = None,
-        ) -> torch.Tensor:
-            del timestep, latent, domain, anchor_mask
-            if anchor_image is None:
-                return torch.zeros_like(current)
-            return anchor_image
-
-    diffusion = _TraceDiffusion(timesteps=1)
-    generator = _generator(AnchorImageModel(), diffusion)
-    anchor = PlaneAnchor(
-        image=torch.zeros(4, 4, dtype=torch.long),
-        axis=0,
-        index=2,
-    )
-
-    generator.generate_probs(
-        anchors=(anchor,),
-        anchor_sigma=1.0,
-        anchor_residual_blur=0.5,
-    )
-
-    clean = diffusion.calls[1].clean
-    baseline = Denoiser3D.decode(torch.zeros_like(clean))
-    delta = (clean - baseline).abs()
-    assert bool((delta[:, :, 1] > 0).any())
-    assert bool((delta[:, :, 3] > 0).any())
-    assert delta[:, :, 2].mean() > delta[:, :, 1].mean()
-
-    unsmoothed_diffusion = _TraceDiffusion(timesteps=1)
-    unsmoothed_generator = _generator(AnchorImageModel(), unsmoothed_diffusion)
-    unsmoothed_generator.generate_probs(
-        anchors=(anchor,),
-        anchor_sigma=1.0,
-        anchor_residual_blur=0.0,
-    )
-    unsmoothed_clean = unsmoothed_diffusion.calls[1].clean
-    unsmoothed_delta = (unsmoothed_clean - baseline).abs()
-    assert not bool((unsmoothed_delta[:, :, 1] > 0).any())
-    assert not bool((unsmoothed_delta[:, :, 3] > 0).any())
-
-
-def test_anchor_residual_blur_narrows_toward_late_steps() -> None:
-    generator = _generator(_AnchorTraceModel(), Diffusion(3))
-    axes = (_SpatialAnchorAxis(0, torch.ones(1, 1, 9, 1, 1)),)
-
-    schedule = _SpatialAnchorDenoiser.make_kernel_schedule(
-        generator,
-        axes,
-        residual_blur=1.5,
-        residual_blur_early=2.0,
-    )
-
-    centers = [schedule[step][0].flatten()[4] for step in range(3)]
-    assert centers[2] < centers[1] < centers[0]
-    for step in range(3):
-        assert schedule[step][0][0].sum() == pytest.approx(1.0)
-
-
 def test_coupled_anchor_sampling_keeps_separate_states_and_shared_conditions() -> None:
     model = _AnchorTraceModel()
     diffusion = _NoiseTraceDiffusion(timesteps=3)
@@ -1051,48 +961,6 @@ def test_anchor_sigma_rejects_invalid_values(anchor_sigma: object) -> None:
 
     with pytest.raises(ValueError, match="anchor_sigma"):
         generator.generate_probs(anchor_sigma=anchor_sigma)
-
-
-@pytest.mark.parametrize(
-    "anchor_residual_blur",
-    (-1, float("nan"), float("inf"), True),
-)
-def test_anchor_residual_blur_rejects_invalid_values(
-    anchor_residual_blur: object,
-) -> None:
-    generator = _generator(_AnchorTraceModel(), Diffusion(3))
-
-    with pytest.raises(ValueError, match="anchor_residual_blur"):
-        generator.generate_probs(anchor_residual_blur=anchor_residual_blur)
-
-
-@pytest.mark.parametrize(
-    "anchor_residual_blur_early",
-    (-1, float("nan"), float("inf"), True),
-)
-def test_anchor_residual_blur_early_rejects_invalid_values(
-    anchor_residual_blur_early: object,
-) -> None:
-    generator = _generator(_AnchorTraceModel(), Diffusion(3))
-
-    with pytest.raises(ValueError, match="anchor_residual_blur_early"):
-        generator.generate_probs(anchor_residual_blur_early=anchor_residual_blur_early)
-
-
-@pytest.mark.parametrize("release", (None, True, "everywhere"))
-def test_anchor_coupling_release_rejects_invalid_values(release: object) -> None:
-    generator = _generator(_AnchorTraceModel(), Diffusion(3))
-
-    with pytest.raises(ValueError, match="anchor_coupling_release"):
-        generator.generate_probs(anchor_coupling_release=release)
-
-
-@pytest.mark.parametrize("profile", (None, True, "uniform"))
-def test_anchor_temporal_profile_rejects_invalid_values(profile: object) -> None:
-    generator = _generator(_AnchorTraceModel(), Diffusion(3))
-
-    with pytest.raises(ValueError, match="anchor_temporal_profile"):
-        generator.generate_probs(anchor_temporal_profile=profile)
 
 
 def test_anchor_never_overwrites_a_different_model_prediction() -> None:
@@ -2582,11 +2450,6 @@ def _config(root: Path) -> dict:
             "training_probability": 0.0,
             "start_step": 0,
             "ramp_steps": 0,
-            "multi_anchor_prob": 0.5,
-            "max_density": 0.05,
-            "min_spacing": 2,
-            "mixed_axis_prob": 0.5,
-            "teacher_bank_size_mib": 1,
             "loss_weight": 0.0,
         },
         "conditioning": {
@@ -2598,9 +2461,8 @@ def _config(root: Path) -> dict:
         "connectivity": {
             "loss_weight": 0.0,
             "normal_transition_loss_weight": 0.0,
-            "replay_triplets_per_axis": 1,
-            "replay_capacity_per_axis": 2,
-            "max_triplets_per_step": 1,
+            "bank_size": 1,
+            "refresh": 500,
             "reversal_invariant": True,
         },
         "vf": {

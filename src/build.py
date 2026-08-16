@@ -51,6 +51,15 @@ def get_data_axes(data: Mapping[str, object]) -> tuple[int, ...]:
     )
 
 
+def get_anchor_multiscale(model: Mapping[str, object]) -> bool:
+    if "anchor_adapter" in model:
+        raise ValueError("model.anchor_adapter was removed; use anchor_multiscale.")
+    value = model.get("anchor_multiscale", False)
+    if not isinstance(value, bool):
+        raise TypeError("model.anchor_multiscale must be a boolean.")
+    return value
+
+
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
 
 
@@ -149,7 +158,7 @@ def build_denoiser(
         latent_channels=model["latent_channels"],
         num_domains=num_domains,
         gradient_checkpointing=checkpointing,
-        anchor_adapter=model.get("anchor_adapter", "single"),
+        anchor_multiscale=get_anchor_multiscale(model),
     )
 
 
@@ -262,7 +271,6 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     model = cfg["model"]
     anchor = cfg["anchor"]
     connectivity = cfg["connectivity"]
-    relation = cfg.get("relation", {})
     conditioning = cfg["conditioning"]["cfg_dropout"]
     vf = cfg["vf"]
     optim = cfg["optim"]
@@ -270,10 +278,11 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         anchor,
         "anchor",
     )
-    validate_anchor_capacity(
+    validate_prior_capacity(
         data=data,
         train=train,
         anchor=anchor,
+        connectivity=connectivity,
         anchor_start_step=anchor_start_step,
     )
     denoiser, critics, connectivity_critic = build_models(cfg)
@@ -333,11 +342,6 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             anchor_training_probability=anchor["training_probability"],
             anchor_start_step=anchor_start_step,
             anchor_ramp_steps=anchor_ramp_steps,
-            anchor_multi_probability=anchor["multi_anchor_prob"],
-            anchor_max_density=anchor["max_density"],
-            anchor_min_spacing=anchor["min_spacing"],
-            anchor_mixed_axis_probability=anchor["mixed_axis_prob"],
-            anchor_teacher_bank_mebibytes=anchor["teacher_bank_size_mib"],
             anchor_loss_weight=anchor["loss_weight"],
             anchor_pool_size=anchor.get("coarse_pool_size", 4),
             anchor_coarse_loss_weight=anchor.get("coarse_loss_weight", 0.0),
@@ -348,60 +352,25 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             ),
             connectivity_weight=connectivity["loss_weight"],
             normal_transition_weight=connectivity["normal_transition_loss_weight"],
-            connectivity_replay_triplets_per_axis=(
-                connectivity["replay_triplets_per_axis"]
-            ),
-            connectivity_replay_capacity_per_axis=(
-                connectivity["replay_capacity_per_axis"]
-            ),
-            connectivity_max_triplets_per_step=(connectivity["max_triplets_per_step"]),
+            connectivity_bank_size=connectivity["bank_size"],
+            connectivity_refresh_steps=connectivity["refresh"],
             vf_loss_weight=vf["loss_weight"],
+            vf_target_average_max_samples=vf.get("target_average_max_samples", 1),
             domain_dropout=data.get("domain_dropout", 0.0),
             cfg_drop_each_probability=conditioning["drop_each_prob"],
             cfg_single_drop_probability=conditioning["single_condition_drop_prob"],
             latent_channels=model["latent_channels"],
             amp_enabled=use_amp,
-            relation_loss_weight=relation.get("loss_weight", 0.0),
-            relation_bank_capacity_per_axis=relation.get(
-                "bank_capacity_per_axis",
-                64,
-            ),
-            relation_profiles_per_axis=relation.get("profiles_per_axis", 4),
-            relation_neighbors=relation.get("neighbors", 8),
-            relation_quantile_low=relation.get("quantile_low", 0.10),
-            relation_quantile_high=relation.get("quantile_high", 0.90),
-            relation_start_step=relation.get(
-                "start_step",
-                anchor_start_step,
-            ),
-            relation_support_max_radius=relation.get("support_max_radius", 2),
-            relation_phase_weight=relation.get("phase_weight", 0.75),
-            relation_support_weight=relation.get("support_weight", 0.25),
-            relation_direction_reduction=relation.get(
-                "direction_reduction",
-                "mean",
-            ),
-            relation_min_support_pixels=relation.get(
-                "min_support_pixels",
-                8,
-            ),
-            relation_min_phase_fraction=relation.get(
-                "min_phase_fraction",
-                0.001,
-            ),
-            relation_min_chance_gap=relation.get(
-                "min_chance_gap",
-                0.02,
-            ),
         ),
     )
 
 
-def validate_anchor_capacity(
+def validate_prior_capacity(
     *,
     data: dict,
     train: dict,
     anchor: dict,
+    connectivity: dict,
     anchor_start_step: int,
 ) -> None:
     anchor_active = (
@@ -415,18 +384,12 @@ def validate_anchor_capacity(
             "train.volume_batch_size must not exceed data.batch_size when "
             "anchor training is enabled."
         )
-    if anchor["multi_anchor_prob"] <= 0.0:
+    if (
+        connectivity["loss_weight"] <= 0.0
+        and connectivity["normal_transition_loss_weight"] <= 0.0
+    ):
         return
 
-    entry_bytes = (
-        data["input_size"] ** 3 + data["input_size"] ** 2 + 4 * data["num_phases"]
-    )
-    required_bytes = entry_bytes
-    budget_bytes = round(anchor["teacher_bank_size_mib"] * 1024**2)
-    if budget_bytes < required_bytes:
-        required_mib = required_bytes / 1024**2
-        raise ValueError(
-            "anchor.teacher_bank_size_mib is too small for "
-            "one largest teacher volume; "
-            f"at least {required_mib:.2f} MiB is required."
-        )
+    bank_size = connectivity["bank_size"]
+    if not isinstance(bank_size, int) or isinstance(bank_size, bool) or bank_size < 1:
+        raise ValueError("connectivity.bank_size must be a positive integer.")

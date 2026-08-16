@@ -26,8 +26,8 @@ model:
   latent_channels: 64
   critic_channels: [32, 64, 128, 256]
   gradient_checkpointing: true
-  # Omit or set single for legacy weights; multiscale adds zero-init encoder paths.
-  anchor_adapter: multiscale
+  # False keeps the original input-only anchor path.
+  anchor_multiscale: true
 
 diffusion:
   timesteps: 10
@@ -41,12 +41,6 @@ anchor:
   # Occasionally treat a provider-domain section as an external anchor for a
   # target domain that does not own that axis. Target-domain VF remains local.
   shared_axis_probability: 0.20
-  # Keep pseudo multi-anchor training off while relation learning is evaluated.
-  multi_anchor_prob: 0.0
-  max_density: 0.05
-  min_spacing: 4
-  mixed_axis_prob: 0.5
-  teacher_bank_size_mib: 128
   loss_weight: 1.0
   coarse_pool_size: 4
   coarse_loss_weight: 1.0
@@ -60,36 +54,20 @@ conditioning:
     single_condition_drop_prob: 0.10
 
 connectivity:
-  replay_triplets_per_axis: 4
-  replay_capacity_per_axis: 64
-  max_triplets_per_step: 4
+  # Frozen anchor/VF-free EMA volumes used as the continuation reference.
+  # Complete uint8 EMA volumes stored per domain.
+  bank_size: 16
+  # Replace the oldest volume with one current EMA sample at this interval.
+  refresh: 500
   reversal_invariant: true
   loss_weight: 0.25
   normal_transition_loss_weight: 0.10
 
-relation:
-  # Starting here, freeze an anchor/VF-free EMA relation prior before anchor
-  # training is allowed to begin. The bank stores statistics, never images.
-  start_step: 3000
-  loss_weight: 0.02
-  phase_weight: 0.75
-  support_weight: 0.25
-  # Compute guard only: the frozen prior selects radius 0..cap per phase and
-  # distance. Overflow disables that support term instead of clamping it.
-  support_max_radius: 2
-  min_support_pixels: 8
-  min_phase_fraction: 0.001
-  # Also rejects dominant-phase support whose chance baseline exceeds 0.98.
-  min_chance_gap: 0.02
-  direction_reduction: mean
-  bank_capacity_per_axis: 64
-  profiles_per_axis: 4
-  neighbors: 8
-  quantile_low: 0.10
-  quantile_high: 0.90
-
 vf:
   loss_weight: 1.0
+  # Average a random 1..N empirical crop VFs. This reduces single-crop noise
+  # without collapsing the conditioning range to the full-batch mean.
+  target_average_max_samples: 4
 
 optim:
   denoiser_lr: 0.00016

@@ -23,7 +23,6 @@ from src.train.engine import (
     TrainerSettings,
 )
 from src.train.loss import get_critic_r1
-from src.train.relation import RelationBank, RelationLoss
 from src.train.runner import run_training
 
 
@@ -45,11 +44,6 @@ def AnchorConfig(**values):
         training_probability=0.0,
         start_step=0,
         ramp_steps=0,
-        multi_anchor_prob=0.0,
-        max_density=0.05,
-        min_spacing=2,
-        mixed_axis_prob=0.5,
-        teacher_bank_size_mib=1,
         loss_weight=0.0,
         shared_axis_probability=0.0,
     )
@@ -65,9 +59,8 @@ def ConnectivityConfig(**values):
     cfg = Config(
         loss_weight=0.0,
         normal_transition_loss_weight=0.0,
-        replay_triplets_per_axis=1,
-        replay_capacity_per_axis=4,
-        max_triplets_per_step=4,
+        bank_size=1,
+        refresh=500,
         reversal_invariant=True,
     )
     cfg.update(values)
@@ -118,11 +111,13 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
         values=torch.zeros(2, 3, 2, 1, 1),
         axes=axes,
         center_slots=real_centers,
+        anchor_flags=torch.tensor((True, False)),
     )
     fake = TripletBatch(
         values=torch.ones(2, 3, 2, 1, 1),
         axes=axes,
         center_slots=fake_centers,
+        anchor_flags=torch.tensor((True, False)),
     )
     trainer.connect = Mock()
     trainer.connect.match_anchor.return_value = (real, fake)
@@ -200,6 +195,7 @@ def test_empirical_vf_target_resamples_for_anchor_minima_and_rejects_no_match() 
     trainer.num_phases = 2
     trainer.volume_batch_size = 1
     trainer.device = torch.device("cpu")
+    trainer.vf_target_average_max_samples = 1
     condition = build_anchors(
         (PlaneAnchor(torch.ones(2, 2, dtype=torch.uint8), axis=0, index=0),),
         batch_size=1,
@@ -214,7 +210,7 @@ def test_empirical_vf_target_resamples_for_anchor_minima_and_rejects_no_match() 
 
     with patch(
         "src.train.engine.torch.randint",
-        side_effect=(torch.tensor((0,)), torch.tensor(0)),
+        side_effect=(torch.tensor(((0,),)), torch.tensor((0,))),
     ):
         target, resample_rate = trainer.sample_target_vf(pool, condition)
 
@@ -222,10 +218,35 @@ def test_empirical_vf_target_resamples_for_anchor_minima_and_rejects_no_match() 
     assert resample_rate == 1.0
 
     with (
-        patch("src.train.engine.torch.randint", return_value=torch.tensor((0,))),
+        patch("src.train.engine.torch.randint", return_value=torch.tensor(((0,),))),
         pytest.raises(ValueError, match="incompatible"),
     ):
         trainer.sample_target_vf(pool[:1], condition)
+
+
+def test_empirical_vf_target_averages_a_random_number_of_crops() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.num_phases = 2
+    trainer.volume_batch_size = 1
+    trainer.device = torch.device("cpu")
+    trainer.vf_target_average_max_samples = 4
+    pool = torch.tensor(
+        (
+            (1.0, 0.0),
+            (0.5, 0.5),
+            (0.0, 1.0),
+            (0.25, 0.75),
+        )
+    )
+
+    with patch(
+        "src.train.engine.torch.randint",
+        side_effect=(torch.tensor((3,)), torch.tensor(((0, 1, 2, 3),))),
+    ):
+        target, resample_rate = trainer.sample_target_vf(pool, None)
+
+    assert torch.allclose(target, torch.tensor(((0.5, 0.5),)))
+    assert resample_rate == 0.0
 
 
 def test_sample_pairs_centers_half_the_patches_on_focus() -> None:
@@ -342,6 +363,22 @@ def test_missing_axes_borrow_from_axis_providers() -> None:
     assert critic_domains == {0: 0, 1: NULL_DOMAIN, 2: NULL_DOMAIN}
 
 
+def test_connectivity_uses_axis_critic_domain_for_shared_context() -> None:
+    triplets = TripletBatch(
+        values=torch.zeros(3, 3, 2, 4, 4),
+        axes=torch.tensor((0, 1, 2)),
+        center_slots=torch.ones(3, dtype=torch.long),
+        anchor_flags=torch.tensor((True, False, False)),
+    )
+
+    domains = Trainer.get_connectivity_domains(
+        critic_domains={0: 0, 1: NULL_DOMAIN, 2: NULL_DOMAIN},
+        triplets=triplets,
+    )
+
+    assert domains.tolist() == [0, NULL_DOMAIN, NULL_DOMAIN]
+
+
 def test_domain_dropout_masks_every_axis_critic() -> None:
     sources = {0: 0, 1: 1, 2: 1}
 
@@ -428,29 +465,6 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         connectivity_optim=connectivity_optim,
         device=torch.device("cpu"),
     )
-    trainer.relation_loss_weight = 0.02
-
-    def shared_relation_loss(probs, condition, visible, *, domain):
-        assert domain == 0
-        assert bool(visible.all())
-        assert not bool(condition.axis_masks[:, 0].any())
-        assert bool(condition.axis_masks[:, 1:].any())
-        zero = probs.sum() * 0.0
-        return RelationLoss(
-            loss=zero,
-            phase=zero,
-            support=zero,
-            minus=zero,
-            plus=zero,
-            queries=1,
-            matches=1,
-            domain_matches=0,
-            shared_matches=1,
-            ood_rejections=0,
-            missing_references=0,
-            distance_weights=probs.new_zeros(probs.shape[2] - 1),
-        )
-
     observed_domains = {axis: [] for axis in (0, 1, 2)}
     hooks = [
         critics[str(axis)].register_forward_pre_hook(
@@ -461,16 +475,7 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         for axis in (0, 1, 2)
     ]
     try:
-        with (
-            patch.object(trainer, "sample_target_domain", return_value=0),
-            patch.object(trainer.relation, "prior_ready", return_value=True),
-            patch.object(trainer.relation, "needs_data", return_value=False),
-            patch.object(
-                trainer.relation,
-                "loss",
-                side_effect=shared_relation_loss,
-            ),
-        ):
+        with patch.object(trainer, "sample_target_domain", return_value=0):
             metrics = trainer.step(0, transition=1)
     finally:
         for hook in hooks:
@@ -478,7 +483,6 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
 
     assert metrics.domain == 0
     assert metrics.anchor_shared
-    assert metrics.relation_queries == metrics.relation_shared_matches == 1
     assert metrics.target_vfs == pytest.approx((0.5, 0.5))
     assert streams[0][0].calls == 1
     assert streams[1][0].calls == 0
@@ -900,6 +904,7 @@ def test_incompatible_shared_anchor_falls_back_to_an_owned_axis() -> None:
     trainer.num_phases = 2
     trainer.device = torch.device("cpu")
     trainer.anchor_shared_axis_probability = 1.0
+    trainer.vf_target_average_max_samples = 1
     own = torch.zeros(1, 8, 8, dtype=torch.long)
     borrowed = torch.ones(1, 8, 8, dtype=torch.long)
     batches = {0: own, 1: borrowed}
@@ -976,9 +981,9 @@ def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
 def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
-        multi_probability=1.0,
         connectivity_weight=0.25,
     )
+    trainer.connect.record_prior(torch.zeros(1, 3, 8, 8, 8), 0)
     dropped = ConditionPresence(
         anchor=torch.tensor((False,)),
         vf=torch.tensor((True,)),
@@ -1013,9 +1018,6 @@ def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
     assert metrics.anchor_pixel_loss == 0.0
     assert metrics.generator_connectivity == 0.0
     assert metrics.normal_transition_loss == 0.0
-    assert metrics.relation_loss == 0.0
-    assert metrics.teacher_volumes == 0
-    assert metrics.connectivity_replay == 3
 
 
 def test_vf_total_variation_uses_raw_prediction() -> None:
@@ -1059,29 +1061,36 @@ def test_unconditional_warmup_populates_reference_before_anchor_connectivity() -
         anchor_start_step=1,
         connectivity_weight=0.25,
     )
+    trainer.prior_refresh_steps = 2
 
     with patch.object(
-        trainer.ema_denoiser,
-        "forward",
-        wraps=trainer.ema_denoiser.forward,
-    ) as ema_forward:
+        trainer.diffusion,
+        "sample",
+        wraps=trainer.diffusion.sample,
+    ) as prior_samples:
         warmup = trainer.step(0, transition=0)
+        prior = trainer.step(1, transition=0)
         connectivity_before = _parameters(trainer.connectivity_critic)
-        anchored = trainer.step(1, transition=0)
+        anchored = trainer.step(2, transition=0)
+        refreshed = trainer.step(3, transition=0)
 
-    assert ema_forward.call_count == 0
+    assert prior_samples.call_count == 2
     assert warmup.anchor_ramp == 0.0
     assert warmup.anchor_planes == 0
-    assert warmup.connectivity_replay == 3
+    assert warmup.prior_volumes == 0
     assert warmup.generator_connectivity == 0.0
     assert warmup.critic_connectivity == 0.0
+    assert prior.anchor_ramp == 0.0
+    assert prior.prior_volumes == 1
+    assert prior.prior_ready
     assert anchored.anchor_ramp == 1.0
     assert anchored.anchor_planes == 1
-    assert not anchored.anchor_teacher
-    assert anchored.teacher_volumes == 0
-    assert anchored.connectivity_triplets == 1
+    assert anchored.connectivity_triplets == 7
     assert anchored.generator_connectivity > 0.0
     assert anchored.critic_connectivity > 0.0
+    assert refreshed.anchor_ramp == 1.0
+    assert refreshed.anchor_planes == 1
+    assert refreshed.prior_updates == 1
     assert _changed(connectivity_before, trainer.connectivity_critic)
     assert all(
         parameter.requires_grad
@@ -1095,236 +1104,6 @@ def test_unconditional_warmup_populates_reference_before_anchor_connectivity() -
         + anchored.vf_loss,
         rel_tol=1e-5,
     )
-
-
-@pytest.mark.parametrize("anchored", (False, True))
-def test_full_anchor_free_ema_sample_populates_frozen_relation_bank(
-    anchored: bool,
-) -> None:
-    trainer, _, _ = _conditioning_trainer(anchored=anchored)
-    trainer.relation_loss_weight = 0.02
-    trainer.relation_start_step = 0
-    trainer.relation = RelationBank(
-        num_domains=1,
-        num_phases=3,
-        axes=(0, 1, 2),
-        capacity_per_axis=2,
-        profiles_per_axis=2,
-        neighbors=2,
-        quantile_low=0.1,
-        quantile_high=0.9,
-    )
-
-    with patch.object(
-        trainer.ema_denoiser,
-        "forward",
-        wraps=trainer.ema_denoiser.forward,
-    ) as ema_forward:
-        metrics = trainer.step(0, transition=0)
-
-    assert ema_forward.call_count == trainer.diffusion.timesteps
-    assert metrics.relation_bank_entries == 12
-    assert metrics.relation_ready_buckets == 6
-
-
-def test_relation_reference_sampling_preserves_training_rng() -> None:
-    trainer, _, _ = _conditioning_trainer(anchored=False)
-    trainer.relation_loss_weight = 0.02
-    trainer.relation_start_step = 0
-    trainer.relation = RelationBank(
-        num_domains=1,
-        num_phases=3,
-        axes=(0, 1, 2),
-        capacity_per_axis=2,
-        profiles_per_axis=2,
-        neighbors=2,
-        quantile_low=0.1,
-        quantile_high=0.9,
-    )
-    prepared = trainer.prepare_step(0, transition=0)
-    before = torch.random.get_rng_state().clone()
-
-    trainer.record_relation_reference(step=0, prepared=prepared)
-
-    assert torch.equal(torch.random.get_rng_state(), before)
-
-
-def test_relation_prior_freezes_before_anchor_training_begins() -> None:
-    trainer, _, _ = _conditioning_trainer(anchored=True)
-    trainer.relation_loss_weight = 0.02
-    trainer.relation_start_step = 0
-    trainer.relation = RelationBank(
-        num_domains=1,
-        num_phases=3,
-        axes=(0, 1, 2),
-        capacity_per_axis=2,
-        profiles_per_axis=2,
-        neighbors=2,
-        quantile_low=0.1,
-        quantile_high=0.9,
-    )
-    captured = {}
-    original_sample = trainer.diffusion.sample
-
-    def capture_sample(model, initial, latent_channels, conditions):
-        captured["conditions"] = conditions
-        return original_sample(model, initial, latent_channels, conditions)
-
-    with patch.object(trainer.diffusion, "sample", side_effect=capture_sample):
-        prior_step = trainer.step(0, transition=0)
-    anchored_step = trainer.step(1, transition=0)
-
-    conditions = captured["conditions"]
-    assert "anchor_image" not in conditions
-    assert "anchor_mask" not in conditions
-    assert not bool(conditions["vf_present"].any())
-    assert torch.equal(conditions["vf"], torch.zeros_like(conditions["vf"]))
-    assert prior_step.anchor_ramp == 0.0
-    assert prior_step.anchor_planes == 0
-    assert prior_step.relation_prior_ready
-    assert anchored_step.anchor_ramp == 1.0
-    assert anchored_step.anchor_planes == 1
-
-
-def test_relation_bank_uses_one_fixed_ema_snapshot_until_complete() -> None:
-    trainer, _, _ = _conditioning_trainer(anchored=True)
-    trainer.relation_loss_weight = 0.02
-    trainer.relation_start_step = 0
-    trainer.relation = RelationBank(
-        num_domains=1,
-        num_phases=3,
-        axes=(0, 1, 2),
-        capacity_per_axis=3,
-        profiles_per_axis=1,
-        neighbors=2,
-        quantile_low=0.1,
-        quantile_high=0.9,
-    )
-    snapshot = _parameters(trainer.ema_denoiser)
-
-    first = trainer.step(0, transition=0)
-    second = trainer.step(1, transition=0)
-
-    assert not first.relation_prior_ready
-    assert not second.relation_prior_ready
-    assert not _changed(snapshot, trainer.ema_denoiser)
-
-    third = trainer.step(2, transition=0)
-
-    assert third.relation_prior_ready
-    assert _changed(snapshot, trainer.ema_denoiser)
-
-
-def test_relation_loss_uses_diffusion_signal_weight_in_generator_total() -> None:
-    trainer, _, _ = _conditioning_trainer(anchored=True)
-    trainer.relation_loss_weight = 0.02
-
-    def relation_loss(probs, condition, visible, *, domain):
-        del condition, visible, domain
-        zero = probs.sum() * 0.0
-        phase_weights = probs.new_zeros(7, 2)
-        phase_weights[:2] = probs.new_tensor(((0.75, 0.25), (0.25, 0.75)))
-        support_weights = probs.new_zeros(7, 2)
-        support_weights[0] = 1.0
-        diagnostics = probs.new_zeros(7, 2)
-        diagnostics[0] = probs.new_tensor((0.3, 0.2))
-        displacement = probs.new_full((7, 2, 2), -1.0)
-        displacement[0] = 1.0
-        return RelationLoss(
-            loss=zero + 2.0,
-            phase=zero + 1.5,
-            support=zero + 0.5,
-            minus=zero + 0.75,
-            plus=zero + 1.25,
-            queries=1,
-            matches=1,
-            domain_matches=0,
-            shared_matches=1,
-            ood_rejections=0,
-            missing_references=0,
-            distance_weights=probs.new_tensor((0.75, 0.25, 0, 0, 0, 0, 0)),
-            phase_distance_weights=phase_weights,
-            support_distance_weights=support_weights,
-            correlation_strength=diagnostics,
-            uncertainty=0.5 * diagnostics,
-            displacement_quantile=displacement,
-            dilation_radius=diagnostics.sign(),
-            valid_ratio_by_phase=probs.new_tensor((1.0, 0.5)),
-            support_forward=zero + 0.2,
-            support_backward=zero + 0.3,
-            long_range=zero + 1.5,
-            matched_reference_count=10.0 * diagnostics.sign(),
-        )
-
-    with (
-        patch.object(trainer.relation, "prior_ready", return_value=True),
-        patch.object(trainer.relation, "needs_data", return_value=False),
-        patch.object(trainer.relation, "loss", side_effect=relation_loss),
-    ):
-        metrics = trainer.step(0, transition=0)
-
-    temporal = float(trainer.diffusion.alpha_bars[1])
-    expected = (
-        metrics.generator
-        + metrics.anchor_loss
-        + metrics.vf_loss
-        + 0.02 * temporal * metrics.relation_loss
-    )
-    assert metrics.relation_queries == metrics.relation_matches == 1
-    assert metrics.relation_shared_matches == 1
-    assert math.isclose(
-        metrics.relation_weighted_loss,
-        0.02 * temporal * metrics.relation_loss,
-        rel_tol=1e-6,
-    )
-    assert metrics.relation_phase_loss == 1.5
-    assert metrics.relation_support_loss == 0.5
-    assert metrics.relation_minus_loss == 0.75
-    assert metrics.relation_plus_loss == 1.25
-    assert metrics.relation_distance_weights[:2] == (0.75, 0.25)
-    assert metrics.relation_phase_distance_weights[0] == (0.75, 0.25)
-    assert metrics.relation_support_distance_weights[0] == (1.0, 1.0)
-    assert metrics.relation_correlation_strength[0] == pytest.approx((0.3, 0.2))
-    assert metrics.relation_displacement_quantiles[0][0] == (1.0, 1.0)
-    assert metrics.relation_dilation_radii[0] == (1.0, 1.0)
-    assert metrics.relation_valid_ratio_by_phase == (1.0, 0.5)
-    assert metrics.relation_support_forward_loss == pytest.approx(0.2)
-    assert metrics.relation_support_backward_loss == pytest.approx(0.3)
-    assert metrics.relation_long_range_loss == pytest.approx(1.5)
-    assert metrics.relation_matched_reference_counts[0] == (10.0, 10.0)
-    assert math.isclose(metrics.generator_total, expected, rel_tol=1e-5)
-
-
-def test_single_real_prediction_is_promoted_only_on_a_later_step() -> None:
-    trainer, _, _ = _conditioning_trainer(
-        anchored=True,
-        multi_probability=1.0,
-    )
-    trainer.connect.teacher_min_entries = 1
-
-    first = trainer.step(0, transition=0)
-    second = trainer.step(1, transition=0)
-
-    assert first.anchor_planes == 1
-    assert not first.anchor_teacher
-    assert first.teacher_volumes == 1
-    assert second.anchor_planes >= 2
-    assert second.anchor_teacher
-    assert second.teacher_volumes == 1
-    assert math.isclose(sum(second.target_vfs), 1.0, rel_tol=1e-6)
-
-
-def test_nonterminal_prediction_does_not_enter_teacher_bank() -> None:
-    trainer, _, _ = _conditioning_trainer(
-        anchored=True,
-        multi_probability=1.0,
-    )
-    trainer.connect.teacher_min_entries = 1
-
-    metrics = trainer.step(0, transition=1)
-
-    assert metrics.anchor_planes == 1
-    assert metrics.teacher_volumes == 0
 
 
 def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
@@ -1392,10 +1171,9 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
             connectivity_r1=0.0,
             anchor_ramp=0.0,
             connectivity_triplets=0,
-            connectivity_replay=0,
-            anchor_teacher=False,
-            teacher_volumes=0,
-            teacher_mebibytes=0.0,
+            prior_volumes=0,
+            prior_mebibytes=0.0,
+            prior_ready=False,
         )
     )
 
@@ -1432,7 +1210,6 @@ def _conditioning_trainer(
     patch_size: int = 8,
     anchor_start_step: int = 0,
     anchor_ramp_steps: int = 0,
-    multi_probability: float = 0.0,
     connectivity_weight: float = 0.0,
     normal_transition_weight: float = 0.0,
     cfg_drop_each_probability: float = 0.0,
@@ -1471,7 +1248,6 @@ def _conditioning_trainer(
             training_probability=1.0 if anchored else 0.0,
             start_step=anchor_start_step,
             ramp_steps=anchor_ramp_steps,
-            multi_anchor_prob=multi_probability,
             loss_weight=1.0 if anchored else 0.0,
         ),
         connectivity=ConnectivityConfig(
@@ -1558,11 +1334,6 @@ def _make_trainer(
             anchor_training_probability=cfg.anchor.training_probability,
             anchor_start_step=cfg.anchor.start_step,
             anchor_ramp_steps=cfg.anchor.ramp_steps,
-            anchor_multi_probability=cfg.anchor.multi_anchor_prob,
-            anchor_max_density=cfg.anchor.max_density,
-            anchor_min_spacing=cfg.anchor.min_spacing,
-            anchor_mixed_axis_probability=cfg.anchor.mixed_axis_prob,
-            anchor_teacher_bank_mebibytes=cfg.anchor.teacher_bank_size_mib,
             anchor_loss_weight=cfg.anchor.loss_weight,
             anchor_shared_axis_probability=cfg.anchor.get(
                 "shared_axis_probability",
@@ -1570,13 +1341,8 @@ def _make_trainer(
             ),
             connectivity_weight=cfg.connectivity.loss_weight,
             normal_transition_weight=(cfg.connectivity.normal_transition_loss_weight),
-            connectivity_replay_triplets_per_axis=(
-                cfg.connectivity.replay_triplets_per_axis
-            ),
-            connectivity_replay_capacity_per_axis=(
-                cfg.connectivity.replay_capacity_per_axis
-            ),
-            connectivity_max_triplets_per_step=(cfg.connectivity.max_triplets_per_step),
+            connectivity_bank_size=cfg.connectivity.bank_size,
+            connectivity_refresh_steps=cfg.connectivity.refresh,
             vf_loss_weight=cfg.vf.loss_weight,
             domain_dropout=cfg.data.get("domain_dropout", 0.0),
             cfg_drop_each_probability=(cfg.conditioning.cfg_dropout.drop_each_prob),

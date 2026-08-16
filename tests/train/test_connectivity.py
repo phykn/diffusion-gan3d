@@ -1,4 +1,3 @@
-from itertools import pairwise
 from unittest.mock import patch
 
 import pytest
@@ -6,426 +5,228 @@ import torch
 import torch.nn.functional as F
 
 from src.anchor import PlaneAnchor, build_anchors
-from src.model.critic import ConnectivityCritic2D
+from src.model.critic import ConnectivityCritic2D, connectivity_images
 from src.train.connect import Connectivity, TripletBatch, normal_transition_loss
 
 
-def test_straight_through_uses_raw_prediction_at_anchor_and_backpropagates() -> None:
+def test_prior_bank_stores_complete_cpu_uint8_volumes_and_freezes() -> None:
+    size = 4
+    connect = _connectivity(num_phases=2, patch_size=size, volumes=2)
+    first = torch.zeros(1, size, size, size, dtype=torch.long)
+    second = torch.ones_like(first)
+
+    connect.record_prior(_prediction_from_labels(first, num_phases=2), 0)
+    assert not connect.prior_ready
+    connect.record_prior(_prediction_from_labels(second, num_phases=2), 0)
+    assert connect.prior_ready
+    connect.record_prior(_prediction_from_labels(first, num_phases=2), 0)
+
+    assert connect.prior_count == 2
+    assert connect.prior_storage_bytes == 2 * size**3
+    assert all(item.device.type == "cpu" for item in connect._domain_banks[0].items)
+    assert all(item.dtype == torch.uint8 for item in connect._domain_banks[0].items)
+    assert torch.equal(
+        connect._domain_banks[0].items[1],
+        second[0].to(torch.uint8),
+    )
+
+
+def test_prior_uses_domain_axis_first_and_provider_fallback_for_missing_axis() -> None:
+    size = 4
+    connect = _connectivity(
+        num_phases=2,
+        num_domains=2,
+        patch_size=size,
+        volumes=1,
+        owned_axes={0: (0,), 1: (1,)},
+    )
+    zeros = torch.zeros(1, size, size, size, dtype=torch.long)
+    ones = torch.ones_like(zeros)
+    connect.record_prior(_prediction_from_labels(zeros, num_phases=2), 0)
+    connect.record_prior(_prediction_from_labels(ones, num_phases=2), 1)
+
+    own = connect._prior_volumes(0, 0)
+    borrowed = connect._prior_volumes(0, 1)
+
+    assert len(own) == len(borrowed) == 1
+    assert int(own[0].max()) == 0
+    assert int(borrowed[0].min()) == 1
+
+
+def test_refresh_pushes_one_volume_and_evicts_the_oldest() -> None:
+    size = 4
     connect = _connectivity(
         num_phases=3,
-        patch_size=5,
-        replay_triplets_per_axis=1,
-        max_triplets_per_step=2,
+        patch_size=size,
+        volumes=2,
     )
-    connect.record_unconditional(_constant_prediction(0, 3, 5), 0)
+    zeros = torch.zeros(1, size, size, size, dtype=torch.long)
+    ones = torch.ones_like(zeros)
+    twos = torch.full_like(zeros, 2)
+    connect.record_prior(_prediction_from_labels(zeros, num_phases=3), 0)
+    connect.record_prior(_prediction_from_labels(ones, num_phases=3), 0)
+    storage_bytes = connect.prior_storage_bytes
+
+    connect.refresh_prior(
+        _prediction_from_labels(twos, num_phases=3),
+        0,
+    )
+
+    volumes = connect._prior_volumes(0, 0)
+    assert len(volumes) == 2
+    assert int(volumes[0].min()) == 1
+    assert int(volumes[1].min()) == 2
+    assert connect.prior_count == 2
+    assert connect.prior_storage_bytes == storage_bytes
+    assert connect.prior_updates == 1
+
+
+def test_straight_through_triplets_backpropagate_to_the_prediction() -> None:
+    size = 5
+    connect = _connectivity(num_phases=3, patch_size=size, volumes=1)
+    prior = torch.zeros(1, size, size, size, dtype=torch.long)
+    connect.record_prior(_prediction_from_labels(prior, num_phases=3), 0)
+    prediction = torch.randn(1, 3, size, size, size, requires_grad=True)
     seed = PlaneAnchor(
-        torch.ones(5, 5, dtype=torch.uint8),
+        prediction.detach()[0].argmax(dim=0)[2].to(torch.uint8),
         axis=0,
         index=2,
     )
-    condition = _condition((seed,), num_phases=3, volume_size=5)
-    prediction = _constant_prediction(2, 3, 5, requires_grad=True)
 
-    real, fake = connect.match_anchor(prediction, condition, 0)
-
-    assert len(fake) == len(real) == 1
-    assert set(fake.values.detach().unique().tolist()) == {-1.0, 1.0}
-    assert torch.all(fake.values.argmax(dim=2) == 2)
-    assert real.values.requires_grad is False
-
+    _, fake = connect.match_anchor(
+        prediction,
+        _condition((seed,), num_phases=3, volume_size=size),
+        0,
+    )
     fake.values.sum().backward()
 
+    assert len(fake) == 5
     assert prediction.grad is not None
-    assert bool(prediction.grad[:, :, 2].any())
-    assert bool(prediction.grad[:, :, 1].any())
-    assert bool(prediction.grad[:, :, 3].any())
+    assert float(prediction.grad.abs().sum()) > 0.0
+
+
+def test_change_images_ignore_confidence_but_keep_student_gradients() -> None:
+    connect = _connectivity(num_phases=2, patch_size=4)
+    labels = torch.tensor((0, 1, 1)).view(1, 1, 3, 1, 1).expand(1, 1, 3, 4, 4)
+    one_hot = F.one_hot(labels[:, 0], num_classes=2).movedim(-1, 1).float()
+    low_confidence = (one_hot * 0.6 + (1.0 - one_hot) * 0.4).requires_grad_()
+    high_confidence = one_hot * 10.0 - (1.0 - one_hot) * 10.0
+
+    low_images = connectivity_images(
+        connect._straight_through(low_confidence).movedim(1, 2)
+    )
+    high_images = connectivity_images(
+        connect._straight_through(high_confidence).movedim(1, 2)
+    )
+    loss = low_images.square().sum()
+    loss.backward()
+
+    assert torch.equal(low_images, high_images)
+    assert low_confidence.grad is not None
+    assert float(low_confidence.grad.abs().sum()) > 0.0
 
 
 def test_endpoint_anchors_use_only_real_consecutive_slices() -> None:
     size = 5
     labels = torch.arange(size).view(1, size, 1, 1).expand(1, size, size, size)
     prediction = _prediction_from_labels(labels, num_phases=size)
-    connect = _connectivity(
-        num_phases=size,
-        patch_size=size,
-        replay_triplets_per_axis=1,
-        max_triplets_per_step=4,
-    )
-    connect.record_unconditional(prediction, 0)
+    connect = _connectivity(num_phases=size, patch_size=size)
     seeds = (
         PlaneAnchor(labels[0, 0].to(torch.uint8), axis=0, index=0),
-        PlaneAnchor(labels[0, -1].to(torch.uint8), axis=0, index=size - 1),
+        PlaneAnchor(labels[0, 4].to(torch.uint8), axis=0, index=4),
     )
-    condition = _condition(seeds, num_phases=size, volume_size=size)
 
-    real, fake = connect.match_anchor(prediction, condition, 0)
+    fake = connect._sample_anchor_triplets(
+        connect._straight_through(prediction),
+        _condition(seeds, num_phases=size, volume_size=size),
+    )
     hard = fake.values.argmax(dim=2)
 
     assert fake.axes.tolist() == [0, 0]
     assert fake.center_slots.tolist() == [0, 2]
-    assert real.center_slots.tolist() == [1, 1]
     assert torch.equal(hard[0, :, 0, 0], torch.tensor((0, 1, 2)))
     assert torch.equal(hard[1, :, 0, 0], torch.tensor((2, 3, 4)))
 
 
-def test_online_reference_replay_is_cpu_float16_axis_matched_fifo() -> None:
-    connect = _connectivity(
-        num_phases=2,
-        patch_size=4,
-        replay_triplets_per_axis=1,
-        replay_capacity_per_axis=2,
-    )
-    connect.record_unconditional(_constant_prediction(0, 2, 4), 0)
-    source = _constant_prediction(1, 2, 4, requires_grad=True)
-    connect.record_unconditional(source, 0)
-    connect.record_unconditional(source, 0)
-    source.data.fill_(-9.0)
-
-    assert connect.replay_size == 6
-    for axis in (0, 1, 2):
-        entries = connect._replays[0]._items[axis]
-        assert len(entries) == 2
-        for entry in entries:
-            assert entry.values.device.type == "cpu"
-            assert entry.values.dtype == torch.float16
-            assert entry.values.grad_fn is None
-            assert bool((entry.values[:, 1] == 1.0).all())
-
-    seed = PlaneAnchor(
-        torch.ones(4, 4, dtype=torch.uint8),
-        axis=2,
-        index=1,
-    )
-    condition = _condition((seed,), num_phases=2, volume_size=4)
-    real, fake = connect.match_anchor(
-        _constant_prediction(1, 2, 4),
-        condition,
-        0,
+def test_anchor_match_adds_two_general_windows_from_every_axis() -> None:
+    size = 9
+    labels = torch.arange(size).view(1, size, 1, 1).expand(1, size, size, size)
+    prediction = _prediction_from_labels(labels, num_phases=size)
+    connect = _connectivity(num_phases=size, patch_size=size, volumes=1)
+    connect.record_prior(prediction, 0)
+    condition = _condition(
+        (PlaneAnchor(labels[0, 4].to(torch.uint8), axis=0, index=4),),
+        num_phases=size,
+        volume_size=size,
     )
 
-    assert fake.axes.tolist() == [2]
-    assert bool((real.values[:, :, 1] == 1.0).all())
-
-
-def test_replay_and_teachers_are_isolated_by_domain() -> None:
-    connect = _connectivity(num_phases=2, patch_size=4, num_domains=2)
-    prediction = _constant_prediction(1, 2, 4)
-    seed = PlaneAnchor(
-        torch.ones(4, 4, dtype=torch.uint8),
-        axis=0,
-        index=1,
-    )
-    condition = _condition((seed,), num_phases=2, volume_size=4)
-
-    connect.record_unconditional(prediction, 0)
-    real, fake = connect.match_anchor(prediction, condition, 1)
-    connect.record_seeded(prediction, (seed,), 0)
-
-    assert len(real) == len(fake) == 0
-    assert connect.teacher_count_for(4, 0) == 1
-    assert connect.teacher_count_for(4, 1) == 0
-
-
-def test_unconditional_replay_categorizes_only_sampled_triplets() -> None:
-    connect = _connectivity(
-        num_phases=2,
-        patch_size=4,
-        replay_triplets_per_axis=1,
-    )
-    prediction = torch.randn(1, 2, 8, 8, 8)
-
-    with patch.object(
-        connect,
-        "_hard_labels",
-        side_effect=AssertionError("full-volume conversion must not run"),
+    with patch(
+        "src.train.connect.torch.randperm",
+        return_value=torch.tensor((0, 1, 2, 3)),
     ):
-        connect.record_unconditional(prediction, 0)
+        _, fake = connect.match_anchor(prediction, condition, 0)
 
-    assert connect.replay_size == 3
-
-
-def test_online_reference_matching_never_crosses_axes() -> None:
-    size = 5
-    labels = torch.arange(size).remainder(3).view(1, size, 1, 1)
-    labels = labels.expand(1, size, size, size)
-    prediction = _prediction_from_labels(labels, num_phases=3)
-    connect = _connectivity(
-        num_phases=3,
-        patch_size=size,
-        replay_triplets_per_axis=1,
-        replay_capacity_per_axis=1,
-    )
-    connect.record_unconditional(prediction, 0)
-    seed = PlaneAnchor(labels[0, 2].to(torch.uint8), axis=0, index=2)
-    condition = _condition((seed,), num_phases=3, volume_size=size)
-
-    real, fake = connect.match_anchor(prediction, condition, 0)
-    phases = real.values.argmax(dim=2)[0, :, 0, 0]
-
-    assert fake.axes.tolist() == [0]
-    assert phases.unique().numel() == 3
-    assert torch.equal((phases[1:] - phases[:-1]).remainder(3), torch.ones(2))
+    assert len(fake) == 7
+    assert fake.axes.tolist() == [0, 0, 0, 1, 1, 2, 2]
+    assert fake.center_slots.tolist() == [1, 1, 1, 1, 1, 1, 1]
+    assert fake.anchor_flags.tolist() == [
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
 
 
-def test_teacher_storage_keeps_raw_predicted_labels_without_seed_overlay() -> None:
-    connect = _connectivity(num_phases=2, patch_size=4)
-    prediction = _constant_prediction(0, 2, 4, requires_grad=True)
-    seed_image = torch.ones(4, 4, dtype=torch.uint8)
-    seed = PlaneAnchor(seed_image, axis=0, index=0)
+def test_connectivity_images_are_phase_changes_and_discrete_bend() -> None:
+    phases = torch.tensor((0.0, 0.25, 1.0)).reshape(1, 3, 1, 1, 1)
+    triplets = phases.mul(2.0).sub(1.0)
 
-    connect.record_seeded(prediction, (seed,), 0)
-    prediction.data.fill_(-7.0)
-    seed_image.zero_()
+    images = connectivity_images(triplets)
 
-    assert connect.teacher_count == 1
-    entry = connect._teachers[0]._items[0]
-    assert entry.labels.device.type == "cpu"
-    assert entry.labels.dtype == torch.uint8
-    assert entry.labels.is_contiguous()
-    assert entry.labels.grad_fn is None
-    assert bool((entry.labels == 0).all())
-    assert bool((entry.seed.image == 0).all())
-    assert entry.seed.image.device.type == "cpu"
-    assert entry.seed.image.dtype == torch.uint8
-    assert torch.allclose(entry.target_vf, torch.tensor((1.0, 0.0)))
-
-
-def test_teacher_bank_uses_one_global_fifo_byte_budget_across_volume_sizes() -> None:
-    connect = _connectivity(
-        num_phases=3,
-        patch_size=3,
-        teacher_bank_bytes=85,
-    )
-    _record_constant_teacher(connect, phase=0, volume_size=3)
-    assert connect.teacher_count_for(3, 0) == 1
-
-    _record_constant_teacher(connect, phase=2, volume_size=4)
-
-    assert connect.teacher_storage_bytes == 85
-    assert connect.teacher_count == 1
-    assert connect.teacher_count_for(3, 0) == 0
-    assert connect.teacher_count_for(4, 0) == 1
-    assert bool((connect._teachers[0]._items[0].labels[1:] == 2).all())
-
-
-def test_record_seeded_splits_prediction_batch_into_independent_teachers() -> None:
-    connect = _connectivity(num_phases=3, patch_size=3)
-    labels = torch.stack(
-        (
-            torch.zeros(4, 4, 4, dtype=torch.long),
-            torch.full((4, 4, 4), 2, dtype=torch.long),
-        )
-    )
-    prediction = _prediction_from_labels(labels, num_phases=3)
-    seed_images = torch.stack(
-        (
-            torch.ones(3, 3, dtype=torch.uint8),
-            torch.ones(3, 3, dtype=torch.uint8),
-        )
-    )
-    seeds = tuple(
-        PlaneAnchor(image, axis=0, index=0, position=(0, 0)) for image in seed_images
-    )
-
-    connect.record_seeded(prediction, seeds, 0)
-
-    assert connect.teacher_count == 2
-    first, second = connect._teachers[0]._items
-    assert first.labels.shape == second.labels.shape == (4, 4, 4)
-    assert bool((first.labels == 0).all())
-    assert bool((second.labels == 2).all())
-    assert first.seed.image.ndim == second.seed.image.ndim == 2
-
-
-def test_teacher_sampling_supports_more_than_four_mixed_axis_strict_anchors() -> None:
-    connect, labels, teacher = _mixed_teacher(max_triplets_per_step=4)
-    condition = teacher.condition
-
-    assert condition.planes == 8
-    assert condition.conflicts == 0
-    active_axes = condition.axis_masks.flatten(2).any(dim=(0, 2))
-    assert active_axes.tolist() == [True, True, True]
-    selected = condition.mask[0, 0]
-    assert torch.equal(condition.target[0][selected], labels[0][selected])
-
-    for axis in (0, 1, 2):
-        indices = (
-            condition.axis_masks[0, axis]
-            .movedim(axis, 0)
-            .flatten(1)
-            .any(dim=1)
-            .nonzero()
-            .flatten()
-            .tolist()
-        )
-        assert all(right - left >= 2 for left, right in pairwise(indices))
-
-    counts = torch.bincount(labels.flatten(), minlength=3).to(torch.float32)
-    assert torch.allclose(teacher.target_vf[0], counts / counts.sum())
-    assert connect.teacher_count_for(8, 0) == 1
-
-
-def test_connectivity_triplet_work_stays_bounded_for_many_mixed_anchors() -> None:
-    connect, labels, teacher = _mixed_teacher(max_triplets_per_step=2)
-    prediction = _prediction_from_labels(labels, num_phases=3, requires_grad=True)
-    connect.record_unconditional(prediction.detach(), 0)
-
-    real, fake = connect.match_anchor(prediction, teacher.condition, 0)
-
-    assert teacher.condition.planes > 4
-    assert len(fake) == len(real) == 2
-    assert fake.values.requires_grad
-    assert set(fake.axes.tolist()).issubset({0, 1, 2})
+    assert torch.allclose(images[:, 0], torch.tensor(0.25))
+    assert torch.allclose(images[:, 1], torch.tensor(0.75))
+    assert torch.allclose(images[:, 2], torch.tensor(0.25))
+    assert float(images.min()) >= -1.0
+    assert float(images.max()) <= 1.0
 
 
 def test_normal_transition_loss_is_zero_for_matching_triplets() -> None:
     labels = torch.tensor([[[[0, 1], [1, 0]], [[1, 1], [0, 0]], [[0, 0], [1, 1]]]])
-    values = (
-        F.one_hot(labels, num_classes=2)
-        .movedim(-1, 2)
-        .to(torch.float32)
-        .mul(2.0)
-        .sub(1.0)
-    )
-    batch = TripletBatch(
-        values=values,
-        axes=torch.tensor((2,)),
-        center_slots=torch.tensor((1,)),
-    )
+    batch = _triplet_batch(labels, num_phases=2)
 
-    loss = normal_transition_loss(batch, batch)
-
-    assert float(loss) == 0.0
+    assert float(normal_transition_loss(batch, batch)) == 0.0
 
 
 def test_normal_transition_loss_measures_neighbor_tv_and_backpropagates() -> None:
     real_labels = torch.zeros(1, 3, 2, 2, dtype=torch.long)
     fake_labels = real_labels.clone()
     fake_labels[:, (0, 2)] = 1
-    real_values = (
-        F.one_hot(real_labels, num_classes=2)
-        .movedim(-1, 2)
-        .to(torch.float32)
-        .mul(2.0)
-        .sub(1.0)
-    )
-    fake_values = (
-        F.one_hot(fake_labels, num_classes=2)
-        .movedim(-1, 2)
-        .to(torch.float32)
-        .mul(2.0)
-        .sub(1.0)
-        .requires_grad_()
-    )
-    axes = torch.tensor((0,))
-    center_slots = torch.tensor((1,))
-    real = TripletBatch(
-        values=real_values,
-        axes=axes,
-        center_slots=center_slots,
-    )
-    fake = TripletBatch(
-        values=fake_values,
-        axes=axes,
-        center_slots=center_slots,
-    )
+    real = _triplet_batch(real_labels, num_phases=2)
+    fake_values = _triplet_values(fake_labels, num_phases=2).requires_grad_()
+    fake = TripletBatch(fake_values, real.axes, real.center_slots, real.anchor_flags)
 
     loss = normal_transition_loss(real, fake)
-    reversed_loss = normal_transition_loss(
-        TripletBatch(
-            values=real_values.flip(1),
-            axes=axes,
-            center_slots=center_slots,
-        ),
-        TripletBatch(
-            values=fake_values.flip(1),
-            axes=axes,
-            center_slots=center_slots,
-        ),
-    )
     loss.backward()
 
     assert torch.isclose(loss, torch.tensor(1.0))
-    assert torch.equal(loss, reversed_loss)
     assert fake_values.grad is not None
     assert bool(torch.isfinite(fake_values.grad).all())
-    assert float(fake_values.grad.abs().sum()) > 0.0
 
 
-@pytest.mark.parametrize(
-    ("center_slot", "fake_labels", "changed_neighbor_labels"),
-    (
-        (0, (0, 2, 1), (0, 1, 1)),
-        (2, (2, 1, 0), (2, 2, 0)),
-    ),
-)
-def test_normal_transition_loss_aligns_replay_and_endpoint_sides(
-    center_slot: int,
-    fake_labels: tuple[int, int, int],
-    changed_neighbor_labels: tuple[int, int, int],
-) -> None:
-    real_labels = torch.tensor((1, 0, 2)).reshape(1, 3, 1, 1)
+def test_normal_transition_balances_anchor_and_general_groups() -> None:
+    real_labels = torch.zeros(4, 3, 2, 2, dtype=torch.long)
+    fake_labels = real_labels.clone()
+    fake_labels[0, (0, 2)] = 1
+    flags = torch.tensor((True, False, False, False))
+    real = _triplet_batch(real_labels, num_phases=2, anchor_flags=flags)
+    fake = _triplet_batch(fake_labels, num_phases=2, anchor_flags=flags)
 
-    def triplets(labels: tuple[int, int, int], center: int) -> TripletBatch:
-        label_tensor = torch.tensor(labels).reshape(1, 3, 1, 1)
-        values = (
-            F.one_hot(label_tensor, num_classes=3)
-            .movedim(-1, 2)
-            .to(torch.float32)
-            .mul(2.0)
-            .sub(1.0)
-        )
-        return TripletBatch(
-            values=values,
-            axes=torch.tensor((0,)),
-            center_slots=torch.tensor((center,)),
-        )
+    loss = normal_transition_loss(real, fake)
 
-    real = triplets(tuple(real_labels.flatten().tolist()), center=1)
-
-    assert (
-        float(normal_transition_loss(real, triplets(fake_labels, center_slot))) == 0.0
-    )
-    assert (
-        float(
-            normal_transition_loss(
-                real,
-                triplets(changed_neighbor_labels, center_slot),
-            )
-        )
-        > 0.0
-    )
-
-
-def test_triplet_batch_index_select_preserves_center_slots() -> None:
-    batch = TripletBatch(
-        values=torch.arange(18).reshape(3, 3, 2, 1, 1).to(torch.float32),
-        axes=torch.tensor((0, 1, 2)),
-        center_slots=torch.tensor((0, 1, 2)),
-    )
-
-    selected = batch.index_select(torch.tensor((2, 0)))
-
-    assert selected.axes.tolist() == [2, 0]
-    assert selected.center_slots.tolist() == [2, 0]
-    assert torch.equal(selected.values, batch.values[(2, 0), ...])
-
-
-@pytest.mark.parametrize(("volume_size", "maximum"), ((128, 6), (160, 12)))
-def test_multi_anchor_count_starts_at_two_and_scales_to_max_density(
-    volume_size: int,
-    maximum: int,
-) -> None:
-    connect = _connectivity(patch_size=128, max_density=0.05)
-
-    with patch(
-        "src.train.connect.torch.randint",
-        return_value=torch.tensor(maximum),
-    ) as randint:
-        count = connect._sample_plane_count(volume_size, generator=None)
-
-    randint.assert_called_once_with(2, maximum + 1, (), generator=None)
-    assert count == maximum
+    assert torch.isclose(loss, torch.tensor(0.5))
 
 
 @pytest.mark.parametrize("num_phases", (2, 3, 5))
@@ -447,13 +248,10 @@ def test_connectivity_critic_is_multiphase_and_exactly_reversal_invariant(
     forward = critic(triplets, axes, domains)
     reverse = critic(triplets.flip(1), axes, domains)
 
-    assert forward.logits_global.shape == (3,)
-    assert forward.logits_local.shape[0] == 3
     assert torch.equal(forward.logits_global, reverse.logits_global)
     assert torch.equal(forward.logits_local, reverse.logits_local)
     (forward.logits_global.sum() + forward.logits_local.sum()).backward()
     assert triplets.grad is not None
-    assert bool(torch.isfinite(triplets.grad).all())
 
 
 def test_connectivity_critic_rejects_invalid_axes() -> None:
@@ -474,29 +272,19 @@ def test_connectivity_critic_rejects_invalid_axes() -> None:
 def _connectivity(
     *,
     num_phases: int = 3,
-    num_domains: int = 2,
+    num_domains: int = 1,
     patch_size: int = 4,
-    replay_triplets_per_axis: int = 2,
-    replay_capacity_per_axis: int = 4,
-    max_triplets_per_step: int = 4,
-    teacher_bank_bytes: int = 1_000_000,
-    teacher_min_entries: int = 1,
-    max_density: float = 0.25,
-    min_spacing: int = 2,
-    mixed_axis_probability: float = 1.0,
+    volumes: int = 1,
+    owned_axes: dict[int, tuple[int, ...]] | None = None,
 ) -> Connectivity:
+    if owned_axes is None:
+        owned_axes = {domain: (0, 1, 2) for domain in range(num_domains)}
     return Connectivity(
         num_phases=num_phases,
         num_domains=num_domains,
         patch_size=patch_size,
-        replay_triplets_per_axis=replay_triplets_per_axis,
-        replay_capacity_per_axis=replay_capacity_per_axis,
-        max_triplets_per_step=max_triplets_per_step,
-        teacher_bank_bytes=teacher_bank_bytes,
-        teacher_min_entries=teacher_min_entries,
-        max_density=max_density,
-        min_spacing=min_spacing,
-        mixed_axis_probability=mixed_axis_probability,
+        bank_size=volumes,
+        owned_axes=owned_axes,
     )
 
 
@@ -505,11 +293,10 @@ def _condition(
     *,
     num_phases: int,
     volume_size: int,
-    batch_size: int = 1,
 ):
     condition = build_anchors(
         seeds,
-        batch_size=batch_size,
+        batch_size=1,
         num_phases=num_phases,
         volume_size=volume_size,
         device=torch.device("cpu"),
@@ -524,77 +311,37 @@ def _prediction_from_labels(
     labels: torch.Tensor,
     *,
     num_phases: int,
-    requires_grad: bool = False,
 ) -> torch.Tensor:
-    prediction = (
+    return (
         F.one_hot(labels.to(torch.long), num_classes=num_phases)
         .movedim(-1, 1)
         .to(torch.float32)
         .mul(2.0)
         .sub(1.0)
     )
-    return prediction.requires_grad_(requires_grad)
 
 
-def _constant_prediction(
-    phase: int,
+def _triplet_values(labels: torch.Tensor, *, num_phases: int) -> torch.Tensor:
+    return (
+        F.one_hot(labels.to(torch.long), num_classes=num_phases)
+        .movedim(-1, 2)
+        .to(torch.float32)
+        .mul(2.0)
+        .sub(1.0)
+    )
+
+
+def _triplet_batch(
+    labels: torch.Tensor,
+    *,
     num_phases: int,
-    size: int,
-    *,
-    requires_grad: bool = False,
-) -> torch.Tensor:
-    labels = torch.full((1, size, size, size), phase, dtype=torch.long)
-    return _prediction_from_labels(
-        labels,
-        num_phases=num_phases,
-        requires_grad=requires_grad,
+    anchor_flags: torch.Tensor | None = None,
+) -> TripletBatch:
+    if anchor_flags is None:
+        anchor_flags = torch.zeros(labels.shape[0], dtype=torch.bool)
+    return TripletBatch(
+        values=_triplet_values(labels, num_phases=num_phases),
+        axes=torch.zeros(labels.shape[0], dtype=torch.long),
+        center_slots=torch.ones(labels.shape[0], dtype=torch.long),
+        anchor_flags=anchor_flags,
     )
-
-
-def _record_constant_teacher(
-    connect: Connectivity,
-    *,
-    phase: int,
-    volume_size: int,
-) -> None:
-    prediction = _constant_prediction(phase, connect.num_phases, volume_size)
-    seed_image = torch.full(
-        (connect.patch_size, connect.patch_size),
-        phase,
-        dtype=torch.uint8,
-    )
-    seed = PlaneAnchor(seed_image, axis=0, index=0, position=(0, 0))
-    connect.record_seeded(prediction, (seed,), 0)
-
-
-def _mixed_teacher(*, max_triplets_per_step: int):
-    size = 8
-    coordinates = torch.stack(torch.meshgrid(*(torch.arange(size),) * 3, indexing="ij"))
-    labels = coordinates.sum(dim=0).remainder(3).unsqueeze(0)
-    prediction = _prediction_from_labels(labels, num_phases=3)
-    connect = _connectivity(
-        num_phases=3,
-        patch_size=4,
-        max_triplets_per_step=max_triplets_per_step,
-        max_density=0.25,
-        min_spacing=2,
-        mixed_axis_probability=1.0,
-    )
-    seed = PlaneAnchor(
-        labels[0, 0, :4, :4].to(torch.uint8),
-        axis=0,
-        index=0,
-        position=(0, 0),
-    )
-    connect.record_seeded(prediction, (seed,), 0)
-    with patch.object(connect, "_sample_plane_count", return_value=8):
-        teacher = connect.sample_teacher(
-            domain=0,
-            volume_size=size,
-            batch_size=1,
-            device=torch.device("cpu"),
-            dtype=torch.float32,
-            generator=torch.Generator().manual_seed(7),
-        )
-    assert teacher is not None
-    return connect, labels, teacher

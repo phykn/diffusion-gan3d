@@ -125,10 +125,6 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
             anchors,
             anchor_strength,
             anchor_sigma,
-            anchor_residual_blur,
-            anchor_residual_blur_early,
-            anchor_coupling_release,
-            anchor_temporal_profile,
             guidance,
             domain,
             margin,
@@ -138,10 +134,6 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
                     anchors,
                     anchor_strength,
                     anchor_sigma,
-                    anchor_residual_blur,
-                    anchor_residual_blur_early,
-                    anchor_coupling_release,
-                    anchor_temporal_profile,
                     guidance,
                     domain,
                     margin,
@@ -185,9 +177,7 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
     module.main()
 
     output = capsys.readouterr().out
-    assert calls == [
-        ((), 0.0, 2.0, 0.0, 0.0, "off", "split", 1.75, 1, 8)
-    ]
+    assert calls == [((), 0.0, 2.0, 1.75, 1, 8)]
     assert "Anchors  : 0 planes" in output
     assert "Conditioning : none" in output
 
@@ -384,11 +374,6 @@ def _config(root: Path) -> dict:
             "start_step": 0,
             "ramp_steps": 0,
             "training_probability": 1.0,
-            "multi_anchor_prob": 0.5,
-            "max_density": 0.05,
-            "min_spacing": 2,
-            "mixed_axis_prob": 0.5,
-            "teacher_bank_size_mib": 1,
             "loss_weight": 1.0,
         },
         "conditioning": {
@@ -400,9 +385,8 @@ def _config(root: Path) -> dict:
         "connectivity": {
             "loss_weight": 0.0,
             "normal_transition_loss_weight": 0.0,
-            "replay_triplets_per_axis": 1,
-            "replay_capacity_per_axis": 2,
-            "max_triplets_per_step": 1,
+            "bank_size": 1,
+            "refresh": 500,
             "reversal_invariant": True,
         },
         "vf": {

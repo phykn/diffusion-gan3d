@@ -1,3 +1,4 @@
+import copy
 import math
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -15,35 +16,13 @@ from ..model.denoiser import Denoiser3D
 from ..model.domain import NULL_DOMAIN
 from .anchor_loss import soft_anchor_loss
 from .augment import CriticAugment
-from .connect import (
-    TEACHER_MIN_ENTRIES,
-    Connectivity,
-    TripletBatch,
-    normal_transition_loss,
-)
+from .connect import Connectivity, TripletBatch, normal_transition_loss
 from .ema import update_ema
 from .loss import (
     get_critic_loss,
     get_critic_r1,
     get_generator_loss,
 )
-from .relation import RelationBank, RelationLoss
-
-
-def _float_matrix(values: torch.Tensor) -> tuple[tuple[float, ...], ...]:
-    return tuple(
-        tuple(float(value) for value in row)
-        for row in values.detach().to(device="cpu").tolist()
-    )
-
-
-def _float_tensor3(
-    values: torch.Tensor,
-) -> tuple[tuple[tuple[float, ...], ...], ...]:
-    return tuple(
-        tuple(tuple(float(value) for value in cell) for cell in row)
-        for row in values.detach().to(device="cpu").tolist()
-    )
 
 
 @dataclass(frozen=True)
@@ -65,10 +44,10 @@ class Metrics:
     connectivity_r1: float
     anchor_ramp: float
     connectivity_triplets: int
-    connectivity_replay: int
-    anchor_teacher: bool
-    teacher_volumes: int
-    teacher_mebibytes: float
+    prior_volumes: int
+    prior_mebibytes: float
+    prior_ready: bool
+    prior_updates: int = 0
     generator_global: float = 0.0
     generator_local: float = 0.0
     critic_global: float = 0.0
@@ -92,34 +71,6 @@ class Metrics:
     normal_transition_loss: float = 0.0
     anchor_coarse_loss: float = 0.0
     anchor_pixel_loss: float = 0.0
-    relation_loss: float = 0.0
-    relation_weighted_loss: float = 0.0
-    relation_time_weight: float = 0.0
-    relation_phase_loss: float = 0.0
-    relation_support_loss: float = 0.0
-    relation_minus_loss: float = 0.0
-    relation_plus_loss: float = 0.0
-    relation_queries: int = 0
-    relation_matches: int = 0
-    relation_domain_matches: int = 0
-    relation_shared_matches: int = 0
-    relation_ood_rejections: int = 0
-    relation_missing_references: int = 0
-    relation_distance_weights: tuple[float, ...] = ()
-    relation_phase_distance_weights: tuple[tuple[float, ...], ...] = ()
-    relation_support_distance_weights: tuple[tuple[float, ...], ...] = ()
-    relation_correlation_strength: tuple[tuple[float, ...], ...] = ()
-    relation_uncertainty: tuple[tuple[float, ...], ...] = ()
-    relation_displacement_quantiles: tuple[tuple[tuple[float, ...], ...], ...] = ()
-    relation_dilation_radii: tuple[tuple[float, ...], ...] = ()
-    relation_valid_ratio_by_phase: tuple[float, ...] = ()
-    relation_matched_reference_counts: tuple[tuple[float, ...], ...] = ()
-    relation_support_forward_loss: float = 0.0
-    relation_support_backward_loss: float = 0.0
-    relation_long_range_loss: float = 0.0
-    relation_bank_entries: int = 0
-    relation_ready_buckets: int = 0
-    relation_prior_ready: bool = False
     anchor_shared: bool = False
 
 
@@ -135,38 +86,13 @@ class DenoiserUpdate:
     anchor_coarse: float
     anchor_pixel: float
     anchor_accuracy: float
-    relation: float
-    relation_weighted: float
-    relation_time_weight: float
-    relation_phase: float
-    relation_support: float
-    relation_minus: float
-    relation_plus: float
-    relation_queries: int
-    relation_matches: int
-    relation_domain_matches: int
-    relation_shared_matches: int
-    relation_ood_rejections: int
-    relation_missing_references: int
-    relation_distance_weights: tuple[float, ...]
-    relation_phase_distance_weights: tuple[tuple[float, ...], ...]
-    relation_support_distance_weights: tuple[tuple[float, ...], ...]
-    relation_correlation_strength: tuple[tuple[float, ...], ...]
-    relation_uncertainty: tuple[tuple[float, ...], ...]
-    relation_displacement_quantiles: tuple[tuple[tuple[float, ...], ...], ...]
-    relation_dilation_radii: tuple[tuple[float, ...], ...]
-    relation_valid_ratio_by_phase: tuple[float, ...]
-    relation_matched_reference_counts: tuple[tuple[float, ...], ...]
-    relation_support_forward: float
-    relation_support_backward: float
-    relation_long_range: float
     vf: float
 
 
 @dataclass(frozen=True)
 class DenoiserBatch:
     transition: int
-    model_domain: int
+    connectivity_domains: torch.Tensor
     critic_domains: dict[int, int]
     fake: dict[int, tuple[torch.Tensor, torch.Tensor]]
     connectivity_real: TripletBatch
@@ -199,7 +125,7 @@ class StepPreparation:
 @dataclass(frozen=True)
 class AnchorSelection:
     condition: AnchorCondition
-    source: Literal["real", "shared", "teacher"]
+    source: Literal["real", "shared"]
     seeds: tuple[PlaneAnchor, ...] = ()
     target_vf: torch.Tensor | None = None
 
@@ -275,17 +201,11 @@ class TrainerSettings:
     anchor_training_probability: float
     anchor_start_step: int
     anchor_ramp_steps: int
-    anchor_multi_probability: float
-    anchor_max_density: float
-    anchor_min_spacing: int
-    anchor_mixed_axis_probability: float
-    anchor_teacher_bank_mebibytes: float
     anchor_loss_weight: float
     connectivity_weight: float
     normal_transition_weight: float
-    connectivity_replay_triplets_per_axis: int
-    connectivity_replay_capacity_per_axis: int
-    connectivity_max_triplets_per_step: int
+    connectivity_bank_size: int
+    connectivity_refresh_steps: int
     vf_loss_weight: float
     cfg_drop_each_probability: float
     cfg_single_drop_probability: float
@@ -295,21 +215,8 @@ class TrainerSettings:
     anchor_pool_size: int = 4
     anchor_coarse_loss_weight: float = 0.0
     anchor_pixel_loss_weight: float = 1.0
-    relation_loss_weight: float = 0.0
-    relation_bank_capacity_per_axis: int = 64
-    relation_profiles_per_axis: int = 4
-    relation_neighbors: int = 8
-    relation_quantile_low: float = 0.10
-    relation_quantile_high: float = 0.90
-    relation_start_step: int | None = None
     anchor_shared_axis_probability: float = 0.0
-    relation_support_max_radius: int = 2
-    relation_phase_weight: float = 0.75
-    relation_support_weight: float = 0.25
-    relation_direction_reduction: Literal["mean", "max"] = "mean"
-    relation_min_support_pixels: int = 8
-    relation_min_phase_fraction: float = 0.001
-    relation_min_chance_gap: float = 0.02
+    vf_target_average_max_samples: int = 1
 
     def __post_init__(self) -> None:
         self._validate_positive_integers()
@@ -321,13 +228,6 @@ class TrainerSettings:
                 "probability at most one."
             )
         if (
-            not isinstance(self.anchor_teacher_bank_mebibytes, (int, float))
-            or isinstance(self.anchor_teacher_bank_mebibytes, bool)
-            or not math.isfinite(self.anchor_teacher_bank_mebibytes)
-            or self.anchor_teacher_bank_mebibytes <= 0.0
-        ):
-            raise ValueError("anchor_teacher_bank_mebibytes must be positive.")
-        if (
             not isinstance(self.ema_decay, (int, float))
             or isinstance(self.ema_decay, bool)
             or not math.isfinite(self.ema_decay)
@@ -337,37 +237,6 @@ class TrainerSettings:
         self._validate_non_negative_values()
         if not isinstance(self.amp_enabled, bool):
             raise TypeError("amp_enabled must be a boolean.")
-        if self.relation_start_step is not None and (
-            not isinstance(self.relation_start_step, int)
-            or isinstance(self.relation_start_step, bool)
-            or self.relation_start_step < 0
-        ):
-            raise ValueError("relation_start_step must be a non-negative integer.")
-        if self.relation_quantile_low >= self.relation_quantile_high:
-            raise ValueError("relation quantiles must be strictly increasing.")
-        if self.relation_neighbors < 2:
-            raise ValueError("relation neighbors must be at least two.")
-        if self.relation_neighbors > self.relation_bank_capacity_per_axis:
-            raise ValueError("relation neighbors must not exceed bank capacity.")
-        if (
-            self.relation_loss_weight > 0.0
-            and self.anchor_training_probability > 0.0
-            and self.relation_start_step is not None
-            and self.relation_start_step > self.anchor_start_step
-        ):
-            raise ValueError(
-                "relation_start_step must not follow anchor_start_step when "
-                "relation learning is enabled."
-            )
-        if self.relation_phase_weight + self.relation_support_weight <= 0.0:
-            raise ValueError("at least one relation component weight must be positive.")
-        if self.relation_direction_reduction not in ("mean", "max"):
-            raise ValueError("relation_direction_reduction must be 'mean' or 'max'.")
-        if (
-            self.relation_min_phase_fraction == 0.0
-            or self.relation_min_chance_gap == 0.0
-        ):
-            raise ValueError("relation numerical guard fractions must be positive.")
 
     def validate_denoiser(self, denoiser: Denoiser3D) -> None:
         downsample_factor = getattr(denoiser, "downsample_factor", None)
@@ -389,22 +258,10 @@ class TrainerSettings:
             "patch_size": self.patch_size,
             "slice_pairs_per_axis": self.slice_pairs_per_axis,
             "r1_interval": self.r1_interval,
-            "connectivity_replay_triplets_per_axis": (
-                self.connectivity_replay_triplets_per_axis
-            ),
-            "connectivity_replay_capacity_per_axis": (
-                self.connectivity_replay_capacity_per_axis
-            ),
-            "connectivity_max_triplets_per_step": (
-                self.connectivity_max_triplets_per_step
-            ),
-            "anchor_min_spacing": self.anchor_min_spacing,
             "latent_channels": self.latent_channels,
             "anchor_pool_size": self.anchor_pool_size,
-            "relation_bank_capacity_per_axis": (self.relation_bank_capacity_per_axis),
-            "relation_profiles_per_axis": self.relation_profiles_per_axis,
-            "relation_neighbors": self.relation_neighbors,
-            "relation_min_support_pixels": self.relation_min_support_pixels,
+            "vf_target_average_max_samples": self.vf_target_average_max_samples,
+            "connectivity_bank_size": self.connectivity_bank_size,
         }
         for name, value in values.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -414,7 +271,7 @@ class TrainerSettings:
         values = {
             "anchor_start_step": self.anchor_start_step,
             "anchor_ramp_steps": self.anchor_ramp_steps,
-            "relation_support_max_radius": self.relation_support_max_radius,
+            "connectivity_refresh_steps": self.connectivity_refresh_steps,
         }
         for name, value in values.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -425,14 +282,8 @@ class TrainerSettings:
             "anchor_training_probability": self.anchor_training_probability,
             "cfg_drop_each_probability": self.cfg_drop_each_probability,
             "cfg_single_drop_probability": self.cfg_single_drop_probability,
-            "anchor_multi_probability": self.anchor_multi_probability,
-            "anchor_mixed_axis_probability": self.anchor_mixed_axis_probability,
             "domain_dropout": self.domain_dropout,
-            "relation_quantile_low": self.relation_quantile_low,
-            "relation_quantile_high": self.relation_quantile_high,
             "anchor_shared_axis_probability": (self.anchor_shared_axis_probability),
-            "relation_min_phase_fraction": self.relation_min_phase_fraction,
-            "relation_min_chance_gap": self.relation_min_chance_gap,
         }
         for name, value in values.items():
             if (
@@ -450,9 +301,6 @@ class TrainerSettings:
             "anchor_loss_weight": self.anchor_loss_weight,
             "anchor_coarse_loss_weight": self.anchor_coarse_loss_weight,
             "anchor_pixel_loss_weight": self.anchor_pixel_loss_weight,
-            "relation_loss_weight": self.relation_loss_weight,
-            "relation_phase_weight": self.relation_phase_weight,
-            "relation_support_weight": self.relation_support_weight,
             "connectivity_weight": self.connectivity_weight,
             "normal_transition_weight": self.normal_transition_weight,
             "vf_loss_weight": self.vf_loss_weight,
@@ -504,13 +352,7 @@ class Trainer:
         self.anchor_training_probability = float(settings.anchor_training_probability)
         self.anchor_start_step = settings.anchor_start_step
         self.anchor_ramp_steps = settings.anchor_ramp_steps
-        self.anchor_effective_start_step: int | None = (
-            settings.anchor_start_step if settings.relation_loss_weight <= 0.0 else None
-        )
-        self.anchor_multi_start_step = (
-            settings.anchor_start_step + settings.anchor_ramp_steps
-        )
-        self.anchor_multi_probability = float(settings.anchor_multi_probability)
+        self.anchor_effective_start_step: int | None = None
         self.anchor_shared_axis_probability = float(
             settings.anchor_shared_axis_probability
         )
@@ -520,48 +362,26 @@ class Trainer:
         self.anchor_pixel_loss_weight = settings.anchor_pixel_loss_weight
         self.connectivity_weight = settings.connectivity_weight
         self.normal_transition_weight = settings.normal_transition_weight
-        self.connect = Connectivity(
-            num_phases=settings.num_phases,
-            # The extra replay/teacher bank stores domain-dropped predictions.
-            num_domains=self.num_domains + 1,
-            patch_size=settings.patch_size,
-            replay_triplets_per_axis=settings.connectivity_replay_triplets_per_axis,
-            replay_capacity_per_axis=settings.connectivity_replay_capacity_per_axis,
-            max_triplets_per_step=settings.connectivity_max_triplets_per_step,
-            teacher_bank_bytes=round(settings.anchor_teacher_bank_mebibytes * 1024**2),
-            teacher_min_entries=TEACHER_MIN_ENTRIES,
-            max_density=settings.anchor_max_density,
-            min_spacing=settings.anchor_min_spacing,
-            mixed_axis_probability=settings.anchor_mixed_axis_probability,
+        self.prior_required = self.anchor_training_probability > 0.0 and (
+            self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
         )
-        self.relation_loss_weight = settings.relation_loss_weight
-        self.relation_start_step = (
-            self.anchor_start_step
-            if settings.relation_start_step is None
-            else settings.relation_start_step
-        )
-        self.relation_owned_axes = {
+        owned_axes = {
             domain: tuple(streams) for domain, streams in self.streams.items()
         }
-        self.relation_prior_snapshot_active = False
-        self.relation = RelationBank(
+        self.connect = Connectivity(
+            num_phases=settings.num_phases,
             num_domains=self.num_domains,
-            num_phases=self.num_phases,
-            axes=self.active_axes,
-            capacity_per_axis=settings.relation_bank_capacity_per_axis,
-            profiles_per_axis=settings.relation_profiles_per_axis,
-            neighbors=settings.relation_neighbors,
-            quantile_low=settings.relation_quantile_low,
-            quantile_high=settings.relation_quantile_high,
-            support_max_radius=settings.relation_support_max_radius,
-            phase_weight=settings.relation_phase_weight,
-            support_weight=settings.relation_support_weight,
-            direction_reduction=settings.relation_direction_reduction,
-            min_support_pixels=settings.relation_min_support_pixels,
-            min_phase_fraction=settings.relation_min_phase_fraction,
-            min_chance_gap=settings.relation_min_chance_gap,
+            patch_size=settings.patch_size,
+            bank_size=settings.connectivity_bank_size,
+            owned_axes=owned_axes,
         )
+        self.prior_refresh_steps = settings.connectivity_refresh_steps
+        self.prior_denoiser: Denoiser3D | None = None
+        self.last_prior_refresh_steps: list[int | None] = [
+            None for _ in range(self.num_domains)
+        ]
         self.vf_loss_weight = settings.vf_loss_weight
+        self.vf_target_average_max_samples = settings.vf_target_average_max_samples
         self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
         self.cfg_single_drop_probability = float(settings.cfg_single_drop_probability)
         self.domain_dropout = float(settings.domain_dropout)
@@ -590,7 +410,7 @@ class Trainer:
         target_vf = prepared.target_vf
         presence = prepared.presence
         ramp = prepared.anchor_ramp
-        self.record_relation_reference(
+        self.record_prior_reference(
             step=step,
             prepared=prepared,
         )
@@ -627,8 +447,12 @@ class Trainer:
             prediction,
             anchor,
             transition,
-            self.replay_domain(prepared.model_domain),
+            prepared.domain,
             presence.anchor,
+        )
+        connectivity_domains = self.get_connectivity_domains(
+            prepared.critic_domains,
+            connectivity_fake,
         )
 
         (
@@ -648,14 +472,14 @@ class Trainer:
                 connectivity_real.values,
                 connectivity_fake,
                 step,
-                prepared.model_domain,
+                connectivity_domains,
             )
         else:
             critic_connectivity, connectivity_r1 = 0.0, 0.0
         denoiser_update = self.update_denoiser(
             DenoiserBatch(
                 transition=transition,
-                model_domain=prepared.model_domain,
+                connectivity_domains=connectivity_domains,
                 critic_domains=critic_domains,
                 fake=fake,
                 connectivity_real=connectivity_real,
@@ -680,7 +504,6 @@ class Trainer:
             connectivity_r1=connectivity_r1,
             connectivity_fake=connectivity_fake,
             clean_probs=clean_probs,
-            prediction=prediction,
         )
 
     def prepare_step(
@@ -710,14 +533,6 @@ class Trainer:
             model_domain,
             batch_domains,
         )
-        if self.relation_loss_weight > 0.0:
-            for axis, images in batches.items():
-                self.relation.observe_shape(
-                    axis=axis,
-                    height=min(self.patch_size, images.shape[-2]),
-                    width=min(self.patch_size, images.shape[-1]),
-                    volume_size=self.patch_size,
-                )
         vf_pool = self.get_vf_pool(own_batches)
         ramp = self.get_anchor_ramp(step)
         selection = (
@@ -726,8 +541,6 @@ class Trainer:
             else self.sample_anchor(
                 batches,
                 self.patch_size,
-                step,
-                self.replay_domain(model_domain),
                 owned_axes=tuple(own_batches),
             )
         )
@@ -784,7 +597,6 @@ class Trainer:
         connectivity_r1: float,
         connectivity_fake: TripletBatch,
         clean_probs: torch.Tensor,
-        prediction: torch.Tensor,
     ) -> Metrics:
         target_values, soft_values, hard_values, hard_mae = self.summarize_vfs(
             clean_probs,
@@ -792,15 +604,7 @@ class Trainer:
             prepared.presence.vf,
         )
         target_stds = self.update_target_stats(prepared.target_vf)
-        self.record_connectivity_prediction(
-            prediction,
-            prepared.selection,
-            prepared.transition,
-            self.replay_domain(prepared.model_domain),
-            prepared.presence.anchor,
-        )
-        if not self.relation_prior_snapshot_active:
-            update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
+        update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
         anchor = prepared.anchor
         presence = prepared.presence
         return Metrics(
@@ -821,14 +625,10 @@ class Trainer:
             connectivity_r1=connectivity_r1,
             anchor_ramp=prepared.anchor_ramp,
             connectivity_triplets=len(connectivity_fake),
-            connectivity_replay=self.connect.replay_size,
-            anchor_teacher=(
-                prepared.selection is not None
-                and prepared.selection.source == "teacher"
-                and bool(presence.anchor.any())
-            ),
-            teacher_volumes=self.connect.teacher_count,
-            teacher_mebibytes=self.connect.teacher_storage_bytes / 1024**2,
+            prior_volumes=self.connect.prior_count,
+            prior_mebibytes=self.connect.prior_storage_bytes / 1024**2,
+            prior_ready=not self.prior_required or self.connect.prior_ready,
+            prior_updates=self.connect.prior_updates,
             generator_global=denoiser_update.global_loss,
             generator_local=denoiser_update.local_loss,
             critic_global=critic_global,
@@ -849,46 +649,6 @@ class Trainer:
             normal_transition_loss=denoiser_update.normal_transition,
             anchor_coarse_loss=denoiser_update.anchor_coarse,
             anchor_pixel_loss=denoiser_update.anchor_pixel,
-            relation_loss=denoiser_update.relation,
-            relation_weighted_loss=denoiser_update.relation_weighted,
-            relation_time_weight=denoiser_update.relation_time_weight,
-            relation_phase_loss=denoiser_update.relation_phase,
-            relation_support_loss=denoiser_update.relation_support,
-            relation_minus_loss=denoiser_update.relation_minus,
-            relation_plus_loss=denoiser_update.relation_plus,
-            relation_queries=denoiser_update.relation_queries,
-            relation_matches=denoiser_update.relation_matches,
-            relation_domain_matches=denoiser_update.relation_domain_matches,
-            relation_shared_matches=denoiser_update.relation_shared_matches,
-            relation_ood_rejections=denoiser_update.relation_ood_rejections,
-            relation_missing_references=(denoiser_update.relation_missing_references),
-            relation_distance_weights=(denoiser_update.relation_distance_weights),
-            relation_phase_distance_weights=(
-                denoiser_update.relation_phase_distance_weights
-            ),
-            relation_support_distance_weights=(
-                denoiser_update.relation_support_distance_weights
-            ),
-            relation_correlation_strength=(
-                denoiser_update.relation_correlation_strength
-            ),
-            relation_uncertainty=denoiser_update.relation_uncertainty,
-            relation_displacement_quantiles=(
-                denoiser_update.relation_displacement_quantiles
-            ),
-            relation_dilation_radii=denoiser_update.relation_dilation_radii,
-            relation_valid_ratio_by_phase=(
-                denoiser_update.relation_valid_ratio_by_phase
-            ),
-            relation_matched_reference_counts=(
-                denoiser_update.relation_matched_reference_counts
-            ),
-            relation_support_forward_loss=(denoiser_update.relation_support_forward),
-            relation_support_backward_loss=(denoiser_update.relation_support_backward),
-            relation_long_range_loss=denoiser_update.relation_long_range,
-            relation_bank_entries=self.relation.entry_count,
-            relation_ready_buckets=self.relation.ready_bucket_count,
-            relation_prior_ready=self.relation_prior_ready(),
             anchor_shared=(
                 prepared.selection is not None
                 and prepared.selection.source == "shared"
@@ -920,6 +680,7 @@ class Trainer:
             ),
             axes=torch.empty(0, device=self.device, dtype=torch.long),
             center_slots=torch.empty(0, device=self.device, dtype=torch.long),
+            anchor_flags=torch.empty(0, device=self.device, dtype=torch.bool),
         )
         enabled = self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
         if not enabled or transition != 0 or anchor is None:
@@ -937,53 +698,26 @@ class Trainer:
                 values=real_values,
                 axes=real.axes,
                 center_slots=real.center_slots,
+                anchor_flags=real.anchor_flags,
             ),
             TripletBatch(
                 values=fake_values,
                 axes=fake.axes,
                 center_slots=fake.center_slots,
+                anchor_flags=fake.anchor_flags,
             ),
         )
 
-    def record_connectivity_prediction(
-        self,
-        prediction: torch.Tensor,
-        selection: AnchorSelection | None,
-        transition: int,
-        domain: int,
-        visible: torch.Tensor | None = None,
-    ) -> None:
-        if transition != 0:
-            return
-        if selection is None:
-            if self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0:
-                self.connect.record_unconditional(prediction, domain)
-            return
-        if visible is None:
-            visible = torch.ones(
-                prediction.shape[0],
-                device=prediction.device,
-                dtype=torch.bool,
-            )
-        if visible.shape != (prediction.shape[0],) or visible.dtype != torch.bool:
-            raise ValueError("anchor visibility must be boolean with shape [B].")
-        hidden = ~visible
-        if bool(hidden.any()) and (
-            self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
-        ):
-            self.connect.record_unconditional(prediction[hidden], domain)
-        if (
-            selection.source == "real"
-            and self.anchor_multi_probability > 0.0
-            and bool(visible.any())
-        ):
-            indices = visible.nonzero().flatten()
-            seeds = tuple(selection.seeds[index] for index in indices.tolist())
-            self.connect.record_seeded(
-                prediction.index_select(0, indices),
-                seeds,
-                domain,
-            )
+    @staticmethod
+    def get_connectivity_domains(
+        critic_domains: dict[int, int],
+        triplets: TripletBatch,
+    ) -> torch.Tensor:
+        return torch.tensor(
+            [critic_domains[axis] for axis in triplets.axes.tolist()],
+            device=triplets.values.device,
+            dtype=torch.long,
+        )
 
     @staticmethod
     def visible_anchor(
@@ -1064,9 +798,6 @@ class Trainer:
             axis: domain if source_domain == domain else NULL_DOMAIN
             for axis, source_domain in batch_domains.items()
         }
-
-    def replay_domain(self, model_domain: int) -> int:
-        return self.num_domains if model_domain == NULL_DOMAIN else model_domain
 
     def make_domain(self, domain: int, batch_size: int) -> torch.Tensor:
         return torch.full(
@@ -1187,10 +918,31 @@ class Trainer:
         ):
             raise ValueError("VF pool must have shape [N, num_phases].")
         pool = pool.to(device=self.device, dtype=torch.float32)
+        max_samples = min(self.vf_target_average_max_samples, pool.shape[0])
+        sample_counts = (
+            torch.ones(
+                self.volume_batch_size,
+                device=self.device,
+                dtype=torch.long,
+            )
+            if max_samples == 1
+            else torch.randint(
+                1,
+                max_samples + 1,
+                (self.volume_batch_size,),
+                device=self.device,
+            )
+        )
         indices = torch.randint(
             pool.shape[0],
-            (self.volume_batch_size,),
+            (self.volume_batch_size, max_samples),
             device=self.device,
+        )
+        active = (
+            torch.arange(max_samples, device=self.device)[None] < sample_counts[:, None]
+        )
+        target = (
+            (pool[indices] * active[..., None]).sum(dim=1).div_(sample_counts[:, None])
         )
         resampled = 0
         if anchor is not None:
@@ -1204,11 +956,15 @@ class Trainer:
                         "anchor phase minima are incompatible with every empirical "
                         "VF target."
                     )
-                if not bool((pool[indices[batch]] + 1e-7 >= minimum).all()):
-                    choice = int(torch.randint(len(valid), (), device=self.device))
-                    indices[batch] = valid[choice]
+                if not bool((target[batch] + 1e-7 >= minimum).all()):
+                    choices = torch.randint(
+                        len(valid),
+                        (int(sample_counts[batch]),),
+                        device=self.device,
+                    )
+                    target[batch] = pool[valid.index_select(0, choices)].mean(dim=0)
                     resampled += 1
-        target = self.validate_target_vf(pool.index_select(0, indices))
+        target = self.validate_target_vf(target)
         return target, resampled / self.volume_batch_size
 
     def anchor_has_compatible_vf(
@@ -1283,11 +1039,10 @@ class Trainer:
     def get_anchor_ramp(self, step: int) -> float:
         if step < self.anchor_start_step:
             return 0.0
-        if not self.relation_prior_ready():
+        if self.prior_required and not self.connect.prior_ready:
             return 0.0
         if self.anchor_effective_start_step is None:
             self.anchor_effective_start_step = step
-            self.anchor_multi_start_step = step + self.anchor_ramp_steps
         start_step = self.anchor_effective_start_step
         if self.anchor_ramp_steps == 0:
             return 1.0
@@ -1296,17 +1051,10 @@ class Trainer:
             1.0,
         )
 
-    def relation_prior_ready(self) -> bool:
-        return self.relation_loss_weight <= 0.0 or self.relation.prior_ready(
-            self.relation_owned_axes
-        )
-
     def sample_anchor(
         self,
         batches: dict[int, torch.Tensor],
         volume_size: int,
-        step: int,
-        domain: int,
         *,
         owned_axes: tuple[int, ...] | None = None,
     ) -> AnchorSelection | None:
@@ -1315,24 +1063,6 @@ class Trainer:
             return None
         if probability < 1.0 and not bool(torch.rand(()) < probability):
             return None
-        if (
-            step >= self.anchor_multi_start_step
-            and self.anchor_multi_probability > 0.0
-            and bool(torch.rand(()) < self.anchor_multi_probability)
-        ):
-            teacher = self.connect.sample_teacher(
-                domain=domain,
-                volume_size=volume_size,
-                batch_size=self.volume_batch_size,
-                device=self.device,
-                dtype=torch.float32,
-            )
-            if teacher is not None:
-                return AnchorSelection(
-                    condition=teacher.condition,
-                    source="teacher",
-                    target_vf=teacher.target_vf,
-                )
         return self.sample_real_anchor(
             batches,
             volume_size,
@@ -1411,64 +1141,73 @@ class Trainer:
         )
 
     @torch.no_grad()
-    def record_relation_reference(
+    def record_prior_reference(
         self,
         *,
         step: int,
         prepared: StepPreparation,
     ) -> None:
-        owned_axes = self.relation_owned_axes[prepared.domain]
-        if self.relation_loss_weight <= 0.0:
-            self.relation_prior_snapshot_active = False
+        if not self.prior_required or step < self.anchor_start_step:
             return
-        if step < self.relation_start_step or self.relation_prior_ready():
-            return
-        # Keep one EMA snapshot fixed until every owned domain/axis bucket is
-        # complete. This avoids a moving relation target without a second model.
-        self.relation_prior_snapshot_active = True
-        if not self.relation.needs_data(
-            condition_domain=prepared.domain,
-            source_domain=prepared.domain,
-            owned_axes=owned_axes,
-        ):
-            return
+
+        initial = not self.connect.prior_ready
+        if initial and self.prior_denoiser is None:
+            self.prior_denoiser = copy.deepcopy(self.ema_denoiser)
+            self.prior_denoiser.eval().requires_grad_(False)
+        if initial:
+            if not self.connect.needs_prior(prepared.domain):
+                return
+            denoiser = self.prior_denoiser
+            batch_size = self.volume_batch_size
+        else:
+            if self.prior_refresh_steps == 0:
+                return
+            last_refresh = self.last_prior_refresh_steps[prepared.domain]
+            if last_refresh is None:
+                self.last_prior_refresh_steps[prepared.domain] = step
+                return
+            if step - last_refresh < self.prior_refresh_steps:
+                return
+            denoiser = self.ema_denoiser
+            batch_size = 1
+        assert denoiser is not None
         conditions = {
-            name: values
+            name: values[:batch_size]
             for name, values in prepared.model_conditions.items()
             if name not in ("anchor_image", "anchor_mask")
         }
         conditions["domain"] = self.make_domain(
             prepared.domain,
-            self.volume_batch_size,
+            batch_size,
         )
-        conditions["vf"] = torch.zeros_like(prepared.target_vf)
-        conditions["vf_present"] = torch.zeros_like(prepared.presence.vf)
+        conditions["vf"] = torch.zeros_like(prepared.target_vf[:batch_size])
+        conditions["vf_present"] = torch.zeros_like(prepared.presence.vf[:batch_size])
         devices = [self.device] if self.device.type == "cuda" else []
         with torch.random.fork_rng(devices=devices):
             shape = (
-                self.volume_batch_size,
+                batch_size,
                 self.num_phases,
                 self.patch_size,
                 self.patch_size,
                 self.patch_size,
             )
-            initial = torch.randn(shape, device=self.device, dtype=torch.float32)
+            noise = torch.randn(shape, device=self.device, dtype=torch.float32)
             with self.autocast():
                 prediction = self.diffusion.sample(
-                    self.ema_denoiser,
-                    initial,
+                    denoiser,
+                    noise,
                     self.latent_channels,
                     conditions,
                 )
-            probs = (prediction.float() + 1.0) * 0.5
-            self.relation.add(
-                probs,
-                condition_domain=prepared.domain,
-                source_domain=prepared.domain,
-                owned_axes=owned_axes,
-            )
-        if self.relation_prior_ready():
-            self.relation_prior_snapshot_active = False
+            if initial:
+                self.connect.record_prior(prediction, prepared.domain)
+                if not self.connect.needs_prior(prepared.domain):
+                    self.last_prior_refresh_steps[prepared.domain] = step
+            else:
+                self.connect.refresh_prior(prediction, prepared.domain)
+                self.last_prior_refresh_steps[prepared.domain] = step
+        if initial and self.connect.prior_ready:
+            self.prior_denoiser = None
 
     def generate_pair(
         self,
@@ -1654,7 +1393,7 @@ class Trainer:
         real: torch.Tensor,
         fake: TripletBatch,
         step: int,
-        domain: int,
+        domains: torch.Tensor,
     ) -> tuple[float, float]:
         if not len(fake):
             return 0.0, 0.0
@@ -1665,12 +1404,17 @@ class Trainer:
         self.connectivity_optim.zero_grad(set_to_none=True)
         real = real.detach().float().requires_grad_(apply_r1)
         fake_values = fake.values.detach().float()
-        domains = self.make_domain(domain, len(fake))
+        if domains.shape != (len(fake),):
+            raise ValueError("connectivity domains must have shape [B].")
         autocast = self.autocast(self.amp_enabled and not apply_r1)
         with autocast:
             real_score = self.connectivity_critic(real, fake.axes, domains)
             fake_score = self.connectivity_critic(fake_values, fake.axes, domains)
-            losses = get_critic_loss(real_score, fake_score)
+            losses = get_critic_loss(
+                real_score,
+                fake_score,
+                fake.anchor_flags,
+            )
             loss = losses.combine(self.critic_local_weight)
         adversarial = float(loss.detach())
         r1_value = 0.0
@@ -1718,12 +1462,12 @@ class Trainer:
                     connectivity_scores = self.connectivity_critic(
                         batch.connectivity_fake.values,
                         batch.connectivity_fake.axes,
-                        self.make_domain(
-                            batch.model_domain,
-                            len(batch.connectivity_fake),
-                        ),
+                        batch.connectivity_domains,
                     )
-                    connectivity_head = get_generator_loss(connectivity_scores)
+                    connectivity_head = get_generator_loss(
+                        connectivity_scores,
+                        batch.connectivity_fake.anchor_flags,
+                    )
                     connectivity_loss = connectivity_head.combine(local_weight)
                 normal_loss = adversarial_loss.new_zeros(())
                 if len(batch.connectivity_fake) and self.normal_transition_weight > 0.0:
@@ -1748,32 +1492,11 @@ class Trainer:
                     anchor_coarse = anchor_result.coarse
                     anchor_pixel = anchor_result.pixel
                     anchor_accuracy = anchor_result.accuracy
-                relation_result = RelationLoss.empty(
-                    adversarial_loss,
-                    distances=self.patch_size - 1,
-                    phases=self.num_phases,
-                )
-                if batch.anchor is not None and self.relation_loss_weight > 0.0:
-                    relation_result = self.relation.loss(
-                        batch.clean_probs,
-                        batch.anchor,
-                        batch.anchor_present,
-                        domain=batch.model_domain,
-                    )
                 vf_loss = adversarial_loss.new_zeros(())
                 if bool(batch.vf_present.any()):
                     pred_vf = batch.clean_probs.mean(dim=(2, 3, 4))
                     per_sample = 0.5 * (pred_vf - batch.target_vf).abs().sum(dim=1)
                     vf_loss = per_sample[batch.vf_present].mean()
-                relation_time_weight = self.diffusion.alpha_bars[
-                    batch.transition + 1
-                ].to(device=adversarial_loss.device, dtype=adversarial_loss.dtype)
-                relation_weighted = (
-                    batch.anchor_ramp
-                    * self.relation_loss_weight
-                    * relation_time_weight
-                    * relation_result.loss
-                )
                 total = (
                     adversarial_loss
                     + batch.anchor_ramp
@@ -1782,7 +1505,6 @@ class Trainer:
                         + self.normal_transition_weight * normal_loss
                         + self.anchor_loss_weight * anchor_loss
                     )
-                    + relation_weighted
                     + self.vf_loss_weight * vf_loss
                 )
             self.scaler.scale(total).backward()
@@ -1803,47 +1525,6 @@ class Trainer:
             anchor_coarse=float(anchor_coarse.detach()),
             anchor_pixel=float(anchor_pixel.detach()),
             anchor_accuracy=float(anchor_accuracy.detach()),
-            relation=float(relation_result.loss.detach()),
-            relation_weighted=float(relation_weighted.detach()),
-            relation_time_weight=float(relation_time_weight.detach()),
-            relation_phase=float(relation_result.phase.detach()),
-            relation_support=float(relation_result.support.detach()),
-            relation_minus=float(relation_result.minus.detach()),
-            relation_plus=float(relation_result.plus.detach()),
-            relation_queries=relation_result.queries,
-            relation_matches=relation_result.matches,
-            relation_domain_matches=relation_result.domain_matches,
-            relation_shared_matches=relation_result.shared_matches,
-            relation_ood_rejections=relation_result.ood_rejections,
-            relation_missing_references=relation_result.missing_references,
-            relation_distance_weights=tuple(
-                float(value)
-                for value in relation_result.distance_weights.detach().to("cpu")
-            ),
-            relation_phase_distance_weights=_float_matrix(
-                relation_result.phase_distance_weights
-            ),
-            relation_support_distance_weights=_float_matrix(
-                relation_result.support_distance_weights
-            ),
-            relation_correlation_strength=_float_matrix(
-                relation_result.correlation_strength
-            ),
-            relation_uncertainty=_float_matrix(relation_result.uncertainty),
-            relation_displacement_quantiles=_float_tensor3(
-                relation_result.displacement_quantile
-            ),
-            relation_dilation_radii=_float_matrix(relation_result.dilation_radius),
-            relation_valid_ratio_by_phase=tuple(
-                float(value)
-                for value in relation_result.valid_ratio_by_phase.detach().to("cpu")
-            ),
-            relation_matched_reference_counts=_float_matrix(
-                relation_result.matched_reference_count
-            ),
-            relation_support_forward=float(relation_result.support_forward.detach()),
-            relation_support_backward=float(relation_result.support_backward.detach()),
-            relation_long_range=float(relation_result.long_range.detach()),
             vf=float(vf_loss.detach()),
         )
 

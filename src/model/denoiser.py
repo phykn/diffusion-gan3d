@@ -16,7 +16,6 @@ from .blocks import (
 from .domain import masked_domain_embedding
 
 MAX_GUIDANCE = 10_000.0
-ANCHOR_ADAPTERS = ("single", "multiscale")
 
 
 def validate_guidance(value: float) -> float:
@@ -43,18 +42,18 @@ class Denoiser3D(nn.Module):
         latent_channels: int,
         num_domains: int,
         gradient_checkpointing: bool = False,
-        anchor_adapter: str = "single",
+        anchor_multiscale: bool = False,
     ) -> None:
         super().__init__()
-        if anchor_adapter not in ANCHOR_ADAPTERS:
-            raise ValueError(f"anchor_adapter must be one of {ANCHOR_ADAPTERS}.")
+        if not isinstance(anchor_multiscale, bool):
+            raise TypeError("anchor_multiscale must be a boolean.")
         multipliers = tuple(channel_multipliers)
 
         channels = tuple(base_channels * scale for scale in multipliers)
         levels = len(channels)
         self.downsample_factor = 2 ** (levels - 1)
         self.gradient_checkpointing = gradient_checkpointing
-        self.anchor_adapter = anchor_adapter
+        self.anchor_multiscale = anchor_multiscale
 
         self.time_emb = SinusoidalTimeEmbedding(embedding_channels)
         self.time_mlp = nn.Sequential(
@@ -135,7 +134,7 @@ class Denoiser3D(nn.Module):
 
         # Build optional weights last so the shared backbone keeps identical RNG init.
         self.anchor_pyramid = nn.ModuleList()
-        if anchor_adapter == "multiscale":
+        if anchor_multiscale:
             for channel in channels[1:]:
                 projection = nn.Conv3d(
                     num_phases + 1,

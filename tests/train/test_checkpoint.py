@@ -32,7 +32,7 @@ def _multiscale_denoiser() -> Denoiser3D:
         embedding_channels=8,
         latent_channels=4,
         num_domains=1,
-        anchor_adapter="multiscale",
+        anchor_multiscale=True,
     )
 
 

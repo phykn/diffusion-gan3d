@@ -41,18 +41,12 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             "training_probability": 1.0,
             "start_step": 0,
             "ramp_steps": 0,
-            "multi_anchor_prob": 0.5,
-            "max_density": 0.05,
-            "min_spacing": 4,
-            "mixed_axis_prob": 0.5,
-            "teacher_bank_size_mib": 16,
             "loss_weight": 1.0,
         },
         "connectivity": {
             "loss_weight": 0.0,
-            "replay_triplets_per_axis": 1,
-            "replay_capacity_per_axis": 2,
-            "max_triplets_per_step": 1,
+            "bank_size": 1,
+            "refresh": 500,
             "reversal_invariant": True,
             "normal_transition_loss_weight": 0.0,
         },
@@ -121,25 +115,13 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             anchor_training_probability=cfg["anchor"]["training_probability"],
             anchor_start_step=cfg["anchor"]["start_step"],
             anchor_ramp_steps=cfg["anchor"]["ramp_steps"],
-            anchor_multi_probability=cfg["anchor"]["multi_anchor_prob"],
-            anchor_max_density=cfg["anchor"]["max_density"],
-            anchor_min_spacing=cfg["anchor"]["min_spacing"],
-            anchor_mixed_axis_probability=cfg["anchor"]["mixed_axis_prob"],
-            anchor_teacher_bank_mebibytes=cfg["anchor"]["teacher_bank_size_mib"],
             anchor_loss_weight=cfg["anchor"]["loss_weight"],
             connectivity_weight=cfg["connectivity"]["loss_weight"],
             normal_transition_weight=cfg["connectivity"][
                 "normal_transition_loss_weight"
             ],
-            connectivity_replay_triplets_per_axis=cfg["connectivity"][
-                "replay_triplets_per_axis"
-            ],
-            connectivity_replay_capacity_per_axis=cfg["connectivity"][
-                "replay_capacity_per_axis"
-            ],
-            connectivity_max_triplets_per_step=cfg["connectivity"][
-                "max_triplets_per_step"
-            ],
+            connectivity_bank_size=cfg["connectivity"]["bank_size"],
+            connectivity_refresh_steps=cfg["connectivity"]["refresh"],
             vf_loss_weight=cfg["vf"]["loss_weight"],
             cfg_drop_each_probability=0.0,
             cfg_single_drop_probability=0.1,

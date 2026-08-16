@@ -70,24 +70,17 @@ def test_repository_generation_config_has_expected_defaults() -> None:
     assert load_generation_settings() == GenerationSettings()
 
 
-def test_repository_training_config_enables_soft_anchor_relation_learning() -> None:
+def test_repository_training_config_uses_soft_anchor_and_ema_image_prior() -> None:
     cfg = load_yaml(ROOT / "config" / "train.yaml")
 
-    assert cfg["model"]["anchor_adapter"] == "multiscale"
-    assert cfg["anchor"]["multi_anchor_prob"] == 0.0
+    assert cfg["model"]["anchor_multiscale"] is True
     assert cfg["anchor"]["shared_axis_probability"] == 0.20
     assert cfg["anchor"]["coarse_loss_weight"] == 1.0
     assert cfg["anchor"]["pixel_loss_weight"] == 0.05
-    assert cfg["relation"]["loss_weight"] == 0.02
-    assert cfg["relation"]["start_step"] == cfg["anchor"]["start_step"]
-    assert cfg["relation"]["phase_weight"] == 0.75
-    assert cfg["relation"]["support_weight"] == 0.25
-    assert cfg["relation"]["support_max_radius"] == 2
-    assert cfg["relation"]["min_support_pixels"] == 8
-    assert cfg["relation"]["min_phase_fraction"] == 0.001
-    assert cfg["relation"]["min_chance_gap"] == 0.02
-    assert cfg["relation"]["direction_reduction"] == "mean"
-    assert "distances" not in cfg["relation"]
+    assert cfg["connectivity"]["bank_size"] == 16
+    assert cfg["connectivity"]["refresh"] == 500
+    assert cfg["vf"]["target_average_max_samples"] == 4
+    assert "relation" not in cfg
 
 
 @pytest.mark.parametrize(

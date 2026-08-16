@@ -1,19 +1,11 @@
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Literal
 
 import torch
-import torch.nn.functional as F
 
 from .anchor import PlaneAnchor, build_anchors
 from .diffusion import Diffusion
 from .model.denoiser import Denoiser3D, validate_guidance
-
-AnchorCouplingRelease = Literal["off", "shell", "global"]
-ANCHOR_COUPLING_RELEASE_MODES = ("off", "shell", "global")
-AnchorTemporalProfile = Literal["split", "legacy"]
-ANCHOR_TEMPORAL_PROFILES = ("split", "legacy")
 
 
 class _GuidedDenoiser:
@@ -44,12 +36,6 @@ class _GuidedDenoiser:
         )
 
 
-@dataclass(frozen=True)
-class _SpatialAnchorAxis:
-    axis: int
-    weight: torch.Tensor
-
-
 class _SpatialAnchorDenoiser:
     def __init__(
         self,
@@ -57,23 +43,13 @@ class _SpatialAnchorDenoiser:
         guidance: float,
         anchor_image: torch.Tensor,
         anchor_mask: torch.Tensor,
-        axes: tuple[_SpatialAnchorAxis, ...],
-        residual_blur: float,
-        residual_blur_early: float,
-        temporal_profile: AnchorTemporalProfile = "split",
+        weight: torch.Tensor,
     ) -> None:
         self.generator = generator
         self.guidance = guidance
         self.anchor_image = anchor_image
         self.anchor_mask = anchor_mask
-        self.axes = axes
-        self.temporal_profile = temporal_profile
-        self.kernels = self.make_kernel_schedule(
-            generator,
-            axes,
-            residual_blur,
-            residual_blur_early,
-        )
+        self.weight = weight
 
     def __call__(
         self,
@@ -104,24 +80,11 @@ class _SpatialAnchorDenoiser:
             anchor_mask=self.anchor_mask,
         )
         residual = conditioned.float().sub(baseline)
-        correction = torch.zeros_like(baseline)
-        weight_sum = torch.zeros_like(self.axes[0].weight)
-        max_weight = torch.zeros_like(weight_sum)
-        for anchor_axis in self.axes:
-            smoothed = self.smooth_scheduled(
-                residual,
-                time,
-                anchor_axis.axis,
-            )
-            weight = anchor_axis.weight.to(device=plain.device, dtype=torch.float32)
-            correction.add_(smoothed.mul(weight))
-            weight_sum.add_(weight)
-            max_weight = torch.maximum(max_weight, weight)
-        correction.mul_(max_weight / weight_sum.clamp_min(torch.finfo(torch.float32).eps))
+        weight = self.weight.to(device=plain.device, dtype=torch.float32)
+        correction = residual.mul(weight)
         plane_scale, context_scale = self.temporal_scales(
             time,
             self.generator.diffusion.timesteps,
-            self.temporal_profile,
         )
         plane_scale = plane_scale.view(-1, 1, 1, 1, 1)
         context_scale = context_scale.view(-1, 1, 1, 1, 1)
@@ -138,103 +101,14 @@ class _SpatialAnchorDenoiser:
     def temporal_scales(
         time: torch.Tensor,
         timesteps: int,
-        profile: AnchorTemporalProfile,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if timesteps == 1:
             progress = torch.ones_like(time, dtype=torch.float32)
-            if profile == "legacy":
-                return progress, progress
         else:
             progress = 1.0 - time.to(torch.float32) / (timesteps - 1)
-        if profile == "split":
-            plane = 0.5 + 0.5 * progress.square()
-            context = 0.6 * (1.0 - progress) + 0.15 * progress
-            return plane, context
-        if profile == "legacy":
-            scale = 2.0 * (1.0 - 0.75 * progress)
-            return scale, scale
-        raise ValueError("anchor_temporal_profile must be 'split' or 'legacy'.")
-
-    def smooth_scheduled(
-        self,
-        residual: torch.Tensor,
-        time: torch.Tensor,
-        axis: int,
-    ) -> torch.Tensor:
-        smoothed = torch.empty_like(residual)
-        for step in time.unique():
-            selected = time == step
-            smoothed[selected] = self.smooth_axis(
-                residual[selected],
-                axis,
-                self.kernels[int(step.item())][axis],
-            ).to(residual.dtype)
-        return smoothed
-
-    @classmethod
-    def make_kernel_schedule(
-        cls,
-        generator: "Generator",
-        axes: tuple[_SpatialAnchorAxis, ...],
-        residual_blur: float,
-        residual_blur_early: float,
-    ) -> dict[int, dict[int, torch.Tensor]]:
-        last_step = generator.diffusion.timesteps - 1
-        schedule = {}
-        for step in range(generator.diffusion.timesteps):
-            progress = 0.0 if last_step == 0 else step / last_step
-            sigma = residual_blur + progress * (
-                residual_blur_early - residual_blur
-            )
-            schedule[step] = cls.make_kernels(generator, axes, sigma)
-        return schedule
-
-    @staticmethod
-    def make_kernels(
-        generator: "Generator",
-        axes: tuple[_SpatialAnchorAxis, ...],
-        sigma: float,
-    ) -> dict[int, torch.Tensor]:
-        kernels = {}
-        for axis in {item.axis for item in axes}:
-            if sigma == 0.0:
-                kernels[axis] = torch.ones(
-                    (generator.num_phases, 1, 1, 1, 1),
-                    device=generator.device,
-                    dtype=torch.float32,
-                )
-                continue
-            length = axes[0].weight.shape[axis + 2]
-            radius = min(math.ceil(3.0 * sigma), max(1, (length - 1) // 2))
-            positions = torch.arange(
-                -radius,
-                radius + 1,
-                device=generator.device,
-                dtype=torch.float32,
-            )
-            kernel = torch.exp(positions.square().mul(-0.5 / sigma**2))
-            kernel.div_(kernel.sum())
-            shape = [1, 1, 1, 1, 1]
-            shape[axis + 2] = kernel.numel()
-            kernels[axis] = kernel.view(shape).expand(
-                generator.num_phases,
-                1,
-                *shape[2:],
-            ).contiguous()
-        return kernels
-
-    @staticmethod
-    def smooth_axis(
-        residual: torch.Tensor,
-        axis: int,
-        kernel: torch.Tensor,
-    ) -> torch.Tensor:
-        radius = (kernel.shape[axis + 2] - 1) // 2
-        padding = [0, 0, 0, 0, 0, 0]
-        padding[2 * (2 - axis)] = radius
-        padding[2 * (2 - axis) + 1] = radius
-        padded = F.pad(residual, tuple(padding), mode="replicate")
-        return F.conv3d(padded, kernel, groups=residual.shape[1])
+        plane = 0.5 + 0.5 * progress.square()
+        context = 0.6 * (1.0 - progress) + 0.15 * progress
+        return plane, context
 
 
 class _CoupledAnchorSampler:
@@ -244,12 +118,8 @@ class _CoupledAnchorSampler:
         guidance: float,
         anchor_image: torch.Tensor,
         anchor_mask: torch.Tensor,
-        axes: tuple[_SpatialAnchorAxis, ...],
+        weight: torch.Tensor,
         coupling_weight: torch.Tensor,
-        residual_blur: float,
-        residual_blur_early: float,
-        coupling_release: AnchorCouplingRelease,
-        temporal_profile: AnchorTemporalProfile,
     ) -> None:
         self.generator = generator
         self.guidance = guidance
@@ -258,13 +128,9 @@ class _CoupledAnchorSampler:
             guidance,
             anchor_image,
             anchor_mask,
-            axes,
-            residual_blur,
-            residual_blur_early,
-            temporal_profile,
+            weight,
         )
         self.coupling_weight = coupling_weight
-        self.coupling_release = coupling_release
 
     def sample(
         self,
@@ -274,7 +140,6 @@ class _CoupledAnchorSampler:
         generator = self.generator
         base_state = initial_noise.clone()
         anchor_state = initial_noise.clone()
-        last_step = generator.diffusion.timesteps - 1
         for transition in reversed(range(generator.diffusion.timesteps)):
             time = torch.full(
                 (initial_noise.shape[0],),
@@ -318,37 +183,13 @@ class _CoupledAnchorSampler:
                 transition,
                 noise=posterior_noise,
             )
-            progress = 1.0 if last_step == 0 else 1.0 - transition / last_step
-            coupling_weight = self.apply_release(
-                self.coupling_weight,
-                progress,
-                self.coupling_release,
-            )
             anchor_state = torch.lerp(
                 base_next.float(),
                 anchor_next_raw.float(),
-                coupling_weight,
+                self.coupling_weight,
             ).to(base_next.dtype)
             base_state = base_next
         return anchor_state
-
-    @staticmethod
-    def apply_release(
-        base_weight: torch.Tensor,
-        progress: float,
-        mode: AnchorCouplingRelease,
-    ) -> torch.Tensor:
-        if mode == "off":
-            return base_weight
-        release = progress**4
-        if mode == "shell":
-            shell = base_weight * (1.0 - base_weight)
-            return (base_weight + release * shell).clamp(0.0, 1.0)
-        if mode == "global":
-            return base_weight.lerp(torch.ones_like(base_weight), release)
-        raise ValueError(
-            "anchor_coupling_release must be 'off', 'shell', or 'global'."
-        )
 
 
 class Generator:
@@ -485,10 +326,6 @@ class Generator:
         domain: int | None = None,
         margin: int = 8,
         anchor_sigma: float = 2.0,
-        anchor_residual_blur: float = 0.0,
-        anchor_residual_blur_early: float = 0.0,
-        anchor_coupling_release: AnchorCouplingRelease = "off",
-        anchor_temporal_profile: AnchorTemporalProfile = "split",
     ) -> torch.Tensor:
         size = self.patch_size if size is None else size
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
@@ -511,34 +348,6 @@ class Generator:
         ):
             raise ValueError("anchor_sigma must be a positive finite number.")
         anchor_sigma = float(anchor_sigma)
-        if (
-            not isinstance(anchor_residual_blur, (int, float))
-            or isinstance(anchor_residual_blur, bool)
-            or not math.isfinite(anchor_residual_blur)
-            or anchor_residual_blur < 0.0
-        ):
-            raise ValueError(
-                "anchor_residual_blur must be a non-negative finite number."
-            )
-        anchor_residual_blur = float(anchor_residual_blur)
-        if (
-            not isinstance(anchor_residual_blur_early, (int, float))
-            or isinstance(anchor_residual_blur_early, bool)
-            or not math.isfinite(anchor_residual_blur_early)
-            or anchor_residual_blur_early < 0.0
-        ):
-            raise ValueError(
-                "anchor_residual_blur_early must be a non-negative finite number."
-            )
-        anchor_residual_blur_early = float(anchor_residual_blur_early)
-        if anchor_coupling_release not in ANCHOR_COUPLING_RELEASE_MODES:
-            raise ValueError(
-                "anchor_coupling_release must be 'off', 'shell', or 'global'."
-            )
-        if anchor_temporal_profile not in ANCHOR_TEMPORAL_PROFILES:
-            raise ValueError(
-                "anchor_temporal_profile must be 'split' or 'legacy'."
-            )
         guidance = validate_guidance(guidance)
         vf = self.prepare_vf(vf)
         generation_size = size + 2 * margin
@@ -552,7 +361,7 @@ class Generator:
             dtype=torch.float32,
         )
         anchor = None
-        anchor_axes: tuple[_SpatialAnchorAxis, ...] = ()
+        anchor_weight = None
         coupling_weight = None
         if anchor_strength > 0.0:
             shifted_anchors = self.offset_anchors(anchors, size, margin)
@@ -565,24 +374,13 @@ class Generator:
                 dtype=initial_noise.dtype,
             )
             if anchor is not None:
-                grouped = []
-                for axis in sorted({item.axis for item in shifted_anchors}):
-                    axis_anchors = tuple(
-                        item for item in shifted_anchors if item.axis == axis
-                    )
-                    grouped.append(
-                        _SpatialAnchorAxis(
-                            axis=axis,
-                            weight=self.make_anchor_weight(
-                                axis_anchors,
-                                generation_size,
-                                anchor_sigma,
-                                anchor_strength,
-                                device=self.device,
-                            ),
-                        )
-                    )
-                anchor_axes = tuple(grouped)
+                anchor_weight = self.make_anchor_weight(
+                    shifted_anchors,
+                    generation_size,
+                    anchor_sigma,
+                    anchor_strength,
+                    device=self.device,
+                )
                 coupling_weight = self.make_anchor_coupling_weight(
                     shifted_anchors,
                     generation_size,
@@ -599,18 +397,15 @@ class Generator:
             enabled=self.use_amp,
         ):
             if anchor is not None:
+                assert anchor_weight is not None
                 assert coupling_weight is not None
                 sampler = _CoupledAnchorSampler(
                     self,
                     guidance,
                     anchor.image,
                     anchor.mask,
-                    anchor_axes,
+                    anchor_weight,
                     coupling_weight,
-                    anchor_residual_blur,
-                    anchor_residual_blur_early,
-                    anchor_coupling_release,
-                    anchor_temporal_profile,
                 )
                 clean = sampler.sample(initial_noise, conditions)
             else:
@@ -793,10 +588,6 @@ class Generator:
         domain: int | None = None,
         margin: int = 8,
         anchor_sigma: float = 2.0,
-        anchor_residual_blur: float = 0.0,
-        anchor_residual_blur_early: float = 0.0,
-        anchor_coupling_release: AnchorCouplingRelease = "off",
-        anchor_temporal_profile: AnchorTemporalProfile = "split",
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,
@@ -804,10 +595,6 @@ class Generator:
             size=size,
             anchor_strength=anchor_strength,
             anchor_sigma=anchor_sigma,
-            anchor_residual_blur=anchor_residual_blur,
-            anchor_residual_blur_early=anchor_residual_blur_early,
-            anchor_coupling_release=anchor_coupling_release,
-            anchor_temporal_profile=anchor_temporal_profile,
             guidance=guidance,
             domain=domain,
             margin=margin,
@@ -828,10 +615,6 @@ class Generator:
         domain: int | None = None,
         margin: int = 8,
         anchor_sigma: float = 2.0,
-        anchor_residual_blur: float = 0.0,
-        anchor_residual_blur_early: float = 0.0,
-        anchor_coupling_release: AnchorCouplingRelease = "off",
-        anchor_temporal_profile: AnchorTemporalProfile = "split",
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,
@@ -839,10 +622,6 @@ class Generator:
             size=size,
             anchor_strength=anchor_strength,
             anchor_sigma=anchor_sigma,
-            anchor_residual_blur=anchor_residual_blur,
-            anchor_residual_blur_early=anchor_residual_blur_early,
-            anchor_coupling_release=anchor_coupling_release,
-            anchor_temporal_profile=anchor_temporal_profile,
             guidance=guidance,
             domain=domain,
             margin=margin,

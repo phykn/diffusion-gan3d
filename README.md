@@ -51,39 +51,36 @@ configuration contains only axis 0, only `critic_0.pt` is created.
 
 Anchor training separates appearance from continuation. A mask-normalized
 coarse loss preserves the supplied section's phase layout, while a low-weight
-pixel loss lets exact boundaries adapt. Both losses, the connectivity loss, and
-teacher promotion are disabled for samples whose anchor was removed by CFG
+pixel loss lets exact boundaries adapt. Both losses and the connectivity loss
+are disabled for samples whose anchor was removed by CFG
 dropout. Coarse pooling cells are weighted by their observed coverage, so a
 one-pixel partial-anchor edge cannot outweigh a fully observed cell. With
-`model.anchor_adapter: multiscale`, the original observed phases and mask are
+`model.anchor_multiscale: true`, the original observed phases and mask are
 pooled independently at every encoder scale. Mask normalization preserves a
 thin or partial plane, while zero-initialized projections preserve the original
-generator path at initialization. Omitting this setting selects the legacy
-single-scale adapter so existing weight files remain strictly loadable with
-their original run configuration. The optional
-relation loss stores only relation curves and morphology descriptors from a full
-anchor/VF-free EMA diffusion sample—never generated images. Before anchor
-training begins, one EMA snapshot is held fixed until this bank is complete; the
-bank then remains frozen. It measures both chance-corrected phase covariance and
-lateral-movement-tolerant support continuation at every available distance.
-Minus and plus directions are penalized separately so failure on one side cannot
-be hidden by the other. Reference crops follow the training anchor ROI shapes,
-use the same hard morphology descriptor as observed anchors, and stop gradients
-through the anchor plane. Each phase learns its own distance profile from excess
-dependence divided by natural reference variability. A hard-morphology
-displacement histogram selects a phase- and distance-specific support radius;
-movement beyond the configured compute cap disables only that support term rather
-than forcing it to the cap. Rare and near-certain phases are excluded with
-numerical mass and chance-baseline guards. Domain
-curves are used only for axes actually observed in that domain; otherwise training
-falls back to a balanced shared bank built from domains that own the axis. An
-out-of-distribution descriptor gate disables unsuitable shared matches instead of
-forcing an external anchor toward a generated style.
+generator path at initialization. Setting it to false selects the original
+input-only path.
 
-The repository defaults keep pseudo multi-anchor replay off while this relation
-path is trained. Existing model checkpoints remain load-compatible because the
-new banks are trainer-side statistics rather than model parameters, but weights
-must be fine-tuned or retrained to learn the new objective.
+Before anchor training begins, a fixed EMA snapshot generates complete
+anchor/VF-free 3D volumes for a frozen prior bank. During anchor training, the
+connectivity critic compares at most seven three-slice windows: one containing
+the anchor and up to two general windows from each of the three axes. Anchor and
+general groups receive equal loss weight, so broader coverage does not dilute the
+anchor boundary. Reference windows are sampled from the frozen volumes. A domain
+uses its own prior for axes
+it owns and falls back to provider-domain volumes only for a missing axis. After
+the initial bank is complete, each domain periodically adds one volume from the
+current EMA and evicts its oldest volume. This rolling update changes the prior
+gradually without a second full-size bank or an abrupt global replacement.
+
+The critic does not receive raw logits or raw slices. EMA references and student
+outputs are converted to hard categorical phase images, and each three-slice
+window becomes three bounded images: the first phase change, the second phase
+change, and the change in those two changes. The student uses a straight-through
+categorical conversion, so the critic sees the same representation on both sides
+while gradients still reach the generator. This learns image-level continuation
+without copying a teacher volume voxel by voxel. The existing normal-transition
+loss remains as a small aggregate guardrail.
 
 Set `data.allow_partial_crop: true` to train from a section whose height or
 width is smaller than `crop_size`. Each available dimension is cropped to at
@@ -138,18 +135,13 @@ keeps separate baseline and anchor trajectories from the same initial noise. Bot
 trajectories share every step's latent and posterior noise. All anchor planes are
 passed in one joint conditional prediction, and its logit residual is blended
 through a Gaussian spatial window controlled by `anchor_sigma` before decoding.
-The residual can be smoothed along each anchor's normal axis, but both early and
-late `anchor_residual_blur` defaults are zero so the model's learned continuation
-is not artificially thickened. After each posterior update, the anchor trajectory
-is kept intact near the anchor and tapered back to the baseline over a wide cosine
-window. The default `anchor_coupling_release=off` preserves that same-RNG baseline
-exactly in the far field through the final step. `shell` relaxes only the transition
-zone, while `global` reproduces the legacy whole-volume late release for ablation.
-The default `anchor_temporal_profile=split` uses stronger context guidance early
-and reduces it during cleanup, while plane guidance rises toward the final step;
-`legacy` applies the old shared early-strong/late-weak scale. The defaults
-(`anchor_strength=1`, `anchor_sigma=2`, zero residual blur, fixed far field, split
-timing) favor similar conditional structure over exact plane reconstruction.
+After each posterior update, the anchor trajectory is kept intact near the anchor
+and tapered back to the baseline over a wide cosine window. This fixed coupling
+preserves the same-RNG baseline exactly in the far field through the final step.
+Context guidance is stronger early and reduces during cleanup, while plane
+guidance rises toward the final step. The defaults (`anchor_strength=1`,
+`anchor_sigma=2`) favor similar conditional structure over exact plane
+reconstruction.
 Script `03` reports
 slice-change rates for distances zero through 24 from the nearest anchor to make
 displaced transition seams visible. `guidance=1` is the standard conditional path;
@@ -166,7 +158,7 @@ and `--anchor-strength` is nonzero:
 ```bash
 python scripts/01_check_dataset.py
 python scripts/02_check_generated.py --weight run/<run-id>/generator.pt --domain 0
-python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3 --anchor-strength 1 --anchor-sigma 2 --anchor-coupling-release off --anchor-temporal-profile split
+python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --gt scripts/gt_128.tiff --count 3 --anchor-strength 1 --anchor-sigma 2
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0
 ```
 
@@ -175,7 +167,7 @@ Generator scripts default to `--domain 0` and the `guidance` value in `config/ge
 `generator.pt` is the latest weight; `checkpoint_every_steps` preserves numbered
 sets under `checkpoints/step_XXXXXXXX/`. Every `.pt` file is an independent model
 `state_dict` containing tensors only. Optimizer state, training step metadata, and
-trainer-side relation-bank statistics are never embedded in these weight files.
+trainer-side frozen prior volumes are never embedded in these weight files.
 
 ## Development
 
