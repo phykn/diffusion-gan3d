@@ -59,7 +59,7 @@ $$
 
 The reverse process follows denoising diffusion GANs [16,17] with ten transitions. The U-Net channel widths are 16, 32, 64, and 64; its condition embedding has 128 channels and its stochastic latent has 64 channels.
 
-Because no paired 3D target exists, an axis-specific 2D critic evaluates section pairs cut from generated volumes against real section pairs. Each critic contains a global and local head. Missing-axis data can be borrowed from a provider domain with the domain label removed for that critic, allowing geometric context to be shared without presenting provider appearance as target-domain evidence. The evaluated data contain one domain and use the same image distribution for all axes.
+Because no paired 3D target exists, an axis-specific 2D critic evaluates section pairs cut from generated volumes against real section pairs. Each critic contains a global and local head. The experiments use one image distribution for all three axes.
 
 ### 3.3 Soft multiscale anchor conditioning
 
@@ -91,7 +91,7 @@ $$
 r=(p_0-p_{-1},\;p_{+1}-p_0,\;\tfrac12[(p_{+1}-p_0)-(p_0-p_{-1})]).
 $$
 
-This removes the static center image as a direct shortcut. Real 2D pair critics still constrain marginal appearance. A seven-window budget always retains the measured-root window when present, reserves general windows across available axes, and fills the remaining slots with pseudo-plane windows. The bank initially uses the fixed EMA and then replaces one oldest completion with a current-EMA completion every 500 steps.
+This removes the static center image as a direct shortcut. Real 2D pair critics still constrain marginal appearance. Relation batches retain the measured-root window, combine pseudo-plane and general windows across available axes, and periodically refresh the initially fixed EMA completion bank.
 
 The generator loss is
 
@@ -146,7 +146,7 @@ The training data consist of one 226 × 690 binary phase map. Phase 0 is treated
 </p>
 <p align="center"><em>Figure 1. Binary 2D training image. Orange boxes show example 128 × 128 training crops. Black and gray denote phases 0 and 1.</em></p>
 
-All reported values use the EMA parameters after 20,000 optimization steps. The generator and critics were initialized from the preceding training stage, whereas the conditional completion bank was constructed anew under the current formulation. Adam learning rates are $1.6\times10^{-4}$ for the generator and $10^{-4}$ for critics. Training uses mixed precision, EMA decay 0.999, real batch size 8, 16 generated pairs per axis, and anchor requests on 80% of eligible updates.
+All reported values use the EMA parameters after 20,000 optimization steps. The generator and critics were initialized from the preceding training stage, whereas the conditional completion bank was constructed anew under the current formulation. Training uses Adam with learning rates of $1.6\times10^{-4}$ for the generator and $10^{-4}$ for the critics, mixed precision, EMA decay 0.999, and real batch size 8.
 
 ### 4.2 Evaluation protocols
 
@@ -190,14 +190,14 @@ The direct samples preserve approximately the feature scale and interface densit
 
 ### 5.2 Internal plane conditioning
 
-Across 12 generated-control internal conditions, pool4 similarity rises from an unconditioned 58.52 ± 2.45% to 92.13 ± 0.65%, a gain of 33.60 ± 2.45 percentage points. Exact conditioned agreement is 91.61 ± 0.69% (Table 2). The first-change ratio of 1.12 ± 0.15 indicates that the immediate anchor transition is close to, though slightly larger than, ordinary slice changes. The p95 flicker ratio is 1.20 ± 0.19. The qualitative external center-plane result obtains 92.44% exact agreement without final replacement (Figure 4).
+Across 12 generated-control internal conditions, pool4 similarity rises by 33.60 ± 2.45 percentage points to 92.13 ± 0.65% (Table 2). Adjacent-section change remains close to ordinary generation, while the qualitative external center-plane result obtains 92.44% exact agreement without final replacement (Figure 4).
 
 <p align="center"><img src="assets/paper/04-anchor-conditioning.png" alt="Supplied center section, generated section, and anchored volume" width="780"></p>
 <p align="center"><em>Figure 4. External center-plane conditioning. The supplied section, generated section at the requested coordinate, and surrounding 128³ realization are shown separately.</em></p>
 
 ### 5.3 One-sided continuation from a boundary section
 
-Placing the section at index 0 turns the experiment into one-sided spatial continuation: the model must produce all remaining sections on one side of the observation. In the generated-control cases, conditioning raises pool4 similarity from 59.47 ± 2.11% to 93.71 ± 0.68%. For the external image it rises from 55.16 ± 2.65% to 93.74 ± 0.56%. The external first-change ratio is 0.85 ± 0.12, so the supplied boundary does not create a larger immediate jump than ordinary generated sections. Its p95 flicker is 1.08 ± 0.05 times the same-noise baseline. At the rare worst location, however, the maximum flicker remains 1.37 ± 0.32 times baseline, consistent with a small residual visual stutter in some sequences.
+Placing the section at index 0 turns the experiment into one-sided spatial continuation: the model must produce all remaining sections on one side of the observation. Pool4 similarity reaches 93.71 ± 0.68% for generated-control inputs and 93.74 ± 0.56% for the external image (Table 2). The external boundary does not create a larger immediate jump than ordinary generated sections, although peak flicker still reveals occasional visual stutter.
 
 | Condition | Cases | Unconditioned pool4 | Conditioned pool4 ↑ | Gain | First change / ordinary | p95 flicker / baseline | Peak flicker / baseline | Farthest drift ↓ |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -219,9 +219,9 @@ The fixed-block sampler produces 352³ voxels with 27 fixed-size tiles at each r
 
 ## 6. Discussion
 
-The experiments support a narrower claim than deterministic 2D-to-3D reconstruction. A measured section constrains one stochastic realization, and the model uses learned relations to continue away from it. Coarse and exact agreement near 92–94% show that the condition remains recognizable despite the deliberate absence of hard clamping. The first-change and p95 flicker results show that this flexibility generally avoids a new seam at the plane.
+The experiments support a narrower claim than deterministic 2D-to-3D reconstruction. A measured section constrains one stochastic realization, and the model uses learned relations to continue away from it. The condition remains recognizable without hard clamping, while first-change and p95 flicker results indicate that this flexibility generally avoids a new seam at the plane.
 
-The generated-control experiment isolates conditional behavior within the model's own distribution, whereas the external experiment tests the actual use case but has no 3D ground truth. Their similar boundary metrics suggest that the real 2D critics and soft anchor objective prevent the conditional EMA prior from simply imposing its own center-image style. This remains indirect evidence: only measured 3D data could establish physical reconstruction accuracy.
+The generated-control experiment isolates conditional behavior within the model's own distribution, whereas the external experiment tests the intended use case. Their similar boundary metrics suggest that the real 2D critics and soft anchor objective prevent the conditional EMA prior from simply imposing its own center-image style. Physical reconstruction accuracy nevertheless requires measured 3D data.
 
 The maximum flicker ratios reveal the remaining failure more clearly than mean metrics. Most transitions are close to baseline, but occasional locations still change faster. This agrees with visual inspection of a slight lag-like motion and motivates future work on longer-range relation critics or sequence-level evaluation rather than stronger pixel copying.
 
@@ -237,7 +237,7 @@ FID uses a natural-image network, percolation is a coarse global spanning fracti
 
 ## 8. Conclusion
 
-The method learns 3D microstructure generation from 2D sections, uses a supplied plane as a soft spatial condition, and scales the same model to larger volumes. Its defining choice is to learn section relationships from conditional EMA completions without copying a teacher volume or overwriting final voxels. Conditioning improves pooled agreement by 34–39 percentage points to about 92–94%, keeps external boundary p95 flicker within 1.08 ± 0.05 times a same-noise baseline, and produces 352³ samples with structural statistics close to direct generation. These results support conditional stochastic synthesis; experimental 3D validation remains necessary.
+The method learns 3D microstructure generation from 2D sections, uses a supplied plane as a soft spatial condition, and scales the same model to larger volumes. Its defining choice is to transfer section relationships from conditional EMA completions without copying a teacher volume or overwriting final voxels. The results support conditional stochastic synthesis with near-baseline local continuity and stable scale-up statistics; experimental 3D validation remains necessary.
 
 ## References
 
