@@ -21,6 +21,7 @@ from src.evaluate import (
     phase_fractions,
     voxel_accuracy,
 )
+from src.generate import DEFAULT_ANCHOR_STRENGTH
 from src.scale import ScaledGenerator, ScalePlan
 from src.volume import load_volume, save_volume
 
@@ -91,8 +92,11 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
     parser.add_argument(
         "--anchor-strength",
         type=unit_interval,
-        default=0.90,
-        help="normalized base anchor prediction strength (default: 0.90)",
+        default=DEFAULT_ANCHOR_STRENGTH,
+        help=(
+            "normalized base anchor prediction strength "
+            f"(default: {DEFAULT_ANCHOR_STRENGTH:.2f})"
+        ),
     )
     parser.add_argument(
         "--guidance",

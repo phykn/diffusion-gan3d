@@ -1,11 +1,14 @@
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pytest
 import tifffile
 import torch
+from PIL import Image
 
 from src.build import build_models
 from src.config import GenerationSettings
@@ -21,6 +24,122 @@ from src.train.weights import save_weights
 from src.utils import save_yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_boundary_continuation_defaults_to_an_unconditioned_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = _config(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_yaml(run_dir / "train.yaml", cfg)
+    model, _, _ = build_models(cfg)
+    weights = save_weights(run_dir, model)
+    output_path = tmp_path / "continuation.tiff"
+
+    module = _load_script("05_check_continuation.py")
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "05_check_continuation.py",
+            "--weight",
+            str(weights),
+            "--out",
+            str(output_path),
+            "--no-view",
+        ],
+    )
+
+    module.main()
+
+    assert tifffile.imread(output_path).shape == (8, 8, 8)
+    output = capsys.readouterr().out
+    assert "Anchor  : unconditioned reference boundary" in output
+    assert "Generating unconditioned reference" in output
+
+
+def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = _config(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_yaml(run_dir / "train.yaml", cfg)
+    model, _, _ = build_models(cfg)
+    weights = save_weights(run_dir, model)
+    source = np.indices((10, 12)).sum(axis=0) % cfg["data"]["num_phase"]
+    anchor_path = tmp_path / "anchor.png"
+    Image.fromarray(source.astype(np.uint8)).save(anchor_path)
+    output_path = tmp_path / "continuation.tiff"
+    figure_path = tmp_path / "continuation.png"
+
+    module = _load_script("05_check_continuation.py")
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "05_check_continuation.py",
+            "--weight",
+            str(weights),
+            "--anchor",
+            str(anchor_path),
+            "--out",
+            str(output_path),
+            "--figure",
+            str(figure_path),
+            "--no-view",
+        ],
+    )
+
+    module.main()
+
+    assert tifffile.imread(output_path).shape == (8, 8, 8)
+    assert figure_path.is_file()
+    output = capsys.readouterr().out
+    assert "crop (1, 2, 8, 8)" in output
+    assert "Boundary: axis 0, start plane 0" in output
+    assert "Anchor match" in output
+    assert "First change" in output
+    assert "farthest" in output
+
+
+def test_boundary_continuation_napari_shows_generated_volume_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script("05_check_continuation.py")
+    layers = []
+    ran = False
+
+    class FakeViewer:
+        def __init__(self) -> None:
+            self.dims = SimpleNamespace(ndisplay=2)
+
+        def add_labels(self, values, **kwargs) -> None:
+            layers.append((np.asarray(values), kwargs))
+
+    def run() -> None:
+        nonlocal ran
+        ran = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "napari",
+        SimpleNamespace(Viewer=FakeViewer, run=run),
+    )
+    volume = torch.zeros((4, 4, 4), dtype=torch.long)
+
+    module.show_napari(volume)
+
+    assert ran
+    assert [layer[1]["name"] for layer in layers] == ["Generated output"]
+    assert np.array_equal(layers[0][0], volume.numpy())
 
 
 @pytest.mark.parametrize(
@@ -81,10 +200,10 @@ def test_anchor_check_script_runs_with_generated_reference(
     assert "Phase recall" not in output
     if count == 0:
         assert "Anchor effect" not in output
-        assert "strength 0.90" not in output
+        assert "strength 0.88" not in output
     else:
         assert "Anchor effect" in output
-        assert "strength 0.90" in output
+        assert "strength 0.88" in output
     assert "Indices" not in output
     assert "Center slice" not in output
 

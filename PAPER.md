@@ -1,272 +1,243 @@
 <div align="center">
-  <h1>Anchor-Conditioned Diffusion for Scalable 3D Microstructure Synthesis</h1>
+  <h1>Learning 3D Continuation from 2D Sections:<br>Anchor-Conditioned Diffusion for Scalable Microstructure Synthesis</h1>
 </div>
 
 ## Abstract
 
-We generate binary 3D microstructures from a 2D image and optionally tell the model which internal sections should appear at specific coordinates. The supplied sections are used as learned conditions; they are not pasted into the final volume. The same 128³ model is also used to build a larger 352³ volume from overlapping fixed-size blocks. On a controlled synthetic reference, 25% and 100% anchor coverage give 94.71 ± 0.03% and 98.75 ± 0.02% whole-volume voxel accuracy. The 352³ scale-up has FID 39.51 ± 1.90, phase-0 porosity 0.3495 ± 0.0011, tortuosity 2.1030 ± 0.0048, phase-0 percolation 0.9977 ± 0.0002, and generation time 23.74 ± 0.02 s. These results come from one binary training image and a same-model synthetic reference, so they demonstrate controlled behavior rather than experimental 3D reconstruction accuracy.
-
+We present a diffusion-GAN framework that learns three-dimensional categorical microstructures from unregistered two-dimensional sections and accepts a supplied section as a spatial condition. The objective is not to copy the section voxel by voxel, but to generate a compatible 3D realization whose neighboring sections change naturally. A coarse-dominant anchor loss permits boundary adaptation, while a conditional exponential-moving-average (EMA) completion bank supplies aligned three-section relations without imposing a hidden teacher volume as a reconstruction target. At inference, same-noise baseline and anchor trajectories are coupled by the same model-derived Gaussian used for logit guidance, so the condition decays smoothly into ordinary generation. The same 128³ model also generates a 352³ volume through shared-state overlapping blocks. On one binary 226 × 690 training image, direct and scaled samples obtain FID 44.85 ± 2.66 and 35.06 ± 0.61, respectively. Across 12 generated-control internal anchors, conditioning raises pooled anchor similarity from 58.52 ± 2.45% to 92.13 ± 0.65%. For four external boundary-section trials, it raises similarity from 55.16 ± 2.65% to 93.74 ± 0.56%; the 95th-percentile slice flicker is 1.08 ± 0.05 times the same-noise baseline, and the measured farthest-section drift is zero. These are controlled generation results, not experimental 3D reconstruction accuracy; no measured 3D ground truth is available.
 
 ## 1. Introduction
 
-Many material properties depend on connected paths through a 3D structure. However, 2D microscopy is often easier to obtain than a large 3D scan. This motivates models that learn from 2D sections and generate 3D volumes.
+Three-dimensional connectivity controls many transport and mechanical properties, but large 3D scans are often harder to obtain than 2D microscopy. Models such as SliceGAN therefore learn a volumetric generator by matching generated sections to available 2D images. This setting is useful for stochastic reconstruction, but it does not by itself answer a conditional question: if a particular section is known, can the model place a similar section at the requested coordinate while preserving a plausible 3D neighborhood?
 
-Matching the overall 2D appearance is not enough when a known section must appear at a particular 3D coordinate. Pasting the section after generation would match its labels exactly, but it could create an unnatural neighborhood around the plane. We instead condition the model on the section during sampling.
+Hard insertion solves only the first half of that problem. Pasting a measured image into a completed volume guarantees exact labels on one plane but can introduce an abrupt change immediately before and after it. Strong full-resolution supervision creates a similar pressure during learning. We instead treat the supplied section as a prompt for one plausible 3D continuation. Its large-scale morphology should remain recognizable, but local boundaries may move when required by the learned 3D prior.
 
-A second problem is size. A network trained on 128³ inputs cannot directly process a much larger volume. Independent blocks also tend to leave visible boundaries. Our scale-up sampler keeps the block size fixed at 128³, overlaps only neighboring blocks, and fuses their predictions during every diffusion step.
+The available data create a second difficulty: there are no measured 3D trajectories from which to learn section-to-section relations. We use conditional volumes sampled from a frozen EMA model as relation references, while real-data 2D critics remain responsible for marginal appearance. The generated volumes are never used as voxel-wise reconstruction targets.
 
-The paper focuses on three questions: whether generated sections resemble the 2D data, whether supplied anchors are recovered at the right coordinates, and whether the same model can generate a larger volume. We report six direct measurements: FID, voxel accuracy, tortuosity, phase-0 porosity, phase-0 percolation, and generation time.
+Our contributions are:
+
+1. a multiscale, mask-normalized plane condition whose loss emphasizes coarse morphology and gives exact pixels only a small weight;
+2. a conditional EMA completion bank that separates a measured root section from generated pseudo-planes and transfers aligned local relations rather than a full teacher volume;
+3. a same-noise coupled sampler that applies joint multi-anchor guidance in logit space and returns continuously to an unconditioned trajectory with distance; and
+4. a shared-state tiled sampler that uses the same fixed-size model to synthesize larger 3D volumes.
+
+We evaluate direct generation, internal anchoring, one-sided generation from a boundary section, and 352³ scale-up. Exact pixel agreement is reported as a secondary diagnostic; the main conditional evidence measures coarse agreement, adjacent-section change, slice flicker, and distance-wise drift.
 
 ## 2. Related Work
 
 ### 2.1 Reconstruction from 2D observations
 
-Feature-matching and conditional neural methods reconstruct 3D microstructures from a 2D exemplar [1,2]. SliceGAN removes the need for paired 3D supervision by applying 2D discriminators to sections of a generated volume [3]. Diffusion has also been used for 2D microstructure synthesis [7] and, more recently, for 2D-to-3D dimensional expansion [4,5]. Property-conditioned approaches control quantities such as phase fraction or spatial statistics [8,9]. Recent volumetrically supervised methods additionally condition on fixed or sparse observed slices [10,11]. Our distinct setting uses unregistered 2D section collections rather than volumetric training targets and treats supplied internal sections as learned conditions in direct, base-size samples.
+Feature-matching and conditional neural methods reconstruct 3D microstructures from a 2D exemplar [1,2]. SliceGAN removes paired 3D supervision by applying 2D discriminators to sections of a generated volume [3]. Diffusion has since been used for 2D microstructure synthesis and 2D-to-3D dimensional expansion [4,5,7]. Property-conditioned approaches control phase fraction or spatial statistics [8,9], while recent volumetrically supervised methods use fixed or sparse observed slices [10,11]. Our setting uses unregistered 2D section collections rather than measured volumetric targets and asks for a plausible conditional realization, not a unique reconstruction.
 
-### 2.2 Conditioning on known regions
+### 2.2 Conditioning and continuation
 
-Diffusion inpainting preserves observed pixels while generating their surroundings [12,13]. A specified internal section poses a stricter 3D problem: unknown material lies on both sides, and the generated neighborhood should remain compatible across the plane. We adapt masked conditioning to categorical internal sections and regularize three-plane stacks spanning each anchor; direct anchor-neighborhood evaluation remains future work.
+Diffusion inpainting preserves observed image regions while generating their missing surroundings [12,13]. An internal material section differs because unknown structure lies on both sides and must remain compatible through the plane. We avoid final overwriting and train a separate relation critic on bounded categorical changes among three consecutive sections. Conditional EMA completions supply candidate relations, but real 2D sections continue to define appearance.
 
 ### 2.3 Generation beyond the training size
 
-MultiDiffusion binds overlapping diffusion paths through a shared optimization objective [6], whereas Patch-DM collages features cropped from neighboring patches [14]. GrainPaint applies diffusion inpainting to large microstructures [15]. Our scale-up procedure fuses overlapping clean predictions in one 3D categorical state and adds an adaptive base condition with a cosine-tapered transition shell.
+MultiDiffusion coordinates overlapping diffusion paths [6], Patch-DM collages neighboring features [14], and GrainPaint applies diffusion inpainting to large microstructures [15]. Our scale-up sampler keeps one global categorical diffusion state, fuses clean predictions from fixed-size overlapping 3D blocks at every reverse step, and performs only one posterior update after fusion.
 
 ## 3. Method
 
-### 3.1 Task definition
+### 3.1 Problem definition
 
-Let $\mathcal{D}_a$ be a set of categorical 2D sections normal to axis $a \in \{0,1,2\}$, with phase labels in $\{0,\ldots,K-1\}$. The axis-specific sets need not be spatially aligned. We learn a generator whose categorical samples
-
-$$
-X \in \{0,\ldots,K-1\}^{D \times H \times W}
-$$
-
-have sections that match the corresponding 2D distributions. At inference, each anchor supplies either a full plane or one dense rectangular region at a distinct axis/coordinate pair. Multiple planes and axes are supported, but labels at intersecting planes must agree. Voxels outside these regions are sampled stochastically.
-
-### 3.2 2D-supervised 3D diffusion
-
-The generator contains a 3D denoising network $G_\theta(x_{t+1},t,z_t,d,c)$, where $d$ is the domain ID. Reverse transition $t$ maps noisy state $x_{t+1}$ to $x_t$; the network receives that current state, a per-transition latent vector $z_t$, and optional conditions $c$, and predicts phase logits $\ell_\theta$. These are decoded to the relaxed signed one-hot estimate $\hat{x}_0=2\,\mathrm{softmax}(\ell_\theta)-1$; categorical labels are obtained by a final phase-wise argmax. The model follows the forward–reverse diffusion formulation [16] and the short adversarial reverse process of denoising diffusion GANs [17]. The denoiser uses channel widths 16, 32, 64, and 64, a 128-dimensional conditioning embedding, and a 64-dimensional latent vector that is resampled at every reverse transition.
-The denoiser and critics also receive a numeric domain ID. This keeps configured datasets separate in multi-domain training; the evaluated run contains only domain 0.
-
-Because paired 3D targets are unavailable, three domain-conditioned 2D critics $C_a$ supervise orthogonal sections. Each critic compares real section pairs with pairs cut from generated volumes. A global head evaluates the whole section, and a patch head evaluates local structure. The generator objective is
+Let $\mathcal{D}_a$ contain categorical 2D sections normal to axis $a\in\{0,1,2\}$, with labels in $\{0,\ldots,K-1\}$. The sets need not be registered. We learn samples
 
 $$
-\mathcal{L}_{\mathrm{adv}}
-=\sum_{a=0}^{2}\left(
-\mathcal{L}_{\mathrm{global}}^{(a)}
-+\lambda_{\mathrm{local}}\mathcal{L}_{\mathrm{local}}^{(a)}
-\right).
+X\in\{0,\ldots,K-1\}^{D\times H\times W}
 $$
 
-This trains a 3D generator through observable 2D distributions; it does not provide measured volumetric supervision.
+whose sections match the corresponding 2D distributions. At inference, an anchor specifies a full plane or dense rectangular region, its normal axis, and its coordinate. Multiple planes and axes may be supplied if labels agree at intersections.
 
-### 3.3 Plane-anchor conditioning
+### 3.2 2D-supervised 3D diffusion-GAN
 
-An anchor contains a dense rectangular array of categorical labels, a plane normal, a coordinate on that axis, and an optional in-plane offset. Anchors at distinct axis/coordinate pairs are assembled into a target tensor $Y$ and binary mask $M$, where $M(v)=1$ marks constrained voxel $v$. Full planes and smaller rectangles use the same representation; intersecting rectangles must assign the same label to their shared voxels.
-
-Define the anchor condition as $c_A=(\mathrm{onehot}(Y)\odot M,M)$. Its masked one-hot labels and mask are projected by a zero-initialized 3D convolution and added to the first denoiser feature map:
+The 3D denoiser $G_\theta(x_{t+1},t,z_t,d,c)$ receives the current categorical diffusion state, time, a newly sampled latent vector, a domain identifier, and optional conditions. It predicts phase logits $\ell_\theta$, decoded as
 
 $$
-h_A=\mathrm{Conv}_{3D}\!\left(
-\left[\mathrm{onehot}(Y)\odot M,\;M\right]
-\right).
+\hat{x}_0=2\,\mathrm{softmax}(\ell_\theta)-1.
 $$
 
-The current default also injects the anchor at every deeper encoder scale. For each target feature shape, it independently average-pools $\mathrm{onehot}(Y)\odot M$ and $M$, divides the pooled labels by nonzero mask coverage, appends that continuous coverage channel, and applies a separate zero-initialized $1\times1\times1$ projection. Thus a thin or partial plane does not disappear through ordinary zero-padded downsampling, while every added anchor path still leaves the unconditioned mapping unchanged at initialization. The same anchor is provided at every reverse step.
+The reverse process follows denoising diffusion GANs [16,17] with ten transitions. The U-Net channel widths are 16, 32, 64, and 64; its condition embedding has 128 channels and its stochastic latent has 64 channels.
 
-The training loss preserves coarse morphology more strongly than exact boundaries: it applies mask-normalized in-plane pooling with a $4\times4$ window, weights partially observed pooling cells by their coverage, and retains only a low-weight full-resolution cross-entropy term on the original measured plane,
+Because no paired 3D target exists, an axis-specific 2D critic evaluates section pairs cut from generated volumes against real section pairs. Each critic contains a global and local head. Missing-axis data can be borrowed from a provider domain with the domain label removed for that critic, allowing geometric context to be shared without presenting provider appearance as target-domain evidence. The evaluated data contain one domain and use the same image distribution for all axes.
 
-$$
-\mathcal{L}_{\mathrm{anchor}}
-=\mathcal{L}_{\mathrm{pool4}}+0.05\,\mathcal{L}_{\mathrm{pixel}}.
-$$
+### 3.3 Soft multiscale anchor conditioning
 
-Correct labels alone do not ensure a compatible neighborhood. At the final transition ($t=0$), a separate critic supplies $\mathcal{L}_{\mathrm{conn}}$. It receives bounded categorical change images derived from three consecutive planes rather than raw logits: the two adjacent phase changes and the change between those changes. Each anchored update normally has a seven-window budget, reserves one available general window per axis, always retains the measured-root window, then samples generated-plane windows and any remaining general windows; the anchor and general groups receive equal aggregate weight.
-
-The real single-anchor path is trained during the anchor ramp. After that ramp, one fixed EMA snapshot fills a per-domain bank with conditional completions rooted in visible measured sections and without phase-fraction conditioning. Raw EMA labels remain unchanged for relation references, while the measured root is stored separately and overlaid only on a temporary copy used to assemble coherent multi-plane conditions. Every generated plane also retains the exact three-slice window at its source coordinate. Subsequent training alternates fresh real single anchors with a scale-balanced number of planes drawn from one completion; only the measured root receives the pixel term, and generated-plane connectivity uses its aligned source window rather than an unrelated morphology match. Measured and EMA-derived coarse losses are normalized separately and then averaged, so plane count cannot overwhelm the real seed. During later training, one current-EMA conditional completion periodically replaces the oldest volume for the selected domain. The connectivity critic therefore learns image-level slice relations without reconstructing a hidden teacher volume voxel by voxel, while the real-data 2D critics remain responsible for marginal appearance.
-
-At inference, baseline and anchor trajectories start from the same ordinary noise and share every transition's latent vector and posterior noise. On the anchor trajectory, the sampler subtracts the plain logits from one joint multi-anchor conditional prediction, applies this residual through a Gaussian spatial weight, and decodes only after the logit correction. Plane guidance increases toward the final transition while surrounding-context guidance decreases. After each posterior update, the normalized form of that same Gaussian couples the anchor trajectory to the same-RNG baseline: it is one on the supplied plane and decays continuously into baseline-dominant distant regions without separate coupling radii. The sampler does not initialize constrained voxels from $q(x_T\mid Y)$, clamp intermediate clean predictions, or overwrite final labels. Anchor agreement is therefore a measured learned-conditioning outcome rather than a sampler invariant.
-
-### 3.4 Phase-fraction conditioning and training objective
-
-An optional phase-fraction vector $v\in\Delta^{K-1}$, with $v_k\geq0$ and $\sum_k v_k=1$, specifies the desired composition. Non-negative user inputs are normalized to this simplex before sampling. During training, each target averages a random one to four empirical crop fractions from the selected target domain; provider-domain crops borrowed for missing axes never enter this pool. Its embedding conditions the denoiser, while predicted mean fractions $\hat{p}$ receive
+Anchor labels $Y$ and mask $M$ form
 
 $$
-\mathcal{L}_{\mathrm{vf}}=\frac{1}{2}\sum_{k=0}^{K-1}|\hat{p}_k-v_k|.
+c_A=(\mathrm{onehot}(Y)\odot M,M).
 $$
 
-At training step $s$, the implemented generator objective is
+The condition is projected into the full-resolution encoder feature. At each deeper scale, masked labels and mask coverage are pooled independently; labels are divided by nonzero coverage before a zero-initialized $1\times1\times1$ projection. A thin or partial plane therefore remains visible without treating unobserved zeros as a phase. Zero initialization preserves the original unconditioned mapping at adapter creation.
+
+The anchor objective is
 
 $$
-\mathcal{L}_{G}=\mathcal{L}_{\mathrm{adv}}
-+r_A(s)\left(
-\lambda_{\mathrm{anchor}}\mathcal{L}_{\mathrm{anchor}}
-+\lambda_{\mathrm{conn}}\mathcal{L}_{\mathrm{conn}}
-+\lambda_{\mathrm{normal}}\mathcal{L}_{\mathrm{normal}}
-\right)
-+\lambda_{\mathrm{vf}}\mathcal{L}_{\mathrm{vf}}
+\mathcal{L}_{A}=\mathcal{L}_{\mathrm{pool4}}+0.05\,\mathcal{L}_{\mathrm{pixel}}.
 $$
 
-where unavailable conditional terms are zero. The current warm-start configuration begins the anchor ramp immediately and reaches one after 500 steps. The connectivity critic term is active only for anchored final-transition samples. On the same matched anchor triplets, $\mathcal{L}_{\mathrm{normal}}$ compares soft center-to-previous and center-to-next $K\times K$ phase-transition matrices with total-variation distance. The implementation uses 10 reverse transitions, $\lambda_{\mathrm{local}}=0.5$ inside $\mathcal{L}_{\mathrm{adv}}$, and weights $\lambda_{\mathrm{anchor}}=1$, $\lambda_{\mathrm{conn}}=0.25$, $\lambda_{\mathrm{normal}}=0.10$, and $\lambda_{\mathrm{vf}}=1$.
+The first term compares mask-normalized $4\times4$ in-plane phase distributions and weights boundary cells by observed coverage. The second term is exact cross-entropy only on the measured root. Generated pseudo-planes receive no full-resolution target. If classifier-free dropout hides an anchor, all anchor-specific losses are disabled for that sample.
 
-Anchor conditions are requested for 80% of eligible training samples. Once the conditional bank is ready, eligible anchor updates alternate between fresh measured single planes and bank-derived coherent multi-plane conditions. The multi-plane count follows a discrete log-uniform distribution up to the number of encoder-stride positions across the input. When anchor and phase-fraction conditions are both available, the joint-null, anchor-null-only, and phase-fraction-null-only states are mutually exclusive and each occurs with probability 0.05; both conditions are retained for the remaining 0.85. When no anchor is present, the lone phase-fraction condition is dropped with probability 0.10. This supplies unconditional and partially conditional states to the same network without independent 0.2 dropouts.
+### 3.4 Learning relations from conditional EMA completions
 
-### 3.5 Fixed-block shared-state tiled scale-up
+After the real single-anchor ramp, a frozen EMA snapshot generates conditional 3D completions rooted in visible measured sections. Each bank entry keeps three objects separate: the raw EMA volume, the measured root, and source coordinates for sampled pseudo-planes. The measured root is overlaid only on a temporary copy used to build a coherent model condition; the raw EMA volume remains unchanged as a relation reference.
 
-Let $P=128$ be the fixed block input size and $o$ the overlap reserved inside each block on every shared face. Adjacent blocks start $P-2o$ voxels apart, so their predictions share a $2o$-voxel fusion band. For $b$ blocks, the requested output length is $P+(b-1)(P-2o)$. Every denoiser call therefore uses the same $P^3$ shape seen during training. At every reverse transition, one newly sampled latent vector $z_t$ is shared by all blocks. A separable cosine-taper window $w_k$ then fuses their overlapping predictions:
+Training alternates fresh measured single anchors with multi-plane conditions sampled from one completion. Measured and pseudo-plane coarse losses are normalized separately and averaged, preventing many generated planes from overwhelming the real root. For a pseudo-plane at coordinate $i$, the relation reference is the exact source triplet $(i-1,i,i+1)$ from its completion. A fresh real anchor has no aligned 3D source and therefore uses a morphology-matched fallback triplet.
 
-$$
-\bar{x}_0(v)=
-\frac{\sum_k w_k(v)\hat{x}_{0,k}(v)}
-{\sum_k w_k(v)}.
-$$
-
-The reverse posterior updates the shared global state only after fusion, so adjacent blocks exchange information throughout denoising rather than being stitched after generation. Fusion windows taper only on shared tile faces, while outermost faces use unit weight and there is no periodic wrap. The public sampler can optionally add an outer context margin $m$: it runs the same shared-state process on a shape expanded by $2m$ and center-crops the requested output afterward. That context can require more actual tiles than the requested block grid. The fixed 27-tile paper evaluation sets $m=0$.
-
-When a base volume $B$ is supplied, define its signed one-hot field as $b(v)=2\,\mathrm{onehot}(B(v))-1$ and keep one fixed noise field $\epsilon_B$. The corresponding fixed-noise forward realization is
+The relation critic does not see raw section appearance. For three consecutive relaxed categorical sections $(p_{-1},p_0,p_{+1})$, it receives two bounded changes and their bend,
 
 $$
-\widetilde{B}_{t+1}(v)=
-\sqrt{\bar{\alpha}_{t+1}}\,b(v)
-+\sqrt{1-\bar{\alpha}_{t+1}}\,\epsilon_B(v).
+r=(p_0-p_{-1},\;p_{+1}-p_0,\;\tfrac12[(p_{+1}-p_0)-(p_0-p_{-1})]).
 $$
 
-Immediately before reverse transition $t$, the centered shared state is blended as
+This removes the static center image as a direct shortcut. Real 2D pair critics still constrain marginal appearance. A seven-window budget always retains the measured-root window when present, reserves general windows across available axes, and fills the remaining slots with pseudo-plane windows. The bank initially uses the fixed EMA and then replaces one oldest completion with a current-EMA completion every 500 steps.
+
+The generator loss is
 
 $$
-x_{t+1}(v)\leftarrow[1-s(v)]x_{t+1}(v)
-+s(v)\widetilde{B}_{t+1}(v),
+\mathcal{L}_G=\mathcal{L}_{\mathrm{adv}}+r_A(s)(\mathcal{L}_{A}+0.25\mathcal{L}_{\mathrm{rel}}+0.10\mathcal{L}_{\mathrm{transition}})+\mathcal{L}_{\mathrm{vf}},
 $$
 
-where $\bar{\alpha}_{t+1}$ is the cumulative forward signal coefficient and $s(v)=1$ in the base interior, with a separable cosine taper over the four-voxel outer shell. This operation conditions the noisy input state; it does not clamp the tile predictions. Final labels are obtained from the fused clean prediction and are never overwritten by $B$, so even the full-strength base interior may change.
+where $r_A(s)$ is a 500-step anchor ramp. The optional phase-fraction term is part of the shared training model but is not evaluated as a paper contribution here.
+
+### 3.5 Same-noise coupled anchor sampling
+
+At inference, baseline and anchor trajectories begin from identical ordinary noise and share every transition's latent vector and posterior noise. The conditional branch computes one joint multi-anchor logit residual
+
+$$
+\Delta\ell=\ell_{\mathrm{anchor}}-\ell_{\mathrm{plain}}.
+$$
+
+For distance $d(v,A)$ from the nearest observed anchor support, its spatial weight is
+
+$$
+w(v)=s_A\exp\left[-\frac{d(v,A)^2}{2\sigma^2}\right],\qquad \sigma=\sqrt{3}\,f,
+$$
+
+where $s_A=0.88$ and $f=8$ is the model downsampling factor. The corrected logits are $\ell_{\mathrm{plain}}+w\Delta\ell$. Exact-plane guidance grows toward the final transition, while surrounding-context guidance decreases with the remaining diffusion noise.
+
+After each posterior update, the normalized Gaussian $w/s_A$ couples the conditional state to the same-noise baseline state. Thus the anchor plane uses the conditional trajectory and distant regions continuously approach the ordinary trajectory without a second hand-chosen coupling radius. No constrained voxel is initialized from the anchor, clamped during denoising, or overwritten after sampling.
+
+### 3.6 Shared-state scale-up
+
+For block size $P=128$ and inward overlap $o$, neighboring starts are separated by $P-2o$. Three blocks per axis with $o=8$ therefore produce
+
+$$
+128+2(128-16)=352
+$$
+
+voxels per axis. At every reverse transition, all blocks read the same pre-update global state and share one latent vector. Separable cosine windows fuse overlapping clean predictions,
+
+$$
+\bar{x}_0(v)=\frac{\sum_k w_k(v)\hat{x}_{0,k}(v)}{\sum_k w_k(v)},
+$$
+
+before one global posterior update. A supplied 128³ base is re-noised with one fixed noise field at every transition and blended into the global noisy state with a tapered shell. It remains free to adapt and is never pasted into the final output.
 
 ## 4. Experimental Setup
 
-### 4.1 Data and scope
+### 4.1 Data and model
 
-The available source artifact, `data/sample.png`, is a 226 × 690 binary phase map. Phase 0 is treated as pore and phase 1 as solid. The material system, acquisition and segmentation procedures, physical pixel size, and external source or data license are not recorded in the available project files. Results are therefore reported in voxels and should be interpreted as an algorithmic study without a calibrated physical length scale. Under an isotropy assumption, the same image distribution supervises all three axes. Random 128 × 128 crops are used at the real critic-section size and, with probability 0.5, augmented by right-angle rotations and reflections (Figure 1).
+The source artifact `data/sample.png` is one 226 × 690 binary phase map. Phase 0 is treated as pore and phase 1 as solid. Material provenance, acquisition conditions, segmentation history, physical pixel size, and an external data license are not available in the project files. Results are therefore reported in voxels and interpreted as an algorithmic study. Random 128 × 128 crops supervise all three axes under an isotropy assumption.
 
 <p align="center">
-  <img src="assets/paper/01-training-data.png" alt="Binary training image with three 128 by 128 crop regions" width="680">
+  <img src="assets/paper/01-training-data.png" alt="Binary training image with example crop regions" width="680">
 </p>
-<p align="center"><em>Figure 1. Binary 2D training image. Orange boxes show example 128 × 128 crops used at the real critic-section size. Black denotes pore and gray denotes solid throughout.</em></p>
+<p align="center"><em>Figure 1. Binary 2D training image. Orange boxes show example 128 × 128 training crops. Black and gray denote phases 0 and 1.</em></p>
 
-Evaluation uses 64 randomly sampled real crops. A fixed unconditioned 128³ seed-10000 sample from the trained generator serves as synthetic pseudo-ground truth for controlled anchor tests; it is denoted GT only in that context. Evaluation volumes use separate seeds 0–3. All real crops come from the training image, and no held-out experimental 3D volume is included.
+All reported values use the completed 20,000-step EMA generator from run `08170028` (SHA-256 `fe6289e7…f444f`). It was warm-started from run `08161634`; generator and all critic weights were loaded strictly, while the trainer-side conditional completion bank was rebuilt under the current formulation. Adam learning rates are $1.6\times10^{-4}$ for the generator and $10^{-4}$ for critics. Training uses mixed precision, EMA decay 0.999, real batch size 8, 16 generated pairs per axis, and anchor requests on 80% of eligible updates.
 
-### 4.2 Training and implementation
+### 4.2 Evaluation protocols
 
-All reported results use the immutable 20,000-step EMA checkpoint from run 08111303, domain 0, with guidance scale 1.0. That archived checkpoint predates the current anchor loss, rolling conditional EMA prior, multi-plane training, and coupled logit-space sampler described in Section 3.3. The unchanged values below are historical results and do not evaluate the revised training path without retraining and regeneration.
+Structural evaluation uses seeds 0–3. Direct samples are 128³. Scale-up samples use a 3 × 3 × 3 block plan, eight-voxel inward overlap, no outer margin, and no supplied base, isolating the tiled sampler. FID compares 64 random axis-0 generated sections with 64 random real crops at the same 128² field of view.
 
-The archived run and the current default configuration both use 128³ volumes, 16 section pairs per axis, and real-section batch size 8. Adam learning rates are $1.6\times10^{-4}$ for the denoiser and $1.0\times10^{-4}$ for the critics. Training uses mixed precision, EMA decay 0.999, 10 diffusion transitions, and an R1 penalty every 16 steps. The archived run used the earlier 3,000-step start and 6,000-step ramp; the current warm-start configuration uses a 500-step ramp and requests anchors on 80% of eligible steps. Its conditional EMA bank is initialized after that ramp and then refreshed one completion at a time. The fixed-block sampler is an inference procedure and does not require a second model.
+Conditional evaluation has three groups. Generated-control internal anchors use four unconditioned references, all three center axes, and therefore 12 cases. Generated-control boundary anchors use the first axis-0 section of those references in four cases. External boundary tests use the fixed 128² crop at $(\mathrm{left},\mathrm{top})=(281,58)$ from the real image with four sampling seeds. Every conditioned sample is compared with an unconditioned trajectory that shares its initial noise, per-step latent vectors, and posterior noise.
 
-### 4.3 Evaluation protocols
+The qualitative internal and scale-up examples use seed 0 and the same external crop. The 352³ illustrated scale-up receives an anchored 128³ base; the quantitative scale-up row does not, keeping the structural comparison separate from anchor retention.
 
-The single-plane examples in Figures 4 and 6 use the 128 × 128 crop at $(\mathrm{left},\mathrm{top})=(281,58)$ in `data/sample.png`, place it at the axis-0 center of a 128³ volume, and use seed 0. A separate seed-0 coverage sweep supplies 0, 1, 2, 4, 8, 16, 32, 64, or 128 planes from the synthetic GT at evenly distributed axis-0 coordinates. Coordinates are recomputed for each count, so successive sets are not generally nested. The multi-sample evaluation uses 32, 64, 96, and 128 planes—25%, 50%, 75%, and 100% coverage—with seeds 0–3.
+### 4.3 Metrics
 
-The phase-fraction-conditioned samples receive the synthetic reference fractions $(0.3487196,0.6512804)$ as an oracle target. Only this one target is tested.
+- **FID:** Inception-v3 feature distance between real and generated 2D sections [19]. It is a relative image-distribution measure, not a material-specific perceptual score.
+- **Phase-0 fraction:** fraction of labels assigned to phase 0.
+- **Interface density:** mean fraction of adjacent locations with different labels, over two axes for real crops and three axes for generated volumes.
+- **Tortuosity:** TauFactor 1.2.1 phase-0 diffusive tortuosity along axis 0, with convergence criterion $10^{-3}$ [18].
+- **Percolation:** mean fraction of phase-0 voxels in non-periodic, 6-connected components spanning each of the three axes.
+- **Pool4 similarity:** one minus the mean total-variation distance between categorical phase distributions in corresponding 4 × 4 cells of the supplied and generated plane. The same-noise unconditioned value measures how much agreement existed before conditioning.
+- **First-change ratio:** phase-change rate adjacent to the anchor divided by the ordinary adjacent-section change rate in the same volume.
+- **Flicker ratio:** 95th percentile or maximum of the absolute second difference of adjacent-section change rates, divided by the same-noise unconditioned baseline.
+- **Farthest drift:** label disagreement with the same-noise baseline at the farthest section represented in that protocol.
 
-The scale-up evaluation uses 3 × 3 × 3 fixed 128³ blocks with eight-voxel inward overlaps and no outer context margin. The 27-tile plan produces a 352³ volume with shared boundaries at coordinates 120 and 232 on every axis.
-
-### 4.4 Metrics
-
-- **FID:** compares Inception-v3 features from 64 fixed real crops with 64 axis-0 sections from each generated volume [19]. Lower is better. Large scale-up sections are cropped to the same 128 × 128 field of view, so every condition is compared at the same image size.
-  Figure 5 instead uses all 128 synthetic-GT axis-0 sections as its FID reference, so its values should not be compared numerically with Table 1.
-
-- **Voxel accuracy:** measures the fraction of voxels that match the synthetic GT at the same coordinates. It is meaningful only for the controlled anchor experiments. Higher is better.
-
-- **Tortuosity:** measures axis-0 diffusive path length through phase 0 with TauFactor 1.2.1 and convergence criterion $10^{-3}$ [18]. The GT value is a reference line; closer is better.
-
-- **Porosity (phase 0):** is the fraction of voxels labeled as phase 0. The GT value is the target for the controlled comparison.
-
-- **Percolation (phase 0):** uses non-periodic 6-connectivity. For each axis, it measures the fraction of phase-0 voxels that belong to a component touching both opposing faces. We report the mean over the three axes. Higher values indicate that more pore voxels belong to spanning paths.
-
-- **Generation time:** is CUDA-synchronized sampling time on an RTX 2060. It includes all model sampling needed for the output, including base generation for scale-up, but excludes TIFF writing and metric calculation. Lower is better.
-
-Table 1 reports mean ± sample standard deviation over four seeds. The GT row is one fixed synthetic volume. Figure 5 is a separate seed-0 anchor sweep and therefore has no error bars.
+Tables report mean ± sample standard deviation. Exact anchor pixel accuracy is included only as a secondary diagnostic.
 
 ## 5. Results
 
-Table 1 and Figure 7 show the same six measurements. The real-crop row is the expected low-FID baseline because both crop sets come from the same 2D image. Among generated conditions, scale-up has the lowest FID (39.51 ± 1.90). Its porosity, tortuosity, and percolation remain close to the 128³ GT values, while generation time increases from about one second for a 128³ sample to 23.74 s for a 352³ sample.
+### 5.1 Direct and scalable 3D synthesis
 
-| Evaluation data | FID ↓ | Voxel accuracy ↑ | Tortuosity | Porosity (phase 0) | Percolation (phase 0) ↑ | Time ↓ |
-|---|---:|---:|---:|---:|---:|---:|
-| Controlled reference (GT) | 43.36 | — | 2.0633 | 0.3487 | 99.740% | — |
-| Real 2D crops | 19.51 ± 1.14 | — | — | 0.3625 ± 0.0042 | — | — |
-| 3D | 43.88 ± 2.37 | — | 2.1211 ± 0.0909 | 0.3475 ± 0.0034 | 99.729 ± 0.064% | 0.972 ± 0.284 s |
-| 3D (phase-fraction conditioned) | 50.90 ± 4.10 | — | 1.9993 ± 0.0531 | 0.3501 ± 0.0036 | 99.706 ± 0.048% | 0.844 ± 0.032 s |
-| 3D (anchored, 25%) | 49.26 ± 0.79 | 94.71 ± 0.03% | 2.0528 ± 0.0033 | 0.3555 ± 0.0009 | 99.715 ± 0.029% | 0.899 ± 0.015 s |
-| 3D (anchored, 50%) | 54.84 ± 1.38 | 97.46 ± 0.01% | 2.0596 ± 0.0028 | 0.3486 ± 0.0006 | 99.819 ± 0.003% | 0.922 ± 0.006 s |
-| 3D (anchored, 75%) | 56.81 ± 1.21 | 97.90 ± 0.02% | 2.0834 ± 0.0020 | 0.3380 ± 0.0007 | 99.797 ± 0.008% | 0.957 ± 0.015 s |
-| 3D (anchored, 100%) | 55.73 ± 0.97 | 98.75 ± 0.02% | 2.0755 ± 0.0015 | 0.3415 ± 0.0005 | 99.852 ± 0.005% | 0.985 ± 0.015 s |
-| 3D (scale-up) | 39.51 ± 1.90 | — | 2.1030 ± 0.0048 | 0.3495 ± 0.0011 | 99.767 ± 0.021% | 23.736 ± 0.022 s |
+The direct samples preserve approximately the feature scale and interface density of the real sections (Figures 2 and 3). Table 1 shows that the 352³ sampler maintains phase fraction, interface density, tortuosity, and percolation close to direct 128³ generation. Scale-up FID is lower, but this should not be interpreted as a definitive quality ranking: a larger volume supplies more spatially varied candidate crops to the same 2D metric.
 
-### 5.1 Three-dimensional synthesis
+| Evaluation data | FID ↓ | Phase-0 fraction | Interface density | Tortuosity axis 0 | Percolation phase 0 |
+|---|---:|---:|---:|---:|---:|
+| Real 2D crops | 19.51 ± 1.14 | 0.3625 ± 0.0042 | 0.06332 ± 0.00035 | — | — |
+| Direct 128³ | 44.85 ± 2.66 | 0.3399 ± 0.0025 | 0.06656 ± 0.00022 | 2.050 ± 0.022 | 99.734 ± 0.035% |
+| Scale-up 352³ | 35.06 ± 0.61 | 0.3440 ± 0.0006 | 0.06577 ± 0.00037 | 2.003 ± 0.024 | 99.729 ± 0.016% |
 
-The cutaway in Figure 2 exposes both the surface and interior of the fixed 128³ controlled-reference volume. Its three orthogonal center sections (Figure 3) show feature scales comparable to those in the training image. These figures provide qualitative context; Table 1 supplies the distributional and transport measurements.
+<p align="center"><img src="assets/paper/02-generated-volume.png" alt="Generated binary 3D volume with one octant removed" width="470"></p>
+<p align="center"><em>Figure 2. Unconditioned 128³ seed-0 sample with one octant removed.</em></p>
 
-<p align="center">
-  <img src="assets/paper/02-generated-volume.png" alt="Generated binary 3D volume with one octant removed" width="470">
-</p>
-<p align="center"><em>Figure 2. Generated 128³ controlled-reference volume with one octant removed. Black denotes pore and gray denotes solid.</em></p>
+<p align="center"><img src="assets/paper/03-generated-slices.png" alt="Three orthogonal center sections of the generated volume" width="760"></p>
+<p align="center"><em>Figure 3. Orthogonal center sections of the volume in Figure 2.</em></p>
 
-<p align="center">
-  <img src="assets/paper/03-generated-slices.png" alt="Three orthogonal center sections of a generated volume" width="760">
-</p>
-<p align="center"><em>Figure 3. Center sections normal to axes 0, 1, and 2 of the volume in Figure 2.</em></p>
+### 5.2 Internal plane conditioning
 
-### 5.2 Plane anchoring
+Across 12 generated-control internal conditions, pool4 similarity rises from an unconditioned 58.52 ± 2.45% to 92.13 ± 0.65%, a gain of 33.60 ± 2.45 percentage points. Exact conditioned agreement is 91.61 ± 0.69% (Table 2). The first-change ratio of 1.12 ± 0.15 indicates that the immediate anchor transition is close to, though slightly larger than, ordinary slice changes. The p95 flicker ratio is 1.20 ± 0.19. The qualitative external center-plane result obtains 92.44% exact agreement without final replacement (Figure 4).
 
-In the seed-0 single-plane example, the generated center section matches 16,235 of 16,384 supplied voxels (99.09%) without post-generation replacement (Figure 4). This is measured conditioning accuracy, not a hard copy operation.
+<p align="center"><img src="assets/paper/04-anchor-conditioning.png" alt="Supplied center section, generated section, and anchored volume" width="780"></p>
+<p align="center"><em>Figure 4. External center-plane conditioning. The supplied section, generated section at the requested coordinate, and surrounding 128³ realization are shown separately.</em></p>
 
-<p align="center">
-  <img src="assets/paper/04-anchor-conditioning.png" alt="Supplied center section, generated center section, and anchored 3D volume" width="780">
-</p>
-<p align="center"><em>Figure 4. Fixed-seed single-plane conditioning. (a) Supplied axis-0 center section; (b) generated center section, matching 16,235/16,384 constrained voxels (99.09%); (c) surrounding 128³ volume.</em></p>
+### 5.3 One-sided continuation from a boundary section
 
-Across four seeds, whole-volume accuracy rises from 94.71 ± 0.03% at 25% coverage to 98.75 ± 0.02% at 100% coverage. In the seed-0 sweep, accuracy is 55.33% with no anchors, 94.75% with 32 planes, 97.44% with 64 planes, and 98.72% with 128 planes. FID is lowest at 32 planes (14.71) and remains 15.98 at full coverage, so better coordinate recovery does not require a monotonic FID change. Phase-0 percolation stays between 99.63% and 99.85%, while generation time increases from 0.826 s with no anchors to 1.588 s with 128 anchors.
+Placing the section at index 0 turns the experiment into one-sided spatial continuation: the model must produce all remaining sections on one side of the observation. In the generated-control cases, conditioning raises pool4 similarity from 59.47 ± 2.11% to 93.71 ± 0.68%. For the external image it rises from 55.16 ± 2.65% to 93.74 ± 0.56%. The external first-change ratio is 0.85 ± 0.12, so the supplied boundary does not create a larger immediate jump than ordinary generated sections. Its p95 flicker is 1.08 ± 0.05 times the same-noise baseline. At the rare worst location, however, the maximum flicker remains 1.37 ± 0.32 times baseline, consistent with a small residual visual stutter in some sequences.
 
-<p align="center">
-  <img src="assets/paper/06-anchor-sweep-metrics.png" alt="Voxel accuracy, FID, tortuosity, porosity, percolation, and generation time versus supplied axis-0 planes" width="780">
-</p>
-<p align="center"><em>Figure 5. Seed-0 controlled anchor sweep. (a) Whole-volume voxel accuracy; (b) FID against all 128 GT axis-0 sections; (c) tortuosity; (d) phase-0 porosity; (e) mean phase-0 percolation over three axes; and (f) generation time. Dashed lines mark GT values where applicable. The symmetric-log x-axis makes small anchor counts visible.</em></p>
+| Condition | Cases | Unconditioned pool4 | Conditioned pool4 ↑ | Gain | First change / ordinary | p95 flicker / baseline | Peak flicker / baseline | Farthest drift ↓ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Generated-control internal | 12 | 58.52 ± 2.45% | 92.13 ± 0.65% | +33.60 ± 2.45 pp | 1.12 ± 0.15 | 1.20 ± 0.19 | 1.74 ± 0.63 | 0.00% |
+| Generated-control boundary | 4 | 59.47 ± 2.11% | 93.71 ± 0.68% | +34.24 ± 2.54 pp | 0.90 ± 0.08 | 1.12 ± 0.10 | 1.64 ± 0.51 | 0.00% |
+| External boundary | 4 | 55.16 ± 2.65% | 93.74 ± 0.56% | +38.58 ± 2.32 pp | 0.85 ± 0.12 | 1.08 ± 0.05 | 1.37 ± 0.32 | 0.00% |
 
-### 5.3 Anchored scale-up
+<p align="center"><img src="assets/paper/05-boundary-continuation.png" alt="One-sided continuation from generated-control and external boundary sections" width="900"></p>
+<p align="center"><em>Figure 5. One-sided continuation. Top: a section drawn from an unconditioned reference. Bottom: a real external crop. The input and generated d=0 plane are shown separately, followed by sections at increasing distance. These are possible stochastic continuations, not predictions of a unique measured 3D volume.</em></p>
 
-The shared-state sampler combines 3 × 3 × 3 fixed 128³ blocks to produce a 352³ output, 20.80 times the base voxel count. In the illustrated seed-0 sample, the full center-plane anchor retains 16,036 of 16,384 voxels (97.88%). The 120² full-strength center region retains 14,250 of 14,400 voxels (98.96%), and the 120³ base interior retains 1,727,130 of 1,728,000 voxels (99.95%). Across four seeds, scale-up has FID 39.51 ± 1.90 and takes 23.74 ± 0.02 s.
+The zero farthest drift in Table 2 is observed at distance 64 for internal center-plane tests and distance 127 for boundary tests. It is not caused by final output copying; the Gaussian guidance becomes numerically negligible and the coupled trajectory returns to the same-noise baseline.
 
-<p align="center">
-  <img src="assets/paper/05-scale-up.png" alt="Anchor, scaled center section, and cutaway of a 352 cubed volume" width="780">
-</p>
-<p align="center"><em>Figure 6. Scale-up with 3 × 3 × 3 fixed 128³ blocks and eight-voxel inward margins on shared faces. (a) 128² center-plane anchor; (b) 352² center section, with the orange box marking the full 128² base footprint and the blue dashed box marking the 120² full-strength conditioning region; (c) cutaway of the 352³ output. No base voxels are pasted into the result.</em></p>
+### 5.4 Anchored scale-up
 
-### 5.4 Overall comparison
+The fixed-block sampler produces 352³ voxels with 27 fixed-size tiles at each reverse transition (Figure 6), 20.80 times the voxel count of a direct sample. In the illustrated result, the external center anchor retains 91.66% exact agreement after scale-up. Table 1 shows that global morphology and transport summaries remain close to direct generation.
 
-Figure 7 presents Table 1 as six small comparisons. FID and time are lower-is-better. Voxel accuracy is higher-is-better. Tortuosity, porosity, and percolation should be read against the dashed GT lines.
-
-<p align="center">
-  <img src="assets/paper/08-paper-metrics.png" alt="Six-panel comparison of FID, voxel accuracy, tortuosity, porosity, percolation, and generation time" width="780">
-</p>
-<p align="center"><em>Figure 7. Four-seed evaluation summary. Bars show means and error bars show sample standard deviations. GT and real-crop rows appear only where the metric is defined.</em></p>
+<p align="center"><img src="assets/paper/06-scale-up.png" alt="Anchor, scaled center section, and cutaway of a 352 cubed volume" width="900"></p>
+<p align="center"><em>Figure 6. Scale-up with 3 × 3 × 3 fixed 128³ blocks. The orange box marks the base footprint and the blue dashed box its full-strength interior. Neither the anchor nor the base is pasted into the final 352³ result.</em></p>
 
 ## 6. Discussion
 
-More anchor planes strongly improve coordinate recovery: the seed-0 sweep rises from 55.33% accuracy with no anchors to 98.72% with all 128 planes. FID is best at 32 planes rather than 128 planes, showing that coordinate accuracy and section-distribution similarity measure different properties.
+The experiments support a narrower claim than deterministic 2D-to-3D reconstruction. A measured section constrains one stochastic realization, and the model uses learned relations to continue away from it. Coarse and exact agreement near 92–94% show that the condition remains recognizable despite the deliberate absence of hard clamping. The first-change and p95 flicker results show that this flexibility generally avoids a new seam at the plane.
 
-The unconditioned sample already matches GT porosity closely (0.3475 versus 0.3487). Supplying the GT phase fractions gives 0.3501, so this single target does not show an improvement over unconditioned sampling. Phase-0 percolation remains above 99.70% for every Table 1 condition.
+The generated-control experiment isolates conditional behavior within the model's own distribution, whereas the external experiment tests the actual use case but has no 3D ground truth. Their similar boundary metrics suggest that the real 2D critics and soft anchor objective prevent the conditional EMA prior from simply imposing its own center-image style. This remains indirect evidence: only measured 3D data could establish physical reconstruction accuracy.
 
-Scale-up produces 20.80 times as many voxels as a base sample and takes 23.74 s instead of about one second. Its FID is lower than the direct 128³ result, and its porosity, tortuosity, and percolation remain close to GT. This indicates that the larger field of view does not obviously degrade these aggregate measurements.
+The maximum flicker ratios reveal the remaining failure more clearly than mean metrics. Most transitions are close to baseline, but occasional locations still change faster. This agrees with visual inspection of a slight lag-like motion and motivates future work on longer-range relation critics or sequence-level evaluation rather than stronger pixel copying.
+
+Scale-up preserves the reported aggregate statistics while expanding the field of view. Because all blocks share one state and exchange predictions at every step, no post-hoc seam correction is required. The anchored base can still differ locally from its input, which is necessary for compatibility with the larger realization.
 
 ## 7. Limitations
 
-The synthetic GT is sampled from the trained model and therefore lies within its learned distribution. It tests controlled coordinate agreement, not reconstruction of unseen experimental 3D material. The real crop baseline, training data, and single-plane anchor all come from the same 2D image, with no held-out specimen. The image's material provenance, imaging and segmentation history, physical scale, and external license are unavailable.
+The study uses one binary image, no held-out specimen, and no experimental 3D volume. The generated-control anchors come from the model itself and therefore cannot measure out-of-distribution reconstruction. The external anchor comes from the same source image used for training. Material provenance, physical scale, and acquisition variability are unknown.
 
-The study does not compare against a separate slice-conditioned baseline and does not ablate every anchor or scale-up component. Percolation is a global spanning fraction, not permeability or conductivity, and tortuosity is evaluated only along axis 0.
+The relation reference is a model-generated conditional completion, not measured 3D truth. Separating relation changes from appearance and retaining real 2D critics reduces but cannot eliminate self-reference. No independently trained ablation isolates every component of the current anchor system, so the results establish integrated-system behavior rather than causal contribution sizes.
 
-The main table uses four seeds, while the anchor sweep uses one fixed seed. FID relies on Inception-v3 features trained for natural images and is therefore a relative section-distribution score, not a material-specific perceptual metric. Generation times are specific to the RTX 2060 used here.
+FID uses a natural-image network, percolation is a coarse global spanning fraction, and tortuosity is evaluated only along axis 0. Four seeds characterize stochastic variation only approximately. The nonzero peak-flicker ratios show that occasional abrupt changes remain even when p95 behavior is close to baseline.
 
 ## 8. Conclusion
 
-The model learns 3D generation, coordinate-aware plane conditioning, and fixed-block scale-up from 2D supervision. In the controlled test, whole-volume voxel accuracy reaches 94.71 ± 0.03% with 25% anchor coverage and 98.75 ± 0.02% with full coverage. The same 128³ model generates a 352³ volume in 23.74 ± 0.02 s while keeping porosity, tortuosity, and phase-0 percolation close to the synthetic reference. The results support the method as a controlled generation tool, but experimental 3D validation remains necessary.
+The method learns 3D microstructure generation from 2D sections, uses a supplied plane as a soft spatial condition, and scales the same model to larger volumes. Its defining choice is to learn section relationships from conditional EMA completions without copying a teacher volume or overwriting final voxels. Conditioning improves pooled agreement by 34–39 percentage points to about 92–94%, keeps external boundary p95 flicker within 1.08 ± 0.05 times a same-noise baseline, and produces 352³ samples with structural statistics close to direct generation. These results support conditional stochastic synthesis; experimental 3D validation remains necessary.
 
 ## References
 
@@ -292,7 +263,7 @@ The model learns 3D generation, coordinate-aware plane conditioning, and fixed-b
 
 [11] Y. Shi et al., “GeoTopoDiff: Learning geometry–topology graph priors through boundary-constrained mixed diffusion for sparse-slice 3D porous reconstruction,” *arXiv preprint* arXiv:2605.03764, 2026.
 
-[12] G. Zhang et al., “Towards coherent image inpainting using denoising diffusion implicit models,” in *Proceedings of the 40th International Conference on Machine Learning*, vol. 202, pp. 41164–41193, 2023.
+[12] G. Zhang et al., “Towards coherent image inpainting using denoising diffusion implicit models,” in *Proceedings of the 40th International Conference on Machine Learning*, pp. 41164–41193, 2023.
 
 [13] A. Lugmayr et al., “RePaint: Inpainting using denoising diffusion probabilistic models,” in *Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition*, pp. 11461–11471, 2022.
 
@@ -304,7 +275,6 @@ The model learns 3D generation, coordinate-aware plane conditioning, and fixed-b
 
 [17] Z. Xiao, K. Kreis, and A. Vahdat, “Tackling the generative learning trilemma with denoising diffusion GANs,” in *International Conference on Learning Representations*, 2022.
 
-
 [18] S. J. Cooper, A. Bertei, P. R. Shearing, J. A. Kilner, and N. P. Brandon, “TauFactor: An open-source application for calculating tortuosity factors from tomographic data,” *SoftwareX*, vol. 5, pp. 203–210, 2016.
 
-[19] M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter, “GANs trained by a two time-scale update rule converge to a local Nash equilibrium,” in *Advances in Neural Information Processing Systems*, vol. 30, 2017.
+[19] M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter, “GANs trained by a two time-scale update rule converge to a Nash equilibrium,” in *Advances in Neural Information Processing Systems*, vol. 30, 2017.

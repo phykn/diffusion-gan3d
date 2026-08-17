@@ -7,6 +7,8 @@ from .anchor import PlaneAnchor, build_anchors
 from .diffusion import Diffusion
 from .model.denoiser import Denoiser3D, validate_guidance
 
+DEFAULT_ANCHOR_STRENGTH = 0.88
+
 
 class _GuidedDenoiser:
     def __init__(self, generator: "Generator", guidance: float) -> None:
@@ -332,7 +334,7 @@ class Generator:
         anchors: Sequence[PlaneAnchor] = (),
         vf: Sequence[float] | None = None,
         size: int | None = None,
-        anchor_strength: float = 0.90,
+        anchor_strength: float = DEFAULT_ANCHOR_STRENGTH,
         guidance: float = 1.0,
         domain: int | None = None,
         margin: int | None = None,
@@ -568,7 +570,7 @@ class Generator:
         anchors: Sequence[PlaneAnchor] = (),
         vf: Sequence[float] | None = None,
         size: int | None = None,
-        anchor_strength: float = 0.90,
+        anchor_strength: float = DEFAULT_ANCHOR_STRENGTH,
         guidance: float = 1.0,
         domain: int | None = None,
         margin: int | None = None,
@@ -595,7 +597,7 @@ class Generator:
         anchors: Sequence[PlaneAnchor] = (),
         vf: Sequence[float] | None = None,
         size: int | None = None,
-        anchor_strength: float = 0.90,
+        anchor_strength: float = DEFAULT_ANCHOR_STRENGTH,
         guidance: float = 1.0,
         domain: int | None = None,
         margin: int | None = None,

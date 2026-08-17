@@ -180,7 +180,7 @@ baseline-dominant without a second pair of spatial-radius settings.
 Context guidance follows the diffusion schedule: it starts at the natural
 two-prediction residual scale $\sqrt{2}$ and tapers to the noise remaining at the
 final reverse transition. Plane guidance rises toward the final step. The default
-`anchor_strength=0.90` and model-derived spatial width spread the adaptation across
+`anchor_strength=0.88` and model-derived spatial width spread the adaptation across
 multiple slices instead of fitting the anchor through a narrow transition.
 Script `03` reports slice-change rates for distances zero through 24 from the
 nearest anchor. It also reports the first-difference change curve's second
@@ -208,7 +208,32 @@ python scripts/01_check_dataset.py
 python scripts/02_check_generated.py --weight run/<run-id>/generator.pt --domain 0
 python scripts/03_check_anchor.py --weight run/<run-id>/generator.pt --domain 0 --count 3
 python scripts/04_check_scale_up.py --weight run/<run-id>/generator.pt --domain 0
+python scripts/05_check_continuation.py --weight run/<run-id>/generator.pt --no-view
 ```
+
+Script `05` first generates an unconditioned reference, takes its boundary
+section, and uses that one section to generate the remaining 3D volume jointly.
+Passing `--anchor` instead uses the center crop of a real 2D label image. The
+script reports boundary agreement, first-plane continuation, slice flicker, and
+same-RNG baseline drift. Use `--out` for the generated TIFF and `--figure` for a
+non-interactive distance-wise slice strip. Use `--napari` to inspect the full
+generated volume in 3D; the condition input remains separately labeled in the
+Matplotlib slice strip.
+
+Rebuild the paper's tracked data and figures from one explicit checkpoint in
+this order:
+
+```bash
+python scripts/paper/evaluate_structure.py --weight run/<run-id>/generator.pt
+python scripts/paper/make_assets.py --reference temp/paper_structure/direct_seed_0.tiff
+python scripts/paper/make_anchor_asset.py --weight run/<run-id>/generator.pt
+python scripts/paper/evaluate_continuation.py --weight run/<run-id>/generator.pt
+python scripts/paper/make_scale_up_asset.py --weight run/<run-id>/generator.pt
+```
+
+The two evaluation scripts record the complete raw rows, summaries, weight hash,
+training-config hash, and generation settings in tracked JSON sidecars. Paper
+figures no longer depend on a separately maintained `gt.tiff`.
 
 Generator scripts default to `--domain 0`. Conditional Scripts `03` and `04` use the `guidance` value in `config/gen.yaml`; Script `02` has no anchor or phase-fraction condition, so it exposes no guidance option. Paper scripts require explicit weights and record input provenance.
 

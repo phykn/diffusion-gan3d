@@ -32,6 +32,7 @@ from provenance import (
 from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.config import load_generation_settings
+from src.generate import DEFAULT_ANCHOR_STRENGTH
 from src.scale import ScaledGenerator
 
 BLOCKS = (3, 3, 3)
@@ -91,13 +92,14 @@ def main() -> None:
             "scale_geometry": "fixed_blocks_inward_margins",
             "overlap": overlap,
             "base_margin": base_margin,
+            "anchor_strength": DEFAULT_ANCHOR_STRENGTH,
             "margin": SCALE_MARGIN,
             "source_roi_left_top": list(ROI_POSITIONS[1]),
             "source_crop_size": CROP_SIZE,
         },
         reference=SAMPLE_PATH,
     )
-    output = OUTPUT_DIR / "05-scale-up.png"
+    output = OUTPUT_DIR / "06-scale-up.png"
     metadata = output.with_suffix(".json")
     validate_output_paths(provenance, (output, metadata))
     anchor = load_center_roi(generator.patch_size)
@@ -118,6 +120,7 @@ def main() -> None:
     print("Status  : generating anchored base...", flush=True)
     base = generator.generate(
         anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=anchor_index),),
+        anchor_strength=DEFAULT_ANCHOR_STRENGTH,
         guidance=guidance,
         domain=args.domain,
         margin=base_margin,

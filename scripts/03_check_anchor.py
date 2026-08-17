@@ -19,6 +19,7 @@ from src.evaluate import (
     measure_slice_smoothness,
     voxel_accuracy,
 )
+from src.generate import DEFAULT_ANCHOR_STRENGTH
 from src.volume import save_volume
 
 
@@ -58,8 +59,11 @@ def main() -> None:
     parser.add_argument(
         "--anchor-strength",
         type=unit_interval,
-        default=0.90,
-        help="normalized anchor prediction strength from 0 to 1 (default: 0.90)",
+        default=DEFAULT_ANCHOR_STRENGTH,
+        help=(
+            "normalized anchor prediction strength from 0 to 1 "
+            f"(default: {DEFAULT_ANCHOR_STRENGTH:.2f})"
+        ),
     )
     parser.add_argument(
         "--guidance",

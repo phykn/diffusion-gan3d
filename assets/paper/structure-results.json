@@ -1,0 +1,233 @@
+{
+  "weights": "D:\\code\\diffusion-gan3d\\run\\08170028\\generator.pt",
+  "weight_sha256": "fe6289e7a608a2677dce87b1ee616efbc609f3d7132fce55b02974a47f0f444f",
+  "train_config": "D:\\code\\diffusion-gan3d\\run\\08170028\\train.yaml",
+  "train_config_sha256": "212ea664e0be4a221c00505f6587c84a02df261e83476872e76ea2cadc1de1ec",
+  "guidance": 1.0,
+  "reference": null,
+  "reference_sha256": null,
+  "additional_inputs": {
+    "training_image": {
+      "path": "D:\\code\\diffusion-gan3d\\data\\sample.png",
+      "sha256": "fd3c6b68573e74c9d01f96c28a2fe60025e3493e981bb8d7408c1740a16f8094"
+    }
+  },
+  "generation": {
+    "conditions": [
+      "Direct 128^3",
+      "Scale-up 352^3"
+    ],
+    "direct_margin": 8,
+    "domain": 0,
+    "scale_blocks": [
+      3,
+      3,
+      3
+    ],
+    "scale_margin": 0,
+    "scale_output_shape": [
+      352,
+      352,
+      352
+    ],
+    "scale_overlap": 8,
+    "seeds": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "generation_signature": "ddc03d7c1e398816d466c531b91b99a21238d7b63c1fd67b1e7e013fd0e30ef5",
+  "metrics": {
+    "fid": "Inception-v3 FID on 64 axis-0 sections/crops",
+    "phase_0_fraction": "fraction of labels equal to phase 0",
+    "interface_density": "mean unlike-neighbor fraction over available axes",
+    "tortuosity_axis0": "TauFactor phase-0 tortuosity",
+    "percolation": "mean phase-0 spanning fraction over three axes"
+  },
+  "raw": [
+    {
+      "condition": "Real 2D crops",
+      "seed": 20000,
+      "guidance": null,
+      "fid": 20.07555389404297,
+      "phase_0_fraction": 0.36370849609375,
+      "interface_density": 0.06304595226377953,
+      "tortuosity_axis0": null,
+      "percolation": null,
+      "generation_seconds": null
+    },
+    {
+      "condition": "Real 2D crops",
+      "seed": 20001,
+      "guidance": null,
+      "fid": 20.77676010131836,
+      "phase_0_fraction": 0.3575592041015625,
+      "interface_density": 0.0638307586429626,
+      "tortuosity_axis0": null,
+      "percolation": null,
+      "generation_seconds": null
+    },
+    {
+      "condition": "Real 2D crops",
+      "seed": 20002,
+      "guidance": null,
+      "fid": 18.969247817993164,
+      "phase_0_fraction": 0.3674659729003906,
+      "interface_density": 0.06322713536540354,
+      "tortuosity_axis0": null,
+      "percolation": null,
+      "generation_seconds": null
+    },
+    {
+      "condition": "Real 2D crops",
+      "seed": 20003,
+      "guidance": null,
+      "fid": 18.220624923706055,
+      "phase_0_fraction": 0.3610715866088867,
+      "interface_density": 0.06318051796259842,
+      "tortuosity_axis0": null,
+      "percolation": null,
+      "generation_seconds": null
+    },
+    {
+      "condition": "Direct 128^3",
+      "seed": 0,
+      "guidance": 1.0,
+      "fid": 44.77307891845703,
+      "phase_0_fraction": 0.33696603775024414,
+      "interface_density": 0.06666000246062992,
+      "tortuosity_axis0": 2.02484393119812,
+      "percolation": 0.9975250081721428,
+      "generation_seconds": 1.701988499989966
+    },
+    {
+      "condition": "Direct 128^3",
+      "seed": 1,
+      "guidance": 1.0,
+      "fid": 41.549129486083984,
+      "phase_0_fraction": 0.34265613555908203,
+      "interface_density": 0.06676381028543306,
+      "tortuosity_axis0": 2.043409824371338,
+      "percolation": 0.996821606396865,
+      "generation_seconds": 1.174056899995776
+    },
+    {
+      "condition": "Direct 128^3",
+      "seed": 2,
+      "guidance": 1.0,
+      "fid": 45.00490188598633,
+      "phase_0_fraction": 0.3410677909851074,
+      "interface_density": 0.06656740844406168,
+      "tortuosity_axis0": 2.076021671295166,
+      "percolation": 0.9975533748746979,
+      "generation_seconds": 1.1740487999923062
+    },
+    {
+      "condition": "Direct 128^3",
+      "seed": 3,
+      "guidance": 1.0,
+      "fid": 48.05679702758789,
+      "phase_0_fraction": 0.33902883529663086,
+      "interface_density": 0.06626255305733268,
+      "tortuosity_axis0": 2.056077718734741,
+      "percolation": 0.9974739625454468,
+      "generation_seconds": 1.1718575999839231
+    },
+    {
+      "condition": "Scale-up 352^3",
+      "seed": 0,
+      "guidance": 1.0,
+      "fid": 35.28550338745117,
+      "phase_0_fraction": 0.3442231256383241,
+      "interface_density": 0.06534615163876527,
+      "tortuosity_axis0": 1.9837568998336792,
+      "percolation": 0.9974915105349563,
+      "generation_seconds": 23.007097699999576
+    },
+    {
+      "condition": "Scale-up 352^3",
+      "seed": 1,
+      "guidance": 1.0,
+      "fid": 34.34130096435547,
+      "phase_0_fraction": 0.343326032654313,
+      "interface_density": 0.06568078561449774,
+      "tortuosity_axis0": 2.0289881229400635,
+      "percolation": 0.997113509492822,
+      "generation_seconds": 22.955025200004457
+    },
+    {
+      "condition": "Scale-up 352^3",
+      "seed": 2,
+      "guidance": 1.0,
+      "fid": 35.76860046386719,
+      "phase_0_fraction": 0.3446846495527329,
+      "interface_density": 0.06623258676999207,
+      "tortuosity_axis0": 1.9813188314437866,
+      "percolation": 0.9972273937567834,
+      "generation_seconds": 23.008555199980037
+    },
+    {
+      "condition": "Scale-up 352^3",
+      "seed": 3,
+      "guidance": 1.0,
+      "fid": 34.83917236328125,
+      "phase_0_fraction": 0.34392508056090343,
+      "interface_density": 0.06580522714518926,
+      "tortuosity_axis0": 2.017979860305786,
+      "percolation": 0.9973090035879952,
+      "generation_seconds": 23.023150399996666
+    }
+  ],
+  "summary": [
+    {
+      "condition": "Real 2D crops",
+      "samples": 4,
+      "fid_mean": 19.510546684265137,
+      "fid_std": 1.137164921433664,
+      "phase_0_fraction_mean": 0.36245131492614746,
+      "phase_0_fraction_std": 0.004185837137948535,
+      "interface_density_mean": 0.06332109105868602,
+      "interface_density_std": 0.0003483536854829996,
+      "tortuosity_axis0_mean": null,
+      "tortuosity_axis0_std": null,
+      "percolation_mean": null,
+      "percolation_std": null,
+      "generation_seconds_mean": null,
+      "generation_seconds_std": null
+    },
+    {
+      "condition": "Direct 128^3",
+      "samples": 4,
+      "fid_mean": 44.84597682952881,
+      "fid_std": 2.658893255300785,
+      "phase_0_fraction_mean": 0.3399296998977661,
+      "phase_0_fraction_std": 0.002471406690707003,
+      "interface_density_mean": 0.06656344356186433,
+      "interface_density_std": 0.0002160410924281453,
+      "tortuosity_axis0_mean": 2.0500882863998413,
+      "tortuosity_axis0_std": 0.021527448187838628,
+      "percolation_mean": 0.9973434879972881,
+      "percolation_std": 0.0003494691630485256,
+      "generation_seconds_mean": 1.3054879499904928,
+      "generation_seconds_std": 0.26433572570232383
+    },
+    {
+      "condition": "Scale-up 352^3",
+      "samples": 4,
+      "fid_mean": 35.05864429473877,
+      "fid_std": 0.6105331529007776,
+      "phase_0_fraction_mean": 0.3440397221015683,
+      "phase_0_fraction_std": 0.0005692285962978975,
+      "interface_density_mean": 0.06576618779211109,
+      "interface_density_std": 0.0003664132365312144,
+      "tortuosity_axis0_mean": 2.003010928630829,
+      "tortuosity_axis0_std": 0.024084215058573284,
+      "percolation_mean": 0.9972853543431393,
+      "percolation_std": 0.00015911185201828598,
+      "generation_seconds_mean": 22.998457124995184,
+      "generation_seconds_std": 0.02984806299413332
+    }
+  ]
+}

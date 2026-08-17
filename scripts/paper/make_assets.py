@@ -8,7 +8,6 @@ from matplotlib.colors import ListedColormap, to_rgb
 from PIL import Image, ImageDraw
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-VOLUME_PATH = PROJECT_ROOT / "scripts" / "gt.tiff"
 SAMPLE_PATH = PROJECT_ROOT / "data" / "sample.png"
 OUTPUT_DIR = PROJECT_ROOT / "assets" / "paper"
 PHASE_COLORS = ("#000000", "#9E9E9E")
@@ -24,16 +23,13 @@ def main() -> None:
     parser.add_argument(
         "--reference",
         type=Path,
-        default=VOLUME_PATH,
-        help="3D uint8 label TIFF created by make_reference.py",
+        required=True,
+        help="generated 3D uint8 label TIFF to render",
     )
     args = parser.parse_args()
     reference = args.reference.resolve()
     if not reference.is_file():
-        raise FileNotFoundError(
-            f"reference volume does not exist: {reference}. "
-            "Run make_reference.py first or pass --reference."
-        )
+        raise FileNotFoundError(f"reference volume does not exist: {reference}.")
 
     volume = np.asarray(tifffile.imread(reference))
     if volume.ndim != 3 or volume.dtype != np.uint8:

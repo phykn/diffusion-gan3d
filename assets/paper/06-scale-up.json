@@ -1,20 +1,23 @@
 {
-  "weights": "D:\\code\\diffusion-gan3d\\run\\08111303\\checkpoints\\step_00020000\\generator.pt",
-  "weight_sha256": "d1621f07242d78da841b94fa6c1aab23c2bc7754671c890a03689150ab871aa7",
-  "train_config": "D:\\code\\diffusion-gan3d\\run\\08111303\\train.yaml",
-  "train_config_sha256": "3237de4579dd7164c2fc007237f64ce0f34617b9c44669fecb22f2dd031e8552",
-  "guidance_scale": 1.0,
+  "weights": "D:\\code\\diffusion-gan3d\\run\\08170028\\generator.pt",
+  "weight_sha256": "fe6289e7a608a2677dce87b1ee616efbc609f3d7132fce55b02974a47f0f444f",
+  "train_config": "D:\\code\\diffusion-gan3d\\run\\08170028\\train.yaml",
+  "train_config_sha256": "212ea664e0be4a221c00505f6587c84a02df261e83476872e76ea2cadc1de1ec",
+  "guidance": 1.0,
   "reference": "D:\\code\\diffusion-gan3d\\data\\sample.png",
   "reference_sha256": "fd3c6b68573e74c9d01f96c28a2fe60025e3493e981bb8d7408c1740a16f8094",
   "additional_inputs": {},
   "generation": {
+    "anchor_strength": 0.88,
     "axis": 0,
+    "base_margin": 8,
     "blocks": [
       3,
       3,
       3
     ],
     "domain": 0,
+    "margin": 0,
     "overlap": 8,
     "scale_geometry": "fixed_blocks_inward_margins",
     "seed": 0,
@@ -24,7 +27,7 @@
       58
     ]
   },
-  "generation_signature": "a374f88beeaf319176fdf0886a92fd8f585ee82e7817982d56b3c9bb05238f05",
+  "generation_signature": "1ecd5e1ff91c96f7c920e0a5398334065971787d59a45b6037b7475bad86af5d",
   "seed": 0,
   "scale_plan": {
     "blocks": [
@@ -33,6 +36,7 @@
       3
     ],
     "overlap": 8,
+    "margin": 0,
     "block_size": 128,
     "stride": 112,
     "shape": [
@@ -74,23 +78,23 @@
     "dtype": "torch.uint8"
   },
   "output": {
-    "path": "D:\\code\\diffusion-gan3d\\assets\\paper\\05-scale-up.png",
-    "sha256": "1a5999d04d0bc45a846235c44139c654f9f7fec622a3b1faf48efc1b3c5ab4d9",
+    "path": "D:\\code\\diffusion-gan3d\\assets\\paper\\06-scale-up.png",
+    "sha256": "bc4aaf8cac55a6a925541c5b70000e999fbe90c3d0ee200d69f1b0059cb43af9",
     "shape": [
       352,
       352,
       352
     ],
     "dtype": "torch.uint8",
-    "elapsed_seconds": 23.1193717999995
+    "elapsed_seconds": 22.8192895000102
   },
   "quality": {
-    "anchor_matched_voxels": 16036,
+    "anchor_matched_voxels": 15018,
     "anchor_total_voxels": 16384,
-    "anchor_accuracy": 0.978759765625,
-    "plane_core_matched_voxels": 14250,
+    "anchor_accuracy": 0.9166259765625,
+    "plane_core_matched_voxels": 13287,
     "plane_core_total_voxels": 14400,
-    "base_core_matched_voxels": 1727130,
+    "base_core_matched_voxels": 1726634,
     "base_core_total_voxels": 1728000
   }
 }
