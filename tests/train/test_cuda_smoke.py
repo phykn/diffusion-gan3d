@@ -27,6 +27,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             "crop_partial": False,
             "crop_size": 64,
             "input_size": 64,
+            "domain_prob": 1.0,
             "batch_size": 8,
         },
         "model": {
@@ -49,6 +50,8 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             "train_prob": 1.0,
             "start_step": 0,
             "ramp_steps": 0,
+            "cross_domain_prob": 0.0,
+            "pixel_weight": 0.05,
             "connectivity": {
                 "weight": 0.0,
                 "volume_count": 1,
@@ -56,7 +59,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
                 "phase_transition_weight": 0.0,
             },
         },
-        "vf": {"weight": 1.0},
+        "vf": {"max_samples": 4, "weight": 1.0},
         "optim": {
             "generator_lr": 0.00016,
             "critic_lr": 0.0001,
@@ -117,6 +120,8 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             anchor_training_probability=cfg["anchor"]["train_prob"],
             anchor_start_step=cfg["anchor"]["start_step"],
             anchor_ramp_steps=cfg["anchor"]["ramp_steps"],
+            anchor_pixel_loss_weight=cfg["anchor"]["pixel_weight"],
+            anchor_shared_axis_probability=cfg["anchor"]["cross_domain_prob"],
             connectivity_weight=cfg["anchor"]["connectivity"]["weight"],
             normal_transition_weight=cfg["anchor"]["connectivity"][
                 "phase_transition_weight"
@@ -124,6 +129,8 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             connectivity_bank_size=cfg["anchor"]["connectivity"]["volume_count"],
             connectivity_refresh_steps=cfg["anchor"]["connectivity"]["refresh_every"],
             vf_loss_weight=cfg["vf"]["weight"],
+            vf_target_average_max_samples=cfg["vf"]["max_samples"],
+            domain_dropout=1.0 - data["domain_prob"],
             cfg_drop_each_probability=0.0,
             latent_channels=model["generator"]["latent_channels"],
             amp_enabled=True,

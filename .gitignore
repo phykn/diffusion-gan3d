@@ -15,6 +15,9 @@ htmlcov/
 /run/
 /scripts/gt.tiff
 /temp/
+/visualize/
+/front/node_modules/
+/front/dist/
 
 *.bat
 

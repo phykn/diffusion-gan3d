@@ -214,10 +214,10 @@ class TrainerSettings:
     cfg_drop_each_probability: float
     latent_channels: int
     amp_enabled: bool
-    domain_dropout: float = 0.0
-    anchor_pixel_loss_weight: float = 1.0
-    anchor_shared_axis_probability: float = 0.0
-    vf_target_average_max_samples: int = 1
+    domain_dropout: float
+    anchor_pixel_loss_weight: float
+    anchor_shared_axis_probability: float
+    vf_target_average_max_samples: int
 
     def __post_init__(self) -> None:
         self._validate_positive_integers()

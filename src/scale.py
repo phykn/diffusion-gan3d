@@ -163,6 +163,7 @@ class ScaledGenerator:
         guidance: float = 1.0,
         domain: int | None = None,
         margin: int | None = None,
+        base_offset: Sequence[int | None] | None = None,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
@@ -190,7 +191,7 @@ class ScaledGenerator:
         tiles = self.make_tiles(plan)
         vf = self.generator.prepare_vf(vf)
         domain = self.generator.prepare_domain(domain)
-        base = self.prepare_base(base, plan)
+        base = self.prepare_base(base, plan, offset=base_offset)
         current, next_state = self.make_states(plan, storage)
         self.fill_noise(current, tiles)
         current = self.run(
@@ -228,6 +229,7 @@ class ScaledGenerator:
         guidance: float = 1.0,
         domain: int | None = None,
         margin: int | None = None,
+        base_offset: Sequence[int | None] | None = None,
     ) -> torch.Tensor:
         self.stats = None
         if not isinstance(progress, bool):
@@ -252,7 +254,7 @@ class ScaledGenerator:
         tiles = self.make_tiles(plan)
         vf = self.generator.prepare_vf(vf)
         domain = self.generator.prepare_domain(domain)
-        base = self.prepare_base(base, plan)
+        base = self.prepare_base(base, plan, offset=base_offset)
         current, next_state = self.make_states(plan, selected)
         labels = torch.empty(plan.shape, dtype=torch.uint8)
         self.fill_noise(current, tiles)
@@ -414,8 +416,12 @@ class ScaledGenerator:
         self,
         base: torch.Tensor | None,
         plan: ScalePlan,
+        *,
+        offset: Sequence[int | None] | None = None,
     ) -> Base | None:
         if base is None:
+            if offset is not None:
+                raise ValueError("base_offset requires base.")
             return None
 
         generator = self.generator
@@ -431,7 +437,9 @@ class ScaledGenerator:
         if any(size < generator.patch_size for size in plan.shape):
             raise ValueError("shape must not be smaller than the base.")
 
-        start = tuple((size - generator.patch_size) // 2 for size in plan.shape)
+        output_shape = tuple(size - 2 * plan.margin for size in plan.shape)
+        output_offset, explicit = self._resolve_base_offset(offset, output_shape)
+        start = tuple(plan.margin + value for value in output_offset)
         region = tuple(slice(idx, idx + generator.patch_size) for idx in start)
         clean = F.one_hot(
             base.to(device=generator.device, dtype=torch.long),
@@ -456,8 +464,16 @@ class ScaledGenerator:
                 ramp = (
                     positions.div(plan.base_shell + 1).mul(math.pi / 2).sin().square()
                 )
-                weight_axis[: plan.base_shell] = ramp
-                weight_axis[-plan.base_shell :] = ramp.flip(0)
+                # The default centered placement keeps its historical two-sided
+                # transition. Explicit boundary placement only tapers the side
+                # that meets newly generated output.
+                if not explicit[axis] or output_offset[axis] > 0:
+                    weight_axis[: plan.base_shell] = ramp
+                if (
+                    not explicit[axis]
+                    or output_offset[axis] + generator.patch_size < output_shape[axis]
+                ):
+                    weight_axis[-plan.base_shell :] = ramp.flip(0)
             weight_axes.append(weight_axis)
         weight = (
             weight_axes[0].view(1, 1, -1, 1, 1)
@@ -470,6 +486,48 @@ class ScaledGenerator:
             region=region,
             weight=weight,
         )
+
+    def _resolve_base_offset(
+        self,
+        offset: Sequence[int | None] | None,
+        output_shape: tuple[int, int, int],
+    ) -> tuple[tuple[int, int, int], tuple[bool, bool, bool]]:
+        """Resolve a base origin in requested-output coordinates.
+
+        ``None`` centers the complete base. Within a three-axis offset, a
+        per-axis ``None`` keeps centering on that axis while an integer fixes
+        the base origin. Generation margins are deliberately excluded from
+        these public coordinates.
+        """
+        patch_size = self.generator.patch_size
+        maximum = tuple(size - patch_size for size in output_shape)
+        if any(value < 0 for value in maximum):
+            raise ValueError("shape must not be smaller than the base.")
+        if offset is None:
+            values: tuple[int | None, ...] = (None, None, None)
+        elif isinstance(offset, Sequence) and not isinstance(offset, (str, bytes)):
+            values = tuple(offset)
+        else:
+            raise TypeError("base_offset must be a sequence of three values.")
+        if len(values) != 3:
+            raise ValueError("base_offset must contain exactly three values.")
+
+        resolved = []
+        explicit = []
+        for axis, (value, limit) in enumerate(zip(values, maximum, strict=True)):
+            if value is None:
+                resolved.append(limit // 2)
+                explicit.append(False)
+                continue
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError("base_offset values must be integers or None.")
+            if not 0 <= value <= limit:
+                raise ValueError(
+                    f"base_offset axis {axis} must be between 0 and {limit}."
+                )
+            resolved.append(value)
+            explicit.append(True)
+        return tuple(resolved), tuple(explicit)
 
     def select_storage(
         self,

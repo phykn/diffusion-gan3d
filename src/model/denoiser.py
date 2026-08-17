@@ -365,17 +365,6 @@ class Denoiser3D(nn.Module):
             )
         return block(inputs, emb)
 
-    def encode_anchor(
-        self,
-        inputs: torch.Tensor,
-        anchor_image: torch.Tensor | None,
-        anchor_mask: torch.Tensor | None,
-    ) -> torch.Tensor | None:
-        anchor = self._prepare_anchor(inputs, anchor_image, anchor_mask)
-        if anchor is None:
-            return None
-        return self.anchor_input(torch.cat(anchor, dim=1))
-
     def _prepare_anchor(
         self,
         inputs: torch.Tensor,

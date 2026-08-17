@@ -1945,6 +1945,38 @@ def test_scaled_generation_centers_base_in_anisotropic_shape(
         assert abs(region.start - (size - region.stop)) <= 1
 
 
+def test_scaled_base_offset_uses_output_coordinates_outside_generation_margin() -> None:
+    scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1), patch_size=8))
+    plan = scaled._generation_plan((12, 12, 12), overlap=2, margin=2)
+
+    condition = scaled.prepare_base(
+        torch.zeros((8, 8, 8), dtype=torch.uint8),
+        plan,
+        offset=(0, None, 4),
+    )
+
+    assert condition is not None
+    assert condition.region == (slice(2, 10), slice(4, 12), slice(6, 14))
+    assert condition.weight[0, 0, 0, 4, 4] == 1
+    assert condition.weight[0, 0, -1, 4, 4] < 1
+    assert condition.weight[0, 0, 4, 4, 0] < 1
+    assert condition.weight[0, 0, 4, 4, -1] == 1
+
+
+def test_scaled_base_offset_rejects_out_of_bounds_and_requires_base() -> None:
+    scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1)))
+    plan = scaled.plan((6, 6, 6), overlap=0)
+
+    with pytest.raises(ValueError, match="axis 0 must be between 0 and 2"):
+        scaled.prepare_base(
+            torch.zeros((4, 4, 4), dtype=torch.uint8),
+            plan,
+            offset=(3, None, None),
+        )
+    with pytest.raises(ValueError, match="requires base"):
+        scaled.prepare_base(None, plan, offset=(0, None, None))
+
+
 def test_scaled_base_keeps_constant_prediction_in_every_core() -> None:
     model = _PhaseModel(phase=0)
     diffusion = _TraceDiffusion(timesteps=3)

@@ -1,4 +1,5 @@
 matplotlib
+fastapi
 napari[all]
 numpy
 Pillow
@@ -11,3 +12,4 @@ torchmetrics
 taufactor
 tifffile
 tqdm
+uvicorn
