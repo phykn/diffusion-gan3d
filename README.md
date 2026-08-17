@@ -182,7 +182,7 @@ baseline-dominant without a second pair of spatial-radius settings.
 Context guidance follows the diffusion schedule: it starts at the natural
 two-prediction residual scale $\sqrt{2}$ and tapers to the noise remaining at the
 final reverse transition. Plane guidance rises toward the final step. The default
-`anchor_strength=0.88` and model-derived spatial width spread the adaptation across
+`anchor_strength=0.90` and model-derived spatial width spread the adaptation across
 multiple slices instead of fitting the anchor through a narrow transition.
 Script `03` reports slice-change rates for distances zero through 24 from the
 nearest anchor. It also reports the first-difference change curve's second

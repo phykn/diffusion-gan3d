@@ -18,6 +18,7 @@ GENERATION_SCRIPTS = (
     "make_scale_up_asset.py",
     "evaluate_structure.py",
     "evaluate_continuation.py",
+    "evaluate_anchor_coverage.py",
 )
 
 
@@ -165,6 +166,13 @@ def test_structure_interface_density_distinguishes_collection_from_volume() -> N
     )
 
 
+def test_structure_fid_uses_192_dimensional_features() -> None:
+    module = _load_script("evaluate_structure.py")
+
+    assert module.REAL_CROP_COUNT == 64
+    assert module.FID_FEATURE_DIMENSIONS == 192
+
+
 def test_continuation_pool4_similarity_rewards_coarse_match() -> None:
     module = _load_script("evaluate_continuation.py")
     target = torch.zeros((8, 8), dtype=torch.long)
@@ -177,6 +185,16 @@ def test_continuation_pool4_similarity_rewards_coarse_match() -> None:
     )
 
 
+def test_anchor_coverage_order_is_nested_and_complete() -> None:
+    module = _load_script("evaluate_anchor_coverage.py")
+    order = module.nested_plane_order(8)
+
+    assert len(order) == 8
+    assert set(order) == set(range(8))
+    assert order[0] == 4
+    assert set(order[:2]).issubset(order[:4])
+
+
 def test_paper_numbers_and_assets_match_tracked_results() -> None:
     paper = (ROOT / "PAPER.md").read_text(encoding="utf-8")
     structure = json.loads(
@@ -186,6 +204,9 @@ def test_paper_numbers_and_assets_match_tracked_results() -> None:
         (ROOT / "assets/paper/05-boundary-continuation.json").read_text(
             encoding="utf-8"
         )
+    )
+    coverage = json.loads(
+        (ROOT / "assets/paper/04-anchor-coverage.json").read_text(encoding="utf-8")
     )
 
     direct = structure["summary"][1]
@@ -199,18 +220,25 @@ def test_paper_numbers_and_assets_match_tracked_results() -> None:
         f"{external['smoothness_p95_ratio_mean']:.2f} ± "
         f"{external['smoothness_p95_ratio_std']:.2f}"
     ) in paper
+    coverage_by_count = {
+        result["anchor_count"]: result["voxel_accuracy"]
+        for result in coverage["results"]
+    }
+    assert f"{100 * coverage_by_count[64]:.2f}%" in paper
+    assert f"{100 * coverage_by_count[128]:.2f}%" in paper
+    assert "192-dimensional Inception-v3 feature layer" in paper
 
     assets = re.findall(r'<img src="([^"]+)"', paper)
     assert assets
     assert all((ROOT / asset).is_file() for asset in assets)
-    assert not any(
-        "anchor-sweep" in asset or "paper-metrics" in asset for asset in assets
-    )
+    assert not any("paper-metrics" in asset for asset in assets)
 
 
 def test_paper_sidecars_match_rendered_assets() -> None:
+    weight_digests = set()
     for stem in (
         "04-anchor-conditioning",
+        "04-anchor-coverage",
         "05-boundary-continuation",
         "06-scale-up",
     ):
@@ -220,6 +248,13 @@ def test_paper_sidecars_match_rendered_assets() -> None:
         )
         digest = hashlib.sha256(image.read_bytes()).hexdigest()
         assert metadata["output"]["sha256"] == digest
+        weight_digests.add(metadata["weight_sha256"])
+
+    structure = json.loads(
+        (ROOT / "assets/paper/structure-results.json").read_text(encoding="utf-8")
+    )
+    weight_digests.add(structure["weight_sha256"])
+    assert len(weight_digests) == 1
 
 
 def test_common_manifest_rejects_changed_inputs_and_cache_paths(tmp_path: Path) -> None:

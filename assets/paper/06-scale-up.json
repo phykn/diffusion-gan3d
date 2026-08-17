@@ -1,14 +1,14 @@
 {
-  "weights": "D:\\code\\diffusion-gan3d\\run\\08170028\\generator.pt",
-  "weight_sha256": "fe6289e7a608a2677dce87b1ee616efbc609f3d7132fce55b02974a47f0f444f",
-  "train_config": "D:\\code\\diffusion-gan3d\\run\\08170028\\train.yaml",
-  "train_config_sha256": "212ea664e0be4a221c00505f6587c84a02df261e83476872e76ea2cadc1de1ec",
+  "weights": "D:\\code\\diffusion-gan3d\\temp\\paper_08171130_snapshot\\generator.pt",
+  "weight_sha256": "1bf96ba65feb86b016c6084e041a1142db355ca23cfeb67fef746f9cd7209ddc",
+  "train_config": "D:\\code\\diffusion-gan3d\\temp\\paper_08171130_snapshot\\train.yaml",
+  "train_config_sha256": "00373414f8b18d8c94229a184d5a862ef6aa6568da730f5cb5bae5f8f02914fe",
   "guidance": 1.0,
   "reference": "D:\\code\\diffusion-gan3d\\data\\sample.png",
   "reference_sha256": "fd3c6b68573e74c9d01f96c28a2fe60025e3493e981bb8d7408c1740a16f8094",
   "additional_inputs": {},
   "generation": {
-    "anchor_strength": 0.88,
+    "anchor_strength": 0.9,
     "axis": 0,
     "base_margin": 8,
     "blocks": [
@@ -27,7 +27,7 @@
       58
     ]
   },
-  "generation_signature": "1ecd5e1ff91c96f7c920e0a5398334065971787d59a45b6037b7475bad86af5d",
+  "generation_signature": "78fb646cbb85a0ac9ad3f1f37e2db0697acd7f8c5ba193c904a96249f5776975",
   "seed": 0,
   "scale_plan": {
     "blocks": [
@@ -79,22 +79,22 @@
   },
   "output": {
     "path": "D:\\code\\diffusion-gan3d\\assets\\paper\\06-scale-up.png",
-    "sha256": "20eaecb3fda50a7294b04ed9fd022b22d7760a872f5046df53112150c8b7cbcc",
+    "sha256": "4eff374ce13b1eb848f49e2984541656067512947d62891284b7e64490b93d16",
     "shape": [
       352,
       352,
       352
     ],
     "dtype": "torch.uint8",
-    "elapsed_seconds": 22.794691299990518
+    "elapsed_seconds": 69.00981519999914
   },
   "quality": {
-    "anchor_matched_voxels": 15018,
+    "anchor_matched_voxels": 14682,
     "anchor_total_voxels": 16384,
-    "anchor_accuracy": 0.9166259765625,
-    "plane_core_matched_voxels": 13287,
+    "anchor_accuracy": 0.8961181640625,
+    "plane_core_matched_voxels": 12967,
     "plane_core_total_voxels": 14400,
-    "base_core_matched_voxels": 1726634,
+    "base_core_matched_voxels": 1727091,
     "base_core_total_voxels": 1728000
   }
 }

@@ -200,10 +200,10 @@ def test_anchor_check_script_runs_with_generated_reference(
     assert "Phase recall" not in output
     if count == 0:
         assert "Anchor effect" not in output
-        assert "strength 0.88" not in output
+        assert "strength 0.90" not in output
     else:
         assert "Anchor effect" in output
-        assert "strength 0.88" in output
+        assert "strength 0.90" in output
     assert "Indices" not in output
     assert "Center slice" not in output
 

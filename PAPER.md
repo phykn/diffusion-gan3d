@@ -4,7 +4,7 @@
 
 ## Abstract
 
-We present a diffusion-GAN framework that learns three-dimensional categorical microstructures from unregistered two-dimensional sections and accepts a supplied section as a spatial condition. The objective is not to copy the section voxel by voxel, but to generate a compatible 3D realization whose neighboring sections change naturally. A coarse-dominant anchor loss permits boundary adaptation, while a conditional exponential-moving-average (EMA) completion bank supplies aligned three-section relations without imposing a hidden teacher volume as a reconstruction target. This separates supervision of measured 2D appearance from supervision of 3D continuation, allowing conditional training without measured 3D volumes. At inference, same-noise baseline and anchor trajectories are coupled by the same model-derived Gaussian used for logit guidance, so the condition decays smoothly into ordinary generation. The same 128³ model also generates a 352³ volume through shared-state overlapping blocks. On one binary 226 × 690 training image, direct and scaled samples obtain FID 44.85 ± 2.66 and 35.06 ± 0.61, respectively. Across 12 generated-control internal anchors, conditioning raises pooled anchor similarity from 58.52 ± 2.45% to 92.13 ± 0.65%. For four external boundary-section trials, it raises similarity from 55.16 ± 2.65% to 93.74 ± 0.56%; the 95th-percentile slice flicker is 1.08 ± 0.05 times the same-noise baseline, and the measured farthest-section drift is zero. These are controlled generation results, not experimental 3D reconstruction accuracy; no measured 3D ground truth is available.
+We present a diffusion-GAN framework that learns three-dimensional categorical microstructures from unregistered two-dimensional sections and accepts a supplied section as a spatial condition. The objective is not to copy the section voxel by voxel, but to generate a compatible 3D realization whose neighboring sections change naturally. A coarse-dominant anchor loss permits boundary adaptation, while a conditional exponential-moving-average (EMA) completion bank supplies aligned three-section relations without imposing a hidden teacher volume as a reconstruction target. This separates supervision of measured 2D appearance from supervision of 3D continuation, allowing conditional training without measured 3D volumes. At inference, same-noise baseline and anchor trajectories are coupled by the same model-derived Gaussian used for logit guidance, so the condition decays smoothly into ordinary generation. The same 128³ model also generates a 352³ volume through shared-state overlapping blocks. On one binary 226 × 690 training image, direct and scaled samples obtain 192-dimensional FID values of 1.30 ± 0.29 and 0.94 ± 0.27, respectively. Across 12 generated-control internal anchors, conditioning raises pooled anchor similarity from 58.25 ± 2.96% to 90.91 ± 1.29%. For four external boundary-section trials, it raises similarity from 56.83 ± 0.88% to 92.76 ± 0.64%; the 95th-percentile slice flicker is 1.19 ± 0.07 times the same-noise baseline, and the measured farthest-section drift is zero. In a fixed-seed controlled-reference sweep, nested axis-0 sections raise whole-volume agreement from 54.01% without anchors to 94.52% with 64 sections, while complete 128-plane conditioning falls to 88.84%. These are controlled generation results, not experimental 3D reconstruction accuracy; no measured 3D ground truth is available.
 
 ## 1. Introduction
 
@@ -21,7 +21,7 @@ Our contributions are:
 3. a same-noise coupled sampler that applies joint multi-anchor guidance in logit space and returns continuously to an unconditioned trajectory with distance; and
 4. a shared-state tiled sampler that uses the same fixed-size model to synthesize larger 3D volumes.
 
-We evaluate direct generation, internal anchoring, one-sided generation from a boundary section, and 352³ scale-up. Exact pixel agreement is reported as a secondary diagnostic; the main conditional evidence measures coarse agreement, adjacent-section change, slice flicker, and distance-wise drift.
+We evaluate direct generation, internal anchoring, controlled recovery as nested reference sections are added, one-sided generation from a boundary section, and 352³ scale-up. Exact pixel agreement is reported as a secondary diagnostic; the main conditional evidence measures coarse agreement, adjacent-section change, slice flicker, distance-wise drift, and whole-volume agreement only where a synthetic reference is known.
 
 ## 2. Related Work
 
@@ -115,7 +115,7 @@ $$
 w(v)=s_A\exp\left[-\frac{d(v,A)^2}{2\sigma^2}\right],\qquad \sigma=\sqrt{3}\,f,
 $$
 
-where $s_A=0.88$ and $f=8$ is the model downsampling factor. The corrected logits are $\ell_{\mathrm{plain}}+w\Delta\ell$. Exact-plane guidance grows toward the final transition, while surrounding-context guidance decreases with the remaining diffusion noise.
+where $s_A=0.90$ and $f=8$ is the model downsampling factor. The corrected logits are $\ell_{\mathrm{plain}}+w\Delta\ell$. Exact-plane guidance grows toward the final transition, while surrounding-context guidance decreases with the remaining diffusion noise.
 
 After each posterior update, the normalized Gaussian $w/s_A$ couples the conditional state to the same-noise baseline state. Thus the anchor plane uses the conditional trajectory and distant regions continuously approach the ordinary trajectory without a second hand-chosen coupling radius. No constrained voxel is initialized from the anchor, clamped during denoising, or overwritten after sampling.
 
@@ -146,19 +146,21 @@ The training data consist of one 226 × 690 binary phase map. Phase 0 is treated
 </p>
 <p align="center"><em>Figure 1. Binary 2D training image. Orange boxes show example 128 × 128 training crops. Black and gray denote phases 0 and 1.</em></p>
 
-All reported values use the EMA parameters after 20,000 optimization steps. The generator and critics were initialized from the preceding training stage, whereas the conditional completion bank was constructed anew under the current formulation. Training uses Adam with learning rates of $1.6\times10^{-4}$ for the generator and $10^{-4}$ for the critics, mixed precision, EMA decay 0.999, and real batch size 8.
+All reported values use one fixed EMA snapshot captured after 13,200 optimization steps of the latest training stage. The generator and critics were initialized from the preceding stage, whereas the conditional completion bank was constructed anew under the current formulation. Training uses Adam with learning rates of $1.6\times10^{-4}$ for the generator and $10^{-4}$ for the critics, mixed precision, EMA decay 0.999, and real batch size 8.
 
 ### 4.2 Evaluation protocols
 
-Structural evaluation uses seeds 0–3. Direct samples are 128³. Scale-up samples use a 3 × 3 × 3 block plan, eight-voxel inward overlap, no outer margin, and no supplied base, isolating the tiled sampler. FID compares 64 random axis-0 generated sections with 64 random real crops at the same 128² field of view.
+Structural evaluation uses seeds 0–3. Direct samples are 128³. Scale-up samples use a 3 × 3 × 3 block plan, eight-voxel inward overlap, no outer margin, and no supplied base, isolating the tiled sampler. FID compares 64 random axis-0 generated sections with 64 random real crops at the same 128² field of view, using the 192-dimensional Inception-v3 feature layer.
 
 Conditional evaluation has three groups. Generated-control internal anchors use four unconditioned references, all three center axes, and therefore 12 cases. Generated-control boundary anchors use the first axis-0 section of those references in four cases. External boundary tests use the fixed 128² crop at $(\mathrm{left},\mathrm{top})=(281,58)$ from the real image with four sampling seeds. Every conditioned sample is compared with an unconditioned trajectory that shares its initial noise, per-step latent vectors, and posterior noise.
+
+A separate fixed-seed coverage sweep generates one 128³ synthetic reference with seed 10,000 and one reconstruction trajectory with seed 0. Axis-0 reference sections are added cumulatively at counts 0, 1, 2, 4, 8, 16, 32, 64, and 128. Each prefix uses a deterministic farthest-point order, so every larger condition contains all smaller conditions. This controlled same-model test permits coordinate-wise comparison but is not experimental ground truth.
 
 The qualitative internal and scale-up examples use seed 0 and the same external crop. The 352³ illustrated scale-up receives an anchored 128³ base; the quantitative scale-up row does not, keeping the structural comparison separate from anchor retention.
 
 ### 4.3 Metrics
 
-- **FID:** Inception-v3 feature distance between real and generated 2D sections [19]. It is a relative image-distribution measure, not a material-specific perceptual score.
+- **FID:** Fréchet distance between 192-dimensional Inception-v3 features from real and generated 2D sections [19]. It is a relative image-distribution measure, not a material-specific perceptual score, and values are not numerically comparable with FID computed from another feature layer.
 - **Phase-0 fraction:** fraction of labels assigned to phase 0.
 - **Interface density:** mean fraction of adjacent locations with different labels, over two axes for real crops and three axes for generated volumes.
 - **Tortuosity:** TauFactor 1.2.1 phase-0 diffusive tortuosity along axis 0, with convergence criterion $10^{-3}$ [18].
@@ -167,6 +169,7 @@ The qualitative internal and scale-up examples use seed 0 and the same external 
 - **First-change ratio:** phase-change rate adjacent to the anchor divided by the ordinary adjacent-section change rate in the same volume.
 - **Flicker ratio:** 95th percentile or maximum of the absolute second difference of adjacent-section change rates, divided by the same-noise unconditioned baseline.
 - **Farthest drift:** label disagreement with the same-noise baseline at the farthest section represented in that protocol.
+- **Whole-volume agreement:** fraction of all 128³ voxels equal to a known synthetic reference at the same coordinate. It is used only for the controlled coverage sweep.
 
 Tables report mean ± sample standard deviation. Exact anchor pixel accuracy is included only as a secondary diagnostic.
 
@@ -178,9 +181,9 @@ The direct samples preserve approximately the feature scale and interface densit
 
 | Evaluation data | FID ↓ | Phase-0 fraction | Interface density | Tortuosity axis 0 | Percolation phase 0 |
 |---|---:|---:|---:|---:|---:|
-| Real 2D crops | 19.51 ± 1.14 | 0.3625 ± 0.0042 | 0.06332 ± 0.00035 | — | — |
-| Direct 128³ | 44.85 ± 2.66 | 0.3399 ± 0.0025 | 0.06656 ± 0.00022 | 2.050 ± 0.022 | 99.734 ± 0.035% |
-| Scale-up 352³ | 35.06 ± 0.61 | 0.3440 ± 0.0006 | 0.06577 ± 0.00037 | 2.003 ± 0.024 | 99.729 ± 0.016% |
+| Real 2D crops | 0.26 ± 0.13 | 0.3625 ± 0.0042 | 0.06332 ± 0.00035 | — | — |
+| Direct 128³ | 1.30 ± 0.29 | 0.3445 ± 0.0075 | 0.06449 ± 0.00053 | 2.003 ± 0.024 | 99.838 ± 0.026% |
+| Scale-up 352³ | 0.94 ± 0.27 | 0.3508 ± 0.0007 | 0.06424 ± 0.00008 | 1.950 ± 0.010 | 99.833 ± 0.010% |
 
 <p align="center"><img src="assets/paper/02-generated-volume.png" alt="Generated binary 3D volume with one octant removed" width="470"></p>
 <p align="center"><em>Figure 2. Unconditioned 128³ seed-0 sample with one octant removed.</em></p>
@@ -190,20 +193,24 @@ The direct samples preserve approximately the feature scale and interface densit
 
 ### 5.2 Internal plane conditioning
 
-Across 12 generated-control internal conditions, pool4 similarity rises by 33.60 ± 2.45 percentage points to 92.13 ± 0.65% (Table 2). Adjacent-section change remains close to ordinary generation, while the qualitative external center-plane result obtains 92.44% exact agreement without final replacement (Figure 4).
+Across 12 generated-control internal conditions, pool4 similarity rises by 32.65 ± 2.81 percentage points to 90.91 ± 1.29% (Table 2). Adjacent-section change remains close to ordinary generation, while the qualitative external center-plane result obtains 90.34% exact agreement without final replacement (Figure 4a–c).
 
 <p align="center"><img src="assets/paper/04-anchor-conditioning.png" alt="Supplied center section, generated section, and anchored volume" width="780"></p>
-<p align="center"><em>Figure 4. External center-plane conditioning. The supplied section, generated section at the requested coordinate, and surrounding 128³ realization are shown separately.</em></p>
+
+The nested controlled-reference sweep tests whether additional registered sections recover more of a known 3D realization. Whole-volume agreement rises from 54.01% without an anchor to 76.77% with 8 planes, 89.06% with 16, and a maximum of 94.52% with 64 (Figure 4d). Complete 128-plane conditioning drops to 88.84%. The training curriculum exposes the model to at most 16 planes per condition, so the 32-, 64-, and especially 128-plane cases are extrapolations; the final decline shows that more constraints do not guarantee better recovery outside that range.
+
+<p align="center"><img src="assets/paper/04-anchor-coverage.png" alt="Whole-volume agreement as nested synthetic-reference planes are added" width="780"></p>
+<p align="center"><em>Figure 4. Anchor conditioning and controlled recovery. (a) Supplied external center section; (b) generated section at the requested coordinate; (c) surrounding 128³ realization; (d) whole-volume agreement with a synthetic reference as nested axis-0 sections are added. Panel (d) is a fixed-seed same-model diagnostic, not experimental 3D reconstruction accuracy.</em></p>
 
 ### 5.3 One-sided continuation from a boundary section
 
-Placing the section at index 0 turns the experiment into one-sided spatial continuation: the model must produce all remaining sections on one side of the observation. Pool4 similarity reaches 93.71 ± 0.68% for generated-control inputs and 93.74 ± 0.56% for the external image (Table 2). The external boundary does not create a larger immediate jump than ordinary generated sections, although peak flicker still reveals occasional visual stutter.
+Placing the section at index 0 turns the experiment into one-sided spatial continuation: the model must produce all remaining sections on one side of the observation. Pool4 similarity reaches 92.26 ± 1.37% for generated-control inputs and 92.76 ± 0.64% for the external image (Table 2). The external boundary creates approximately the same immediate change as ordinary generated sections, although peak flicker still reveals occasional visual stutter.
 
 | Condition | Cases | Unconditioned pool4 | Conditioned pool4 ↑ | Gain | First change / ordinary | p95 flicker / baseline | Peak flicker / baseline | Farthest drift ↓ |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Generated-control internal | 12 | 58.52 ± 2.45% | 92.13 ± 0.65% | +33.60 ± 2.45 pp | 1.12 ± 0.15 | 1.20 ± 0.19 | 1.74 ± 0.63 | 0.00% |
-| Generated-control boundary | 4 | 59.47 ± 2.11% | 93.71 ± 0.68% | +34.24 ± 2.54 pp | 0.90 ± 0.08 | 1.12 ± 0.10 | 1.64 ± 0.51 | 0.00% |
-| External boundary | 4 | 55.16 ± 2.65% | 93.74 ± 0.56% | +38.58 ± 2.32 pp | 0.85 ± 0.12 | 1.08 ± 0.05 | 1.37 ± 0.32 | 0.00% |
+| Generated-control internal | 12 | 58.25 ± 2.96% | 90.91 ± 1.29% | +32.65 ± 2.81 pp | 1.04 ± 0.20 | 2.02 ± 1.23 | 2.52 ± 1.85 | 0.00% |
+| Generated-control boundary | 4 | 59.03 ± 2.73% | 92.26 ± 1.37% | +33.23 ± 1.82 pp | 1.05 ± 0.09 | 1.37 ± 0.16 | 3.26 ± 0.63 | 0.00% |
+| External boundary | 4 | 56.83 ± 0.88% | 92.76 ± 0.64% | +35.93 ± 1.12 pp | 1.00 ± 0.08 | 1.19 ± 0.07 | 3.87 ± 0.66 | 0.00% |
 
 <p align="center"><img src="assets/paper/05-boundary-continuation.png" alt="One-sided continuation from generated-control and external boundary sections" width="900"></p>
 <p align="center"><em>Figure 5. One-sided continuation. Top: a section drawn from an unconditioned reference. Bottom: a real external crop. The input and generated d=0 plane are shown separately, followed by sections at increasing distance. These are possible stochastic continuations, not predictions of a unique measured 3D volume.</em></p>
@@ -212,7 +219,7 @@ The zero farthest drift in Table 2 is observed at distance 64 for internal cente
 
 ### 5.4 Anchored scale-up
 
-The fixed-block sampler produces 352³ voxels with 27 fixed-size tiles at each reverse transition (Figure 6), 20.80 times the voxel count of a direct sample. In the illustrated result, the external center anchor retains 91.66% exact agreement after scale-up. Table 1 shows that global morphology and transport summaries remain close to direct generation.
+The fixed-block sampler produces 352³ voxels with 27 fixed-size tiles at each reverse transition (Figure 6), 20.80 times the voxel count of a direct sample. In the illustrated result, the external center anchor retains 89.61% exact agreement after scale-up, while the protected base core retains 99.95%. Table 1 shows that global morphology and transport summaries remain close to direct generation.
 
 <p align="center"><img src="assets/paper/06-scale-up.png" alt="Anchor, scaled center section, and cutaway of a 352 cubed volume" width="900"></p>
 <p align="center"><em>Figure 6. Scale-up with 3 × 3 × 3 fixed 128³ blocks. The orange box marks the base footprint and the blue dashed box its full-strength interior. Neither the anchor nor the base is pasted into the final 352³ result.</em></p>
@@ -221,7 +228,7 @@ The fixed-block sampler produces 352³ voxels with 27 fixed-size tiles at each r
 
 The experiments support a narrower claim than deterministic 2D-to-3D reconstruction. The main contribution is not section conditioning alone, but learning a continuation signal when measured 3D targets are unavailable: real 2D critics define appearance, EMA completion triplets define local evolution, and neither the supplied section nor a teacher volume is copied into the result. The condition remains recognizable without hard clamping, while first-change and p95 flicker results indicate that this flexibility generally avoids a new seam at the plane.
 
-The generated-control experiment isolates conditional behavior within the model's own distribution, whereas the external experiment tests the intended use case. Their similar boundary metrics suggest that the real 2D critics and soft anchor objective prevent the conditional EMA prior from simply imposing its own center-image style. Physical reconstruction accuracy nevertheless requires measured 3D data.
+The generated-control experiment isolates conditional behavior within the model's own distribution, whereas the external experiment tests the intended use case. Their similar boundary metrics suggest that the real 2D critics and soft anchor objective prevent the conditional EMA prior from simply imposing its own center-image style. The coverage sweep further shows strong coordinate recovery when multiple registered sections are known, but its decline under complete conditioning establishes a practical limit rather than monotonic reconstruction. Physical reconstruction accuracy nevertheless requires measured 3D data.
 
 The maximum flicker ratios reveal the remaining failure more clearly than mean metrics. Most transitions are close to baseline, but occasional locations still change faster. This agrees with visual inspection of a slight lag-like motion and motivates future work on longer-range relation critics or sequence-level evaluation rather than stronger pixel copying.
 
@@ -233,11 +240,11 @@ The study uses one binary image, no held-out specimen, and no experimental 3D vo
 
 The relation reference is a model-generated conditional completion, not measured 3D truth. Separating relation changes from appearance and retaining real 2D critics reduces but cannot eliminate self-reference. No independently trained ablation isolates every component of the current anchor system, so the results establish integrated-system behavior rather than causal contribution sizes.
 
-FID uses a natural-image network, percolation is a coarse global spanning fraction, and tortuosity is evaluated only along axis 0. Four seeds characterize stochastic variation only approximately. The nonzero peak-flicker ratios show that occasional abrupt changes remain even when p95 behavior is close to baseline.
+FID uses the 192-dimensional layer of a natural-image network, percolation is a coarse global spanning fraction, and tortuosity is evaluated only along axis 0. Four seeds characterize stochastic variation only approximately. The coverage sweep uses one synthetic reference and one generation seed. The nonzero peak-flicker ratios show that occasional abrupt changes remain even when p95 behavior is close to baseline.
 
 ## 8. Conclusion
 
-The method learns 3D microstructure generation from 2D sections, uses a supplied plane as a soft spatial condition, and scales the same model to larger volumes. Its defining choice is to separate measured 2D appearance supervision from self-generated relation supervision, transferring local continuation from conditional EMA completions without copying a teacher volume or overwriting final voxels. The results support conditional stochastic synthesis with near-baseline local continuity and stable scale-up statistics; experimental 3D validation remains necessary.
+The method learns 3D microstructure generation from 2D sections, uses supplied planes as soft spatial conditions, and scales the same model to larger volumes. Its defining choice is to separate measured 2D appearance supervision from self-generated relation supervision, transferring local continuation from conditional EMA completions without copying a teacher volume or overwriting final voxels. Nested controlled sections recover up to 94.52% of a known same-model volume at 64-plane coverage, while the decline under complete conditioning identifies the boundary of the learned conditioning regime. Together with near-baseline boundary change and stable scale-up statistics, the results support conditional stochastic synthesis; experimental 3D validation remains necessary.
 
 ## References
 

@@ -7,7 +7,7 @@ from .anchor import PlaneAnchor, build_anchors
 from .diffusion import Diffusion
 from .model.denoiser import Denoiser3D, validate_guidance
 
-DEFAULT_ANCHOR_STRENGTH = 0.88
+DEFAULT_ANCHOR_STRENGTH = 0.90
 
 
 class _GuidedDenoiser:

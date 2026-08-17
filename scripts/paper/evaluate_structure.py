@@ -46,6 +46,7 @@ SEEDS = (0, 1, 2, 3)
 REAL_REFERENCE_SEED = 10_000
 REAL_EVALUATION_SEEDS = (20_000, 20_001, 20_002, 20_003)
 REAL_CROP_COUNT = 64
+FID_FEATURE_DIMENSIONS = 192
 PORE_PHASE = 0
 TAUFACTOR_CONVERGENCE = 1e-3
 SCALE_BLOCKS = (3, 3, 3)
@@ -137,7 +138,9 @@ def main() -> None:
             {
                 **provenance,
                 "metrics": {
-                    "fid": "Inception-v3 FID on 64 axis-0 sections/crops",
+                    "fid": (
+                        "Inception-v3 192-dimensional FID on 64 axis-0 sections/crops"
+                    ),
                     "phase_0_fraction": "fraction of labels equal to phase 0",
                     "interface_density": (
                         "mean unlike-neighbor fraction over available axes"
@@ -210,7 +213,11 @@ def evaluate(
     generation_times: dict[tuple[str, int], float],
 ) -> list[dict[str, object]]:
     real_reference = sample_real_crops(REAL_REFERENCE_SEED, patch_size)
-    metric = make_fid_metric(real_reference, device)
+    metric = make_fid_metric(
+        real_reference,
+        device,
+        feature=FID_FEATURE_DIMENSIONS,
+    )
     rows = []
     try:
         for seed in REAL_EVALUATION_SEEDS:
