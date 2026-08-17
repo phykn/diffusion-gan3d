@@ -4,7 +4,7 @@
 
 ## Abstract
 
-We present a diffusion-GAN framework that learns three-dimensional categorical microstructures from unregistered two-dimensional sections and accepts a supplied section as a spatial condition. The objective is not to copy the section voxel by voxel, but to generate a compatible 3D realization whose neighboring sections change naturally. A coarse-dominant anchor loss permits boundary adaptation, while a conditional exponential-moving-average (EMA) completion bank supplies aligned three-section relations without imposing a hidden teacher volume as a reconstruction target. At inference, same-noise baseline and anchor trajectories are coupled by the same model-derived Gaussian used for logit guidance, so the condition decays smoothly into ordinary generation. The same 128³ model also generates a 352³ volume through shared-state overlapping blocks. On one binary 226 × 690 training image, direct and scaled samples obtain FID 44.85 ± 2.66 and 35.06 ± 0.61, respectively. Across 12 generated-control internal anchors, conditioning raises pooled anchor similarity from 58.52 ± 2.45% to 92.13 ± 0.65%. For four external boundary-section trials, it raises similarity from 55.16 ± 2.65% to 93.74 ± 0.56%; the 95th-percentile slice flicker is 1.08 ± 0.05 times the same-noise baseline, and the measured farthest-section drift is zero. These are controlled generation results, not experimental 3D reconstruction accuracy; no measured 3D ground truth is available.
+We present a diffusion-GAN framework that learns three-dimensional categorical microstructures from unregistered two-dimensional sections and accepts a supplied section as a spatial condition. The objective is not to copy the section voxel by voxel, but to generate a compatible 3D realization whose neighboring sections change naturally. A coarse-dominant anchor loss permits boundary adaptation, while a conditional exponential-moving-average (EMA) completion bank supplies aligned three-section relations without imposing a hidden teacher volume as a reconstruction target. This separates supervision of measured 2D appearance from supervision of 3D continuation, allowing conditional training without measured 3D volumes. At inference, same-noise baseline and anchor trajectories are coupled by the same model-derived Gaussian used for logit guidance, so the condition decays smoothly into ordinary generation. The same 128³ model also generates a 352³ volume through shared-state overlapping blocks. On one binary 226 × 690 training image, direct and scaled samples obtain FID 44.85 ± 2.66 and 35.06 ± 0.61, respectively. Across 12 generated-control internal anchors, conditioning raises pooled anchor similarity from 58.52 ± 2.45% to 92.13 ± 0.65%. For four external boundary-section trials, it raises similarity from 55.16 ± 2.65% to 93.74 ± 0.56%; the 95th-percentile slice flicker is 1.08 ± 0.05 times the same-noise baseline, and the measured farthest-section drift is zero. These are controlled generation results, not experimental 3D reconstruction accuracy; no measured 3D ground truth is available.
 
 ## 1. Introduction
 
@@ -12,12 +12,12 @@ Three-dimensional connectivity controls many transport and mechanical properties
 
 Hard insertion solves only the first half of that problem. Pasting a measured image into a completed volume guarantees exact labels on one plane but can introduce an abrupt change immediately before and after it. Strong full-resolution supervision creates a similar pressure during learning. We instead treat the supplied section as a prompt for one plausible 3D continuation. Its large-scale morphology should remain recognizable, but local boundaries may move when required by the learned 3D prior.
 
-The available data create a second difficulty: there are no measured 3D trajectories from which to learn section-to-section relations. We use conditional volumes sampled from a frozen EMA model as relation references, while real-data 2D critics remain responsible for marginal appearance. The generated volumes are never used as voxel-wise reconstruction targets.
+The available data create a second difficulty: there are no measured 3D trajectories from which to learn section-to-section relations. Slice-conditioned diffusion models can learn this mapping from volumetric training data [10,11,20], but that supervision is absent here. We instead use conditional volumes sampled from a frozen EMA model only as relation references, while real-data 2D critics remain responsible for marginal appearance. The generated volumes are never used as voxel-wise reconstruction targets.
 
 Our contributions are:
 
 1. a multiscale, mask-normalized plane condition whose loss emphasizes coarse morphology and gives exact pixels only a small weight;
-2. a conditional EMA completion bank that separates a measured root section from generated pseudo-planes and transfers aligned local relations rather than a full teacher volume;
+2. a relation-only conditional EMA completion bank that separates a measured root section from generated pseudo-planes and enables anchor training without measured 3D targets;
 3. a same-noise coupled sampler that applies joint multi-anchor guidance in logit space and returns continuously to an unconditioned trajectory with distance; and
 4. a shared-state tiled sampler that uses the same fixed-size model to synthesize larger 3D volumes.
 
@@ -31,7 +31,7 @@ Feature-matching and conditional neural methods reconstruct 3D microstructures f
 
 ### 2.2 Conditioning and continuation
 
-Diffusion inpainting preserves observed image regions while generating their missing surroundings [12,13]. An internal material section differs because unknown structure lies on both sides and must remain compatible through the plane. We avoid final overwriting and train a separate relation critic on bounded categorical changes among three consecutive sections. Conditional EMA completions supply candidate relations, but real 2D sections continue to define appearance.
+Diffusion inpainting preserves observed image regions while generating their missing surroundings [12,13]. Recent porous-media models condition volumetric diffusion on orthogonal surfaces or sparse CT slices [10,11,20], using measured 3D volumes to learn the corresponding interior prior. Our setting instead provides only unregistered 2D sections. We therefore avoid final overwriting and train a separate relation critic on bounded categorical changes among three consecutive sections. Conditional EMA completions supply candidate relations, but real 2D sections continue to define appearance.
 
 ### 2.3 Generation beyond the training size
 
@@ -219,7 +219,7 @@ The fixed-block sampler produces 352³ voxels with 27 fixed-size tiles at each r
 
 ## 6. Discussion
 
-The experiments support a narrower claim than deterministic 2D-to-3D reconstruction. A measured section constrains one stochastic realization, and the model uses learned relations to continue away from it. The condition remains recognizable without hard clamping, while first-change and p95 flicker results indicate that this flexibility generally avoids a new seam at the plane.
+The experiments support a narrower claim than deterministic 2D-to-3D reconstruction. The main contribution is not section conditioning alone, but learning a continuation signal when measured 3D targets are unavailable: real 2D critics define appearance, EMA completion triplets define local evolution, and neither the supplied section nor a teacher volume is copied into the result. The condition remains recognizable without hard clamping, while first-change and p95 flicker results indicate that this flexibility generally avoids a new seam at the plane.
 
 The generated-control experiment isolates conditional behavior within the model's own distribution, whereas the external experiment tests the intended use case. Their similar boundary metrics suggest that the real 2D critics and soft anchor objective prevent the conditional EMA prior from simply imposing its own center-image style. Physical reconstruction accuracy nevertheless requires measured 3D data.
 
@@ -237,7 +237,7 @@ FID uses a natural-image network, percolation is a coarse global spanning fracti
 
 ## 8. Conclusion
 
-The method learns 3D microstructure generation from 2D sections, uses a supplied plane as a soft spatial condition, and scales the same model to larger volumes. Its defining choice is to transfer section relationships from conditional EMA completions without copying a teacher volume or overwriting final voxels. The results support conditional stochastic synthesis with near-baseline local continuity and stable scale-up statistics; experimental 3D validation remains necessary.
+The method learns 3D microstructure generation from 2D sections, uses a supplied plane as a soft spatial condition, and scales the same model to larger volumes. Its defining choice is to separate measured 2D appearance supervision from self-generated relation supervision, transferring local continuation from conditional EMA completions without copying a teacher volume or overwriting final voxels. The results support conditional stochastic synthesis with near-baseline local continuity and stable scale-up statistics; experimental 3D validation remains necessary.
 
 ## References
 
@@ -278,3 +278,5 @@ The method learns 3D microstructure generation from 2D sections, uses a supplied
 [18] S. J. Cooper, A. Bertei, P. R. Shearing, J. A. Kilner, and N. P. Brandon, “TauFactor: An open-source application for calculating tortuosity factors from tomographic data,” *SoftwareX*, vol. 5, pp. 203–210, 2016.
 
 [19] M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter, “GANs trained by a two time-scale update rule converge to a Nash equilibrium,” in *Advances in Neural Information Processing Systems*, vol. 30, 2017.
+
+[20] Y. Meng, J. Jiang, B. Zhao, S. Ye, D. Wang, and J. Wu, “Inferring internal structures of porous media from orthogonal external surfaces: A novel 2D-to-3D reconstruction method based on a deep conditional diffusion model,” *Journal of Geophysical Research: Machine Learning and Computation*, vol. 3, art. e2025JH001101, 2026.
