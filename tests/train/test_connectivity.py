@@ -23,7 +23,8 @@ def test_prior_bank_stores_complete_cpu_uint8_volumes_and_freezes() -> None:
     _record_prior(connect, _prediction_from_labels(first, num_phases=2), 0)
 
     assert connect.prior_count == 2
-    assert connect.prior_storage_bytes == 2 * (size**3 + size**2)
+    gap_bytes = 3 * ((size - 1) // 2) * torch.float32.itemsize
+    assert connect.prior_storage_bytes == 2 * (size**3 + size**2 + gap_bytes)
     entries = connect.prior._banks[0].items
     assert all(item.labels.device.type == "cpu" for item in entries)
     assert all(item.labels.dtype == torch.uint8 for item in entries)
@@ -310,6 +311,7 @@ def test_pseudo_plane_uses_its_exact_source_triplet() -> None:
         index=5,
         values=source,
         center_slot=1,
+        gap=1,
     )
 
     real, fake = connect.match_anchor(
@@ -324,6 +326,39 @@ def test_pseudo_plane_uses_its_exact_source_triplet() -> None:
     assert fake.anchor_flags[:2].tolist() == [True, True]
     assert torch.equal(real.values[1], expected)
     assert int(real.center_slots[1]) == reference.center_slot
+
+
+def test_pseudo_plane_uses_the_source_relation_gap() -> None:
+    size = 9
+    labels = torch.arange(size).view(1, size, 1, 1).expand(1, size, size, size)
+    prediction = _prediction_from_labels(labels, num_phases=size)
+    connect = _connectivity(num_phases=size, patch_size=size, volumes=1)
+    _record_prior(connect, prediction, 0)
+    anchors = (
+        PlaneAnchor(labels[0, 1].to(torch.uint8), axis=0, index=1),
+        PlaneAnchor(labels[0, 5].to(torch.uint8), axis=0, index=5),
+    )
+    condition = _condition(anchors, num_phases=size, volume_size=size)
+    observed = _condition((anchors[0],), num_phases=size, volume_size=size)
+    source = labels[0, (2, 5, 8)].to(torch.uint8)
+    reference = PriorReference(
+        axis=0,
+        index=5,
+        values=source,
+        center_slot=1,
+        gap=3,
+    )
+
+    real, fake = connect.match_anchor(
+        prediction,
+        condition,
+        0,
+        observed_axis_masks=observed.axis_masks,
+        references=((reference,),),
+    )
+
+    assert torch.equal(real.values[1].argmax(dim=1)[:, 0, 0], source[:, 0, 0])
+    assert torch.equal(fake.values[1].argmax(dim=1)[:, 0, 0], source[:, 0, 0])
 
 
 def test_connectivity_images_are_phase_changes_and_discrete_bend() -> None:

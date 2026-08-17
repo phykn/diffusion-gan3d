@@ -265,6 +265,7 @@ class Connectivity:
             categorical,
             condition,
             observed_axis_masks,
+            references,
         )
         candidates, source_references = self._prepare_candidates(
             categorical,
@@ -450,6 +451,7 @@ class Connectivity:
         volume: torch.Tensor,
         condition: AnchorCondition,
         observed_axis_masks: torch.Tensor | None = None,
+        references: PriorReferences = (),
     ) -> _LocatedTriplets:
         self._check_volume(volume)
         if condition.axis_masks.shape != (volume.shape[0], 3, *volume.shape[2:]):
@@ -466,7 +468,12 @@ class Connectivity:
         center_slots = []
         locations = []
         observed = []
-        occupied: set[tuple[int, int, int, int, int]] = set()
+        occupied: set[tuple[int, int, tuple[int, int, int], int, int]] = set()
+        references_by_location = {
+            (batch, *reference.location): reference
+            for batch, batch_references in enumerate(references)
+            for reference in batch_references
+        }
         for batch in range(volume.shape[0]):
             for axis in AXES:
                 moved = volume[batch].movedim(axis + 1, 1)
@@ -482,20 +489,27 @@ class Connectivity:
                     col = (int(points[:, 1].min()) + int(points[:, 1].max())) // 2
                     top = self._centered_start(row, height)
                     left = self._centered_start(col, width)
-                    start = self._window_start(index_value, depth)
-                    key = (batch, axis, start, top, left)
+                    reference = references_by_location.get((batch, axis, index_value))
+                    if reference is None:
+                        start = self._window_start(index_value, depth)
+                        slice_indices = (start, start + 1, start + 2)
+                        center_slot = index_value - start
+                    else:
+                        slice_indices = reference.slice_indices(depth)
+                        center_slot = reference.center_slot
+                    key = (batch, axis, slice_indices, top, left)
                     if key in occupied:
                         continue
                     occupied.add(key)
                     values = moved[
                         :,
-                        start : start + 3,
+                        list(slice_indices),
                         top : top + self.patch_size,
                         left : left + self.patch_size,
                     ].movedim(0, 1)
                     mask = moved_full_mask[
                         :,
-                        start : start + 3,
+                        list(slice_indices),
                         top : top + self.patch_size,
                         left : left + self.patch_size,
                     ].movedim(0, 1)
@@ -503,7 +517,7 @@ class Connectivity:
                         continue
                     triplets.append(values)
                     axes.append(axis)
-                    center_slots.append(index_value - start)
+                    center_slots.append(center_slot)
                     locations.append((batch, axis, index_value))
                     observed.append(
                         bool(observed_axis_masks[batch, axis, index_value].any())

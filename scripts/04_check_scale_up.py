@@ -1,6 +1,7 @@
 import argparse
 import sys
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 
@@ -12,6 +13,14 @@ from matplotlib.patches import Rectangle
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.diagnostic import (
+    select_display_index,
+    select_indices,
+    unit_interval,
+)
+from scripts.diagnostic import (
+    show_napari as show_volume_napari,
+)
 from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.config import load_generation_settings
@@ -26,6 +35,7 @@ from src.scale import ScaledGenerator, ScalePlan
 from src.volume import load_volume, save_volume
 
 AXIS = 0
+show_napari = partial(show_volume_napari, name="scaled phases")
 
 
 @dataclass(frozen=True)
@@ -371,13 +381,6 @@ def non_negative_int(value: str) -> int:
     return parsed
 
 
-def unit_interval(value: str) -> float:
-    parsed = float(value)
-    if not 0.0 <= parsed <= 1.0:
-        raise argparse.ArgumentTypeError("value must be between zero and one")
-    return parsed
-
-
 def print_plan(plan: ScalePlan, device: torch.device) -> None:
     print(
         f"Plan    : {' × '.join(map(str, plan.grid))} tiles "
@@ -396,19 +399,6 @@ def format_bytes(size: int) -> str:
             return f"{value:.2f} {unit}"
         value /= 1024.0
     raise RuntimeError("unreachable")
-
-
-def select_indices(size: int, count: int) -> tuple[int, ...]:
-    if count == 0:
-        return ()
-    return tuple((2 * idx + 1) * size // (2 * count) for idx in range(count))
-
-
-def select_display_index(size: int, indices: tuple[int, ...]) -> int:
-    center = size // 2
-    if not indices:
-        return center
-    return min(indices, key=lambda idx: (abs(idx - center), idx))
 
 
 def get_accuracy(
@@ -650,15 +640,6 @@ def show_base_result(
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     plt.show()
-
-
-def show_napari(vol: torch.Tensor) -> None:
-    import napari
-
-    viewer = napari.Viewer()
-    viewer.add_labels(vol.numpy(), name="scaled phases")
-    viewer.dims.ndisplay = 3
-    napari.run()
 
 
 def format_axes(

@@ -4,7 +4,12 @@ import torch
 import torch.nn.functional as F
 
 from src.anchor import PlaneAnchor, build_anchors
-from src.train.prior import ConditionalPrior, _log_uniform_count
+from src.train.prior import (
+    ConditionalPrior,
+    _log_uniform_count,
+    _relation_gap_weights,
+    _sample_relation_gap,
+)
 
 
 def test_record_keeps_raw_relation_volume_and_preserves_observed_condition() -> None:
@@ -187,8 +192,46 @@ def test_refresh_is_fifo_and_keeps_storage_bounded() -> None:
     volumes = prior.volumes(0, 0)
     assert len(volumes) == prior.count == 2
     assert [int(volume[0, 0, 0]) for volume in volumes] == [1, 2]
-    assert prior.storage_bytes == initial_bytes == 2 * (size**3 + image.numel())
+    gap_bytes = 3 * ((size - 1) // 2) * torch.float32.itemsize
+    assert (
+        prior.storage_bytes
+        == initial_bytes
+        == 2 * (size**3 + image.numel() + gap_bytes)
+    )
     assert prior.updates == 1
+
+
+def test_relation_gap_weights_preserve_long_range_dependence() -> None:
+    size = 16
+    generator = torch.Generator().manual_seed(9)
+    plane = torch.randint(2, (size, size), generator=generator, dtype=torch.uint8)
+    persistent = plane.expand(size, size, size).clone()
+    independent = torch.randint(
+        2,
+        (size, size, size),
+        generator=generator,
+        dtype=torch.uint8,
+    )
+
+    persistent_weights = _relation_gap_weights(persistent, axis=0, num_phases=2)
+    independent_weights = _relation_gap_weights(independent, axis=0, num_phases=2)
+
+    assert persistent_weights.shape == (7,)
+    assert bool((persistent_weights > 0).all())
+    assert float(persistent_weights[-1]) > float(independent_weights[-1]) * 5.0
+
+
+def test_relation_gap_sampling_uses_ema_dependence_and_plane_geometry() -> None:
+    weights = torch.tensor((0.0, 0.0, 4.0, 0.0))
+
+    gap = _sample_relation_gap(
+        weights,
+        index=4,
+        size=10,
+        generator=torch.Generator().manual_seed(2),
+    )
+
+    assert gap == 3
 
 
 def test_owned_axis_does_not_borrow_while_its_domain_bank_is_incomplete() -> None:

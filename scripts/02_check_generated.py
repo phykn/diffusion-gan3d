@@ -8,6 +8,7 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.diagnostic import show_napari
 from src.build import load_generator
 from src.volume import save_volume
 
@@ -90,15 +91,6 @@ def show_slices(
     fig.suptitle("EMA model")
     fig.tight_layout()
     plt.show()
-
-
-def show_napari(vol: torch.Tensor) -> None:
-    import napari
-
-    viewer = napari.Viewer()
-    viewer.add_labels(vol.numpy(), name="generated phases")
-    viewer.dims.ndisplay = 3
-    napari.run()
 
 
 if __name__ == "__main__":

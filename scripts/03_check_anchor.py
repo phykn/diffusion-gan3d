@@ -10,6 +10,14 @@ from matplotlib.colors import ListedColormap
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.diagnostic import (
+    format_percent,
+    format_ratio,
+    select_display_index,
+    select_indices,
+    show_napari,
+    unit_interval,
+)
 from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.config import load_generation_settings
@@ -193,30 +201,6 @@ def main() -> None:
         )
 
 
-def select_indices(size: int, count: int) -> tuple[int, ...]:
-    if size < 1:
-        raise ValueError("volume depth must be positive.")
-    if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= size:
-        raise ValueError("count must be between 0 and the volume depth.")
-    if count == 0:
-        return ()
-    return tuple(((2 * index + 1) * size) // (2 * count) for index in range(count))
-
-
-def unit_interval(value: str) -> float:
-    parsed = float(value)
-    if not 0.0 <= parsed <= 1.0:
-        raise argparse.ArgumentTypeError("value must be between zero and one")
-    return parsed
-
-
-def select_display_index(size: int, indices: tuple[int, ...]) -> int:
-    center = size // 2
-    if not indices:
-        return center
-    return min(indices, key=lambda index: (abs(index - center), index))
-
-
 def print_selection(
     shape: tuple[int, ...],
     device: torch.device,
@@ -272,14 +256,6 @@ def format_profile(
         f"anchor {format_percent(anchor)}, mean {format_percent(mean)}, "
         f"farthest {format_percent(farthest)} at distance {distance}"
     )
-
-
-def format_percent(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2%}"
-
-
-def format_ratio(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2f}x"
 
 
 def show_result(
@@ -390,15 +366,6 @@ def get_slices(vol: torch.Tensor, axis: int) -> torch.Tensor:
     if axis not in (0, 1, 2):
         raise ValueError("axis must be 0, 1, or 2.")
     return vol.movedim(axis, 0)
-
-
-def show_napari(vol: torch.Tensor) -> None:
-    import napari
-
-    viewer = napari.Viewer()
-    viewer.add_labels(vol.numpy(), name="generated phases")
-    viewer.dims.ndisplay = 3
-    napari.run()
 
 
 if __name__ == "__main__":

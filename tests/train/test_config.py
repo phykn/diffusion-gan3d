@@ -98,7 +98,7 @@ def test_repository_training_config_uses_soft_anchor_and_conditional_ema_prior()
     assert "reverse_invariant" not in cfg["anchor"]["connectivity"]
     assert tuple(cfg["condition_dropout"]) == ("joint_each_prob",)
     assert cfg["vf"]["max_samples"] == 4
-    assert cfg["train"]["init_weights"] == "run/08161634"
+    assert cfg["train"]["init_weights"] == "run/08170028"
     assert "relation" not in cfg
 
 

@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from functools import partial
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -13,6 +14,14 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.diagnostic import (
+    format_percent,
+    format_ratio,
+    unit_interval,
+)
+from scripts.diagnostic import (
+    show_napari as show_volume_napari,
+)
 from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.config import load_generation_settings
@@ -26,6 +35,7 @@ from src.generate import DEFAULT_ANCHOR_STRENGTH
 from src.volume import save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
+show_napari = partial(show_volume_napari, name="Generated output")
 
 
 def main() -> None:
@@ -270,15 +280,6 @@ def render_strip(
     plt.close(figure)
 
 
-def show_napari(volume: torch.Tensor) -> None:
-    import napari
-
-    viewer = napari.Viewer()
-    viewer.add_labels(volume.cpu().numpy(), name="Generated output")
-    viewer.dims.ndisplay = 3
-    napari.run()
-
-
 def format_profile(values: tuple[float | None, ...]) -> str:
     valid = [
         (distance, value) for distance, value in enumerate(values) if value is not None
@@ -292,21 +293,6 @@ def format_profile(values: tuple[float | None, ...]) -> str:
         f"boundary {format_percent(near)}, mean {format_percent(mean)}, "
         f"farthest {format_percent(farthest)} at distance {distance}"
     )
-
-
-def format_percent(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2%}"
-
-
-def format_ratio(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2f}x"
-
-
-def unit_interval(value: str) -> float:
-    parsed = float(value)
-    if not 0.0 <= parsed <= 1.0:
-        raise argparse.ArgumentTypeError("value must be between zero and one")
-    return parsed
 
 
 if __name__ == "__main__":

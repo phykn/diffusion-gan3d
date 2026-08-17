@@ -84,9 +84,11 @@ downsampling factor, so this adds no tuning option.
 With the usual one-root volume batch, the connectivity critic compares at most
 seven three-slice windows. It reserves one available general window per axis and
 always retains every measured-root window before sampling additional
-generated-plane windows. Each generated plane keeps the exact three-slice source
-window from its conditional EMA completion. Fresh measured roots and general
-windows, which have no aligned source, fall back to phase-fraction-matched prior
+generated-plane windows. Each generated plane keeps an exact three-slice source
+relation from its conditional EMA completion. Its slice gap is sampled from the
+EMA volume's chance-corrected correlation spectrum, so persistent structures are
+also checked over wider ranges without a configured distance list. Fresh measured
+roots and general windows, which have no aligned source, fall back to phase-fraction-matched prior
 windows. Anchor and general groups receive equal loss weight, so using more
 anchors does not increase the objective under the
 usual one-root batch. A domain uses its own prior for axes it owns and falls back
@@ -99,7 +101,7 @@ connectivity critic always averages forward and reversed triplet scores.
 
 The critic does not receive raw logits or raw slices. EMA references and student
 outputs are converted to hard categorical phase images, and each three-slice
-window becomes three bounded images: the first phase change, the second phase
+relation becomes three bounded images: the first phase change, the second phase
 change, and the change in those two changes. The student uses a straight-through
 categorical conversion, so the critic sees the same representation on both sides
 while gradients still reach the generator. This learns image-level continuation
