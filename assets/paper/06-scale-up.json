@@ -79,14 +79,14 @@
   },
   "output": {
     "path": "D:\\code\\diffusion-gan3d\\assets\\paper\\06-scale-up.png",
-    "sha256": "bc4aaf8cac55a6a925541c5b70000e999fbe90c3d0ee200d69f1b0059cb43af9",
+    "sha256": "20eaecb3fda50a7294b04ed9fd022b22d7760a872f5046df53112150c8b7cbcc",
     "shape": [
       352,
       352,
       352
     ],
     "dtype": "torch.uint8",
-    "elapsed_seconds": 22.8192895000102
+    "elapsed_seconds": 22.794691299990518
   },
   "quality": {
     "anchor_matched_voxels": 15018,

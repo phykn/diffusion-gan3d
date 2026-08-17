@@ -277,6 +277,8 @@ def plot_face(
     panel.plot_surface(
         *coordinates,
         facecolors=facecolors,
+        rstride=1,
+        cstride=1,
         shade=False,
         linewidth=0,
         antialiased=False,

@@ -268,11 +268,11 @@ def render_result(
     shell = assessment.shell
     colors = [to_rgb(color) for color in PHASE_COLORS]
     cmap = ListedColormap(colors)
-    figure = plt.figure(figsize=(13.3, 4.7), facecolor="white")
+    figure = plt.figure(figsize=(15.5, 5.4), facecolor="white")
     grid = figure.add_gridspec(
         1,
         3,
-        width_ratios=(1, 1.35, 1.8),
+        width_ratios=(1, 1.35, 2.5),
         left=0.025,
         right=0.985,
         bottom=0.035,
@@ -347,7 +347,7 @@ def render_result(
     volume_panel.set_title(f"(c) {volume.shape[0]}³ output", fontsize=13, pad=2)
     figure.savefig(
         output,
-        dpi=180,
+        dpi=240,
         facecolor=figure.get_facecolor(),
         bbox_inches="tight",
         pad_inches=0.05,
