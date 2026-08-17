@@ -139,14 +139,14 @@ before one global posterior update. A supplied 128³ base is re-noised with one 
 
 ### 4.1 Data and model
 
-The source artifact `data/sample.png` is one 226 × 690 binary phase map. Phase 0 is treated as pore and phase 1 as solid. Material provenance, acquisition conditions, segmentation history, physical pixel size, and an external data license are not available in the project files. Results are therefore reported in voxels and interpreted as an algorithmic study. Random 128 × 128 crops supervise all three axes under an isotropy assumption.
+The training data consist of one 226 × 690 binary phase map. Phase 0 is treated as pore and phase 1 as solid. Material provenance, acquisition conditions, segmentation history, physical pixel size, and an external data license are unavailable. Results are therefore reported in voxels and interpreted as an algorithmic study. Random 128 × 128 crops supervise all three axes under an isotropy assumption.
 
 <p align="center">
   <img src="assets/paper/01-training-data.png" alt="Binary training image with example crop regions" width="680">
 </p>
 <p align="center"><em>Figure 1. Binary 2D training image. Orange boxes show example 128 × 128 training crops. Black and gray denote phases 0 and 1.</em></p>
 
-All reported values use the completed 20,000-step EMA generator from run `08170028` (SHA-256 `fe6289e7…f444f`). It was warm-started from run `08161634`; generator and all critic weights were loaded strictly, while the trainer-side conditional completion bank was rebuilt under the current formulation. Adam learning rates are $1.6\times10^{-4}$ for the generator and $10^{-4}$ for critics. Training uses mixed precision, EMA decay 0.999, real batch size 8, 16 generated pairs per axis, and anchor requests on 80% of eligible updates.
+All reported values use the EMA parameters after 20,000 optimization steps. The generator and critics were initialized from the preceding training stage, whereas the conditional completion bank was constructed anew under the current formulation. Adam learning rates are $1.6\times10^{-4}$ for the generator and $10^{-4}$ for critics. Training uses mixed precision, EMA decay 0.999, real batch size 8, 16 generated pairs per axis, and anchor requests on 80% of eligible updates.
 
 ### 4.2 Evaluation protocols
 
