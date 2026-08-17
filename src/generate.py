@@ -4,10 +4,9 @@ from collections.abc import Sequence
 import torch
 
 from .anchor import PlaneAnchor, build_anchors
+from .config import DEFAULT_ANCHOR_STRENGTH
 from .diffusion import Diffusion
 from .model.denoiser import Denoiser3D, validate_guidance
-
-DEFAULT_ANCHOR_STRENGTH = 0.90
 
 
 class _GuidedDenoiser:

@@ -32,7 +32,6 @@ from provenance import (
 from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.config import load_generation_settings
-from src.generate import DEFAULT_ANCHOR_STRENGTH
 
 AXIS = 0
 SEED = 0
@@ -53,6 +52,7 @@ def main() -> None:
     weights = args.weight.resolve()
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
+    anchor_strength = settings.anchor_strength
     generator = load_generator(weights, device=device)
     margin = generator.default_margin
     provenance = build_provenance(
@@ -63,7 +63,7 @@ def main() -> None:
             "domain": args.domain,
             "axis": AXIS,
             "margin": margin,
-            "anchor_strength": DEFAULT_ANCHOR_STRENGTH,
+            "anchor_strength": anchor_strength,
             "source_roi_left_top": list(ROI_POSITIONS[1]),
             "source_crop_size": CROP_SIZE,
         },
@@ -87,7 +87,7 @@ def main() -> None:
     print("Status  : generating...", flush=True)
     volume = generator.generate(
         anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=index),),
-        anchor_strength=DEFAULT_ANCHOR_STRENGTH,
+        anchor_strength=anchor_strength,
         guidance=guidance,
         domain=args.domain,
         margin=margin,

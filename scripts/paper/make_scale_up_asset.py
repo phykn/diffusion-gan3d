@@ -32,7 +32,6 @@ from provenance import (
 from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.config import load_generation_settings
-from src.generate import DEFAULT_ANCHOR_STRENGTH
 from src.scale import ScaledGenerator
 
 BLOCKS = (3, 3, 3)
@@ -78,6 +77,7 @@ def main() -> None:
     weights = args.weight.resolve()
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
+    anchor_strength = settings.anchor_strength
     overlap = settings.overlap
     generator = load_generator(weights, device=device)
     base_margin = generator.default_margin
@@ -92,7 +92,7 @@ def main() -> None:
             "scale_geometry": "fixed_blocks_inward_margins",
             "overlap": overlap,
             "base_margin": base_margin,
-            "anchor_strength": DEFAULT_ANCHOR_STRENGTH,
+            "anchor_strength": anchor_strength,
             "margin": SCALE_MARGIN,
             "source_roi_left_top": list(ROI_POSITIONS[1]),
             "source_crop_size": CROP_SIZE,
@@ -120,7 +120,7 @@ def main() -> None:
     print("Status  : generating anchored base...", flush=True)
     base = generator.generate(
         anchors=(PlaneAnchor(image=anchor, axis=AXIS, index=anchor_index),),
-        anchor_strength=DEFAULT_ANCHOR_STRENGTH,
+        anchor_strength=anchor_strength,
         guidance=guidance,
         domain=args.domain,
         margin=base_margin,

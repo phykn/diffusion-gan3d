@@ -31,7 +31,6 @@ from src.evaluate import (
     measure_slice_smoothness,
     voxel_accuracy,
 )
-from src.generate import DEFAULT_ANCHOR_STRENGTH
 from src.volume import save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
@@ -53,7 +52,7 @@ def main() -> None:
     parser.add_argument(
         "--anchor-strength",
         type=unit_interval,
-        default=DEFAULT_ANCHOR_STRENGTH,
+        help="normalized anchor prediction strength (default: config/gen.yaml)",
     )
     parser.add_argument("--guidance", type=float)
     parser.add_argument("--out", type=Path, help="optional generated TIFF path")
@@ -70,10 +69,15 @@ def main() -> None:
     generator = load_generator(args.weight, device=device)
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
+    anchor_strength = (
+        settings.anchor_strength
+        if args.anchor_strength is None
+        else args.anchor_strength
+    )
     index = 0 if args.side == "start" else generator.patch_size - 1
     print(f"\nWeights : {args.weight.resolve()}")
     print(f"Boundary: axis {args.axis}, {args.side} plane {index}")
-    print(f"Strength: {args.anchor_strength:.2f}")
+    print(f"Strength: {anchor_strength:.2f}")
     torch.manual_seed(args.seed)
     if args.anchor is None:
         print("Anchor  : unconditioned reference boundary")
@@ -101,7 +105,7 @@ def main() -> None:
     cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
     generated = generator.generate(
         anchors=(anchor,),
-        anchor_strength=args.anchor_strength,
+        anchor_strength=anchor_strength,
         guidance=guidance,
         domain=args.domain,
         margin=generator.default_margin,

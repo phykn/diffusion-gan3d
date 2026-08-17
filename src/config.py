@@ -4,16 +4,19 @@ from pathlib import Path
 
 from .utils import load_yaml
 
+DEFAULT_ANCHOR_STRENGTH = 0.90
+
 
 @dataclass(frozen=True)
 class GenerationSettings:
     guidance: float = 1.0
+    anchor_strength: float = DEFAULT_ANCHOR_STRENGTH
     overlap: int = 8
 
 
 def load_generation_settings() -> GenerationSettings:
     section = load_yaml(Path(__file__).resolve().parents[1] / "config" / "gen.yaml")
-    unknown = section.keys() - {"guidance", "overlap"}
+    unknown = section.keys() - {"guidance", "anchor_strength", "overlap"}
     if unknown:
         names = ", ".join(sorted(unknown))
         raise ValueError(f"unknown generation setting: {names}")
@@ -27,8 +30,16 @@ def load_generation_settings() -> GenerationSettings:
         or guidance > 10_000.0
     ):
         raise ValueError("guidance must be between zero and 10000.")
+    anchor_strength = section.get("anchor_strength", DEFAULT_ANCHOR_STRENGTH)
+    if (
+        not isinstance(anchor_strength, (int, float))
+        or isinstance(anchor_strength, bool)
+        or not math.isfinite(anchor_strength)
+        or not 0.0 <= anchor_strength <= 1.0
+    ):
+        raise ValueError("anchor_strength must be between zero and one.")
     overlap = _non_negative_int(section.get("overlap", 8), "overlap")
-    return GenerationSettings(float(guidance), overlap)
+    return GenerationSettings(float(guidance), float(anchor_strength), overlap)
 
 
 def _non_negative_int(value: object, name: str) -> int:

@@ -30,7 +30,6 @@ from src.evaluate import (
     measure_slice_smoothness,
     voxel_accuracy,
 )
-from src.generate import DEFAULT_ANCHOR_STRENGTH
 
 SEEDS = (0, 1, 2, 3)
 INTERNAL_AXES = (0, 1, 2)
@@ -54,6 +53,7 @@ def main() -> None:
     weights = args.weight.resolve()
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
+    anchor_strength = settings.anchor_strength
     generator = load_generator(weights, device=device)
     margin = generator.default_margin
     provenance = build_provenance(
@@ -64,7 +64,7 @@ def main() -> None:
             "domain": args.domain,
             "internal_axes": list(INTERNAL_AXES),
             "boundary_axis": 0,
-            "anchor_strength": DEFAULT_ANCHOR_STRENGTH,
+            "anchor_strength": anchor_strength,
             "margin": margin,
         },
         additional_inputs={"training_image": SAMPLE_PATH},
@@ -95,6 +95,7 @@ def main() -> None:
                 seed=50_000 + seed * len(INTERNAL_AXES) + axis,
                 domain=args.domain,
                 guidance=guidance,
+                anchor_strength=anchor_strength,
                 margin=margin,
             )
             rows.append(
@@ -118,6 +119,7 @@ def main() -> None:
             seed=60_000 + seed,
             domain=args.domain,
             guidance=guidance,
+            anchor_strength=anchor_strength,
             margin=margin,
         )
         rows.append(
@@ -143,6 +145,7 @@ def main() -> None:
             seed=70_000 + seed,
             domain=args.domain,
             guidance=guidance,
+            anchor_strength=anchor_strength,
             margin=margin,
         )
         rows.append(
@@ -219,6 +222,7 @@ def generate_pair(
     seed: int,
     domain: int,
     guidance: float,
+    anchor_strength: float,
     margin: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     set_seed(seed, generator.device)
@@ -229,7 +233,7 @@ def generate_pair(
     condition = (PlaneAnchor(anchor, axis, index),)
     generated = generator.generate(
         anchors=condition,
-        anchor_strength=DEFAULT_ANCHOR_STRENGTH,
+        anchor_strength=anchor_strength,
         guidance=guidance,
         domain=domain,
         margin=margin,

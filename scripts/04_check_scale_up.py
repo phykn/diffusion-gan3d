@@ -30,7 +30,6 @@ from src.evaluate import (
     phase_fractions,
     voxel_accuracy,
 )
-from src.generate import DEFAULT_ANCHOR_STRENGTH
 from src.scale import ScaledGenerator, ScalePlan
 from src.volume import load_volume, save_volume
 
@@ -57,7 +56,7 @@ class ScaleAssessment:
     interior_quality: SeamQuality | None
 
 
-def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | None]:
+def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--weight",
@@ -102,11 +101,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
     parser.add_argument(
         "--anchor-strength",
         type=unit_interval,
-        default=DEFAULT_ANCHOR_STRENGTH,
-        help=(
-            "normalized base anchor prediction strength "
-            f"(default: {DEFAULT_ANCHOR_STRENGTH:.2f})"
-        ),
+        help="normalized base anchor strength (default: config/gen.yaml)",
     )
     parser.add_argument(
         "--guidance",
@@ -131,14 +126,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace, int | Non
     args = parser.parse_args()
     if args.count is not None and args.count < 0:
         parser.error("--count must be non-negative.")
-    anchor_count = args.count if args.count is None or args.anchor_strength > 0.0 else 0
-    if anchor_count is not None and anchor_count > 0 and args.gt is None:
-        parser.error("--gt is required when --count is positive.")
-    if args.gt is not None and not anchor_count:
-        parser.error(
-            "--gt requires active anchors (--count > 0 and --anchor-strength > 0)."
-        )
-    return parser, args, anchor_count
+    return parser, args
 
 
 def generate_base(
@@ -261,14 +249,26 @@ def assess_result(
 
 
 def main() -> None:
-    parser, args, anchor_count = parse_args()
+    parser, args = parse_args()
+    settings = load_generation_settings()
+    args.anchor_strength = (
+        settings.anchor_strength
+        if args.anchor_strength is None
+        else args.anchor_strength
+    )
+    anchor_count = args.count if args.count is None or args.anchor_strength > 0.0 else 0
+    if anchor_count is not None and anchor_count > 0 and args.gt is None:
+        parser.error("--gt is required when --count is positive.")
+    if args.gt is not None and not anchor_count:
+        parser.error(
+            "--gt requires active anchors (--count > 0 and --anchor-strength > 0)."
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight = args.weight
     print(f"\nWeights : {weight.resolve()}", flush=True)
 
     generator = load_generator(weight, device=device)
-    settings = load_generation_settings()
     overlap = settings.overlap if args.overlap is None else args.overlap
     margin = generator.default_margin if args.margin is None else args.margin
     guidance = settings.guidance if args.guidance is None else args.guidance

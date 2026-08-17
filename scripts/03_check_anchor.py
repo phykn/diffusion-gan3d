@@ -27,7 +27,6 @@ from src.evaluate import (
     measure_slice_smoothness,
     voxel_accuracy,
 )
-from src.generate import DEFAULT_ANCHOR_STRENGTH
 from src.volume import save_volume
 
 
@@ -67,11 +66,7 @@ def main() -> None:
     parser.add_argument(
         "--anchor-strength",
         type=unit_interval,
-        default=DEFAULT_ANCHOR_STRENGTH,
-        help=(
-            "normalized anchor prediction strength from 0 to 1 "
-            f"(default: {DEFAULT_ANCHOR_STRENGTH:.2f})"
-        ),
+        help="normalized anchor prediction strength (default: config/gen.yaml)",
     )
     parser.add_argument(
         "--guidance",
@@ -96,14 +91,19 @@ def main() -> None:
     args = parser.parse_args()
     if args.count < 0:
         parser.error("--count must be non-negative.")
-    anchor_count = args.count if args.anchor_strength > 0.0 else 0
+    settings = load_generation_settings()
+    anchor_strength = (
+        settings.anchor_strength
+        if args.anchor_strength is None
+        else args.anchor_strength
+    )
+    anchor_count = args.count if anchor_strength > 0.0 else 0
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight = args.weight
     print(f"\nWeights : {Path(weight).resolve()}")
 
     generator = load_generator(weight, device=device)
-    settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
     if anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
@@ -129,7 +129,7 @@ def main() -> None:
         indices=indices,
     )
     if indices:
-        print(f"Guidance : strength {args.anchor_strength:.2f}")
+        print(f"Guidance : strength {anchor_strength:.2f}")
     print("Generating conditioned sample...", flush=True)
 
     cpu_rng = torch.random.get_rng_state()
@@ -137,7 +137,7 @@ def main() -> None:
 
     gen = generator.generate(
         anchors=anchors,
-        anchor_strength=args.anchor_strength,
+        anchor_strength=anchor_strength,
         guidance=guidance,
         domain=args.domain,
         margin=generator.default_margin,

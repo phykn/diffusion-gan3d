@@ -322,13 +322,18 @@ def test_anchor_asset_writes_generation_sidecar(
 
         def generate(self, *, anchors, anchor_strength, guidance, domain, margin):
             assert len(anchors) == 1
-            assert anchor_strength == module.DEFAULT_ANCHOR_STRENGTH
+            assert anchor_strength == 0.75
             assert (guidance, domain, margin) == (1.5, 0, 8)
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(module, "SAMPLE_PATH", sample)
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
+    monkeypatch.setattr(
+        module,
+        "load_generation_settings",
+        lambda: SimpleNamespace(guidance=1.0, anchor_strength=0.75, overlap=8),
+    )
     monkeypatch.setattr(
         module, "load_center_roi", lambda _size: torch.zeros((4, 4), dtype=torch.long)
     )
@@ -367,7 +372,7 @@ def test_scale_asset_writes_renumbered_sidecar(
 
         def generate(self, *, anchors, anchor_strength, guidance, domain, margin):
             assert len(anchors) == 1
-            assert anchor_strength == module.DEFAULT_ANCHOR_STRENGTH
+            assert anchor_strength == 0.75
             assert (guidance, domain, margin) == (1.75, 0, 8)
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
@@ -396,7 +401,7 @@ def test_scale_asset_writes_renumbered_sidecar(
     monkeypatch.setattr(
         module,
         "load_generation_settings",
-        lambda: SimpleNamespace(guidance=1.0, overlap=0),
+        lambda: SimpleNamespace(guidance=1.0, anchor_strength=0.75, overlap=0),
     )
     monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(

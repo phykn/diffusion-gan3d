@@ -20,7 +20,6 @@ from src.anchor import PlaneAnchor
 from src.build import load_generator
 from src.config import load_generation_settings
 from src.evaluate import voxel_accuracy
-from src.generate import DEFAULT_ANCHOR_STRENGTH
 
 COUNTS = (0, 1, 2, 4, 8, 16, 32, 64, 128)
 AXIS = 0
@@ -41,6 +40,7 @@ def main() -> None:
     weights = args.weight.resolve()
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
+    anchor_strength = settings.anchor_strength
     generator = load_generator(weights, device=device)
     size = generator.patch_size
     if COUNTS[-1] != size:
@@ -57,7 +57,7 @@ def main() -> None:
             "domain": args.domain,
             "reference_seed": REFERENCE_SEED,
             "generation_seed": GENERATION_SEED,
-            "anchor_strength": DEFAULT_ANCHOR_STRENGTH,
+            "anchor_strength": anchor_strength,
             "selection": "nested farthest-point plane order",
             "margin": generator.default_margin,
         },
@@ -86,7 +86,7 @@ def main() -> None:
         print(f"Generating with {count:3d} nested planes...", flush=True)
         generated = generator.generate(
             anchors=anchors,
-            anchor_strength=DEFAULT_ANCHOR_STRENGTH,
+            anchor_strength=anchor_strength,
             guidance=guidance,
             domain=args.domain,
             margin=generator.default_margin,
