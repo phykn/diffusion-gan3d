@@ -1,15 +1,17 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { cropAndResizeLabels, readPngLabels } from '../image-labels.js'
 
 const props = defineProps({
   file: File,
   cropSize: { type: Number, default: 128 },
   inputSize: { type: Number, default: 128 },
+  numPhases: { type: Number, default: 2 },
   disabled: Boolean,
 })
 const emit = defineEmits(['change', 'error', 'ready'])
 const canvas = ref(null)
-const state = reactive({ image: null, crop: null, view: null, drag: null })
+const state = reactive({ image: null, sourceLabels: null, crop: null, view: null, drag: null })
 let observer
 let loadVersion = 0
 
@@ -111,6 +113,7 @@ watch(() => props.disabled, (disabled) => {
 watch(() => [props.file, props.cropSize], ([file]) => {
   const version = ++loadVersion
   state.image = null
+  state.sourceLabels = null
   state.crop = null
   emit('ready', false)
   draw()
@@ -127,7 +130,16 @@ watch(() => [props.file, props.cropSize], ([file]) => {
       emit('error', `Image must be at least ${cropSize} × ${cropSize}.`)
       return
     }
+    let sourceLabels = null
+    try {
+      sourceLabels = await readPngLabels(file)
+    } catch (reason) {
+      if (version === loadVersion) emit('error', reason instanceof Error ? reason.message : 'Could not read PNG labels.')
+      return
+    }
+    if (version !== loadVersion) return
     state.image = image
+    state.sourceLabels = sourceLabels
     state.crop = {
       x: (image.naturalWidth - cropSize) / 2,
       y: (image.naturalHeight - cropSize) / 2,
@@ -146,26 +158,10 @@ watch(() => [props.file, props.cropSize], ([file]) => {
 
 function getAnchorImage() {
   if (!state.image || !state.crop) return null
-  const output = document.createElement('canvas')
-  output.width = props.inputSize
-  output.height = props.inputSize
-  const context = output.getContext('2d', { willReadFrequently: true })
-  context.imageSmoothingEnabled = false
-  context.drawImage(state.image, state.crop.x, state.crop.y, props.cropSize, props.cropSize, 0, 0, props.inputSize, props.inputSize)
-  const pixels = context.getImageData(0, 0, props.inputSize, props.inputSize).data
-  const values = new Float32Array(props.inputSize * props.inputSize)
-  let low = Infinity
-  let high = -Infinity
-  for (let i = 0; i < values.length; i += 1) {
-    const j = i * 4
-    const value = .2126 * pixels[j] + .7152 * pixels[j + 1] + .0722 * pixels[j + 2]
-    values[i] = value
-    low = Math.min(low, value)
-    high = Math.max(high, value)
-  }
-  if (high - low < .5) throw new Error('The selected crop contains only one visible phase.')
-  const threshold = (low + high) / 2
-  return Array.from({ length: props.inputSize }, (_, row) => Array.from({ length: props.inputSize }, (_, column) => values[row * props.inputSize + column] > threshold ? 1 : 0))
+  if (!state.sourceLabels) throw new Error('The image does not contain raw PNG label values.')
+  const labels = cropAndResizeLabels(state.sourceLabels, state.crop, props.inputSize)
+  if (new Set(labels.flat()).size < 2) throw new Error('The selected crop contains only one visible phase.')
+  return labels
 }
 onMounted(() => {
   observer = new ResizeObserver(draw)

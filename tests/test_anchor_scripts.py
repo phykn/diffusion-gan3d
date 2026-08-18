@@ -73,7 +73,7 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     save_yaml(run_dir / "train.yaml", cfg)
     model, _, _ = build_models(cfg)
     weights = save_weights(run_dir, model)
-    source = np.indices((10, 12)).sum(axis=0) % cfg["data"]["num_phase"]
+    source = np.indices((18, 20)).sum(axis=0) % cfg["data"]["num_phase"]
     anchor_path = tmp_path / "anchor.png"
     Image.fromarray(source.astype(np.uint8)).save(anchor_path)
     output_path = tmp_path / "continuation.tiff"
@@ -103,11 +103,39 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     assert tifffile.imread(output_path).shape == (8, 8, 8)
     assert figure_path.is_file()
     output = capsys.readouterr().out
-    assert "crop (1, 2, 8, 8)" in output
+    assert "crop (1, 2, 16, 16) -> input 8 x 8" in output
     assert "Boundary: axis 0, start plane 0" in output
     assert "Anchor match" in output
     assert "First change" in output
     assert "farthest" in output
+
+
+def test_continuation_anchor_keeps_indexed_labels_and_uses_nearest_resize(
+    tmp_path: Path,
+) -> None:
+    source = np.array(
+        [
+            [0, 0, 0, 0, 0, 0],
+            [0, 1, 1, 2, 2, 0],
+            [0, 1, 1, 2, 2, 0],
+            [0, 2, 2, 0, 0, 0],
+            [0, 2, 2, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0],
+        ],
+        dtype=np.uint8,
+    )
+    image = Image.fromarray(source, mode="P")
+    palette = [0] * 768
+    palette[:9] = [255, 0, 0, 0, 255, 0, 0, 0, 255]
+    image.putpalette(palette)
+    path = tmp_path / "indexed-anchor.png"
+    image.save(path)
+
+    module = _load_script("05_check_continuation.py")
+    labels, crop = module.load_anchor_image(path, 4, 2, 3)
+
+    assert crop == (1, 1, 4, 4)
+    assert labels.tolist() == [[1, 2], [2, 0]]
 
 
 def test_boundary_continuation_napari_shows_generated_volume_only(

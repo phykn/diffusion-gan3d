@@ -60,6 +60,10 @@ python run_api.py --weight run/my-experiment/generator.pt --device cuda
 
 Open <http://127.0.0.1:8000/> to crop an input section, generate a 3D volume,
 inspect its phases, and reveal its continuation along axis 0.
+PNG label sections are decoded from their raw values: indexed PNG palette
+indices, grayscale PNG samples, or RGB PNGs whose three channels are identical.
+No luminance conversion or palette-color mapping is applied, and values are
+resized with nearest-neighbor sampling.
 
 ## Citation
 

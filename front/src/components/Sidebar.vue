@@ -49,12 +49,12 @@ function setBlock(index, event) {
   <aside class="sidebar">
     <div class="sidebar-section">
       <label class="upload-button" :class="{ 'upload-button--dragging': dragging, 'upload-button--disabled': busy }" @dragenter.prevent="!busy && (dragging = true)" @dragover.prevent @dragleave.prevent="dragging = false" @drop.prevent="accept($event.dataTransfer.files)">
-        <input class="visually-hidden" type="file" accept="image/png,image/jpeg" :disabled="busy" @change="selectInput">
+        <input class="visually-hidden" type="file" accept="image/png" :disabled="busy" @change="selectInput">
         <strong>{{ file?.name || 'Upload image' }}</strong>
       </label>
     </div>
-    <label class="number-control"><span>Seed</span><input :value="seed" type="number" min="0" step="1" :disabled="busy" @input="setSeed"></label>
     <div class="blocks-control"><span>Blocks</span><label v-for="(axis, index) in ['X', 'Y', 'Z']" :key="axis"><small>{{ axis }}</small><input :value="blocks[index]" type="number" :min="MIN_BLOCKS" :max="MAX_BLOCKS" step="1" :disabled="busy" @input="setBlock(index, $event)"></label></div>
+    <label class="number-control"><span>Seed</span><input :value="seed" type="number" min="0" step="1" :disabled="busy" @input="setSeed"></label>
     <button class="primary-button" type="button" :disabled="!ready" @click="emit('generate')">{{ busy ? 'RUNNING…' : 'RUN' }}</button>
     <p v-if="error" class="status status--error">{{ status }}</p>
     <dl class="metrics">

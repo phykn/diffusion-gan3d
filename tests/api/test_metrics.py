@@ -6,7 +6,7 @@ from src.api import metrics as metrics_module
 from src.api.metrics import measure_volume
 
 
-def test_measure_volume_uses_phase_zero_and_axis_zero(
+def test_measure_volume_uses_phase_zero_and_axis_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     volume = torch.tensor(
@@ -25,7 +25,7 @@ def test_measure_volume_uses_phase_zero_and_axis_zero(
 
     assert result.porosity == pytest.approx(0.5)
     assert result.tortuosity == pytest.approx(1.75)
-    assert calls == [(volume, 0, 0, torch.device("cpu"))]
+    assert calls == [(volume, 0, 1, torch.device("cpu"))]
 
 
 def test_measure_volume_marks_failed_tortuosity_unavailable(

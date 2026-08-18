@@ -24,13 +24,14 @@ from scripts.diagnostic import (
 )
 from src.anchor import PlaneAnchor
 from src.build import load_generator
-from src.config import load_generation_settings
+from src.config import find_train_config, load_generation_settings
 from src.evaluate import (
     measure_boundaries,
     measure_distance_divergence,
     measure_slice_smoothness,
     voxel_accuracy,
 )
+from src.utils import load_yaml
 from src.volume import save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
@@ -91,12 +92,27 @@ def main() -> None:
         )
         anchor_image = reference.movedim(args.axis, 0)[index]
     else:
+        train_config = load_yaml(find_train_config(args.weight))
+        data_config = train_config.get("data")
+        if not isinstance(data_config, dict):
+            raise ValueError("train.yaml must contain a data mapping.")
+        crop_size = int(data_config["crop_size"])
+        input_size = int(data_config["input_size"])
+        if input_size != generator.patch_size:
+            raise ValueError(
+                "train.yaml input_size does not match the loaded generator: "
+                f"{input_size} != {generator.patch_size}."
+            )
         anchor_image, crop = load_anchor_image(
             args.anchor,
-            generator.patch_size,
+            crop_size,
+            input_size,
             generator.num_phases,
         )
-        print(f"Anchor  : {args.anchor.resolve()}, crop {crop}")
+        print(
+            f"Anchor  : {args.anchor.resolve()}, crop {crop} -> "
+            f"input {input_size} x {input_size}"
+        )
     anchor = PlaneAnchor(anchor_image, args.axis, index)
 
     print("Generating boundary-conditioned volume...", flush=True)
@@ -149,26 +165,44 @@ def main() -> None:
 
 def load_anchor_image(
     path: Path,
-    size: int,
+    crop_size: int,
+    input_size: int,
     num_phases: int,
 ) -> tuple[torch.Tensor, tuple[int, int, int, int]]:
     if not path.is_file():
         raise FileNotFoundError(f"anchor image was not found: {path}")
+    if crop_size < 1 or input_size < 1:
+        raise ValueError("crop_size and input_size must be positive.")
     with Image.open(path) as image:
         values = np.asarray(image)
     if values.ndim != 2 or values.dtype != np.uint8:
         raise ValueError("anchor image must be a 2D uint8 label image.")
     height, width = values.shape
-    if height < size or width < size:
-        raise ValueError(f"anchor image must contain a {size} x {size} crop.")
-    top = (height - size) // 2
-    left = (width - size) // 2
-    crop = np.array(values[top : top + size, left : left + size], copy=True)
-    if int(crop.max()) >= num_phases:
+    if height < crop_size or width < crop_size:
+        raise ValueError(f"anchor image must contain a {crop_size} x {crop_size} crop.")
+    top = (height - crop_size) // 2
+    left = (width - crop_size) // 2
+    crop = np.array(
+        values[top : top + crop_size, left : left + crop_size],
+        copy=True,
+    )
+    row_indices = np.minimum(
+        crop_size - 1,
+        (
+            (np.arange(input_size, dtype=np.float64) + 0.5) * crop_size / input_size
+        ).astype(np.int64),
+    )
+    resized = crop[np.ix_(row_indices, row_indices)]
+    if int(resized.max()) >= num_phases:
         raise ValueError(
             f"anchor image must contain phases from 0 to {num_phases - 1}."
         )
-    return torch.from_numpy(crop).to(torch.long), (top, left, size, size)
+    return torch.from_numpy(resized).to(torch.long), (
+        top,
+        left,
+        crop_size,
+        crop_size,
+    )
 
 
 def print_quality(

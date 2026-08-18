@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import '@kitware/vtk.js/Rendering/Profiles/Volume'
 import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray'
@@ -11,13 +11,13 @@ import vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume'
 import vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper'
 import vtkGenericRenderWindow from '@kitware/vtk.js/Rendering/Misc/GenericRenderWindow'
 
-const props = defineProps({ values: Uint8Array, shape: Array, busy: Boolean })
+const props = defineProps({ values: Uint8Array, shape: Array, busy: Boolean, numPhases: { type: Number, default: 2 } })
 const host = ref(null)
-const phase0Visible = ref(true)
-const phase1Visible = ref(true)
-const phase0Color = ref('#25282a')
-const phase1Color = ref('#d98266')
+const defaultPhaseColors = ['#25282a', '#d98266', '#5f8d8a', '#d6a84f', '#8c6bb1', '#77945a']
+const phaseVisibility = ref([])
+const phaseColors = ref([])
 const clipDepth = ref(0)
+const clipDepthMax = computed(() => Math.max(0, (props.shape?.[0] ?? 1) - 1))
 let view
 let renderer
 let renderWindow
@@ -28,6 +28,12 @@ let clippingPlane
 let colorTransfer
 let opacityTransfer
 let resizeObserver
+
+function ensurePhaseState() {
+  const count = Math.max(1, Math.floor(Number(props.numPhases) || 2))
+  phaseVisibility.value = Array.from({ length: count }, (_, index) => phaseVisibility.value[index] ?? true)
+  phaseColors.value = Array.from({ length: count }, (_, index) => phaseColors.value[index] ?? defaultPhaseColors[index % defaultPhaseColors.length])
+}
 
 function initialize() {
   view = vtkGenericRenderWindow.newInstance({ background: [.973, .965, .941], listenWindowResize: false })
@@ -54,25 +60,22 @@ function initialize() {
 }
 
 function configureAppearance() {
-  const phase0 = hexToRgb(phase0Color.value)
-  const phase1 = hexToRgb(phase1Color.value)
-  const transitionStart = .35
-  const transitionEnd = .65
+  ensurePhaseState()
   colorTransfer ??= vtkColorTransferFunction.newInstance()
   colorTransfer.removeAllPoints()
-  colorTransfer.addRGBPoint(0, ...phase0)
-  colorTransfer.addRGBPoint(transitionStart, ...phase0)
-  colorTransfer.addRGBPoint(transitionEnd, ...phase1)
-  colorTransfer.addRGBPoint(1, ...phase1)
-
   opacityTransfer ??= vtkPiecewiseFunction.newInstance()
   opacityTransfer.removeAllPoints()
-  const phase0Opacity = phase0Visible.value ? 1 : 0
-  const phase1Opacity = phase1Visible.value ? 1 : 0
-  opacityTransfer.addPoint(0, phase0Opacity)
-  opacityTransfer.addPoint(transitionStart, phase0Opacity)
-  opacityTransfer.addPoint(transitionEnd, phase1Opacity)
-  opacityTransfer.addPoint(1, phase1Opacity)
+  const lastPhase = phaseColors.value.length - 1
+  for (let phase = 0; phase <= lastPhase; phase += 1) {
+    const start = phase === 0 ? 0 : phase - .35
+    const end = phase === lastPhase ? lastPhase : phase + .35
+    const color = hexToRgb(phaseColors.value[phase])
+    const opacity = phaseVisibility.value[phase] ? 1 : 0
+    colorTransfer.addRGBPoint(start, ...color)
+    colorTransfer.addRGBPoint(end, ...color)
+    opacityTransfer.addPoint(start, opacity)
+    opacityTransfer.addPoint(end, opacity)
+  }
 
   const property = actor.getProperty()
   property.setRGBTransferFunction(0, colorTransfer)
@@ -113,8 +116,7 @@ function setVolume(values, shape) {
   }))
   mapper.setInputData(imageData)
   actor.setVisibility(true)
-  clipDepth.value = Math.max(0, depth - 1)
-  updateClipDepth()
+  resetClipDepth(shape)
   setDefaultView()
 }
 
@@ -122,6 +124,16 @@ function updateClipDepth() {
   clippingPlane?.setOrigin(0, 0, Number(clipDepth.value))
   mapper?.modified()
   renderWindow?.render()
+}
+
+function resetClipDepth(shape) {
+  clipDepth.value = Math.max(0, (shape?.[0] ?? 1) - 1)
+  updateClipDepth()
+}
+
+function setClipDepth(event) {
+  clipDepth.value = Number(event.target.value)
+  updateClipDepth()
 }
 
 function setCamera(front) {
@@ -142,15 +154,27 @@ function setCamera(front) {
 }
 
 function setDefaultView() { setCamera(false) }
-function reset() { setCamera(true) }
+function reset() {
+  resetClipDepth(props.shape)
+  setCamera(true)
+}
 function togglePhase(phase) {
-  if (phase === 0) phase0Visible.value = !phase0Visible.value
-  else phase1Visible.value = !phase1Visible.value
+  phaseVisibility.value = phaseVisibility.value.map((visible, index) => index === phase ? !visible : visible)
+  updateAppearance()
+}
+function setPhaseColor(phase, event) {
+  phaseColors.value = phaseColors.value.map((color, index) => index === phase ? event.target.value : color)
   updateAppearance()
 }
 
 watch(() => props.values, values => setVolume(values, props.shape))
+watch(() => props.shape?.[0], () => resetClipDepth(props.shape), { immediate: true, flush: 'sync' })
+watch(() => props.numPhases, () => {
+  ensurePhaseState()
+  updateAppearance()
+})
 onMounted(() => {
+  ensurePhaseState()
   initialize()
   if (props.values) setVolume(props.values, props.shape)
 })
@@ -171,13 +195,9 @@ onBeforeUnmount(() => {
     <header class="panel-header">
       <div><h2>3D Generated</h2></div>
       <div class="phase-toggles">
-        <div class="phase-control" :class="{ active: phase0Visible }">
-          <button type="button" :aria-pressed="phase0Visible" @click="togglePhase(0)">Phase 0</button>
-          <label title="Phase 0 color"><input v-model="phase0Color" type="color" aria-label="Phase 0 color" @input="updateAppearance"><i :style="{ background: phase0Color }"></i></label>
-        </div>
-        <div class="phase-control" :class="{ active: phase1Visible }">
-          <button type="button" :aria-pressed="phase1Visible" @click="togglePhase(1)">Phase 1</button>
-          <label title="Phase 1 color"><input v-model="phase1Color" type="color" aria-label="Phase 1 color" @input="updateAppearance"><i :style="{ background: phase1Color }"></i></label>
+        <div v-for="(color, phase) in phaseColors" :key="phase" class="phase-control" :class="{ active: phaseVisibility[phase] }">
+          <button type="button" :aria-pressed="phaseVisibility[phase]" @click="togglePhase(phase)">Phase {{ phase }}</button>
+          <label :title="`Phase ${phase} color`"><input :value="color" type="color" :aria-label="`Phase ${phase} color`" @input="setPhaseColor(phase, $event)"><i :style="{ background: color }"></i></label>
         </div>
       </div>
     </header>
@@ -188,11 +208,19 @@ onBeforeUnmount(() => {
     <footer class="volume-footer">
       <span>{{ shape ? shape.join(' × ') : '—' }}</span>
       <label class="depth-control">
-        <span>Axis 0</span>
-        <input v-model.number="clipDepth" type="range" min="0" :max="Math.max(0, (shape?.[0] ?? 1) - 1)" step="1" :disabled="!values" @input="updateClipDepth">
+        <input
+          :key="`clip-depth-${shape?.[0] ?? 0}`"
+          :value="clipDepth"
+          type="range"
+          min="0"
+          :max="clipDepthMax"
+          step="1"
+          :disabled="!values"
+          @input="setClipDepth"
+        >
         <output>{{ clipDepth }}</output>
       </label>
-      <button type="button" :disabled="!values" @click="reset">Reset view</button>
+      <button type="button" :disabled="!values" @click="reset">Reset</button>
     </footer>
   </section>
 </template>

@@ -105,12 +105,13 @@ async function generate() {
           :file
           :crop-size="health?.crop_size ?? 128"
           :input-size="health?.input_size ?? 128"
+          :num-phases="health?.num_phases ?? 2"
           :disabled="busy"
           @change="invalidateResult"
           @error="status = $event; error = true"
           @ready="cropReady = $event"
         />
-        <VolumeViewer :values="volume" :shape :busy />
+        <VolumeViewer :values="volume" :shape :busy :num-phases="health?.num_phases ?? 2" />
       </div>
     </section>
   </main>

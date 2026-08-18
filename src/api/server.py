@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..anchor import PlaneAnchor
 from .inference import InferenceAPI
-from .metrics import VolumeMetrics, measure_volume
+from .metrics import TORTUOSITY_AXIS, VolumeMetrics, measure_volume
 
 Dimension = int | tuple[int, int, int]
 FRONT_DIR = Path(__file__).resolve().parents[2] / "front" / "dist"
@@ -154,5 +154,5 @@ def _volume_headers(
         "X-Porosity": f"{metrics.porosity:.8g}",
         "X-Tortuosity": tortuosity_value,
         "X-Pore-Phase": "0",
-        "X-Tortuosity-Axis": "0",
+        "X-Tortuosity-Axis": str(TORTUOSITY_AXIS),
     }

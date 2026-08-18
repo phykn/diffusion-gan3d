@@ -95,6 +95,7 @@ def test_generate_returns_tiff_volume(
     assert response.headers["x-volume-shape"] == "4,4,4"
     assert response.headers["x-porosity"] == "0.25"
     assert response.headers["x-tortuosity"] == "1.5"
+    assert response.headers["x-tortuosity-axis"] == "1"
     volume = tifffile.imread(BytesIO(response.content))
     assert volume.shape == (4, 4, 4)
     assert volume.dtype == torch.empty((), dtype=torch.uint8).numpy().dtype
