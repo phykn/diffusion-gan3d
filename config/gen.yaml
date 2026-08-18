@@ -1,3 +1,4 @@
 guidance: 1.0
 anchor_strength: 0.9
+anchor_spread: 0.1
 overlap: 8

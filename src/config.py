@@ -5,6 +5,7 @@ from pathlib import Path
 from .utils import load_yaml
 
 DEFAULT_ANCHOR_STRENGTH = 0.90
+DEFAULT_ANCHOR_SPREAD = 0.20
 
 
 @dataclass(frozen=True)
@@ -12,11 +13,17 @@ class GenerationSettings:
     guidance: float = 1.0
     anchor_strength: float = DEFAULT_ANCHOR_STRENGTH
     overlap: int = 8
+    anchor_spread: float = DEFAULT_ANCHOR_SPREAD
 
 
 def load_generation_settings() -> GenerationSettings:
     section = load_yaml(Path(__file__).resolve().parents[1] / "config" / "gen.yaml")
-    unknown = section.keys() - {"guidance", "anchor_strength", "overlap"}
+    unknown = section.keys() - {
+        "guidance",
+        "anchor_strength",
+        "anchor_spread",
+        "overlap",
+    }
     if unknown:
         names = ", ".join(sorted(unknown))
         raise ValueError(f"unknown generation setting: {names}")
@@ -38,8 +45,21 @@ def load_generation_settings() -> GenerationSettings:
         or not 0.0 <= anchor_strength <= 1.0
     ):
         raise ValueError("anchor_strength must be between zero and one.")
+    anchor_spread = section.get("anchor_spread", DEFAULT_ANCHOR_SPREAD)
+    if (
+        not isinstance(anchor_spread, (int, float))
+        or isinstance(anchor_spread, bool)
+        or not math.isfinite(anchor_spread)
+        or anchor_spread <= 0.0
+    ):
+        raise ValueError("anchor_spread must be positive and finite.")
     overlap = _non_negative_int(section.get("overlap", 8), "overlap")
-    return GenerationSettings(float(guidance), float(anchor_strength), overlap)
+    return GenerationSettings(
+        float(guidance),
+        float(anchor_strength),
+        overlap,
+        float(anchor_spread),
+    )
 
 
 def _non_negative_int(value: object, name: str) -> int:

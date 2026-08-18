@@ -7,7 +7,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from . import AXES
-from .config import find_train_config, get_schedule_steps
+from .config import find_train_config, get_schedule_steps, load_generation_settings
 from .dataset import BatchStream, FolderBatchSampler, SliceDataset
 from .diffusion import Diffusion
 from .generate import Generator
@@ -267,6 +267,7 @@ def load_generator(
     data = cfg["data"]
     model = cfg["model"]
     train = cfg["train"]
+    generation = load_generation_settings()
     use_amp = train["amp"] and device.type == "cuda"
     return Generator(
         denoiser,
@@ -276,6 +277,7 @@ def load_generator(
         num_phases=data["num_phase"],
         latent_channels=model["generator"]["latent_channels"],
         use_amp=use_amp,
+        anchor_spread=generation.anchor_spread,
     )
 
 

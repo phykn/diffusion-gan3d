@@ -51,11 +51,12 @@ def test_generation_settings_use_gen_yaml(
         lambda path: {
             "guidance": 1.5,
             "anchor_strength": 0.7,
+            "anchor_spread": 0.3,
             "overlap": 12,
         },
     )
 
-    assert load_generation_settings() == GenerationSettings(1.5, 0.7, 12)
+    assert load_generation_settings() == GenerationSettings(1.5, 0.7, 12, 0.3)
 
 
 def test_generation_settings_support_missing_values(
@@ -111,6 +112,8 @@ def test_repository_training_config_uses_soft_anchor_and_conditional_ema_prior()
         {"guidance": float("inf")},
         {"anchor_strength": -0.1},
         {"anchor_strength": 1.1},
+        {"anchor_spread": 0.0},
+        {"anchor_spread": float("nan")},
         {"blocks": [2, 2, 2]},
     ),
 )

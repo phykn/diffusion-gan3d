@@ -112,10 +112,10 @@ $$
 For distance $d(v,A)$ from the nearest observed anchor support, its spatial weight is
 
 $$
-w(v)=s_A\exp\left[-\frac{d(v,A)^2}{2\sigma^2}\right],\qquad \sigma=\sqrt{3}\,f,
+w(v)=s_A\exp\left[-\frac{d(v,A)^2}{2\sigma^2}\right],\qquad \sigma=\rho_A P,
 $$
 
-where $s_A=0.90$ and $f=8$ is the model downsampling factor. The corrected logits are $\ell_{\mathrm{plain}}+w\Delta\ell$. Exact-plane guidance grows toward the final transition, while surrounding-context guidance decreases with the remaining diffusion noise.
+where $s_A=0.90$, $\rho_A=0.20$ is the configured anchor spread, and $P$ is the generated patch side ($\sigma=\rho_A P$, hence $\sigma=25.6$ for the current $128^3$ patch). The corrected logits are $\ell_{\mathrm{plain}}+w\Delta\ell$. Exact-plane guidance grows toward the final transition, while surrounding-context guidance decreases with the remaining diffusion noise. Numeric results generated before changing $\rho_A$ require regeneration before being compared with this setting.
 
 After each posterior update, the normalized Gaussian $w/s_A$ couples the conditional state to the same-noise baseline state. Thus the anchor plane uses the conditional trajectory and distant regions continuously approach the ordinary trajectory without a second hand-chosen coupling radius. No constrained voxel is initialized from the anchor, clamped during denoising, or overwritten after sampling.
 

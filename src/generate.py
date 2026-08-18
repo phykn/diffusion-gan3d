@@ -205,6 +205,7 @@ class Generator:
         num_phases: int,
         latent_channels: int,
         use_amp: bool,
+        anchor_spread: float | None = None,
     ) -> None:
         self.model = model
         self.num_domains = model.num_domains
@@ -214,6 +215,16 @@ class Generator:
         self.num_phases = num_phases
         self.latent_channels = latent_channels
         self.use_amp = use_amp
+        if anchor_spread is not None and (
+            not isinstance(anchor_spread, (int, float))
+            or isinstance(anchor_spread, bool)
+            or not math.isfinite(anchor_spread)
+            or anchor_spread <= 0.0
+        ):
+            raise ValueError("anchor_spread must be positive and finite.")
+        self.default_anchor_spread = (
+            None if anchor_spread is None else float(anchor_spread)
+        )
         factor = getattr(model, "downsample_factor", None)
         if factor is None:
             if isinstance(model, Denoiser3D):
@@ -222,7 +233,11 @@ class Generator:
         if not isinstance(factor, int) or isinstance(factor, bool) or factor < 1:
             raise ValueError("model.downsample_factor must be a positive integer.")
         self.default_margin = factor
-        self.default_anchor_sigma = math.sqrt(3.0) * factor
+        self.default_anchor_sigma = (
+            self.patch_size * self.default_anchor_spread
+            if self.default_anchor_spread is not None
+            else math.sqrt(3.0) * factor
+        )
 
     def predict(
         self,
@@ -353,9 +368,12 @@ class Generator:
         ):
             raise ValueError("anchor_strength must be between zero and one.")
         anchor_strength = float(anchor_strength)
-        anchor_sigma = (
-            self.default_anchor_sigma if anchor_sigma is None else anchor_sigma
-        )
+        if anchor_sigma is None:
+            anchor_sigma = (
+                size * self.default_anchor_spread
+                if self.default_anchor_spread is not None
+                else self.default_anchor_sigma
+            )
         if (
             not isinstance(anchor_sigma, (int, float))
             or isinstance(anchor_sigma, bool)
