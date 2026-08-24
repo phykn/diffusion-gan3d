@@ -1,4 +1,3 @@
-import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -190,14 +189,15 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         anchor,
         "anchor",
     )
-    validate_prior_capacity(
-        data=data,
-        train=train,
-        anchor=anchor,
-        connectivity=connectivity,
-        anchor_start_step=anchor_start_step,
-        anchor_ramp_steps=anchor_ramp_steps,
-    )
+    if (
+        anchor["train_prob"] > 0.0
+        and anchor_start_step < train["steps"]
+        and train["volume_batch_size"] > data["batch_size"]
+    ):
+        raise ValueError(
+            "train.volume_batch_size must not exceed data.batch_size when "
+            "anchor training is enabled."
+        )
     denoiser, critics, connectivity_critic = build_models(cfg)
     denoiser = denoiser.to(device)
     critics = critics.to(device)
@@ -268,8 +268,6 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             anchor_shared_axis_probability=anchor["cross_domain_prob"],
             connectivity_weight=connectivity["weight"],
             normal_transition_weight=connectivity["phase_transition_weight"],
-            connectivity_bank_size=connectivity["volume_count"],
-            connectivity_refresh_steps=connectivity["refresh_every"],
             connectivity_max_gap=connectivity.get("max_gap", 1),
             vf_loss_weight=vf["weight"],
             vf_target_average_max_samples=vf["max_samples"],
@@ -279,47 +277,3 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             amp_enabled=use_amp,
         ),
     )
-
-
-def validate_prior_capacity(
-    *,
-    data: dict,
-    train: dict,
-    anchor: dict,
-    connectivity: dict,
-    anchor_start_step: int,
-    anchor_ramp_steps: int,
-) -> None:
-    anchor_active = anchor["train_prob"] > 0.0 and anchor_start_step < train["steps"]
-    if not anchor_active:
-        return
-    if train["volume_batch_size"] > data["batch_size"]:
-        raise ValueError(
-            "train.volume_batch_size must not exceed data.batch_size when "
-            "anchor training is enabled."
-        )
-    if connectivity["weight"] <= 0.0 and connectivity["phase_transition_weight"] <= 0.0:
-        return
-
-    bank_size = connectivity["volume_count"]
-    if not isinstance(bank_size, int) or isinstance(bank_size, bool) or bank_size < 1:
-        raise ValueError("anchor.connectivity.volume_count must be a positive integer.")
-    volume_batch_size = train["volume_batch_size"]
-    if (
-        not isinstance(volume_batch_size, int)
-        or isinstance(volume_batch_size, bool)
-        or volume_batch_size < 1
-    ):
-        raise ValueError("train.volume_batch_size must be a positive integer.")
-    build_steps = len(get_domains(data)) * math.ceil(bank_size / volume_batch_size)
-    available_steps = train["steps"] - anchor_start_step
-    # The conditional prior is collected only after the real-anchor ramp has
-    # completed. One following step is then needed before a ready bank can be
-    # sampled as a multi-plane condition.
-    required_steps = max(anchor_ramp_steps, 1) + build_steps
-    if available_steps < required_steps:
-        raise ValueError(
-            "training must leave enough steps after anchor.start_step to fill "
-            "every conditional prior bank and leave one multi-anchor-eligible step; "
-            f"need {required_steps}, got {available_steps}."
-        )

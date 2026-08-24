@@ -1,5 +1,3 @@
-from unittest.mock import patch
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -7,357 +5,107 @@ import torch.nn.functional as F
 from src.anchor import PlaneAnchor, build_anchors
 from src.model.critic import ConnectivityCritic2D
 from src.train.connect import Connectivity, TripletBatch, normal_transition_loss
-from src.train.prior import PriorReference
 
 
-def test_prior_bank_stores_complete_cpu_uint8_volumes_and_freezes() -> None:
-    size = 4
-    connect = _connectivity(num_phases=2, patch_size=size, volumes=2)
-    first = torch.zeros(1, size, size, size, dtype=torch.long)
-    second = torch.ones_like(first)
-
-    _record_prior(connect, _prediction_from_labels(first, num_phases=2), 0)
-    assert not connect.prior_ready
-    _record_prior(connect, _prediction_from_labels(second, num_phases=2), 0)
-    assert connect.prior_ready
-    _record_prior(connect, _prediction_from_labels(first, num_phases=2), 0)
-
-    assert connect.prior_count == 2
-    assert connect.prior_storage_bytes == 2 * (size**3 + size**2)
-    entries = connect.prior._banks[0].items
-    assert all(item.labels.device.type == "cpu" for item in entries)
-    assert all(item.labels.dtype == torch.uint8 for item in entries)
-    assert torch.equal(
-        entries[1].labels,
-        second[0].to(torch.uint8),
-    )
-
-
-def test_prior_uses_domain_axis_first_and_provider_fallback_for_missing_axis() -> None:
-    size = 4
-    connect = _connectivity(
-        num_phases=2,
-        num_domains=2,
-        patch_size=size,
-        volumes=1,
-        owned_axes={0: (0,), 1: (1,)},
-    )
-    zeros = torch.zeros(1, size, size, size, dtype=torch.long)
-    ones = torch.ones_like(zeros)
-    _record_prior(connect, _prediction_from_labels(zeros, num_phases=2), 0)
-    _record_prior(connect, _prediction_from_labels(ones, num_phases=2), 1)
-
-    own = connect._prior_volumes(0, 0)
-    borrowed = connect._prior_volumes(0, 1)
-
-    assert len(own) == len(borrowed) == 1
-    assert int(own[0].max()) == 0
-    assert int(borrowed[0].min()) == 1
-
-
-def test_refresh_pushes_one_volume_and_evicts_the_oldest() -> None:
-    size = 4
-    connect = _connectivity(
-        num_phases=3,
-        patch_size=size,
-        volumes=2,
-    )
-    zeros = torch.zeros(1, size, size, size, dtype=torch.long)
-    ones = torch.ones_like(zeros)
-    twos = torch.full_like(zeros, 2)
-    _record_prior(connect, _prediction_from_labels(zeros, num_phases=3), 0)
-    _record_prior(connect, _prediction_from_labels(ones, num_phases=3), 0)
-    storage_bytes = connect.prior_storage_bytes
-
-    _refresh_prior(connect, _prediction_from_labels(twos, num_phases=3), 0)
-
-    volumes = connect._prior_volumes(0, 0)
-    assert len(volumes) == 2
-    assert int(volumes[0].min()) == 1
-    assert int(volumes[1].min()) == 2
-    assert connect.prior_count == 2
-    assert connect.prior_storage_bytes == storage_bytes
-    assert connect.prior_updates == 1
-
-
-def test_straight_through_triplets_backpropagate_to_the_prediction() -> None:
-    size = 5
-    connect = _connectivity(num_phases=3, patch_size=size, volumes=1)
-    prior = torch.zeros(1, size, size, size, dtype=torch.long)
-    _record_prior(connect, _prediction_from_labels(prior, num_phases=3), 0)
-    prediction = torch.randn(1, 3, size, size, size, requires_grad=True)
-    seed = PlaneAnchor(
-        prediction.detach()[0].argmax(dim=0)[2].to(torch.uint8),
-        axis=0,
-        index=2,
-    )
-
-    _, fake = connect.match_anchor(
-        prediction,
-        _condition((seed,), num_phases=3, volume_size=size),
-        0,
-    )
-    fake.values.sum().backward()
-
-    assert len(fake) == 5
-    assert prediction.grad is not None
-    assert float(prediction.grad.abs().sum()) > 0.0
-
-
-def test_change_images_ignore_confidence_but_keep_student_gradients() -> None:
-    connect = _connectivity(num_phases=2, patch_size=4)
-    labels = torch.tensor((0, 1, 1)).view(1, 1, 3, 1, 1).expand(1, 1, 3, 4, 4)
-    one_hot = F.one_hot(labels[:, 0], num_classes=2).movedim(-1, 1).float()
-    low_confidence = (one_hot * 0.6 + (1.0 - one_hot) * 0.4).requires_grad_()
-    high_confidence = one_hot * 10.0 - (1.0 - one_hot) * 10.0
-
-    low_images = ConnectivityCritic2D.connectivity_images(
-        connect._straight_through(low_confidence).movedim(1, 2)
-    )
-    high_images = ConnectivityCritic2D.connectivity_images(
-        connect._straight_through(high_confidence).movedim(1, 2)
-    )
-    loss = low_images.square().sum()
-    loss.backward()
-
-    assert torch.equal(low_images, high_images)
-    assert low_confidence.grad is not None
-    assert float(low_confidence.grad.abs().sum()) > 0.0
-
-
-def test_prior_match_checks_every_ready_volume_and_selects_nearest_fraction() -> None:
-    size = 4
-    connect = _connectivity(num_phases=2, patch_size=size, volumes=1)
-    target = _triplet_batch(
-        torch.ones(1, 3, size, size, dtype=torch.long),
-        num_phases=2,
-    )
-    volumes = (
-        torch.zeros(size, size, size, dtype=torch.uint8),
-        torch.ones(size, size, size, dtype=torch.uint8),
-    )
-
-    with (
-        patch.object(connect, "_prior_volumes", return_value=volumes),
-        patch.object(
-            connect,
-            "_sample_prior_triplet",
-            wraps=connect._sample_prior_triplet,
-        ) as sampled,
-    ):
-        real, matched = connect._sample_prior_matches(
-            target,
-            domain=0,
-            generator=torch.Generator().manual_seed(1),
-        )
-
-    assert sampled.call_count == len(volumes)
-    assert matched.tolist() == [0]
-    assert bool((real.values.argmax(dim=2) == 1).all())
-
-
-def test_endpoint_anchors_use_only_real_consecutive_slices() -> None:
-    size = 5
+def test_anchor_triplets_cover_all_axes_and_intersect_the_anchor() -> None:
+    size = 7
     labels = torch.arange(size).view(1, size, 1, 1).expand(1, size, size, size)
     prediction = _prediction_from_labels(labels, num_phases=size)
-    connect = _connectivity(num_phases=size, patch_size=size)
-    seeds = (
-        PlaneAnchor(labels[0, 0].to(torch.uint8), axis=0, index=0),
-        PlaneAnchor(labels[0, 4].to(torch.uint8), axis=0, index=4),
-    )
-
-    fake = connect._sample_anchor_triplets(
-        connect._straight_through(prediction),
-        _condition(seeds, num_phases=size, volume_size=size),
-    ).triplets
-    hard = fake.values.argmax(dim=2)
-
-    assert fake.axes.tolist() == [0, 0]
-    assert fake.center_slots.tolist() == [0, 2]
-    assert torch.equal(hard[0, :, 0, 0], torch.tensor((0, 1, 2)))
-    assert torch.equal(hard[1, :, 0, 0], torch.tensor((2, 3, 4)))
-
-
-def test_anchor_match_adds_two_general_windows_from_every_axis() -> None:
-    size = 9
-    labels = torch.arange(size).view(1, size, 1, 1).expand(1, size, size, size)
-    prediction = _prediction_from_labels(labels, num_phases=size)
-    connect = _connectivity(num_phases=size, patch_size=size, volumes=1)
-    _record_prior(connect, prediction, 0)
+    connect = _connectivity(num_phases=size, patch_size=size, max_gap=2)
     condition = _condition(
-        (PlaneAnchor(labels[0, 4].to(torch.uint8), axis=0, index=4),),
+        (PlaneAnchor(labels[0, 3].to(torch.uint8), axis=0, index=3),),
         num_phases=size,
         volume_size=size,
     )
 
-    with patch(
-        "src.train.connect.torch.randperm",
-        return_value=torch.tensor((0, 1, 2, 3)),
-    ):
-        _, fake = connect.match_anchor(prediction, condition, 0)
-
-    assert len(fake) == 7
-    assert fake.axes.tolist() == [0, 0, 0, 1, 1, 2, 2]
-    assert fake.center_slots.tolist() == [1, 1, 1, 1, 1, 1, 1]
-    assert fake.anchor_flags.tolist() == [
-        True,
-        False,
-        False,
-        False,
-        False,
-        False,
-        False,
-    ]
-
-
-def test_multi_anchor_match_keeps_total_budget_and_prioritizes_anchor_windows() -> None:
-    size = 9
-    coordinates = torch.meshgrid(
-        *(torch.arange(size) for _ in range(3)),
-        indexing="ij",
-    )
-    labels = sum(coordinates).remainder(3).unsqueeze(0)
-    prediction = _prediction_from_labels(labels, num_phases=3)
-    connect = _connectivity(num_phases=3, patch_size=size, volumes=1)
-    _record_prior(connect, prediction, 0)
-    anchors = tuple(
-        PlaneAnchor(labels[0].select(axis, index).to(torch.uint8), axis, index)
-        for axis, index in ((0, 2), (1, 4), (2, 6))
+    located = connect._sample_anchor_triplets(
+        connect._straight_through(prediction),
+        condition,
     )
 
-    _, fake = connect.match_anchor(
-        prediction,
-        _condition(anchors, num_phases=3, volume_size=size),
-        0,
+    assert located.triplets.axes.tolist() == [0, 1, 2]
+    for batch, axis, index in located.locations:
+        assert bool(condition.mask[batch, 0].select(axis, index).any())
+
+
+def test_anchor_match_uses_the_same_triplet_metadata_for_real_and_fake() -> None:
+    size = 7
+    labels = torch.arange(size).view(1, size, 1, 1).expand(1, size, size, size)
+    conditioned = _prediction_from_labels(labels, num_phases=size).requires_grad_()
+    reference = _prediction_from_labels(labels.remainder(size - 1), num_phases=size)
+    condition = _condition(
+        (PlaneAnchor(labels[0, 3].to(torch.uint8), axis=0, index=3),),
+        num_phases=size,
+        volume_size=size,
     )
+    connect = _connectivity(num_phases=size, patch_size=size, max_gap=2)
 
-    assert len(fake) == 7
-    assert int(fake.anchor_flags.sum()) == 3
-    assert int((~fake.anchor_flags).sum()) == 4
+    real, fake = connect.match_anchor(conditioned, reference, condition)
+
+    assert len(real) == len(fake) == 3
+    assert torch.equal(real.axes, fake.axes)
+    assert torch.equal(real.gaps, fake.gaps)
+    assert torch.equal(real.center_slots, fake.center_slots)
+    fake.values.sum().backward()
+    assert conditioned.grad is not None
+    assert float(conditioned.grad.abs().sum()) > 0.0
 
 
-def test_many_anchors_keep_general_axis_coverage_within_fixed_budget() -> None:
-    size = 15
-    coordinates = torch.meshgrid(
-        *(torch.arange(size) for _ in range(3)),
-        indexing="ij",
+def test_endpoint_anchor_uses_an_endpoint_center_slot() -> None:
+    size = 5
+    labels = torch.arange(size).view(1, size, 1, 1).expand(1, size, size, size)
+    prediction = _prediction_from_labels(labels, num_phases=size)
+    connect = _connectivity(num_phases=size, patch_size=size)
+    condition = _condition(
+        (PlaneAnchor(labels[0, 0].to(torch.uint8), axis=0, index=0),),
+        num_phases=size,
+        volume_size=size,
     )
-    labels = sum(coordinates).remainder(3).unsqueeze(0)
-    prediction = _prediction_from_labels(labels, num_phases=3)
-    connect = _connectivity(num_phases=3, patch_size=size, volumes=1)
-    _record_prior(connect, prediction, 0)
-    anchors = tuple(
-        PlaneAnchor(labels[0].select(axis, index).to(torch.uint8), axis, index)
-        for axis in range(3)
-        for index in (2, 7, 12)
-    )
-
-    _, fake = connect.match_anchor(
-        prediction,
-        _condition(anchors, num_phases=3, volume_size=size),
-        0,
-    )
-
-    assert len(fake) == 7
-    assert int(fake.anchor_flags.sum()) == 4
-    assert set(fake.axes[~fake.anchor_flags].tolist()) == {0, 1, 2}
-
-
-def test_observed_root_is_never_dropped_from_the_anchor_budget() -> None:
-    size = 15
-    coordinates = torch.meshgrid(
-        *(torch.arange(size) for _ in range(3)),
-        indexing="ij",
-    )
-    labels = sum(coordinates).remainder(3).unsqueeze(0)
-    prediction = _prediction_from_labels(labels, num_phases=3)
-    connect = _connectivity(num_phases=3, patch_size=size)
-    anchors = tuple(
-        PlaneAnchor(labels[0].select(axis, index).to(torch.uint8), axis, index)
-        for axis in range(3)
-        for index in (2, 7, 12)
-    )
-    condition = _condition(anchors, num_phases=3, volume_size=size)
-    observed = _condition((anchors[1],), num_phases=3, volume_size=size)
 
     located = connect._sample_anchor_triplets(
         connect._straight_through(prediction),
         condition,
-        observed.axis_masks,
     )
-    limited = connect._limit_anchor_triplets(located, 4)
+    axis_zero = located.triplets.axes == 0
 
-    assert int(limited.observed.sum()) == 1
-    assert (0, 0, 7) in limited.locations
+    assert int(axis_zero.sum()) == 1
+    assert int(located.triplets.center_slots[axis_zero][0]) == 0
 
 
-def test_pseudo_plane_uses_its_exact_source_triplet() -> None:
-    size = 9
-    labels = torch.zeros(1, size, size, size, dtype=torch.long)
-    prediction = _prediction_from_labels(labels, num_phases=2)
-    connect = _connectivity(num_phases=2, patch_size=size, volumes=1)
-    _record_prior(connect, prediction, 0)
-    anchors = (
-        PlaneAnchor(labels[0, 2].to(torch.uint8), axis=0, index=2),
-        PlaneAnchor(labels[0, 5].to(torch.uint8), axis=0, index=5),
+def test_normal_transition_loss_is_zero_for_matching_triplets() -> None:
+    labels = torch.tensor(
+        [
+            [
+                [[0, 1], [1, 0]],
+                [[1, 1], [0, 0]],
+                [[0, 0], [1, 1]],
+            ]
+        ]
     )
-    condition = _condition(anchors, num_phases=2, volume_size=size)
-    observed = _condition((anchors[0],), num_phases=2, volume_size=size)
-    source = torch.zeros(3, size, size, dtype=torch.uint8)
-    source[1].fill_(1)
-    reference = PriorReference(
-        axis=0,
-        index=5,
-        values=source,
-        center_slot=1,
-        gap=1,
-    )
+    batch = _triplet_batch(labels, num_phases=2)
 
-    real, fake = connect.match_anchor(
-        prediction,
-        condition,
-        0,
-        observed_axis_masks=observed.axis_masks,
-        references=((reference,),),
+    assert float(normal_transition_loss(batch, batch)) == 0.0
+
+
+def test_normal_transition_loss_measures_neighbor_tv_and_backpropagates() -> None:
+    real_labels = torch.zeros(1, 3, 2, 2, dtype=torch.long)
+    fake_labels = real_labels.clone()
+    fake_labels[:, (0, 2)] = 1
+    real = _triplet_batch(real_labels, num_phases=2)
+    fake_values = _triplet_values(fake_labels, num_phases=2).requires_grad_()
+    fake = TripletBatch(
+        values=fake_values,
+        axes=real.axes,
+        gaps=real.gaps,
+        center_slots=real.center_slots,
     )
 
-    expected = _triplet_values(source.unsqueeze(0), num_phases=2)[0]
-    assert fake.anchor_flags[:2].tolist() == [True, True]
-    assert torch.equal(real.values[1], expected)
-    assert int(real.center_slots[1]) == reference.center_slot
+    loss = normal_transition_loss(real, fake)
+    loss.backward()
 
-
-def test_pseudo_plane_uses_the_source_relation_gap() -> None:
-    size = 9
-    labels = torch.arange(size).view(1, size, 1, 1).expand(1, size, size, size)
-    prediction = _prediction_from_labels(labels, num_phases=size)
-    connect = _connectivity(num_phases=size, patch_size=size, volumes=1)
-    _record_prior(connect, prediction, 0)
-    anchors = (
-        PlaneAnchor(labels[0, 1].to(torch.uint8), axis=0, index=1),
-        PlaneAnchor(labels[0, 5].to(torch.uint8), axis=0, index=5),
-    )
-    condition = _condition(anchors, num_phases=size, volume_size=size)
-    observed = _condition((anchors[0],), num_phases=size, volume_size=size)
-    source = labels[0, (2, 5, 8)].to(torch.uint8)
-    reference = PriorReference(
-        axis=0,
-        index=5,
-        values=source,
-        center_slot=1,
-        gap=3,
-    )
-
-    real, fake = connect.match_anchor(
-        prediction,
-        condition,
-        0,
-        observed_axis_masks=observed.axis_masks,
-        references=((reference,),),
-    )
-
-    assert torch.equal(real.values[1].argmax(dim=1)[:, 0, 0], source[:, 0, 0])
-    assert torch.equal(fake.values[1].argmax(dim=1)[:, 0, 0], source[:, 0, 0])
+    assert torch.isclose(loss, torch.tensor(1.0))
+    assert fake_values.grad is not None
+    assert bool(torch.isfinite(fake_values.grad).all())
 
 
 def test_connectivity_images_are_phase_changes_and_discrete_bend() -> None:
@@ -382,50 +130,8 @@ def test_connectivity_images_remove_constant_slice_appearance() -> None:
     assert not bool(ConnectivityCritic2D.connectivity_images(second).any())
 
 
-def test_normal_transition_loss_is_zero_for_matching_triplets() -> None:
-    labels = torch.tensor([[[[0, 1], [1, 0]], [[1, 1], [0, 0]], [[0, 0], [1, 1]]]])
-    batch = _triplet_batch(labels, num_phases=2)
-
-    assert float(normal_transition_loss(batch, batch)) == 0.0
-
-
-def test_normal_transition_loss_measures_neighbor_tv_and_backpropagates() -> None:
-    real_labels = torch.zeros(1, 3, 2, 2, dtype=torch.long)
-    fake_labels = real_labels.clone()
-    fake_labels[:, (0, 2)] = 1
-    real = _triplet_batch(real_labels, num_phases=2)
-    fake_values = _triplet_values(fake_labels, num_phases=2).requires_grad_()
-    fake = TripletBatch(
-        values=fake_values,
-        axes=real.axes,
-        gaps=real.gaps,
-        center_slots=real.center_slots,
-        anchor_flags=real.anchor_flags,
-    )
-
-    loss = normal_transition_loss(real, fake)
-    loss.backward()
-
-    assert torch.isclose(loss, torch.tensor(1.0))
-    assert fake_values.grad is not None
-    assert bool(torch.isfinite(fake_values.grad).all())
-
-
-def test_normal_transition_balances_anchor_and_general_groups() -> None:
-    real_labels = torch.zeros(4, 3, 2, 2, dtype=torch.long)
-    fake_labels = real_labels.clone()
-    fake_labels[0, (0, 2)] = 1
-    flags = torch.tensor((True, False, False, False))
-    real = _triplet_batch(real_labels, num_phases=2, anchor_flags=flags)
-    fake = _triplet_batch(fake_labels, num_phases=2, anchor_flags=flags)
-
-    loss = normal_transition_loss(real, fake)
-
-    assert torch.isclose(loss, torch.tensor(0.5))
-
-
 @pytest.mark.parametrize("num_phases", (2, 3, 5))
-def test_connectivity_critic_is_multiphase_and_exactly_reversal_invariant(
+def test_connectivity_critic_is_multiphase_and_reversal_invariant(
     num_phases: int,
 ) -> None:
     critic = ConnectivityCritic2D(
@@ -468,19 +174,12 @@ def test_connectivity_critic_rejects_invalid_axes() -> None:
 def _connectivity(
     *,
     num_phases: int = 3,
-    num_domains: int = 1,
     patch_size: int = 4,
-    volumes: int = 1,
-    owned_axes: dict[int, tuple[int, ...]] | None = None,
+    max_gap: int = 1,
 ) -> Connectivity:
-    if owned_axes is None:
-        owned_axes = {domain: (0, 1, 2) for domain in range(num_domains)}
     return Connectivity(
         num_phases=num_phases,
-        num_domains=num_domains,
-        patch_size=patch_size,
-        bank_size=volumes,
-        owned_axes=owned_axes,
+        max_gap=max_gap,
     )
 
 
@@ -517,40 +216,6 @@ def _prediction_from_labels(
     )
 
 
-def _record_prior(
-    connect: Connectivity,
-    prediction: torch.Tensor,
-    domain: int,
-) -> None:
-    connect.record_prior(
-        prediction,
-        _observed_condition(prediction, connect.num_phases),
-        domain,
-    )
-
-
-def _refresh_prior(
-    connect: Connectivity,
-    prediction: torch.Tensor,
-    domain: int,
-) -> None:
-    connect.refresh_prior(
-        prediction,
-        _observed_condition(prediction, connect.num_phases),
-        domain,
-    )
-
-
-def _observed_condition(prediction: torch.Tensor, num_phases: int):
-    labels = prediction.detach().argmax(dim=1)
-    index = labels.shape[1] // 2
-    return _condition(
-        (PlaneAnchor(labels[0, index].to(torch.uint8), axis=0, index=index),),
-        num_phases=num_phases,
-        volume_size=labels.shape[1],
-    )
-
-
 def _triplet_values(labels: torch.Tensor, *, num_phases: int) -> torch.Tensor:
     return (
         F.one_hot(labels.to(torch.long), num_classes=num_phases)
@@ -561,18 +226,10 @@ def _triplet_values(labels: torch.Tensor, *, num_phases: int) -> torch.Tensor:
     )
 
 
-def _triplet_batch(
-    labels: torch.Tensor,
-    *,
-    num_phases: int,
-    anchor_flags: torch.Tensor | None = None,
-) -> TripletBatch:
-    if anchor_flags is None:
-        anchor_flags = torch.zeros(labels.shape[0], dtype=torch.bool)
+def _triplet_batch(labels: torch.Tensor, *, num_phases: int) -> TripletBatch:
     return TripletBatch(
         values=_triplet_values(labels, num_phases=num_phases),
         axes=torch.zeros(labels.shape[0], dtype=torch.long),
         gaps=torch.ones(labels.shape[0], dtype=torch.long),
         center_slots=torch.ones(labels.shape[0], dtype=torch.long),
-        anchor_flags=anchor_flags,
     )

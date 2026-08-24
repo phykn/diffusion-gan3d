@@ -61,8 +61,6 @@ def ConnectivityConfig(**values):
     cfg = Config(
         weight=0.0,
         phase_transition_weight=0.0,
-        volume_count=1,
-        refresh_every=500,
     )
     cfg.update(values)
     return cfg
@@ -104,15 +102,23 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
         axes=axes,
         gaps=torch.ones(2, dtype=torch.long),
         center_slots=real_centers,
-        anchor_flags=torch.tensor((True, False)),
     )
     fake = TripletBatch(
         values=torch.ones(2, 3, 2, 1, 1),
         axes=axes,
         gaps=torch.ones(2, dtype=torch.long),
         center_slots=fake_centers,
-        anchor_flags=torch.tensor((True, False)),
     )
+    anchor = build_anchors(
+        (PlaneAnchor(torch.zeros(3, 3, dtype=torch.uint8), axis=0, index=1),),
+        batch_size=1,
+        num_phases=2,
+        volume_size=3,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        reconcile=False,
+    )
+    assert anchor is not None
     trainer.connect = Mock()
     trainer.connect.match_anchor.return_value = (real, fake)
     trainer.critic_augment = Mock()
@@ -123,9 +129,10 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
 
     augmented_real, augmented_fake = trainer.make_connectivity_triplets(
         torch.zeros(1, 2, 3, 3, 3),
-        Mock(),
+        torch.zeros(1, 2, 3, 3, 3),
+        anchor,
         transition=0,
-        domain=0,
+        source="real",
     )
 
     assert augmented_real.center_slots.tolist() == [1, 1]
@@ -282,7 +289,6 @@ def test_connectivity_uses_axis_critic_domain_for_shared_context() -> None:
         axes=torch.tensor((0, 1, 2)),
         gaps=torch.ones(3, dtype=torch.long),
         center_slots=torch.ones(3, dtype=torch.long),
-        anchor_flags=torch.tensor((True, False, False)),
     )
 
     domains = Trainer.get_connectivity_domains(
@@ -310,59 +316,24 @@ def test_domain_dropout_probability_controls_the_model_condition() -> None:
     assert trainer.sample_domain_condition(2) == NULL_DOMAIN
 
 
-def test_initial_prior_build_selects_each_incomplete_domain() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.prior_required = True
-    trainer.anchor_start_step = 4
-    trainer.anchor_ramp_steps = 0
-    trainer.num_domains = 3
-    trainer.connect = Mock(prior_ready=False)
-    trainer.connect.needs_prior.side_effect = lambda domain: domain in (1, 2)
-    trainer.sample_target_domain = Mock(return_value=2)
-
-    assert trainer.select_target_domain(3) == 2
-    trainer.sample_target_domain.assert_called_once_with()
-
-    trainer.sample_target_domain.reset_mock()
-    assert trainer.select_target_domain(4) == 1
-    trainer.sample_target_domain.assert_not_called()
-    assert trainer.connect.needs_prior.call_args_list[-2:] == [
-        ((0,),),
-        ((1,),),
-    ]
-
-    trainer.connect.prior_ready = True
-    assert trainer.select_target_domain(5) == 2
-    trainer.sample_target_domain.assert_called_once_with()
-
-
-def test_ready_prior_starts_alternation_and_skipped_request_does_not_toggle() -> None:
+def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
     trainer = object.__new__(Trainer)
     trainer.anchor_training_probability = 0.5
-    trainer.use_prior_next = True
+    trainer.use_multi_anchor_next = False
     trainer.volume_batch_size = 1
     trainer.device = torch.device("cpu")
-    mask = torch.ones(1, 1, 2, 2, 2, dtype=torch.bool)
-    axis_masks = torch.ones(1, 3, 2, 2, 2, dtype=torch.bool)
-    trainer.connect = Mock(prior_ready=True)
-    trainer.connect.sample_prior_condition.return_value = Mock(
-        condition="prior",
-        observed_mask=mask,
-        observed_axis_masks=axis_masks,
-        references=(),
-    )
     trainer.sample_real_anchor = Mock(return_value=Mock(source="real"))
 
     with patch("src.train.engine.torch.rand", return_value=torch.tensor(0.9)):
         assert trainer.sample_anchor({}, 2, domain=0, owned_axes=()) is None
-    assert trainer.use_prior_next
+    assert not trainer.use_multi_anchor_next
 
     trainer.anchor_training_probability = 1.0
     sources = [
         trainer.sample_anchor({}, 2, domain=0, owned_axes=()).source for _ in range(3)
     ]
 
-    assert sources == ["prior", "real", "prior"]
+    assert sources == ["real", "multi", "real"]
 
 
 def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
@@ -694,9 +665,16 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         vf_batch_ids.extend(id(batches[axis]) for axis in (0, 1, 2))
         return original_build_pool(batches, num_phases)
 
-    def track_critics(transition, fake, batches, step, domain):
+    def track_critics(transition, fake, batches, step, domain, **kwargs):
         critic_batch_ids.extend(id(batches[axis]) for axis in (0, 1, 2))
-        return original_update_critics(transition, fake, batches, step, domain)
+        return original_update_critics(
+            transition,
+            fake,
+            batches,
+            step,
+            domain,
+            **kwargs,
+        )
 
     with (
         patch.object(vf, "build_pool", side_effect=track_vfs),
@@ -998,7 +976,6 @@ def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
         dtype=torch.float32,
     )
     assert observed is not None
-    trainer.connect.record_prior(torch.zeros(1, 3, 8, 8, 8), observed, 0)
     dropped = ConditionPresence(
         anchor=torch.tensor((False,)),
         vf=torch.tensor((True,)),
@@ -1070,66 +1047,6 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
     assert math.isclose(metrics.vf_loss, 0.0, abs_tol=1e-7)
 
 
-def test_real_anchor_ramp_builds_and_refreshes_conditional_prior() -> None:
-    trainer, _, _ = _conditioning_trainer(
-        anchored=True,
-        anchor_start_step=1,
-        connectivity_weight=0.25,
-    )
-    trainer.prior_refresh_steps = 2
-
-    with (
-        patch.object(
-            trainer.diffusion,
-            "sample",
-            wraps=trainer.diffusion.sample,
-        ) as prior_samples,
-        patch("src.train.prior._log_uniform_count", return_value=4),
-    ):
-        warmup = trainer.step(0, transition=0)
-        initial = trainer.step(1, transition=0)
-        connectivity_before = _parameters(trainer.connectivity_critic)
-        multi = trainer.step(2, transition=0)
-        refreshed = trainer.step(3, transition=0)
-
-    assert prior_samples.call_count == 2
-    assert warmup.anchor_ramp == 0.0
-    assert warmup.anchor_planes == 0
-    assert warmup.prior_volumes == 0
-    assert warmup.generator_connectivity == 0.0
-    assert warmup.critic_connectivity == 0.0
-    assert initial.anchor_ramp == 1.0
-    assert initial.anchor_planes == 1
-    assert initial.prior_volumes == 1
-    assert initial.prior_ready
-    assert initial.connectivity_triplets == 7
-    assert multi.anchor_ramp == 1.0
-    assert multi.anchor_planes == 4
-    assert multi.connectivity_triplets == 7
-    assert multi.generator_connectivity > 0.0
-    assert multi.critic_connectivity > 0.0
-    assert refreshed.anchor_ramp == 1.0
-    assert refreshed.anchor_planes == 1
-    assert refreshed.prior_updates == 1
-    for call in prior_samples.call_args_list:
-        conditions = call.args[3]
-        assert bool(conditions["anchor_mask"].any())
-        assert not bool(conditions["vf_present"].any())
-    assert _changed(connectivity_before, trainer.connectivity_critic)
-    assert all(
-        parameter.requires_grad
-        for parameter in trainer.connectivity_critic.parameters()
-    )
-    assert math.isclose(
-        multi.generator_total,
-        multi.generator
-        + 0.25 * multi.generator_connectivity
-        + multi.anchor_loss
-        + multi.vf_loss,
-        rel_tol=1e-5,
-    )
-
-
 def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
     trainer = object.__new__(Trainer)
     trainer.device = torch.device("cpu")
@@ -1195,9 +1112,6 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
             connectivity_r1=0.0,
             anchor_ramp=0.0,
             connectivity_triplets=0,
-            prior_volumes=0,
-            prior_mebibytes=0.0,
-            prior_ready=False,
         )
     )
 
@@ -1359,8 +1273,6 @@ def _make_trainer(
             anchor_pixel_loss_weight=cfg.anchor.pixel_weight,
             connectivity_weight=cfg.anchor.connectivity.weight,
             normal_transition_weight=(cfg.anchor.connectivity.phase_transition_weight),
-            connectivity_bank_size=cfg.anchor.connectivity.volume_count,
-            connectivity_refresh_steps=cfg.anchor.connectivity.refresh_every,
             vf_loss_weight=cfg.vf.weight,
             vf_target_average_max_samples=cfg.vf.max_samples,
             domain_dropout=1.0 - cfg.data.domain_prob,

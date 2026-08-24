@@ -84,38 +84,6 @@ def test_r1_aggregation_is_independent_of_patch_count() -> None:
     assert torch.allclose(small, torch.tensor(8.5))
 
 
-def test_connectivity_groups_receive_equal_weight_despite_unequal_counts() -> None:
-    logits = torch.tensor((0.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0))
-    scores = CriticScores(
-        logits_global=logits,
-        logits_local=logits[:, None, None],
-    )
-    groups = torch.tensor((True, False, False, False, False, False, False))
-
-    loss = get_generator_loss(scores, groups)
-    expected = 0.5 * (F.softplus(-logits[0]) + F.softplus(-logits[1]))
-
-    assert torch.allclose(loss.global_loss, expected)
-    assert torch.allclose(loss.local_loss, expected)
-
-
-def test_connectivity_r1_groups_receive_equal_weight_despite_unequal_counts() -> None:
-    inputs = torch.tensor([[1.0], [2.0], [2.0]], requires_grad=True)
-    slopes = torch.tensor((2.0, 4.0, 4.0))
-    logits = inputs[:, 0] * slopes
-    scores = CriticScores(
-        logits_global=logits,
-        logits_local=logits[:, None, None],
-    )
-    groups = torch.tensor((True, False, False))
-
-    penalty = get_critic_r1(scores, (inputs,), groups)
-    expected = torch.tensor(10.0)  # 0.5 * (2**2 + 4**2)
-
-    assert torch.allclose(penalty.global_loss, expected)
-    assert torch.allclose(penalty.local_loss, expected)
-
-
 def test_r1_heads_do_not_cancel_opposite_gradients() -> None:
     inputs = torch.tensor([[1.0], [2.0]], requires_grad=True)
     base = inputs[:, 0]

@@ -117,10 +117,6 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "train/volume_size": metrics.volume_size,
         "train/domain": metrics.domain,
         "train/connectivity_triplets": metrics.connectivity_triplets,
-        "train/prior_volumes": metrics.prior_volumes,
-        "train/prior_mebibytes": metrics.prior_mebibytes,
-        "train/prior_ready": float(metrics.prior_ready),
-        "train/prior_updates": metrics.prior_updates,
         "conditioning/anchor_planes": metrics.anchor_planes,
         "conditioning/anchor_ramp": metrics.anchor_ramp,
         "conditioning/anchor_input_active_fraction": (

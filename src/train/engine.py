@@ -1,7 +1,6 @@
-import copy
 import math
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import torch
@@ -24,7 +23,6 @@ from .loss import (
     get_critic_r1,
     get_generator_loss,
 )
-from .prior import PriorReferences
 
 
 @dataclass(frozen=True)
@@ -46,10 +44,6 @@ class Metrics:
     connectivity_r1: float
     anchor_ramp: float
     connectivity_triplets: int
-    prior_volumes: int
-    prior_mebibytes: float
-    prior_ready: bool
-    prior_updates: int = 0
     generator_global: float = 0.0
     generator_local: float = 0.0
     critic_global: float = 0.0
@@ -118,7 +112,6 @@ class StepPreparation:
     real: dict[int, torch.Tensor]
     selection: "AnchorSelection | None"
     anchor: AnchorCondition | None
-    prior_anchor: AnchorCondition | None
     target_vf: torch.Tensor
     presence: "ConditionPresence"
     model_conditions: dict[str, torch.Tensor]
@@ -128,11 +121,10 @@ class StepPreparation:
 
 @dataclass(frozen=True)
 class AnchorSelection:
-    condition: AnchorCondition
-    observed_mask: torch.Tensor
-    observed_axis_masks: torch.Tensor
-    source: Literal["real", "shared", "prior"]
-    prior_references: PriorReferences = ()
+    condition: AnchorCondition | None
+    observed_mask: torch.Tensor | None
+    observed_axis_masks: torch.Tensor | None
+    source: Literal["real", "shared", "multi"]
 
 
 @dataclass(frozen=True)
@@ -208,8 +200,6 @@ class TrainerSettings:
     anchor_ramp_steps: int
     connectivity_weight: float
     normal_transition_weight: float
-    connectivity_bank_size: int
-    connectivity_refresh_steps: int
     vf_loss_weight: float
     cfg_drop_each_probability: float
     latent_channels: int
@@ -262,7 +252,6 @@ class TrainerSettings:
             "r1_interval": self.r1_interval,
             "latent_channels": self.latent_channels,
             "vf_target_average_max_samples": self.vf_target_average_max_samples,
-            "connectivity_bank_size": self.connectivity_bank_size,
             "connectivity_max_gap": self.connectivity_max_gap,
         }
         for name, value in values.items():
@@ -273,7 +262,6 @@ class TrainerSettings:
         values = {
             "anchor_start_step": self.anchor_start_step,
             "anchor_ramp_steps": self.anchor_ramp_steps,
-            "connectivity_refresh_steps": self.connectivity_refresh_steps,
         }
         for name, value in values.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -360,27 +348,11 @@ class Trainer:
         self.anchor_pixel_loss_weight = settings.anchor_pixel_loss_weight
         self.connectivity_weight = settings.connectivity_weight
         self.normal_transition_weight = settings.normal_transition_weight
-        self.prior_required = self.anchor_training_probability > 0.0 and (
-            self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
-        )
-        owned_axes = {
-            domain: tuple(streams) for domain, streams in self.streams.items()
-        }
         self.connect = Connectivity(
             num_phases=settings.num_phases,
-            num_domains=self.num_domains,
-            patch_size=settings.patch_size,
-            bank_size=settings.connectivity_bank_size,
-            plane_stride=self.denoiser.downsample_factor,
-            owned_axes=owned_axes,
             max_gap=settings.connectivity_max_gap,
         )
-        self.prior_refresh_steps = settings.connectivity_refresh_steps
-        self.prior_denoiser: Denoiser3D | None = None
-        self.last_prior_refresh_steps: list[int | None] = [
-            None for _ in range(self.num_domains)
-        ]
-        self.use_prior_next = True
+        self.use_multi_anchor_next = False
         self.vf_loss_weight = settings.vf_loss_weight
         self.vf_target_average_max_samples = settings.vf_target_average_max_samples
         self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
@@ -406,12 +378,41 @@ class Trainer:
         transition = prepared.transition
         real = prepared.real
         critic_domains = prepared.critic_domains
-        anchor = prepared.anchor
         presence = prepared.presence
-        self.record_prior_reference(
-            step=step,
-            prepared=prepared,
+        selection = prepared.selection
+        needs_reference = selection is not None and (
+            selection.source == "multi"
+            or (
+                selection.source in ("real", "shared")
+                and (
+                    self.connectivity_weight > 0.0
+                    or self.normal_transition_weight > 0.0
+                )
+            )
         )
+        reference = None
+        if needs_reference:
+            rng_state = self.capture_rng_state()
+            with torch.no_grad():
+                reference = self.generate_pair(
+                    transition,
+                    self.without_anchor_conditions(prepared.model_conditions),
+                    volume_size,
+                )
+            if selection.source == "multi":
+                selection = self.sample_multi_anchor(reference[3])
+                prepared = replace(
+                    prepared,
+                    selection=selection,
+                    anchor=selection.condition,
+                    model_conditions=self.make_model_conditions(
+                        selection.condition,
+                        prepared.target_vf,
+                        prepared.presence,
+                        prepared.model_conditions["domain"],
+                    ),
+                )
+            self.restore_rng_state(rng_state)
         (
             previous,
             current,
@@ -422,6 +423,7 @@ class Trainer:
             prepared.model_conditions,
             volume_size,
         )
+        anchor = prepared.anchor
         clean_probs = (prediction + 1.0) * 0.5
         fake = self._sample_fake_pairs(
             previous,
@@ -431,17 +433,23 @@ class Trainer:
             presence.anchor,
         )
 
-        selection = prepared.selection
+        reference_pairs = None
+        if selection is not None and selection.source == "multi":
+            assert reference is not None
+            reference_pairs = self._sample_fake_pairs(
+                reference[0],
+                reference[1],
+                real,
+                None,
+                torch.zeros_like(presence.anchor),
+            )
         connectivity_real, connectivity_fake = self.make_connectivity_triplets(
             prediction,
+            None if reference is None else reference[3],
             anchor,
             transition,
-            prepared.domain,
             presence.anchor,
-            observed_axis_masks=(
-                None if selection is None else selection.observed_axis_masks
-            ),
-            references=(() if selection is None else selection.prior_references),
+            None if selection is None else selection.source,
         )
         connectivity_domains = self.get_connectivity_domains(
             prepared.critic_domains,
@@ -459,6 +467,7 @@ class Trainer:
             real,
             step,
             critic_domains,
+            real_pairs=reference_pairs,
         )
         if self.connectivity_weight > 0.0:
             critic_connectivity, connectivity_r1 = self.update_connectivity_critic(
@@ -582,15 +591,6 @@ class Trainer:
         )
         vf_pool = vf.build_pool(own_batches, num_phases=self.num_phases)
         ramp = self.get_anchor_ramp(step)
-        prior_anchor = (
-            self.sample_real_anchor(
-                batches,
-                self.patch_size,
-                owned_axes=tuple(own_batches),
-            ).condition
-            if self.should_record_prior(step, domain)
-            else None
-        )
         selection = (
             None
             if ramp == 0.0
@@ -603,7 +603,8 @@ class Trainer:
         )
         if (
             selection is not None
-            and selection.source in ("shared", "prior")
+            and selection.condition is not None
+            and selection.source == "shared"
             and not vf.anchor_is_compatible(
                 selection.condition,
                 vf_pool,
@@ -625,7 +626,7 @@ class Trainer:
             device=self.device,
             max_samples=self.vf_target_average_max_samples,
         )
-        presence = self.sample_condition_presence(anchor is not None)
+        presence = self.sample_condition_presence(selection is not None)
         model_conditions = self.make_model_conditions(
             anchor,
             target_vf,
@@ -641,7 +642,6 @@ class Trainer:
             real=batches,
             selection=selection,
             anchor=anchor,
-            prior_anchor=prior_anchor,
             target_vf=target_vf,
             presence=presence,
             model_conditions=model_conditions,
@@ -690,10 +690,6 @@ class Trainer:
             connectivity_r1=connectivity_r1,
             anchor_ramp=prepared.anchor_ramp,
             connectivity_triplets=len(connectivity_fake),
-            prior_volumes=self.connect.prior_count,
-            prior_mebibytes=self.connect.prior_storage_bytes / 1024**2,
-            prior_ready=not self.prior_required or self.connect.prior_ready,
-            prior_updates=self.connect.prior_updates,
             generator_global=denoiser_update.global_loss,
             generator_local=denoiser_update.local_loss,
             critic_global=critic_global,
@@ -724,38 +720,37 @@ class Trainer:
     def make_connectivity_triplets(
         self,
         prediction: torch.Tensor,
+        reference_prediction: torch.Tensor | None,
         anchor: AnchorCondition | None,
         transition: int,
-        domain: int,
         visible: torch.Tensor | None = None,
-        *,
-        observed_axis_masks: torch.Tensor | None = None,
-        references: PriorReferences = (),
+        source: str | None = None,
     ) -> tuple[TripletBatch, TripletBatch]:
         empty = TripletBatch(
             values=prediction.new_empty(
-                (0, 3, self.num_phases, self.patch_size, self.patch_size)
+                (0, 3, self.num_phases, prediction.shape[-2], prediction.shape[-1])
             ),
             axes=torch.empty(0, device=self.device, dtype=torch.long),
             gaps=torch.empty(0, device=self.device, dtype=torch.long),
             center_slots=torch.empty(0, device=self.device, dtype=torch.long),
-            anchor_flags=torch.empty(0, device=self.device, dtype=torch.bool),
         )
         enabled = self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
-        if not enabled or transition != 0 or anchor is None:
+        if (
+            not enabled
+            or transition != 0
+            or anchor is None
+            or source not in ("real", "shared")
+            or reference_prediction is None
+        ):
             return empty, empty
         anchor = self.visible_anchor(anchor, visible)
         if not bool(anchor.mask.any()):
             return empty, empty
-        if observed_axis_masks is not None and visible is not None:
-            observed_axis_masks = observed_axis_masks & visible.reshape(-1, 1, 1, 1, 1)
 
         real, fake = self.connect.match_anchor(
             prediction,
+            reference_prediction,
             anchor,
-            domain,
-            observed_axis_masks=observed_axis_masks,
-            references=references,
         )
         real_values, fake_values = self.critic_augment.apply_together(
             (real.values, fake.values),
@@ -766,14 +761,12 @@ class Trainer:
                 axes=real.axes,
                 gaps=real.gaps,
                 center_slots=real.center_slots,
-                anchor_flags=real.anchor_flags,
             ),
             TripletBatch(
                 values=fake_values,
                 axes=fake.axes,
                 gaps=fake.gaps,
                 center_slots=fake.center_slots,
-                anchor_flags=fake.anchor_flags,
             ),
         )
 
@@ -783,7 +776,7 @@ class Trainer:
         triplets: TripletBatch,
     ) -> torch.Tensor:
         return torch.tensor(
-            [critic_domains[axis] for axis in triplets.axes.tolist()],
+            [critic_domains.get(axis, NULL_DOMAIN) for axis in triplets.axes.tolist()],
             device=triplets.values.device,
             dtype=torch.long,
         )
@@ -819,6 +812,35 @@ class Trainer:
             return 0
         return int(torch.randint(1, self.diffusion.timesteps, ()).item())
 
+    @staticmethod
+    def without_anchor_conditions(
+        conditions: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        return {
+            name: value
+            for name, value in conditions.items()
+            if name not in {"anchor_image", "anchor_mask"}
+        }
+
+    def capture_rng_state(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        device_state = (
+            torch.cuda.get_rng_state(self.device)
+            if self.device.type == "cuda"
+            else None
+        )
+        return torch.random.get_rng_state(), device_state
+
+    def restore_rng_state(
+        self,
+        state: tuple[torch.Tensor, torch.Tensor | None],
+    ) -> None:
+        cpu_state, device_state = state
+        torch.random.set_rng_state(cpu_state)
+        if device_state is not None:
+            torch.cuda.set_rng_state(device_state, self.device)
+
     def select_batch_domains(self, domain: int) -> dict[int, int]:
         selected = {}
         for axis in self.active_axes:
@@ -834,15 +856,6 @@ class Trainer:
         return int(torch.randint(self.num_domains, ()).item())
 
     def select_target_domain(self, step: int) -> int:
-        if (
-            self.prior_required
-            and self.anchor_schedule_complete(step)
-            and not self.connect.prior_ready
-        ):
-            for domain in range(self.num_domains):
-                if self.connect.needs_prior(domain):
-                    return domain
-            raise RuntimeError("conditional prior readiness is inconsistent.")
         return self.sample_target_domain()
 
     def get_batches(
@@ -1001,23 +1014,15 @@ class Trainer:
             return None
         if probability < 1.0 and not bool(torch.rand(()) < probability):
             return None
-        if self.connect.prior_ready and self.use_prior_next:
-            self.use_prior_next = False
-            sampled = self.connect.sample_prior_condition(
-                domain,
-                batch_size=self.volume_batch_size,
-                device=self.device,
-                dtype=torch.float32,
-            )
+        if self.use_multi_anchor_next:
+            self.use_multi_anchor_next = False
             return AnchorSelection(
-                condition=sampled.condition,
-                observed_mask=sampled.observed_mask,
-                observed_axis_masks=sampled.observed_axis_masks,
-                source="prior",
-                prior_references=sampled.references,
+                condition=None,
+                observed_mask=None,
+                observed_axis_masks=None,
+                source="multi",
             )
-        if self.connect.prior_ready:
-            self.use_prior_next = True
+        self.use_multi_anchor_next = True
         return self.sample_real_anchor(
             batches,
             volume_size,
@@ -1085,76 +1090,45 @@ class Trainer:
             source="shared" if use_shared else "real",
         )
 
-    def should_record_prior(self, step: int, domain: int) -> bool:
-        if not self.prior_required or not self.anchor_schedule_complete(step):
-            return False
-        if not self.connect.prior_ready:
-            return self.connect.needs_prior(domain)
-        if self.prior_refresh_steps == 0:
-            return False
-        last_refresh = self.last_prior_refresh_steps[domain]
-        return (
-            last_refresh is not None and step - last_refresh >= self.prior_refresh_steps
-        )
-
-    @torch.no_grad()
-    def record_prior_reference(
-        self,
-        *,
-        step: int,
-        prepared: StepPreparation,
-    ) -> None:
-        if not self.prior_required or step < self.anchor_start_step:
-            return
-
-        observed = prepared.prior_anchor
-        if observed is None:
-            return
-
-        initial = not self.connect.prior_ready
-        if initial and self.prior_denoiser is None:
-            self.prior_denoiser = copy.deepcopy(self.ema_denoiser)
-            self.prior_denoiser.eval().requires_grad_(False)
-        if initial:
-            denoiser = self.prior_denoiser
-            batch_size = self.volume_batch_size
-        else:
-            denoiser = self.ema_denoiser
-            batch_size = 1
-        assert denoiser is not None
-        conditions = {
-            "domain": self.make_domain(prepared.domain, batch_size),
-            "vf": torch.zeros_like(prepared.target_vf[:batch_size]),
-            "vf_present": torch.zeros_like(prepared.presence.vf[:batch_size]),
-            "anchor_image": observed.image[:batch_size],
-            "anchor_mask": observed.mask[:batch_size],
-        }
-        devices = [self.device] if self.device.type == "cuda" else []
-        with torch.random.fork_rng(devices=devices):
-            shape = (
-                batch_size,
-                self.num_phases,
-                self.patch_size,
-                self.patch_size,
-                self.patch_size,
+    def sample_multi_anchor(self, prediction: torch.Tensor) -> AnchorSelection:
+        if prediction.ndim != 5 or prediction.shape[1] != self.num_phases:
+            raise ValueError("prediction must have shape [B, C, D, H, W].")
+        labels = prediction.detach().argmax(dim=1)
+        count = int(torch.randint(2, len(AXES) + 1, ()).item())
+        axes = torch.randperm(len(AXES), device=prediction.device)[:count].tolist()
+        planes = []
+        for axis in axes:
+            index = int(
+                torch.randint(
+                    prediction.shape[axis + 2],
+                    (),
+                    device=prediction.device,
+                ).item()
             )
-            noise = torch.randn(shape, device=self.device, dtype=torch.float32)
-            with self.autocast():
-                prediction = self.diffusion.sample(
-                    denoiser,
-                    noise,
-                    self.latent_channels,
-                    conditions,
+            planes.append(
+                PlaneAnchor(
+                    image=labels.select(axis + 1, index),
+                    axis=axis,
+                    index=index,
                 )
-            if initial:
-                self.connect.record_prior(prediction, observed, prepared.domain)
-                if not self.connect.needs_prior(prepared.domain):
-                    self.last_prior_refresh_steps[prepared.domain] = step
-            else:
-                self.connect.refresh_prior(prediction, observed, prepared.domain)
-                self.last_prior_refresh_steps[prepared.domain] = step
-        if initial and self.connect.prior_ready:
-            self.prior_denoiser = None
+            )
+        condition = build_anchors(
+            tuple(planes),
+            batch_size=prediction.shape[0],
+            num_phases=self.num_phases,
+            volume_size=prediction.shape[2],
+            device=prediction.device,
+            dtype=torch.float32,
+            reconcile=False,
+        )
+        if condition is None:
+            raise RuntimeError("multi-anchor construction returned no condition.")
+        return AnchorSelection(
+            condition=condition,
+            observed_mask=torch.zeros_like(condition.mask),
+            observed_axis_masks=torch.zeros_like(condition.axis_masks),
+            source="multi",
+        )
 
     def generate_pair(
         self,
@@ -1276,6 +1250,7 @@ class Trainer:
         batches: dict[int, torch.Tensor],
         step: int,
         domains: dict[int, int],
+        real_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]] | None = None,
     ) -> tuple[list[float], float, float, float]:
         apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
         critic_losses = [0.0] * len(AXES)
@@ -1288,23 +1263,27 @@ class Trainer:
             optimizer = self.critic_optims[str(axis)]
             optimizer.zero_grad(set_to_none=True)
 
-            images = batches[axis]
-            real = (
-                F.one_hot(images, num_classes=self.num_phases)
-                .movedim(-1, 1)
-                .to(torch.float32)
-                .mul_(2.0)
-                .sub_(1.0)
-            )
-            real_time = self.make_time(transition, real.shape[0])
-            real_prev, real_curr = self.diffusion.sample_pair(
-                real,
-                transition,
-            )
-            real_prev, real_curr = self.critic_augment.apply_pair(
-                real_prev,
-                real_curr,
-            )
+            if real_pairs is None:
+                images = batches[axis]
+                real = (
+                    F.one_hot(images, num_classes=self.num_phases)
+                    .movedim(-1, 1)
+                    .to(torch.float32)
+                    .mul_(2.0)
+                    .sub_(1.0)
+                )
+                real_time = self.make_time(transition, real.shape[0])
+                real_prev, real_curr = self.diffusion.sample_pair(
+                    real,
+                    transition,
+                )
+                real_prev, real_curr = self.critic_augment.apply_pair(
+                    real_prev,
+                    real_curr,
+                )
+            else:
+                real_prev, real_curr = real_pairs[axis]
+                real_time = self.make_time(transition, real_prev.shape[0])
             real_prev.requires_grad_(apply_r1)
             fake_prev, fake_curr = fake[axis]
             fake_prev = fake_prev.detach().float()
@@ -1370,13 +1349,12 @@ class Trainer:
             losses = get_critic_loss(
                 real_score,
                 fake_score,
-                fake.anchor_flags,
             )
             loss = losses.combine(self.critic_local_weight)
         adversarial = float(loss.detach())
         r1_value = 0.0
         if apply_r1:
-            r1 = get_critic_r1(real_score, (real,), fake.anchor_flags)
+            r1 = get_critic_r1(real_score, (real,))
             penalty = r1.combine(self.critic_local_weight)
             r1_value = float(penalty.detach())
             loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
@@ -1424,7 +1402,6 @@ class Trainer:
                     )
                     connectivity_head = get_generator_loss(
                         connectivity_scores,
-                        batch.connectivity_fake.anchor_flags,
                     )
                     connectivity_loss = connectivity_head.combine(local_weight)
                 normal_loss = adversarial_loss.new_zeros(())

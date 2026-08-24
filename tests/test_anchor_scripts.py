@@ -616,8 +616,6 @@ def _config(root: Path) -> dict:
             "cross_domain_prob": 0.0,
             "pixel_weight": 0.05,
             "connectivity": {
-                "volume_count": 1,
-                "refresh_every": 500,
                 "weight": 0.0,
                 "phase_transition_weight": 0.0,
             },

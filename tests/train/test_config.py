@@ -68,10 +68,10 @@ def test_generation_settings_support_missing_values(
 
 
 def test_repository_generation_config_has_expected_defaults() -> None:
-    assert load_generation_settings() == GenerationSettings()
+    assert load_generation_settings() == GenerationSettings(1.0, 0.9, 8, 0.1)
 
 
-def test_repository_training_config_uses_soft_anchor_and_conditional_ema_prior() -> (
+def test_repository_training_config_uses_soft_anchor_and_connectivity() -> (
     None
 ):
     cfg = load_yaml(ROOT / "config" / "train.yaml")
@@ -95,8 +95,6 @@ def test_repository_training_config_uses_soft_anchor_and_conditional_ema_prior()
     assert "pool_size" not in cfg["anchor"]
     assert "coarse_weight" not in cfg["anchor"]
     assert cfg["anchor"]["pixel_weight"] == 0.05
-    assert cfg["anchor"]["connectivity"]["volume_count"] == 16
-    assert cfg["anchor"]["connectivity"]["refresh_every"] == 500
     assert "reverse_invariant" not in cfg["anchor"]["connectivity"]
     assert tuple(cfg["condition_dropout"]) == ("joint_each_prob",)
     assert cfg["vf"]["max_samples"] == 4

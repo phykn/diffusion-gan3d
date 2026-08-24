@@ -50,9 +50,6 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         connectivity_r1=0.05,
         anchor_ramp=0.5,
         connectivity_triplets=3,
-        prior_volumes=8,
-        prior_mebibytes=16.0,
-        prior_ready=True,
         generator_global=0.6,
         generator_local=0.8,
         critic_global=1.2,
@@ -82,10 +79,6 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
     assert "loss/connectivity_r1_raw" in tags
     assert "conditioning/anchor_ramp" in tags
     assert "train/connectivity_triplets" in tags
-    assert "train/prior_volumes" in tags
-    assert "train/prior_mebibytes" in tags
-    assert "train/prior_ready" in tags
-    assert "train/prior_updates" in tags
     assert "loss/vf" in tags
     assert "loss/normal_transition" in tags
     assert "loss/anchor_coarse" in tags
@@ -171,8 +164,6 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
                 "cross_domain_prob": 0.0,
                 "pixel_weight": 0.05,
                 "connectivity": {
-                    "volume_count": 1,
-                    "refresh_every": 500,
                     "weight": 0.25,
                     "phase_transition_weight": 0.1,
                 },
@@ -186,7 +177,6 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
                 "ema_decay": 0.9,
             },
             "train": {
-                # Step one builds the prior; step two exercises anchor training.
                 "init_weights": None,
                 "steps": 2,
                 "volume_batch_size": 1,

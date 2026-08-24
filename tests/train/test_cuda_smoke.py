@@ -54,8 +54,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             "pixel_weight": 0.05,
             "connectivity": {
                 "weight": 0.0,
-                "volume_count": 1,
-                "refresh_every": 500,
                 "phase_transition_weight": 0.0,
             },
         },
@@ -126,8 +124,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             normal_transition_weight=cfg["anchor"]["connectivity"][
                 "phase_transition_weight"
             ],
-            connectivity_bank_size=cfg["anchor"]["connectivity"]["volume_count"],
-            connectivity_refresh_steps=cfg["anchor"]["connectivity"]["refresh_every"],
             vf_loss_weight=cfg["vf"]["weight"],
             vf_target_average_max_samples=cfg["vf"]["max_samples"],
             domain_dropout=1.0 - data["domain_prob"],

@@ -47,8 +47,6 @@ anchor:
   pixel_weight: 0.05
 
   connectivity:
-    volume_count: 16
-    refresh_every: 500
     max_gap: 8
     weight: 0.25
     phase_transition_weight: 0.10

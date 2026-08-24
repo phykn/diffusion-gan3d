@@ -13,7 +13,6 @@ from src.build import (
     build_models,
     build_trainer,
     load_generator,
-    validate_prior_capacity,
 )
 from src.diffusion import Diffusion
 from src.evaluate import measure_seams
@@ -202,92 +201,6 @@ def test_build_trainer_rejects_anchor_batch_larger_than_real_batch(
 
     with pytest.raises(ValueError, match="volume_batch.*data.batch_size"):
         build_trainer(cfg, torch.device("cpu"))
-
-
-def test_build_trainer_rejects_empty_prior_bank(
-    tmp_path: Path,
-) -> None:
-    cfg = _config(tmp_path)
-    cfg["anchor"]["train_prob"] = 1.0
-    cfg["anchor"]["connectivity"]["weight"] = 1.0
-    cfg["anchor"]["connectivity"]["volume_count"] = 0
-
-    with pytest.raises(ValueError, match="anchor.connectivity.volume_count"):
-        build_trainer(cfg, torch.device("cpu"))
-
-
-def test_prior_capacity_accepts_one_volume(tmp_path: Path) -> None:
-    cfg = _config(tmp_path)
-    cfg["anchor"]["train_prob"] = 1.0
-    cfg["anchor"]["connectivity"]["weight"] = 1.0
-    cfg["anchor"]["connectivity"]["volume_count"] = 1
-    cfg["data"]["input_size"] = 128
-
-    validate_prior_capacity(
-        data=cfg["data"],
-        train=cfg["train"],
-        anchor=cfg["anchor"],
-        connectivity=cfg["anchor"]["connectivity"],
-        anchor_start_step=0,
-        anchor_ramp_steps=0,
-    )
-
-
-def test_prior_capacity_requires_time_to_fill_each_domain_and_sample_multi_anchor(
-    tmp_path: Path,
-) -> None:
-    cfg = _config(tmp_path)
-    cfg["data"]["domains"][1] = cfg["data"]["domains"][0]
-    cfg["anchor"].update(train_prob=1.0, start_step=4)
-    cfg["anchor"]["connectivity"].update(weight=1.0, volume_count=3)
-    cfg["train"].update(steps=8, volume_batch_size=2)
-
-    with pytest.raises(ValueError, match="fill every conditional prior bank"):
-        validate_prior_capacity(
-            data=cfg["data"],
-            train=cfg["train"],
-            anchor=cfg["anchor"],
-            connectivity=cfg["anchor"]["connectivity"],
-            anchor_start_step=4,
-            anchor_ramp_steps=0,
-        )
-
-    cfg["train"]["steps"] = 9
-    validate_prior_capacity(
-        data=cfg["data"],
-        train=cfg["train"],
-        anchor=cfg["anchor"],
-        connectivity=cfg["anchor"]["connectivity"],
-        anchor_start_step=4,
-        anchor_ramp_steps=0,
-    )
-
-
-def test_prior_capacity_includes_real_anchor_ramp(tmp_path: Path) -> None:
-    cfg = _config(tmp_path)
-    cfg["anchor"].update(train_prob=1.0, start_step=2, ramp_steps=4)
-    cfg["anchor"]["connectivity"].update(weight=1.0, volume_count=2)
-    cfg["train"].update(steps=7, volume_batch_size=1)
-
-    with pytest.raises(ValueError, match="leave one multi-anchor-eligible step"):
-        validate_prior_capacity(
-            data=cfg["data"],
-            train=cfg["train"],
-            anchor=cfg["anchor"],
-            connectivity=cfg["anchor"]["connectivity"],
-            anchor_start_step=2,
-            anchor_ramp_steps=4,
-        )
-
-    cfg["train"]["steps"] = 8
-    validate_prior_capacity(
-        data=cfg["data"],
-        train=cfg["train"],
-        anchor=cfg["anchor"],
-        connectivity=cfg["anchor"]["connectivity"],
-        anchor_start_step=2,
-        anchor_ramp_steps=4,
-    )
 
 
 def test_generator_prepares_vf_on_its_device() -> None:
@@ -2601,8 +2514,6 @@ def _config(root: Path) -> dict:
             "cross_domain_prob": 0.0,
             "pixel_weight": 0.05,
             "connectivity": {
-                "volume_count": 1,
-                "refresh_every": 500,
                 "weight": 0.0,
                 "phase_transition_weight": 0.0,
             },
