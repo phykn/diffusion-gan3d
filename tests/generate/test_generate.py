@@ -579,9 +579,9 @@ def test_guided_sampling_uses_anchor_as_a_condition() -> None:
 
     with patch.object(
         model,
-        "predict_guided_logits",
-        wraps=model.predict_guided_logits,
-    ) as predict_guided_logits:
+        "apply_guidance_logits",
+        wraps=model.apply_guidance_logits,
+    ) as apply_guidance_logits:
         volume = generator.generate(
             anchors=(anchor,),
             guidance=1.5,
@@ -590,9 +590,9 @@ def test_guided_sampling_uses_anchor_as_a_condition() -> None:
     assert volume.shape == (4, 4, 4)
     assert model.guidances == [1.5] * 6
     for base, plain, conditioned in zip(
-        predict_guided_logits.call_args_list[::3],
-        predict_guided_logits.call_args_list[1::3],
-        predict_guided_logits.call_args_list[2::3],
+        apply_guidance_logits.call_args_list[::3],
+        apply_guidance_logits.call_args_list[1::3],
+        apply_guidance_logits.call_args_list[2::3],
         strict=True,
     ):
         assert base.kwargs.get("anchor_image") is None
@@ -601,24 +601,6 @@ def test_guided_sampling_uses_anchor_as_a_condition() -> None:
         assert plain.kwargs.get("anchor_mask") is None
         assert conditioned.kwargs["anchor_image"] is not None
         assert int(conditioned.kwargs["anchor_mask"].sum()) == 16
-
-
-@pytest.mark.parametrize(
-    "guidance",
-    (-0.1, float("nan"), float("inf"), True),
-)
-def test_guidance_rejects_invalid_values(guidance: object) -> None:
-    generator = _generator(_ControlledModel(), Diffusion(1))
-
-    with pytest.raises(ValueError, match="guidance"):
-        generator.generate_probs(guidance=guidance)
-    with pytest.raises(ValueError, match="guidance"):
-        ScaledGenerator(generator).generate(
-            shape=4,
-            overlap=0,
-            progress=False,
-            guidance=guidance,
-        )
 
 
 def test_scaled_guidance_one_preserves_default_rng_path() -> None:
@@ -919,7 +901,7 @@ def test_final_anchor_step_preserves_same_rng_baseline_in_far_field() -> None:
             anchor_mask: torch.Tensor | None = None,
         ) -> torch.Tensor:
             return Denoiser3D.decode(
-                self.predict_logits(
+                self.compute_logits(
                     current,
                     timestep,
                     latent,
@@ -929,7 +911,7 @@ def test_final_anchor_step_preserves_same_rng_baseline_in_far_field() -> None:
                 )
             )
 
-        def predict_logits(
+        def compute_logits(
             self,
             current: torch.Tensor,
             timestep: torch.Tensor,
@@ -973,7 +955,7 @@ def test_final_anchor_step_preserves_same_rng_baseline_in_far_field() -> None:
 
 def test_anchor_prediction_residual_is_gaussian_blended_before_posterior() -> None:
     class BinaryConditionModel(torch.nn.Module):
-        def predict_logits(
+        def compute_logits(
             self,
             current: torch.Tensor,
             timestep: torch.Tensor,
@@ -2230,7 +2212,7 @@ class _AnchorTraceModel(torch.nn.Module):
         anchor_mask: torch.Tensor | None = None,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        logits = self.predict_logits(
+        logits = self.compute_logits(
             current,
             timestep,
             latent,
@@ -2241,7 +2223,7 @@ class _AnchorTraceModel(torch.nn.Module):
         )
         return Denoiser3D.decode(logits)
 
-    def predict_logits(
+    def compute_logits(
         self,
         current: torch.Tensor,
         timestep: torch.Tensor,
@@ -2308,7 +2290,7 @@ class _OptionalAnchorPhaseModel(_PhaseModel):
         del anchor_image, anchor_mask
         return super().forward(current, timestep, latent, domain=domain, vf=vf)
 
-    def predict_logits(
+    def compute_logits(
         self,
         current: torch.Tensor,
         timestep: torch.Tensor,
@@ -2446,7 +2428,7 @@ class _ControlledModel(torch.nn.Module):
         )
         return torch.tanh(0.2 * current + 0.02 * time + 0.1 * style + 0.05 * condition)
 
-    predict_logits = forward
+    compute_logits = forward
 
 
 class _GuidanceTraceModel(_ControlledModel):
@@ -2462,7 +2444,7 @@ class _GuidanceTraceModel(_ControlledModel):
             ]
         ] = []
 
-    def predict_guided(
+    def apply_guidance_logits(
         self,
         current: torch.Tensor,
         timestep: torch.Tensor,
@@ -2476,23 +2458,7 @@ class _GuidanceTraceModel(_ControlledModel):
         del anchor_image, anchor_mask
         self.guidances.append(guidance)
         self.guidance_inputs.append((current, timestep, latent, vf))
-        return self.forward(current, timestep, latent, domain=domain, vf=vf)
-
-    def predict_guided_logits(
-        self,
-        current: torch.Tensor,
-        timestep: torch.Tensor,
-        latent: torch.Tensor,
-        guidance: float,
-        domain: torch.Tensor,
-        vf: torch.Tensor | None = None,
-        anchor_image: torch.Tensor | None = None,
-        anchor_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        del anchor_image, anchor_mask
-        self.guidances.append(guidance)
-        self.guidance_inputs.append((current, timestep, latent, vf))
-        return self.predict_logits(current, timestep, latent, domain=domain, vf=vf)
+        return self.compute_logits(current, timestep, latent, domain=domain, vf=vf)
 
 
 class _TraceDiffusion(Diffusion):
@@ -2603,7 +2569,7 @@ def _config(root: Path) -> dict:
         "data": {
             "domains": {0: {axis: [root / str(axis)] for axis in (0, 1, 2)}},
             "num_phase": 3,
-            "crop_partial": False,
+            "allow_part": False,
             "crop_size": 8,
             "input_size": 8,
             "augment": False,

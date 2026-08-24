@@ -584,7 +584,7 @@ def _config(root: Path) -> dict:
         "data": {
             "domains": {0: {axis: (root / str(axis),) for axis in (0, 1, 2)}},
             "num_phase": 3,
-            "crop_partial": False,
+            "allow_part": False,
             "crop_size": 16,
             "input_size": 8,
             "augment": False,

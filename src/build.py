@@ -4,11 +4,15 @@ from pathlib import Path
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
 
 from . import AXES
-from .config import find_train_config, get_schedule_steps, load_generation_settings
-from .dataset import BatchStream, FolderBatchSampler, SliceDataset
+from .config import (
+    find_train_config,
+    get_domains,
+    get_schedule_steps,
+    load_generation_settings,
+)
+from .dataset.build import build_datasets, build_stream
 from .diffusion import Diffusion
 from .generate import Generator
 from .model.critic import ConnectivityCritic2D, PairCritic2D
@@ -18,38 +22,6 @@ from .train.ema import build_ema
 from .train.engine import Trainer, TrainerComponents, TrainerSettings
 from .train.weights import load_all_weights, load_weights
 from .utils import load_yaml
-
-
-def get_domains(
-    data: Mapping[str, object],
-) -> dict[int, dict[int, Sequence[str | Path]]]:
-    domains = data["domains"]
-    if not isinstance(domains, Mapping):
-        raise TypeError("data.domains must be a mapping.")
-    if not domains:
-        raise ValueError("data.domains must not be empty.")
-    if set(domains) != set(range(len(domains))):
-        raise ValueError("domain IDs must be contiguous and start at zero.")
-    parsed = {}
-    for domain, folders in domains.items():
-        if not isinstance(folders, Mapping):
-            raise TypeError(f"domain {domain} must map axes to folders.")
-        if not folders:
-            raise ValueError(f"domain {domain} must contain at least one axis.")
-        unknown = set(folders) - set(AXES)
-        if unknown:
-            raise ValueError(
-                f"domain {domain} contains invalid axes: {sorted(unknown)}."
-            )
-        parsed[domain] = dict(folders)
-    return parsed
-
-
-def get_data_axes(data: Mapping[str, object]) -> tuple[int, ...]:
-    domains = get_domains(data)
-    return tuple(
-        axis for axis in AXES if any(axis in folders for folders in domains.values())
-    )
 
 
 def get_generator_channels(model: Mapping[str, object]) -> tuple[int, tuple[int, ...]]:
@@ -71,86 +43,6 @@ def get_generator_channels(model: Mapping[str, object]) -> tuple[int, tuple[int,
             "model.generator.channels must be integer multiples of its first value."
         )
     return base, tuple(value // base for value in values)
-
-
-IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
-
-
-def find_slice_groups(
-    folders: dict[int, Sequence[str | Path]],
-) -> dict[int, tuple[tuple[Path, ...], ...]]:
-    if not folders:
-        raise ValueError("axis folders must contain at least one axis.")
-    if not set(folders).issubset(AXES):
-        raise ValueError("axis folders may contain only axes 0, 1, and 2.")
-
-    grouped = {}
-    for axis in sorted(folders):
-        values = folders[axis]
-        if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-            raise TypeError(f"axis {axis} folders must be a sequence of paths.")
-        if not values:
-            raise ValueError(f"axis {axis} folders must not be empty.")
-        axis_folders = tuple(Path(value) for value in values)
-        if len({folder.resolve() for folder in axis_folders}) != len(axis_folders):
-            raise ValueError(f"axis {axis} folders must not contain duplicates.")
-
-        groups = []
-        for folder in axis_folders:
-            if not folder.is_dir():
-                raise FileNotFoundError(f"axis {axis} folder does not exist: {folder}")
-            found = sorted(
-                path
-                for path in folder.iterdir()
-                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-            )
-            if not found:
-                raise ValueError(f"axis {axis} folder contains no images: {folder}")
-            groups.append(tuple(found))
-        grouped[axis] = tuple(groups)
-    return grouped
-
-
-def find_slices(
-    folders: dict[int, Sequence[str | Path]],
-) -> dict[int, tuple[Path, ...]]:
-    groups = find_slice_groups(folders)
-    return {
-        axis: tuple(path for group in path_groups for path in group)
-        for axis, path_groups in groups.items()
-    }
-
-
-def build_datasets(cfg: dict) -> dict[int, dict[int, SliceDataset]]:
-    data = cfg["data"]
-    return {
-        domain_id: {
-            axis: SliceDataset.from_path_groups(
-                path_groups,
-                crop_size=data["crop_size"],
-                patch_size=data["input_size"],
-                allow_partial_crop=data["crop_partial"],
-            )
-            for axis, path_groups in find_slice_groups(folders).items()
-        }
-        for domain_id, folders in get_domains(data).items()
-    }
-
-
-def build_stream(
-    dataset: SliceDataset,
-    batch_size: int,
-    num_workers: int,
-    pin_memory: bool,
-) -> BatchStream:
-    loader = DataLoader(
-        dataset,
-        batch_sampler=FolderBatchSampler(dataset, batch_size),
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=num_workers > 0,
-    )
-    return BatchStream(loader)
 
 
 def build_denoiser(
@@ -183,7 +75,8 @@ def build_models(
     model = cfg["model"]
     generator = model["generator"]
     critic = model["critic"]
-    num_domains = len(get_domains(data))
+    domains = get_domains(data)
+    num_domains = len(domains)
     denoiser = build_denoiser(cfg)
     critics = nn.ModuleDict(
         {
@@ -194,7 +87,8 @@ def build_models(
                 num_domains=num_domains,
                 gradient_checkpointing=model["grad_checkpoint"],
             )
-            for axis in get_data_axes(data)
+            for axis in AXES
+            if any(axis in folders for folders in domains.values())
         }
     )
     connectivity_critic = ConnectivityCritic2D(
@@ -376,6 +270,7 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             normal_transition_weight=connectivity["phase_transition_weight"],
             connectivity_bank_size=connectivity["volume_count"],
             connectivity_refresh_steps=connectivity["refresh_every"],
+            connectivity_max_gap=connectivity.get("max_gap", 1),
             vf_loss_weight=vf["weight"],
             vf_target_average_max_samples=vf["max_samples"],
             domain_dropout=1.0 - data["domain_prob"],

@@ -8,7 +8,7 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.build import build_datasets
+from src.dataset.build import build_datasets
 from src.utils import load_yaml
 
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "train.yaml"
@@ -37,7 +37,9 @@ def main() -> None:
     for row, axis in enumerate(axes):
         ds = datasets[args.domain][axis]
         for col in range(SAMPLES):
-            img = ds[np.random.randint(len(ds))].numpy()
+            group = ds.path_groups[np.random.randint(len(ds.path_groups))]
+            path = group[np.random.randint(len(group))]
+            img = ds[path].numpy()
             panels[row, col].imshow(
                 img,
                 cmap="gray",

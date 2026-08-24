@@ -1,4 +1,3 @@
-import math
 from collections.abc import Sequence
 
 import torch
@@ -6,30 +5,89 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from .blocks import (
+from .common import (
+    INV_SQRT_THREE,
     INV_SQRT_TWO,
-    AdaptiveResBlock3D,
-    ChannelNorm3D,
-    SinusoidalTimeEmbedding,
-    Upsample3D,
+    AdaptiveNorm,
+    SinusoidalEmbedding,
+    embed_domain,
 )
-from .domain import masked_domain_embedding
-
-MAX_GUIDANCE = 10_000.0
 
 
-def validate_guidance(value: float) -> float:
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(value)
-        or value < 0.0
-        or value > MAX_GUIDANCE
-    ):
-        raise ValueError(
-            f"guidance must be a finite number between zero and {MAX_GUIDANCE:g}."
+class ChannelNorm3D(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        eps: float = 1.0e-5,
+        affine: bool = True,
+    ) -> None:
+        super().__init__()
+        self.eps = eps
+        if affine:
+            self.scale = nn.Parameter(torch.ones(channels))
+            self.shift = nn.Parameter(torch.zeros(channels))
+        else:
+            self.register_parameter("scale", None)
+            self.register_parameter("shift", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        var, mean = torch.var_mean(
+            x,
+            dim=1,
+            keepdim=True,
+            correction=0,
         )
-    return float(value)
+        mean = mean.to(dtype=x.dtype)
+        inv_std = torch.rsqrt(var + self.eps).to(dtype=x.dtype)
+        x = (x - mean) * inv_std
+        if self.scale is None:
+            return x
+        shape = (1, -1, 1, 1, 1)
+        scale = self.scale.to(dtype=x.dtype).view(shape)
+        shift = self.shift.to(dtype=x.dtype).view(shape)
+        return x * scale + shift
+
+
+class AdaptiveResBlock3D(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        embedding_channels: int,
+    ) -> None:
+        super().__init__()
+        self.norm1 = AdaptiveNorm(ChannelNorm3D, in_channels, embedding_channels)
+        self.conv1 = nn.Conv3d(in_channels, out_channels, 3, padding=1)
+        self.norm2 = AdaptiveNorm(ChannelNorm3D, out_channels, embedding_channels)
+        self.conv2 = nn.Conv3d(out_channels, out_channels, 3, padding=1)
+        self.skip = (
+            nn.Identity()
+            if in_channels == out_channels
+            else nn.Conv3d(in_channels, out_channels, 1)
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        emb: torch.Tensor,
+    ) -> torch.Tensor:
+        h = self.conv1(F.silu(self.norm1(x, emb)))
+        h = self.conv2(F.silu(self.norm2(h, emb)))
+        return (self.skip(x) + h) * INV_SQRT_TWO
+
+
+class Upsample3D(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, 3, padding=1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        size: tuple[int, int, int],
+    ) -> torch.Tensor:
+        h = F.interpolate(x, size=size, mode="nearest")
+        return self.conv(h)
 
 
 class Denoiser3D(nn.Module):
@@ -55,7 +113,7 @@ class Denoiser3D(nn.Module):
         self.gradient_checkpointing = gradient_checkpointing
         self.anchor_multiscale = anchor_multiscale
 
-        self.time_emb = SinusoidalTimeEmbedding(embedding_channels)
+        self.time_emb = SinusoidalEmbedding(embedding_channels)
         self.time_mlp = nn.Sequential(
             nn.Linear(embedding_channels, embedding_channels),
             nn.SiLU(),
@@ -156,7 +214,7 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        logits = self.predict_logits(
+        logits = self.compute_logits(
             x_current,
             time,
             latent,
@@ -168,7 +226,7 @@ class Denoiser3D(nn.Module):
         )
         return self.decode(logits)
 
-    def predict_logits(
+    def compute_logits(
         self,
         x_current: torch.Tensor,
         time: torch.Tensor,
@@ -190,7 +248,7 @@ class Denoiser3D(nn.Module):
             x = x + self.anchor_input(torch.cat(anchor, dim=1))
         skips = []
         for idx, block in enumerate(self.encoder):
-            x = self.run_block(block, x, emb)
+            x = self.apply_block(block, x, emb)
             if idx < len(self.downsample):
                 skips.append(x)
                 x = self.downsample[idx](x)
@@ -202,7 +260,7 @@ class Denoiser3D(nn.Module):
                     x = x + self.anchor_pyramid[idx](anchor_at_scale)
 
         for block in self.middle:
-            x = self.run_block(block, x, emb)
+            x = self.apply_block(block, x, emb)
 
         for upsample, block, skip in zip(
             self.upsample,
@@ -215,12 +273,12 @@ class Denoiser3D(nn.Module):
                 (x * INV_SQRT_TWO, skip * INV_SQRT_TWO),
                 dim=1,
             )
-            x = self.run_block(block, x, emb)
+            x = self.apply_block(block, x, emb)
 
         logits = self.output(F.silu(self.output_norm(x)))
         return logits
 
-    def predict_guided(
+    def apply_guidance_logits(
         self,
         x_current: torch.Tensor,
         time: torch.Tensor,
@@ -232,39 +290,12 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Combine conditional and unconditional logits with shared stochastic inputs."""
-        logits = self.predict_guided_logits(
-            x_current,
-            time,
-            latent,
-            guidance,
-            domain,
-            vf=vf,
-            vf_present=vf_present,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
-        )
-        return self.decode(logits).to(x_current.dtype)
-
-    def predict_guided_logits(
-        self,
-        x_current: torch.Tensor,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        guidance: float,
-        domain: torch.Tensor,
-        vf: torch.Tensor | None = None,
-        vf_present: torch.Tensor | None = None,
-        anchor_image: torch.Tensor | None = None,
-        anchor_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Return conditional guidance before phase-probability decoding."""
-        guidance = validate_guidance(guidance)
-        self._validate_vf_condition(x_current, vf, vf_present)
-        if guidance == 1.0 or (
+        if guidance == 0.0 or (
             vf is None and anchor_image is None and anchor_mask is None
         ):
-            return self.predict_logits(
+            return self.compute_logits(x_current, time, latent, domain)
+        elif guidance == 1.0:
+            return self.compute_logits(
                 x_current,
                 time,
                 latent,
@@ -274,23 +305,21 @@ class Denoiser3D(nn.Module):
                 anchor_image=anchor_image,
                 anchor_mask=anchor_mask,
             )
-        unconditional = self.predict_logits(x_current, time, latent, domain)
-        if guidance == 0.0:
-            return unconditional
-        conditional = self.predict_logits(
-            x_current,
-            time,
-            latent,
-            domain,
-            vf=vf,
-            vf_present=vf_present,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
-        )
-        baseline = unconditional.to(torch.float32)
-        guided = conditional.to(torch.float32)
-        guided.sub_(baseline).mul_(guidance).add_(baseline)
-        return guided
+        else:
+            unconditional = self.compute_logits(x_current, time, latent, domain)
+            conditional = self.compute_logits(
+                x_current,
+                time,
+                latent,
+                domain,
+                vf=vf,
+                vf_present=vf_present,
+                anchor_image=anchor_image,
+                anchor_mask=anchor_mask,
+            )
+            baseline = unconditional.to(torch.float32)
+            conditional = conditional.to(torch.float32)
+            return baseline + guidance * (conditional - baseline)
 
     @staticmethod
     def decode(logits: torch.Tensor) -> torch.Tensor:
@@ -305,19 +334,16 @@ class Denoiser3D(nn.Module):
         vf: torch.Tensor | None,
         vf_present: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self._validate_vf_condition(inputs, vf, vf_present)
         time = time.to(device=inputs.device)
         latent = latent.to(device=inputs.device, dtype=inputs.dtype)
         time_emb = self.time_mlp(self.time_emb(time).to(dtype=inputs.dtype))
         latent_emb = self.latent_mlp(latent)
-        emb = (time_emb + latent_emb) * INV_SQRT_TWO
-        domain_emb = masked_domain_embedding(
+        domain_emb = embed_domain(
             self.domain_embedding,
             domain,
-            device=inputs.device,
-            dtype=inputs.dtype,
+            inputs.dtype,
         )
-        emb = (emb + domain_emb) * INV_SQRT_TWO
+        emb = (time_emb + latent_emb + domain_emb) * INV_SQRT_THREE
         if vf is not None:
             vf = vf.to(device=inputs.device, dtype=inputs.dtype)
             vf_emb = self.vf_mlp(vf)
@@ -328,29 +354,7 @@ class Denoiser3D(nn.Module):
                 emb = torch.where(vf_present[:, None], emb + vf_emb, emb)
         return emb
 
-    def _validate_vf_condition(
-        self,
-        inputs: torch.Tensor,
-        vf: torch.Tensor | None,
-        vf_present: torch.Tensor | None,
-    ) -> None:
-        if vf is None:
-            if vf_present is not None:
-                raise ValueError("vf_present requires vf.")
-            return
-        if not isinstance(vf, torch.Tensor) or not vf.is_floating_point():
-            raise TypeError("vf must be a floating-point tensor.")
-        expected = (inputs.shape[0], self.vf_mlp[0].in_features)
-        if vf.shape != expected:
-            raise ValueError("vf must have shape [B, num_phases].")
-        if vf_present is None:
-            return
-        if not isinstance(vf_present, torch.Tensor) or vf_present.dtype != torch.bool:
-            raise TypeError("vf_present must be a boolean tensor.")
-        if vf_present.shape != (inputs.shape[0],):
-            raise ValueError("vf_present must have shape [B].")
-
-    def run_block(
+    def apply_block(
         self,
         block: nn.Module,
         inputs: torch.Tensor,
@@ -375,32 +379,19 @@ class Denoiser3D(nn.Module):
             return None
         if anchor_image is None or anchor_mask is None:
             raise ValueError("anchor_image and anchor_mask must be provided together.")
-        if not isinstance(anchor_image, torch.Tensor) or not isinstance(
-            anchor_mask,
-            torch.Tensor,
-        ):
-            raise TypeError("anchor_image and anchor_mask must be tensors.")
-        if anchor_image.shape != inputs.shape:
-            raise ValueError("anchor_image must have the same shape as inputs.")
-        expected_mask = (inputs.shape[0], 1, *inputs.shape[2:])
-        if anchor_mask.shape != expected_mask:
-            raise ValueError("anchor_mask must have shape [B, 1, D, H, W].")
         mask = anchor_mask.to(device=inputs.device, dtype=inputs.dtype)
-        clean = anchor_image.to(device=inputs.device, dtype=inputs.dtype)
-        probs = (clean + 1.0) * 0.5 * mask
-        return probs, mask
+        values = anchor_image.to(device=inputs.device, dtype=inputs.dtype)
+        return values * mask, mask
 
     @staticmethod
     def _pool_anchor(
-        probs: torch.Tensor,
+        values: torch.Tensor,
         mask: torch.Tensor,
         output_size: Sequence[int],
     ) -> torch.Tensor:
         coverage = F.adaptive_avg_pool3d(mask, output_size)
-        pooled_probs = F.adaptive_avg_pool3d(probs, output_size)
-        pooled_probs = torch.where(
-            coverage > 0.0,
-            pooled_probs / coverage.clamp_min(torch.finfo(probs.dtype).eps),
-            torch.zeros_like(pooled_probs),
+        pooled_values = F.adaptive_avg_pool3d(values, output_size)
+        pooled_values = pooled_values / coverage.clamp_min(
+            torch.finfo(values.dtype).eps,
         )
-        return torch.cat((pooled_probs, coverage), dim=1)
+        return torch.cat((pooled_values, coverage), dim=1)

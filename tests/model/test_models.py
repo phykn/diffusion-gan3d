@@ -2,13 +2,9 @@ import unittest
 
 import torch
 
-from src.model.blocks import (
-    AdaptiveChannelNorm3D,
-    AdaptiveGroupNorm,
-    ChannelNorm3D,
-)
-from src.model.critic import CriticScores, PairCritic2D
-from src.model.denoiser import Denoiser3D
+from src.model.common import AdaptiveNorm
+from src.model.critic import CriticScores, GroupNorm, PairCritic2D
+from src.model.denoiser import ChannelNorm3D, Denoiser3D
 
 
 def _denoiser(
@@ -75,7 +71,8 @@ class Denoiser3DTest(unittest.TestCase):
     def test_3d_model_uses_channel_norm(self):
         model = _denoiser()
 
-        self.assertIsInstance(model.encoder[0].norm1, AdaptiveChannelNorm3D)
+        self.assertIsInstance(model.encoder[0].norm1, AdaptiveNorm)
+        self.assertIsInstance(model.encoder[0].norm1.norm, ChannelNorm3D)
         self.assertIsInstance(model.output_norm, ChannelNorm3D)
         self.assertEqual(model.downsample_factor, 2)
 
@@ -193,7 +190,8 @@ class Denoiser3DTest(unittest.TestCase):
         self.assertGreater(float(model.anchor_input.weight.grad.abs().sum()), 0.0)
 
         with torch.no_grad():
-            model.anchor_input.weight.fill_(0.5)
+            model.anchor_input.weight.zero_()
+            model.anchor_input.weight[:, -1].fill_(0.5)
         learned_plain = model(inputs, time, latent, domain)
         learned_empty = model(
             inputs,
@@ -235,8 +233,8 @@ class Denoiser3DTest(unittest.TestCase):
         anchor_mask[:, :, 1:7, 3, 1:7] = True
         anchor_image[:, 0].masked_fill_(anchor_mask[:, 0], 1.0)
 
-        plain = model.predict_logits(inputs, time, latent, domain)
-        anchored = model.predict_logits(
+        plain = model.compute_logits(inputs, time, latent, domain)
+        anchored = model.compute_logits(
             inputs,
             time,
             latent,
@@ -264,8 +262,8 @@ class Denoiser3DTest(unittest.TestCase):
             model.anchor_input.weight.fill_(0.1)
             for projection in model.anchor_pyramid:
                 projection.weight.fill_(0.1)
-        learned_plain = model.predict_logits(inputs, time, latent, domain)
-        learned_empty = model.predict_logits(
+        learned_plain = model.compute_logits(inputs, time, latent, domain)
+        learned_empty = model.compute_logits(
             inputs,
             time,
             latent,
@@ -273,7 +271,7 @@ class Denoiser3DTest(unittest.TestCase):
             anchor_image=torch.zeros_like(inputs),
             anchor_mask=torch.zeros_like(anchor_mask),
         )
-        learned_anchor = model.predict_logits(
+        learned_anchor = model.compute_logits(
             inputs,
             time,
             latent,
@@ -301,24 +299,28 @@ class Denoiser3DTest(unittest.TestCase):
         domain = _domain(inputs)
         self.assertTrue(
             torch.equal(
-                single.predict_logits(inputs, time, latent, domain),
-                multiscale.predict_logits(inputs, time, latent, domain),
+                single.compute_logits(inputs, time, latent, domain),
+                multiscale.compute_logits(inputs, time, latent, domain),
             )
         )
 
     def test_multiscale_pool_normalizes_partial_anchor_and_keeps_coverage(self):
-        probs = torch.zeros(1, 2, 4, 4, 4)
+        values = torch.zeros(1, 2, 4, 4, 4)
         mask = torch.zeros(1, 1, 4, 4, 4)
         mask[:, :, 0, 0, 0] = 1.0
-        probs[:, 0, 0, 0, 0] = 1.0
+        values[:, :, 0, 0, 0] = -1.0
+        values[:, 0, 0, 0, 0] = 1.0
         mask[:, :, :2, :2, 2:] = 1.0
-        probs[:, 0, :2, :2, 2:] = 1.0
+        values[:, :, :2, :2, 2:] = -1.0
+        values[:, 0, :2, :2, 2:] = 1.0
 
-        pooled = Denoiser3D._pool_anchor(probs, mask, (2, 2, 2))
+        pooled = Denoiser3D._pool_anchor(values, mask, (2, 2, 2))
 
         self.assertTrue(bool(torch.isfinite(pooled).all()))
         torch.testing.assert_close(pooled[0, 0, 0, 0, 0], torch.tensor(1.0))
         torch.testing.assert_close(pooled[0, 0, 0, 0, 1], torch.tensor(1.0))
+        torch.testing.assert_close(pooled[0, 1, 0, 0, 0], torch.tensor(-1.0))
+        torch.testing.assert_close(pooled[0, 1, 0, 0, 1], torch.tensor(-1.0))
         torch.testing.assert_close(pooled[0, -1, 0, 0, 0], torch.tensor(0.125))
         torch.testing.assert_close(pooled[0, -1, 0, 0, 1], torch.tensor(1.0))
         self.assertEqual(float(pooled[0, :, 1, 1, 1].abs().sum()), 0.0)
@@ -354,11 +356,11 @@ class Denoiser3DTest(unittest.TestCase):
             model.vf_mlp[-1].weight.fill_(0.25)
             model.vf_mlp[-1].bias.fill_(0.1)
 
-        unconditional = model.predict_logits(inputs, time, latent, domain)
-        conditional = model.predict_logits(inputs, time, latent, domain, vf=vf)
+        unconditional = model.compute_logits(inputs, time, latent, domain)
+        conditional = model.compute_logits(inputs, time, latent, domain, vf=vf)
         expected = model.decode(unconditional + 2.0 * (conditional - unconditional))
 
-        default = model.predict_guided(
+        default_logits = model.apply_guidance_logits(
             inputs,
             time,
             latent,
@@ -366,7 +368,8 @@ class Denoiser3DTest(unittest.TestCase):
             domain=domain,
             vf=vf,
         )
-        guided = model.predict_guided(
+        default = model.decode(default_logits)
+        guided_logits = model.apply_guidance_logits(
             inputs,
             time,
             latent,
@@ -374,15 +377,8 @@ class Denoiser3DTest(unittest.TestCase):
             domain=domain,
             vf=vf,
         )
-        guided_logits = model.predict_guided_logits(
-            inputs,
-            time,
-            latent,
-            guidance=2.0,
-            domain=domain,
-            vf=vf,
-        )
-        disabled = model.predict_guided(
+        guided = model.decode(guided_logits)
+        disabled_logits = model.apply_guidance_logits(
             inputs,
             time,
             latent,
@@ -390,6 +386,7 @@ class Denoiser3DTest(unittest.TestCase):
             domain=domain,
             vf=vf,
         )
+        disabled = model.decode(disabled_logits)
 
         self.assertTrue(
             torch.equal(default, model(inputs, time, latent, domain, vf=vf))
@@ -400,17 +397,6 @@ class Denoiser3DTest(unittest.TestCase):
             unconditional + 2.0 * (conditional - unconditional),
         )
         self.assertTrue(torch.equal(disabled, model.decode(unconditional)))
-
-        for invalid in (-1.0, 1e39, float("nan"), float("inf"), True):
-            with self.assertRaisesRegex(ValueError, "guidance"):
-                model.predict_guided(
-                    inputs,
-                    time,
-                    latent,
-                    guidance=invalid,
-                    domain=domain,
-                    vf=vf,
-                )
 
     def test_guidance_passes_share_stochastic_inputs(self):
         model = _denoiser()
@@ -429,7 +415,7 @@ class Denoiser3DTest(unittest.TestCase):
                 torch.Tensor | None,
             ]
         ] = []
-        original = model.predict_logits
+        original = model.compute_logits
 
         def traced(
             x_current: torch.Tensor,
@@ -453,8 +439,8 @@ class Denoiser3DTest(unittest.TestCase):
                 anchor_mask=anchor_mask,
             )
 
-        model.predict_logits = traced
-        model.predict_guided(
+        model.compute_logits = traced
+        model.apply_guidance_logits(
             inputs,
             time,
             latent,
@@ -470,31 +456,6 @@ class Denoiser3DTest(unittest.TestCase):
         self.assertIsNone(calls[0][5])
         self.assertIs(calls[1][4], vf)
         self.assertIsNone(calls[1][5])
-
-    def test_guidance_returns_the_current_state_dtype(self):
-        model = _denoiser()
-        inputs = torch.randn(1, 3, 4, 4, 4, dtype=torch.float32)
-        time = torch.ones(1)
-        latent = torch.randn(1, 4)
-        vf = torch.tensor([[0.2, 0.3, 0.5]])
-        domain = _domain(inputs)
-        original = model.predict_logits
-
-        def half_logits(*args, **kwargs):
-            return original(*args, **kwargs).to(torch.float16)
-
-        model.predict_logits = half_logits
-
-        guided = model.predict_guided(
-            inputs,
-            time,
-            latent,
-            guidance=1.5,
-            domain=domain,
-            vf=vf,
-        )
-
-        self.assertEqual(guided.dtype, inputs.dtype)
 
     def test_vf_presence_mask_matches_exact_null_and_conditioned_paths(self):
         model = _denoiser()
@@ -513,9 +474,9 @@ class Denoiser3DTest(unittest.TestCase):
             model.vf_mlp[-1].weight.fill_(0.25)
             model.vf_mlp[-1].bias.fill_(0.1)
 
-        plain = model.predict_logits(inputs, time, latent, domain)
-        conditioned = model.predict_logits(inputs, time, latent, domain, vf=vf)
-        mixed = model.predict_logits(
+        plain = model.compute_logits(inputs, time, latent, domain)
+        conditioned = model.compute_logits(inputs, time, latent, domain, vf=vf)
+        mixed = model.compute_logits(
             inputs,
             time,
             latent,
@@ -523,7 +484,7 @@ class Denoiser3DTest(unittest.TestCase):
             vf=vf,
             vf_present=torch.tensor([False, True, False]),
         )
-        all_false = model.predict_logits(
+        all_false = model.compute_logits(
             inputs,
             time,
             latent,
@@ -531,7 +492,7 @@ class Denoiser3DTest(unittest.TestCase):
             vf=vf,
             vf_present=torch.zeros(3, dtype=torch.bool),
         )
-        all_true = model.predict_logits(
+        all_true = model.compute_logits(
             inputs,
             time,
             latent,
@@ -546,45 +507,6 @@ class Denoiser3DTest(unittest.TestCase):
         self.assertTrue(torch.equal(all_false, plain))
         self.assertTrue(torch.equal(all_true, conditioned))
         self.assertFalse(torch.equal(conditioned, plain))
-
-    def test_vf_presence_validation_rejects_invalid_inputs(self):
-        model = _denoiser()
-        inputs = torch.randn(2, 3, 4, 4, 4)
-        time = torch.zeros(2)
-        latent = torch.randn(2, 4)
-        vf = torch.tensor([[0.2, 0.3, 0.5], [0.5, 0.25, 0.25]])
-        domain = _domain(inputs)
-
-        with self.assertRaisesRegex(ValueError, "vf_present requires vf"):
-            model.predict_logits(
-                inputs,
-                time,
-                latent,
-                domain,
-                vf_present=torch.ones(2, dtype=torch.bool),
-            )
-        with self.assertRaisesRegex(TypeError, "vf must be a floating-point"):
-            model.predict_logits(inputs, time, latent, domain, vf=vf.to(torch.int64))
-        with self.assertRaisesRegex(ValueError, "vf must have shape"):
-            model.predict_logits(inputs, time, latent, domain, vf=vf[:1])
-        with self.assertRaisesRegex(TypeError, "vf_present must be a boolean"):
-            model.predict_logits(
-                inputs,
-                time,
-                latent,
-                domain,
-                vf=vf,
-                vf_present=torch.ones(2),
-            )
-        with self.assertRaisesRegex(ValueError, "vf_present must have shape"):
-            model.predict_logits(
-                inputs,
-                time,
-                latent,
-                domain,
-                vf=vf,
-                vf_present=torch.ones(2, 1, dtype=torch.bool),
-            )
 
     def test_masked_vf_rows_receive_no_gradient(self):
         model = _denoiser()
@@ -632,8 +554,8 @@ class Denoiser3DTest(unittest.TestCase):
         self.assertEqual(int(torch.count_nonzero(output_layer.weight)), 0)
         self.assertEqual(int(torch.count_nonzero(output_layer.bias)), 0)
 
-        plain = model.predict_logits(inputs, time, latent, domain)
-        conditioned = model.predict_logits(
+        plain = model.compute_logits(inputs, time, latent, domain)
+        conditioned = model.compute_logits(
             inputs,
             time,
             latent,
@@ -653,7 +575,7 @@ class Denoiser3DTest(unittest.TestCase):
 
         with torch.no_grad():
             output_layer.bias.fill_(0.5)
-        learned_plain = model.predict_logits(inputs, time, latent, domain)
+        learned_plain = model.compute_logits(inputs, time, latent, domain)
         self.assertTrue(torch.equal(plain, learned_plain))
 
 
@@ -661,7 +583,8 @@ class PairCritic2DTest(unittest.TestCase):
     def test_2d_critic_keeps_spatial_group_norm(self):
         model = _critic()
 
-        self.assertIsInstance(model.blocks[0].norm1, AdaptiveGroupNorm)
+        self.assertIsInstance(model.blocks[0].norm1, AdaptiveNorm)
+        self.assertIsInstance(model.blocks[0].norm1.norm, GroupNorm)
         self.assertIsInstance(model.local_norm, torch.nn.GroupNorm)
         self.assertIsInstance(model.output_norm, torch.nn.GroupNorm)
 

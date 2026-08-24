@@ -12,8 +12,8 @@ from .. import AXES
 from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
 from ..dataset import BatchStream
 from ..diffusion import Diffusion
+from ..model.common import NULL_DOMAIN
 from ..model.denoiser import Denoiser3D
-from ..model.domain import NULL_DOMAIN
 from . import vf
 from .anchor_loss import pool_size_from_downsampling, soft_anchor_loss
 from .augment import CriticAugment
@@ -218,6 +218,7 @@ class TrainerSettings:
     anchor_pixel_loss_weight: float
     anchor_shared_axis_probability: float
     vf_target_average_max_samples: int
+    connectivity_max_gap: int = 1
 
     def __post_init__(self) -> None:
         self._validate_positive_integers()
@@ -262,6 +263,7 @@ class TrainerSettings:
             "latent_channels": self.latent_channels,
             "vf_target_average_max_samples": self.vf_target_average_max_samples,
             "connectivity_bank_size": self.connectivity_bank_size,
+            "connectivity_max_gap": self.connectivity_max_gap,
         }
         for name, value in values.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -371,6 +373,7 @@ class Trainer:
             bank_size=settings.connectivity_bank_size,
             plane_stride=self.denoiser.downsample_factor,
             owned_axes=owned_axes,
+            max_gap=settings.connectivity_max_gap,
         )
         self.prior_refresh_steps = settings.connectivity_refresh_steps
         self.prior_denoiser: Denoiser3D | None = None
@@ -734,6 +737,7 @@ class Trainer:
                 (0, 3, self.num_phases, self.patch_size, self.patch_size)
             ),
             axes=torch.empty(0, device=self.device, dtype=torch.long),
+            gaps=torch.empty(0, device=self.device, dtype=torch.long),
             center_slots=torch.empty(0, device=self.device, dtype=torch.long),
             anchor_flags=torch.empty(0, device=self.device, dtype=torch.bool),
         )
@@ -760,12 +764,14 @@ class Trainer:
             TripletBatch(
                 values=real_values,
                 axes=real.axes,
+                gaps=real.gaps,
                 center_slots=real.center_slots,
                 anchor_flags=real.anchor_flags,
             ),
             TripletBatch(
                 values=fake_values,
                 axes=fake.axes,
+                gaps=fake.gaps,
                 center_slots=fake.center_slots,
                 anchor_flags=fake.anchor_flags,
             ),
@@ -1185,7 +1191,7 @@ class Trainer:
         time = self.make_time(transition, current.shape[0])
         latent = self.sample_latent(current.shape[0], current.dtype)
         with self.autocast():
-            logits = self.denoiser.predict_logits(
+            logits = self.denoiser.compute_logits(
                 current,
                 time,
                 latent,
@@ -1349,8 +1355,18 @@ class Trainer:
             raise ValueError("connectivity domains must have shape [B].")
         autocast = self.autocast(self.amp_enabled and not apply_r1)
         with autocast:
-            real_score = self.connectivity_critic(real, fake.axes, domains)
-            fake_score = self.connectivity_critic(fake_values, fake.axes, domains)
+            real_score = self.connectivity_critic(
+                real,
+                fake.axes,
+                fake.gaps,
+                domains,
+            )
+            fake_score = self.connectivity_critic(
+                fake_values,
+                fake.axes,
+                fake.gaps,
+                domains,
+            )
             losses = get_critic_loss(
                 real_score,
                 fake_score,
@@ -1403,6 +1419,7 @@ class Trainer:
                     connectivity_scores = self.connectivity_critic(
                         batch.connectivity_fake.values,
                         batch.connectivity_fake.axes,
+                        batch.connectivity_fake.gaps,
                         batch.connectivity_domains,
                     )
                     connectivity_head = get_generator_loss(

@@ -135,7 +135,7 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
             "data": {
                 "domains": {0: folders},
                 "num_phase": 3,
-                "crop_partial": True,
+                "allow_part": True,
                 "crop_size": 8,
                 "input_size": 8,
                 "augment": "anisotropic",
@@ -262,7 +262,7 @@ def test_dataset_check_script_accepts_one_axis(tmp_path: Path) -> None:
             "data": {
                 "domains": {0: {0: [str(folder)]}},
                 "num_phase": 2,
-                "crop_partial": False,
+                "allow_part": False,
                 "crop_size": 8,
                 "input_size": 8,
             }

@@ -1,11 +1,38 @@
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import AXES
 from .utils import load_yaml
 
 DEFAULT_ANCHOR_STRENGTH = 0.90
 DEFAULT_ANCHOR_SPREAD = 0.20
+
+
+def get_domains(
+    data: Mapping[str, object],
+) -> dict[int, dict[int, Sequence[str | Path]]]:
+    domains = data["domains"]
+    if not isinstance(domains, Mapping):
+        raise TypeError("data.domains must be a mapping.")
+    if not domains:
+        raise ValueError("data.domains must not be empty.")
+    if set(domains) != set(range(len(domains))):
+        raise ValueError("domain IDs must be contiguous and start at zero.")
+    parsed = {}
+    for domain, folders in domains.items():
+        if not isinstance(folders, Mapping):
+            raise TypeError(f"domain {domain} must map axes to folders.")
+        if not folders:
+            raise ValueError(f"domain {domain} must contain at least one axis.")
+        unknown = set(folders) - set(AXES)
+        if unknown:
+            raise ValueError(
+                f"domain {domain} contains invalid axes: {sorted(unknown)}."
+            )
+        parsed[domain] = dict(folders)
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -29,14 +56,6 @@ def load_generation_settings() -> GenerationSettings:
         raise ValueError(f"unknown generation setting: {names}")
 
     guidance = section.get("guidance", 1.0)
-    if (
-        not isinstance(guidance, (int, float))
-        or isinstance(guidance, bool)
-        or not math.isfinite(guidance)
-        or guidance < 0.0
-        or guidance > 10_000.0
-    ):
-        raise ValueError("guidance must be between zero and 10000.")
     anchor_strength = section.get("anchor_strength", DEFAULT_ANCHOR_STRENGTH)
     if (
         not isinstance(anchor_strength, (int, float))

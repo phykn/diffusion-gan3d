@@ -6,7 +6,7 @@ data:
       2: [data]
 
   num_phase: 2
-  crop_partial: true
+  allow_part: true
   crop_size: 128
   input_size: 128
 
@@ -49,6 +49,7 @@ anchor:
   connectivity:
     volume_count: 16
     refresh_every: 500
+    max_gap: 8
     weight: 0.25
     phase_transition_weight: 0.10
 

@@ -10,6 +10,7 @@ from .prior import (
     PriorCondition,
     PriorReference,
     PriorReferences,
+    _relation_indices,
 )
 
 TRIPLETS_PER_AXIS = 2
@@ -20,6 +21,7 @@ TRIPLETS_PER_STEP = 1 + len(AXES) * TRIPLETS_PER_AXIS
 class TripletBatch:
     values: torch.Tensor
     axes: torch.Tensor
+    gaps: torch.Tensor
     center_slots: torch.Tensor
     anchor_flags: torch.Tensor
 
@@ -30,6 +32,12 @@ class TripletBatch:
             raise ValueError("triplet axes must have shape [B].")
         if self.axes.dtype != torch.long or self.axes.device != self.values.device:
             raise ValueError("triplet axes must use torch.long on the values device.")
+        if self.gaps.shape != (self.values.shape[0],):
+            raise ValueError("triplet gaps must have shape [B].")
+        if self.gaps.dtype != torch.long or self.gaps.device != self.values.device:
+            raise ValueError("triplet gaps must use torch.long on the values device.")
+        if self.gaps.numel() and bool((self.gaps < 1).any()):
+            raise ValueError("triplet gaps must be positive.")
         if self.center_slots.shape != (self.values.shape[0],):
             raise ValueError("triplet center slots must have shape [B].")
         if self.center_slots.dtype != torch.long:
@@ -54,6 +62,7 @@ class TripletBatch:
         return TripletBatch(
             values=self.values.index_select(0, indices),
             axes=self.axes.index_select(0, indices),
+            gaps=self.gaps.index_select(0, indices),
             center_slots=self.center_slots.index_select(0, indices),
             anchor_flags=self.anchor_flags.index_select(0, indices),
         )
@@ -88,6 +97,8 @@ def normal_transition_loss(real: TripletBatch, fake: TripletBatch) -> torch.Tens
         raise ValueError("real and fake triplets must have the same shape.")
     if not torch.equal(real.axes, fake.axes):
         raise ValueError("real and fake triplets must use the same axes.")
+    if not torch.equal(real.gaps, fake.gaps):
+        raise ValueError("real and fake triplets must use the same gaps.")
     if not torch.equal(real.anchor_flags, fake.anchor_flags):
         raise ValueError("real and fake triplets must use the same groups.")
     _, _, phase_count, height, width = real.values.shape
@@ -177,17 +188,20 @@ class Connectivity:
         bank_size: int,
         owned_axes: dict[int, tuple[int, ...]],
         plane_stride: int = 1,
+        max_gap: int = 1,
     ) -> None:
         for name, value in (
             ("num_phases", num_phases),
             ("num_domains", num_domains),
             ("patch_size", patch_size),
+            ("max_gap", max_gap),
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{name} must be a positive integer.")
         self.num_phases = num_phases
         self.num_domains = num_domains
         self.patch_size = patch_size
+        self.max_gap = max_gap
         self.prior = ConditionalPrior(
             num_phases=num_phases,
             num_domains=num_domains,
@@ -195,6 +209,7 @@ class Connectivity:
             volume_count=bank_size,
             plane_stride=plane_stride,
             owned_axes=owned_axes,
+            max_gap=max_gap,
         )
 
     @property
@@ -266,6 +281,7 @@ class Connectivity:
             condition,
             observed_axis_masks,
             references,
+            generator=generator,
         )
         candidates, source_references = self._prepare_candidates(
             categorical,
@@ -354,19 +370,21 @@ class Connectivity:
             source_references = {}
         selected = []
         center_slots = []
+        gaps = []
         indices = []
         target_fractions = (
             ((target.values.detach().to(torch.float32) + 1.0) * 0.5)
             .mean(dim=(1, 3, 4))
             .to(device="cpu")
         )
-        for index, (axis, fraction) in enumerate(
-            zip(target.axes.tolist(), target_fractions, strict=True)
+        for index, (axis, gap, fraction) in enumerate(
+            zip(target.axes.tolist(), target.gaps.tolist(), target_fractions, strict=True)
         ):
             reference = source_references.get(index)
             if reference is not None:
                 selected.append(self._reference_triplet(reference))
                 center_slots.append(reference.center_slot)
+                gaps.append(reference.gap)
                 indices.append(index)
                 continue
             volumes = self._prior_volumes(domain, axis)
@@ -375,7 +393,7 @@ class Connectivity:
             choices = []
             choice_fractions = []
             for volume in volumes:
-                triplet = self._sample_prior_triplet(volume, axis, generator)
+                triplet = self._sample_prior_triplet(volume, axis, gap, generator)
                 choices.append(triplet)
                 choice_fractions.append(
                     ((triplet.to(torch.float32) + 1.0) * 0.5).mean(dim=(0, 2, 3))
@@ -385,6 +403,7 @@ class Connectivity:
             )
             selected.append(choices[int(distances.argmin())])
             center_slots.append(1)
+            gaps.append(gap)
             indices.append(index)
 
         if not selected:
@@ -399,6 +418,11 @@ class Connectivity:
                     dtype=target.values.dtype,
                 ),
                 axes=metadata.axes,
+                gaps=torch.tensor(
+                    gaps,
+                    device=target.values.device,
+                    dtype=torch.long,
+                ),
                 center_slots=torch.tensor(
                     center_slots,
                     device=target.values.device,
@@ -421,17 +445,18 @@ class Connectivity:
         self,
         labels: torch.Tensor,
         axis: int,
+        gap: int,
         generator: torch.Generator | None,
     ) -> torch.Tensor:
         moved = labels.movedim(axis, 0)
         depth, height, width = moved.shape
-        if depth < 3 or self.patch_size > min(height, width):
+        if gap < 1 or depth < 2 * gap + 1 or self.patch_size > min(height, width):
             raise ValueError("prior volume cannot provide the requested triplet.")
-        start = self._random_index(depth - 2, generator)
+        start = self._random_index(depth - 2 * gap, generator)
         top = self._random_start(height, self.patch_size, generator)
         left = self._random_start(width, self.patch_size, generator)
         values = moved[
-            start : start + 3,
+            start : start + 2 * gap + 1 : gap,
             top : top + self.patch_size,
             left : left + self.patch_size,
         ]
@@ -452,6 +477,7 @@ class Connectivity:
         condition: AnchorCondition,
         observed_axis_masks: torch.Tensor | None = None,
         references: PriorReferences = (),
+        generator: torch.Generator | None = None,
     ) -> _LocatedTriplets:
         self._check_volume(volume)
         if condition.axis_masks.shape != (volume.shape[0], 3, *volume.shape[2:]):
@@ -465,6 +491,7 @@ class Connectivity:
 
         triplets = []
         axes = []
+        gaps = []
         center_slots = []
         locations = []
         observed = []
@@ -491,12 +518,15 @@ class Connectivity:
                     left = self._centered_start(col, width)
                     reference = references_by_location.get((batch, axis, index_value))
                     if reference is None:
-                        start = self._window_start(index_value, depth)
-                        slice_indices = (start, start + 1, start + 2)
-                        center_slot = index_value - start
+                        gap = self._sample_gap(index_value, depth, generator)
+                        slice_indices = _relation_indices(index_value, depth, gap)
+                        if slice_indices is None:
+                            raise RuntimeError("sampled gap does not fit the volume.")
+                        center_slot = slice_indices.index(index_value)
                     else:
                         slice_indices = reference.slice_indices(depth)
                         center_slot = reference.center_slot
+                        gap = reference.gap
                     key = (batch, axis, slice_indices, top, left)
                     if key in occupied:
                         continue
@@ -517,6 +547,7 @@ class Connectivity:
                         continue
                     triplets.append(values)
                     axes.append(axis)
+                    gaps.append(gap)
                     center_slots.append(center_slot)
                     locations.append((batch, axis, index_value))
                     observed.append(
@@ -533,6 +564,7 @@ class Connectivity:
             TripletBatch(
                 values=torch.stack(triplets),
                 axes=torch.tensor(axes, device=volume.device, dtype=torch.long),
+                gaps=torch.tensor(gaps, device=volume.device, dtype=torch.long),
                 center_slots=torch.tensor(
                     center_slots,
                     device=volume.device,
@@ -567,10 +599,13 @@ class Connectivity:
         anchor_planes = condition.axis_masks[:, axis].movedim(axis + 1, 1)
         anchor_planes = anchor_planes.flatten(2).any(dim=2)
         available = [
-            (batch, start)
+            (batch, start, gap)
+            for gap in range(1, min(self.max_gap, (depth - 1) // 2) + 1)
             for batch in range(volume.shape[0])
-            for start in range(depth - 2)
-            if not bool(anchor_planes[batch, start : start + 3].any())
+            for start in range(depth - 2 * gap)
+            if not bool(
+                anchor_planes[batch, [start, start + gap, start + 2 * gap]].any()
+            )
         ]
         if not available:
             return self._empty_triplets(volume)
@@ -578,14 +613,14 @@ class Connectivity:
         choices = torch.randperm(len(available), device=volume.device)[:count]
         triplets = []
         for choice in choices.tolist():
-            batch, start = available[choice]
+            batch, start, gap = available[choice]
             top = self._device_random_start(height, volume.device)
             left = self._device_random_start(width, volume.device)
             triplets.append(
                 moved[
                     batch,
                     :,
-                    start : start + 3,
+                    start : start + 2 * gap + 1 : gap,
                     top : top + self.patch_size,
                     left : left + self.patch_size,
                 ].movedim(0, 1)
@@ -595,6 +630,11 @@ class Connectivity:
             axes=torch.full(
                 (len(triplets),),
                 axis,
+                device=volume.device,
+                dtype=torch.long,
+            ),
+            gaps=torch.tensor(
+                [available[choice][2] for choice in choices.tolist()],
                 device=volume.device,
                 dtype=torch.long,
             ),
@@ -617,6 +657,7 @@ class Connectivity:
         return TripletBatch(
             values=torch.cat((first.values, second.values)),
             axes=torch.cat((first.axes, second.axes)),
+            gaps=torch.cat((first.gaps, second.gaps)),
             center_slots=torch.cat((first.center_slots, second.center_slots)),
             anchor_flags=torch.cat((first.anchor_flags, second.anchor_flags)),
         )
@@ -695,13 +736,20 @@ class Connectivity:
         if not 0 <= domain < self.num_domains:
             raise ValueError("domain is outside the prior bank.")
 
-    @staticmethod
-    def _window_start(index: int, size: int) -> int:
-        if size < 3:
-            raise ValueError("triplet axis size must be at least three.")
-        if not 0 <= index < size:
-            raise ValueError("triplet index is outside the volume.")
-        return min(max(index - 1, 0), size - 3)
+    def _sample_gap(
+        self,
+        index: int,
+        size: int,
+        generator: torch.Generator | None,
+    ) -> int:
+        gaps = [
+            gap
+            for gap in range(1, min(self.max_gap, (size - 1) // 2) + 1)
+            if _relation_indices(index, size, gap) is not None
+        ]
+        if not gaps:
+            raise ValueError("no valid connectivity gap is available.")
+        return gaps[self._random_index(len(gaps), generator)]
 
     def _empty_triplets(self, volume: torch.Tensor) -> TripletBatch:
         return TripletBatch(
@@ -709,6 +757,7 @@ class Connectivity:
                 (0, 3, self.num_phases, self.patch_size, self.patch_size)
             ),
             axes=torch.empty(0, device=volume.device, dtype=torch.long),
+            gaps=torch.empty(0, device=volume.device, dtype=torch.long),
             center_slots=torch.empty(0, device=volume.device, dtype=torch.long),
             anchor_flags=torch.empty(0, device=volume.device, dtype=torch.bool),
         )

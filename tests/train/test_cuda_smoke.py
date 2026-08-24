@@ -24,7 +24,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
         "data": {
             "domains": {0: {0: ".", 1: ".", 2: "."}},
             "num_phase": 3,
-            "crop_partial": False,
+            "allow_part": False,
             "crop_size": 64,
             "input_size": 64,
             "domain_prob": 1.0,

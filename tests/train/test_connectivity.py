@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from src.anchor import PlaneAnchor, build_anchors
-from src.model.critic import ConnectivityCritic2D, connectivity_images
+from src.model.critic import ConnectivityCritic2D
 from src.train.connect import Connectivity, TripletBatch, normal_transition_loss
 from src.train.prior import PriorReference
 
@@ -23,8 +23,7 @@ def test_prior_bank_stores_complete_cpu_uint8_volumes_and_freezes() -> None:
     _record_prior(connect, _prediction_from_labels(first, num_phases=2), 0)
 
     assert connect.prior_count == 2
-    gap_bytes = 3 * ((size - 1) // 2) * torch.float32.itemsize
-    assert connect.prior_storage_bytes == 2 * (size**3 + size**2 + gap_bytes)
+    assert connect.prior_storage_bytes == 2 * (size**3 + size**2)
     entries = connect.prior._banks[0].items
     assert all(item.labels.device.type == "cpu" for item in entries)
     assert all(item.labels.dtype == torch.uint8 for item in entries)
@@ -112,10 +111,10 @@ def test_change_images_ignore_confidence_but_keep_student_gradients() -> None:
     low_confidence = (one_hot * 0.6 + (1.0 - one_hot) * 0.4).requires_grad_()
     high_confidence = one_hot * 10.0 - (1.0 - one_hot) * 10.0
 
-    low_images = connectivity_images(
+    low_images = ConnectivityCritic2D.connectivity_images(
         connect._straight_through(low_confidence).movedim(1, 2)
     )
-    high_images = connectivity_images(
+    high_images = ConnectivityCritic2D.connectivity_images(
         connect._straight_through(high_confidence).movedim(1, 2)
     )
     loss = low_images.square().sum()
@@ -365,7 +364,7 @@ def test_connectivity_images_are_phase_changes_and_discrete_bend() -> None:
     phases = torch.tensor((0.0, 0.25, 1.0)).reshape(1, 3, 1, 1, 1)
     triplets = phases.mul(2.0).sub(1.0)
 
-    images = connectivity_images(triplets)
+    images = ConnectivityCritic2D.connectivity_images(triplets)
 
     assert torch.allclose(images[:, 0], torch.tensor(0.25))
     assert torch.allclose(images[:, 1], torch.tensor(0.75))
@@ -379,8 +378,8 @@ def test_connectivity_images_remove_constant_slice_appearance() -> None:
     second = torch.full_like(first, 1.0)
 
     assert not torch.equal(first, second)
-    assert not bool(connectivity_images(first).any())
-    assert not bool(connectivity_images(second).any())
+    assert not bool(ConnectivityCritic2D.connectivity_images(first).any())
+    assert not bool(ConnectivityCritic2D.connectivity_images(second).any())
 
 
 def test_normal_transition_loss_is_zero_for_matching_triplets() -> None:
@@ -396,7 +395,13 @@ def test_normal_transition_loss_measures_neighbor_tv_and_backpropagates() -> Non
     fake_labels[:, (0, 2)] = 1
     real = _triplet_batch(real_labels, num_phases=2)
     fake_values = _triplet_values(fake_labels, num_phases=2).requires_grad_()
-    fake = TripletBatch(fake_values, real.axes, real.center_slots, real.anchor_flags)
+    fake = TripletBatch(
+        values=fake_values,
+        axes=real.axes,
+        gaps=real.gaps,
+        center_slots=real.center_slots,
+        anchor_flags=real.anchor_flags,
+    )
 
     loss = normal_transition_loss(real, fake)
     loss.backward()
@@ -432,10 +437,11 @@ def test_connectivity_critic_is_multiphase_and_exactly_reversal_invariant(
     )
     triplets = torch.randn(3, 3, num_phases, 15, 17, requires_grad=True)
     axes = torch.tensor((0, 1, 2))
+    gaps = torch.ones(3, dtype=torch.long)
     domains = torch.zeros(3, dtype=torch.long)
 
-    forward = critic(triplets, axes, domains)
-    reverse = critic(triplets.flip(1), axes, domains)
+    forward = critic(triplets, axes, gaps, domains)
+    reverse = critic(triplets.flip(1), axes, gaps, domains)
 
     assert torch.equal(forward.logits_global, reverse.logits_global)
     assert torch.equal(forward.logits_local, reverse.logits_local)
@@ -454,6 +460,7 @@ def test_connectivity_critic_rejects_invalid_axes() -> None:
         critic(
             torch.randn(1, 3, 2, 8, 8),
             torch.tensor((3,)),
+            torch.ones(1, dtype=torch.long),
             torch.zeros(1, dtype=torch.long),
         )
 
@@ -565,6 +572,7 @@ def _triplet_batch(
     return TripletBatch(
         values=_triplet_values(labels, num_phases=num_phases),
         axes=torch.zeros(labels.shape[0], dtype=torch.long),
+        gaps=torch.ones(labels.shape[0], dtype=torch.long),
         center_slots=torch.ones(labels.shape[0], dtype=torch.long),
         anchor_flags=anchor_flags,
     )

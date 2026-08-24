@@ -109,7 +109,6 @@ def test_repository_training_config_uses_soft_anchor_and_conditional_ema_prior()
     (
         {"overlap": -1},
         {"margin": True},
-        {"guidance": float("inf")},
         {"anchor_strength": -0.1},
         {"anchor_strength": 1.1},
         {"anchor_spread": 0.0},
@@ -160,7 +159,7 @@ def test_training_runtime_has_no_3d_reference_input() -> None:
         ROOT / "config" / "train.yaml",
         ROOT / "run_train.py",
         *sorted((ROOT / "src" / "train").glob("*.py")),
-        ROOT / "src" / "dataset.py",
+        *sorted((ROOT / "src" / "dataset").glob("*.py")),
     ]
     forbidden = (
         "generated/volumes",

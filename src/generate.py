@@ -6,7 +6,7 @@ import torch
 from .anchor import PlaneAnchor, build_anchors
 from .config import DEFAULT_ANCHOR_STRENGTH
 from .diffusion import Diffusion
-from .model.denoiser import Denoiser3D, validate_guidance
+from .model.denoiser import Denoiser3D
 
 
 class _GuidedDenoiser:
@@ -61,7 +61,7 @@ class _SpatialAnchorDenoiser:
         domain: torch.Tensor,
         vf: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        plain = self.generator.predict_logits(
+        plain = self.generator.compute_logits(
             current,
             time,
             latent,
@@ -70,7 +70,7 @@ class _SpatialAnchorDenoiser:
             vf=vf,
         )
         baseline = plain.float()
-        conditioned = self.generator.predict_logits(
+        conditioned = self.generator.compute_logits(
             current,
             time,
             latent,
@@ -159,7 +159,7 @@ class _CoupledAnchorSampler:
                 dtype=initial_noise.dtype,
             )
             base_pred = Denoiser3D.decode(
-                generator.predict_logits(
+                generator.compute_logits(
                     base_state,
                     time,
                     latent,
@@ -251,7 +251,6 @@ class Generator:
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        guidance = validate_guidance(guidance)
         conditions = {"domain": domain}
         if vf is not None:
             conditions["vf"] = vf
@@ -261,15 +260,16 @@ class Generator:
             conditions["anchor_mask"] = anchor_mask
         if guidance == 1.0:
             return self.model(current, time, latent, **conditions)
-        return self.model.predict_guided(
+        logits = self.compute_logits(
             current,
             time,
             latent,
-            guidance,
+            guidance=guidance,
             **conditions,
         )
+        return Denoiser3D.decode(logits).to(current.dtype)
 
-    def predict_logits(
+    def compute_logits(
         self,
         current: torch.Tensor,
         time: torch.Tensor,
@@ -281,7 +281,6 @@ class Generator:
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        guidance = validate_guidance(guidance)
         conditions = {"domain": domain}
         if vf is not None:
             conditions["vf"] = vf
@@ -290,8 +289,8 @@ class Generator:
         if anchor_mask is not None:
             conditions["anchor_mask"] = anchor_mask
         if guidance == 1.0:
-            return self.model.predict_logits(current, time, latent, **conditions)
-        return self.model.predict_guided_logits(
+            return self.model.compute_logits(current, time, latent, **conditions)
+        return self.model.apply_guidance_logits(
             current,
             time,
             latent,
@@ -382,7 +381,6 @@ class Generator:
         ):
             raise ValueError("anchor_sigma must be a positive finite number.")
         anchor_sigma = float(anchor_sigma)
-        guidance = validate_guidance(guidance)
         vf = self.prepare_vf(vf)
         generation_size = size + 2 * margin
         initial_noise = torch.randn(

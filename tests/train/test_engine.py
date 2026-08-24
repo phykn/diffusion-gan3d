@@ -11,7 +11,7 @@ from torch import nn
 from src.anchor import PlaneAnchor, build_anchors
 from src.build import build_models, build_optimizers
 from src.diffusion import Diffusion
-from src.model.domain import NULL_DOMAIN
+from src.model.common import NULL_DOMAIN
 from src.train import vf
 from src.train.augment import CriticAugment
 from src.train.connect import TripletBatch
@@ -102,12 +102,14 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
     real = TripletBatch(
         values=torch.zeros(2, 3, 2, 1, 1),
         axes=axes,
+        gaps=torch.ones(2, dtype=torch.long),
         center_slots=real_centers,
         anchor_flags=torch.tensor((True, False)),
     )
     fake = TripletBatch(
         values=torch.ones(2, 3, 2, 1, 1),
         axes=axes,
+        gaps=torch.ones(2, dtype=torch.long),
         center_slots=fake_centers,
         anchor_flags=torch.tensor((True, False)),
     )
@@ -278,6 +280,7 @@ def test_connectivity_uses_axis_critic_domain_for_shared_context() -> None:
     triplets = TripletBatch(
         values=torch.zeros(3, 3, 2, 4, 4),
         axes=torch.tensor((0, 1, 2)),
+        gaps=torch.ones(3, dtype=torch.long),
         center_slots=torch.ones(3, dtype=torch.long),
         anchor_flags=torch.tensor((True, False, False)),
     )
@@ -646,20 +649,20 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
         ) as forward,
         patch.object(
             denoiser,
-            "predict_logits",
-            wraps=denoiser.predict_logits,
-        ) as predict_logits,
+            "compute_logits",
+            wraps=denoiser.compute_logits,
+        ) as compute_logits,
     ):
         metrics = trainer.step(0, transition=0)
 
     assert metrics.anchor_planes == 1
     assert metrics.anchor_conflict_rate == 0.0
     assert forward.call_count == 1
-    assert predict_logits.call_count == 2
+    assert compute_logits.call_count == 2
     assert all(
         call.kwargs["anchor_image"] is not None
         and call.kwargs["anchor_mask"] is not None
-        for call in predict_logits.call_args_list
+        for call in compute_logits.call_args_list
     )
     assert math.isfinite(metrics.anchor_loss)
     assert metrics.generator_connectivity == 0.0
@@ -701,9 +704,9 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
             denoiser,
-            "predict_logits",
-            wraps=denoiser.predict_logits,
-        ) as predict_logits,
+            "compute_logits",
+            wraps=denoiser.compute_logits,
+        ) as compute_logits,
     ):
         metrics = trainer.step(0, transition=0)
 
@@ -715,10 +718,10 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     assert math.isclose(sum(metrics.soft_vfs), 1.0, rel_tol=1e-6)
     assert math.isclose(sum(metrics.hard_vfs), 1.0, rel_tol=1e-6)
 
-    calls = [*forward.call_args_list, *predict_logits.call_args_list]
+    calls = [*forward.call_args_list, *compute_logits.call_args_list]
     vfs = [call.kwargs["vf"] for call in calls]
     assert len(forward.call_args_list) == 1
-    assert len(predict_logits.call_args_list) == 2
+    assert len(compute_logits.call_args_list) == 2
     assert all(vf is vfs[0] for vf in vfs)
     assert vfs[0].shape == (1, 3)
     expected_pool = vf.build_pool(
@@ -801,9 +804,9 @@ def test_training_volume_and_critic_use_patch_size() -> None:
     try:
         with patch.object(
             denoiser,
-            "predict_logits",
-            wraps=denoiser.predict_logits,
-        ) as predict_logits:
+            "compute_logits",
+            wraps=denoiser.compute_logits,
+        ) as compute_logits:
             metrics = trainer.step(0, transition=0)
     finally:
         for hook in hooks:
@@ -815,7 +818,7 @@ def test_training_volume_and_critic_use_patch_size() -> None:
     assert all(previous[-2:] == current[-2:] == (8, 8) for previous, current in shapes)
     assert all(
         call.kwargs["anchor_image"].shape[-3:] == (8, 8, 8)
-        for call in predict_logits.call_args_list
+        for call in compute_logits.call_args_list
     )
 
 
@@ -928,18 +931,18 @@ def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
             denoiser,
-            "predict_logits",
-            wraps=denoiser.predict_logits,
-        ) as predict_logits,
+            "compute_logits",
+            wraps=denoiser.compute_logits,
+        ) as compute_logits,
     ):
         metrics = trainer.step(0, transition=0)
 
     assert all(stream.calls == 1 for stream in streams.values())
     assert not metrics.vf_active
     assert metrics.vf_loss == 0.0
-    calls = [*forward.call_args_list, *predict_logits.call_args_list]
+    calls = [*forward.call_args_list, *compute_logits.call_args_list]
     assert len(forward.call_args_list) == 1
-    assert len(predict_logits.call_args_list) == 2
+    assert len(compute_logits.call_args_list) == 2
     assert all(call.kwargs["vf"] is not None for call in calls)
     assert all(not bool(call.kwargs["vf_present"].any()) for call in calls)
     assert all(
@@ -1386,7 +1389,7 @@ def _config(
         data=DataConfig(
             domains=data.domains,
             num_phase=data.num_phases,
-            crop_partial=data.get("allow_partial_crop", False),
+            allow_part=data.get("allow_part", False),
             crop_size=data.crop_size,
             input_size=data.input_size,
             augment=data.get("augment", False),

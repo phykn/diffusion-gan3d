@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from . import scale_storage
 from .generate import Generator
-from .model.denoiser import Denoiser3D, validate_guidance
+from .model.denoiser import Denoiser3D
 from .scale_storage import TileBuffer, VolumeState
 
 
@@ -168,7 +168,6 @@ class ScaledGenerator:
         self.stats = None
         if not isinstance(progress, bool):
             raise TypeError("progress must be a boolean.")
-        guidance = validate_guidance(guidance)
         margin = self.generator.default_margin if margin is None else margin
         output_shape = self.parse_shape(shape)
         plan = self._generation_plan(
@@ -234,7 +233,6 @@ class ScaledGenerator:
         self.stats = None
         if not isinstance(progress, bool):
             raise TypeError("progress must be a boolean.")
-        guidance = validate_guidance(guidance)
         margin = self.generator.default_margin if margin is None else margin
         if blocks is None:
             if shape is None:

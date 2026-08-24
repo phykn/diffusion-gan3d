@@ -7,8 +7,10 @@ import numpy as np
 import torch
 from PIL import Image
 
-from src.build import build_datasets, build_stream, find_slices, get_domains
-from src.dataset import FolderBatchSampler, SliceDataset
+from src.config import get_domains
+from src.dataset import FolderBatchSampler
+from src.dataset.build import build_datasets, build_stream
+from src.dataset.real import RealDataset
 from src.train.engine import Trainer
 
 
@@ -20,7 +22,7 @@ class LabelTransformTest(unittest.TestCase):
     def test_random_crop_uses_the_sampled_coordinates(self):
         image = np.arange(36, dtype=np.uint8).reshape(6, 6)
 
-        dataset = SliceDataset(["unused"], crop_size=3)
+        dataset = RealDataset([["unused"]], crop_size=3)
 
         with patch("numpy.random.randint", side_effect=(1, 2)):
             cropped = dataset.crop(image)
@@ -28,7 +30,7 @@ class LabelTransformTest(unittest.TestCase):
         np.testing.assert_array_equal(cropped, image[1:4, 2:5])
 
     def test_default_crop_size_is_64(self):
-        dataset = SliceDataset(["unused"])
+        dataset = RealDataset([["unused"]])
 
         self.assertEqual(dataset.crop_size, 64)
         self.assertEqual(dataset.patch_size, 64)
@@ -38,10 +40,10 @@ class LabelTransformTest(unittest.TestCase):
             path = Path(temp) / "image.png"
             img = np.arange(64, dtype=np.uint8).reshape(8, 8)
             _save_image(path, img)
-            dataset = SliceDataset([path], crop_size=4, patch_size=2)
+            dataset = RealDataset([[path]], crop_size=4, patch_size=2)
 
             with patch("numpy.random.randint", side_effect=(2, 3)):
-                actual = dataset[0]
+                actual = dataset[path]
 
         expected = np.asarray(
             Image.fromarray(img[2:6, 3:7]).resize(
@@ -53,7 +55,7 @@ class LabelTransformTest(unittest.TestCase):
 
     def test_default_resize_keeps_the_existing_square_output(self):
         image = np.arange(32, dtype=np.uint8).reshape(4, 8)
-        dataset = SliceDataset(["unused"], crop_size=8, patch_size=2)
+        dataset = RealDataset([["unused"]], crop_size=8, patch_size=2)
 
         actual = dataset.resize(image)
 
@@ -70,14 +72,14 @@ class LabelTransformTest(unittest.TestCase):
             path = Path(temp) / "image.png"
             img = np.arange(32, dtype=np.uint8).reshape(4, 8)
             _save_image(path, img)
-            dataset = SliceDataset(
-                [path],
+            dataset = RealDataset(
+                [[path]],
                 crop_size=8,
                 patch_size=4,
-                allow_partial_crop=True,
+                allow_part=True,
             )
 
-            actual = dataset[0]
+            actual = dataset[path]
 
         expected = np.asarray(
             Image.fromarray(img).resize(
@@ -90,22 +92,22 @@ class LabelTransformTest(unittest.TestCase):
 
     def test_partial_crop_is_rejected_by_default(self):
         image = np.zeros((3, 8), dtype=np.uint8)
-        dataset = SliceDataset(["unused"], crop_size=4, patch_size=4)
+        dataset = RealDataset([["unused"]], crop_size=4, patch_size=4)
 
         with self.assertRaisesRegex(ValueError, "crop size must fit"):
             dataset.crop(image)
 
     def test_partial_crop_flag_requires_a_boolean(self):
         with self.assertRaisesRegex(TypeError, "must be a boolean"):
-            SliceDataset(["unused"], allow_partial_crop=1)
+            RealDataset([["unused"]], allow_part=1)
 
     def test_partial_crop_uses_a_random_window_on_the_long_axis(self):
         image = np.arange(48, dtype=np.uint8).reshape(4, 12)
-        dataset = SliceDataset(
-            ["unused"],
+        dataset = RealDataset(
+            [["unused"]],
             crop_size=8,
             patch_size=8,
-            allow_partial_crop=True,
+            allow_part=True,
         )
 
         with patch("numpy.random.randint", side_effect=(0, 3)):
@@ -117,36 +119,23 @@ class LabelTransformTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "image.png"
             _save_image(path, np.arange(2, dtype=np.uint8).reshape(1, 2))
-            dataset = SliceDataset(
-                [path],
+            dataset = RealDataset(
+                [[path]],
                 crop_size=8,
                 patch_size=2,
-                allow_partial_crop=True,
+                allow_part=True,
             )
 
-            actual = dataset[0]
+            actual = dataset[path]
 
         self.assertEqual(actual.shape, torch.Size([1, 1]))
-
-    def test_dataset_reuses_decoded_images_across_random_crops(self):
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "image.png"
-            _save_image(path, np.arange(64, dtype=np.uint8).reshape(8, 8))
-            dataset = SliceDataset([path], crop_size=4, patch_size=4)
-
-            with patch.object(dataset, "decode", wraps=dataset.decode) as decode:
-                first = dataset[0]
-                second = dataset[0]
-
-        self.assertEqual(decode.call_count, 1)
-        self.assertEqual(first.shape, second.shape)
 
     def test_one_image_can_fill_a_replacement_batch(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "image.png"
             _save_image(path, np.full((8, 8), 2, dtype=np.uint8))
-            dataset = SliceDataset(
-                [path],
+            dataset = RealDataset(
+                [[path]],
                 crop_size=4,
                 patch_size=4,
             )
@@ -165,49 +154,6 @@ class LabelTransformTest(unittest.TestCase):
 
 
 class AxisDataTest(unittest.TestCase):
-    def test_axis_folders_require_one_image_per_axis(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            folders = {}
-            for axis in range(3):
-                folder = root / str(axis)
-                folder.mkdir()
-                _save_image(
-                    folder / f"axis_{axis}.png",
-                    np.full((4, 4), axis, dtype=np.uint8),
-                )
-                (folder / "ignored.txt").write_text("not an image", encoding="utf-8")
-                folders[axis] = [folder]
-
-            paths = find_slices(folders)
-
-        self.assertEqual(set(paths), {0, 1, 2})
-        for axis in range(3):
-            self.assertEqual(
-                tuple(path.name for path in paths[axis]),
-                (f"axis_{axis}.png",),
-            )
-
-    def test_axis_can_combine_multiple_folders(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            folders = {}
-            for axis in range(3):
-                first = root / str(axis) / "first"
-                second = root / str(axis) / "second"
-                first.mkdir(parents=True)
-                second.mkdir()
-                _save_image(first / "a.png", np.full((4, 4), axis, dtype=np.uint8))
-                _save_image(second / "b.tif", np.full((4, 4), axis, dtype=np.uint8))
-                folders[axis] = [first, second]
-
-            paths = find_slices(folders)
-
-        for axis in range(3):
-            self.assertEqual(
-                tuple(path.name for path in paths[axis]), ("a.png", "b.tif")
-            )
-
     def test_tensor_crop_uses_rectangular_shape_and_random_coordinates(self):
         images = torch.arange(2 * 5 * 7).reshape(2, 5, 7)
 
@@ -281,7 +227,7 @@ class DomainDataTest(unittest.TestCase):
                 "data": {
                     "domains": {0: {0: [folder]}},
                     "num_phase": 2,
-                    "crop_partial": False,
+                    "allow_part": False,
                     "crop_size": 4,
                     "input_size": 4,
                 }
@@ -311,7 +257,7 @@ class DomainDataTest(unittest.TestCase):
                 "data": {
                     "domains": domains,
                     "num_phase": 2,
-                    "crop_partial": False,
+                    "allow_part": False,
                     "crop_size": 4,
                     "input_size": 4,
                 }
@@ -319,7 +265,9 @@ class DomainDataTest(unittest.TestCase):
 
             datasets = build_datasets(cfg)
             samples = {
-                (domain, axis): datasets[domain][axis][0]
+                (domain, axis): datasets[domain][axis][
+                    datasets[domain][axis].path_groups[0][0]
+                ]
                 for domain in range(2)
                 for axis in range(3)
             }
@@ -347,16 +295,17 @@ class DomainDataTest(unittest.TestCase):
                 "data": {
                     "domains": {0: folders},
                     "num_phase": 2,
-                    "crop_partial": True,
+                    "allow_part": True,
                     "crop_size": 4,
                     "input_size": 4,
                 }
             }
 
             datasets = build_datasets(cfg)
-            sample = datasets[0][0][0]
+            dataset = datasets[0][0]
+            sample = dataset[dataset.path_groups[0][0]]
 
-        self.assertTrue(datasets[0][0].allow_partial_crop)
+        self.assertTrue(dataset.allow_part)
         self.assertEqual(sample.shape, torch.Size([2, 4]))
 
     def test_partial_crop_stream_builds_each_batch_from_one_folder(self):
@@ -383,7 +332,7 @@ class DomainDataTest(unittest.TestCase):
                 "data": {
                     "domains": {0: folders},
                     "num_phase": 2,
-                    "crop_partial": True,
+                    "allow_part": True,
                     "crop_size": 4,
                     "input_size": 4,
                 }
@@ -395,7 +344,7 @@ class DomainDataTest(unittest.TestCase):
                 "torch.randint",
                 side_effect=(torch.tensor(1), torch.tensor([0, 1, 2])),
             ) as randint:
-                indices = next(iter(sampler))
+                paths = next(iter(sampler))
             self.assertEqual(randint.call_args_list[0].args, (2, ()))
             stream = build_stream(
                 dataset,
@@ -405,8 +354,8 @@ class DomainDataTest(unittest.TestCase):
             )
             batch = stream.next()
 
-        self.assertEqual(dataset.batch_groups, ((0, 1), (2, 3, 4, 5)))
-        self.assertEqual(indices, [2, 3, 4])
+        self.assertEqual(tuple(len(group) for group in dataset.path_groups), (2, 4))
+        self.assertEqual(paths, list(dataset.path_groups[1][:3]))
         self.assertIn(
             batch.shape,
             (torch.Size([3, 2, 4]), torch.Size([3, 4, 4])),

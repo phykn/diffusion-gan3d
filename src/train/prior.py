@@ -63,7 +63,6 @@ class PriorCondition:
 class _Entry:
     labels: torch.Tensor
     observed: PlaneAnchor
-    gap_weights: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 class _Bank:
@@ -129,12 +128,14 @@ class ConditionalPrior:
         volume_count: int,
         plane_stride: int,
         owned_axes: dict[int, tuple[int, ...]],
+        max_gap: int = 1,
     ) -> None:
         for name, value in (
             ("num_phases", num_phases),
             ("num_domains", num_domains),
             ("patch_size", patch_size),
             ("plane_stride", plane_stride),
+            ("max_gap", max_gap),
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{name} must be a positive integer.")
@@ -151,6 +152,7 @@ class ConditionalPrior:
         self.num_phases = num_phases
         self.patch_size = patch_size
         self.plane_stride = plane_stride
+        self.max_gap = max_gap
         self.owned_axes = {domain: tuple(axes) for domain, axes in owned_axes.items()}
         self.axes = tuple(
             sorted({axis for axes in owned_axes.values() for axis in axes})
@@ -277,8 +279,7 @@ class ConditionalPrior:
                         index=index,
                     )
                 )
-                gap = _sample_relation_gap(
-                    entry.gap_weights[axis],
+                gap = self._sample_gap(
                     index=index,
                     size=self.patch_size,
                     generator=generator,
@@ -299,6 +300,22 @@ class ConditionalPrior:
             dtype=dtype,
         )
         return condition, observed, tuple(references)
+
+    def _sample_gap(
+        self,
+        *,
+        index: int,
+        size: int,
+        generator: torch.Generator | None,
+    ) -> int:
+        gaps = [
+            gap
+            for gap in range(1, min(self.max_gap, (size - 1) // 2) + 1)
+            if _relation_indices(index, size, gap) is not None
+        ]
+        if not gaps:
+            raise ValueError("no valid relation gap is available.")
+        return gaps[_random_index(len(gaps), generator)]
 
     def _build_condition(
         self,
@@ -343,10 +360,7 @@ class ConditionalPrior:
         for index in range(prediction.shape[0]):
             plane = _extract_observed(observed, index)
             values = labels[index].contiguous()
-            gap_weights = tuple(
-                _relation_gap_weights(values, axis, self.num_phases) for axis in AXES
-            )
-            entries.append(_Entry(values, plane, gap_weights))
+            entries.append(_Entry(values, plane))
         return tuple(entries)
 
     def _plane_candidates(
@@ -417,7 +431,6 @@ def _clone_entry(entry: _Entry) -> _Entry:
             index=observed.index,
             position=observed.position,
         ),
-        tuple(weights.clone() for weights in entry.gap_weights),
     )
 
 
@@ -453,66 +466,6 @@ def _extract_reference(
         center_slot=center_slot,
         gap=gap,
     )
-
-
-def _relation_gap_weights(
-    labels: torch.Tensor,
-    axis: int,
-    num_phases: int,
-) -> torch.Tensor:
-    """Measure statistically significant same-phase dependence at each gap."""
-    moved = labels.movedim(axis, 0)
-    depth = moved.shape[0]
-    max_gap = (depth - 1) // 2
-    if max_gap < 1:
-        return torch.empty(0, dtype=torch.float32)
-    phases = torch.nn.functional.one_hot(
-        moved.to(torch.long), num_classes=num_phases
-    ).to(torch.float32)
-    spatial = moved[0].numel()
-    flattened = phases.movedim(-1, 1).flatten(2)
-    transform = torch.fft.rfft(flattened, n=depth * 2, dim=0)
-    autocorrelation = torch.fft.irfft(
-        transform * transform.conj(), n=depth * 2, dim=0
-    ).real
-    gaps = torch.arange(1, max_gap + 1, dtype=torch.long)
-    pair_counts = (depth - gaps).to(torch.float32) * spatial
-    agreement = autocorrelation.index_select(0, gaps).sum(dim=2) / pair_counts[:, None]
-    fractions = phases.mean(dim=(0, 1, 2))
-    baseline = fractions.square()
-    uncertainty = (
-        baseline.mul(1.0 - baseline).clamp_min(0.0) / pair_counts[:, None]
-    ).sqrt()
-    sampling_floor = pair_counts.rsqrt()[:, None]
-    excess = (agreement - baseline).clamp_min(0.0)
-    signal = (excess.square() - uncertainty.square()).clamp_min(0.0).sqrt()
-    phase_weights = signal / (uncertainty + sampling_floor).clamp_min(
-        torch.finfo(torch.float32).eps
-    )
-    return phase_weights.mean(dim=1).to(device="cpu", dtype=torch.float32)
-
-
-def _sample_relation_gap(
-    weights: torch.Tensor,
-    *,
-    index: int,
-    size: int,
-    generator: torch.Generator | None,
-) -> int:
-    valid = torch.tensor(
-        [
-            _relation_indices(index, size, gap) is not None
-            for gap in range(1, len(weights) + 1)
-        ],
-        dtype=torch.bool,
-    )
-    usable = weights.clamp_min(0.0) * valid
-    if not bool(usable.sum() > 0):
-        choices = valid.nonzero().flatten()
-        if not choices.numel():
-            raise ValueError("no valid relation gap is available.")
-        return int(choices[0]) + 1
-    return int(torch.multinomial(usable, 1, generator=generator).item()) + 1
 
 
 def _relation_indices(
@@ -552,7 +505,6 @@ def _entry_bytes(entry: _Entry) -> int:
     return (
         entry.labels.numel() * entry.labels.element_size()
         + entry.observed.image.numel() * entry.observed.image.element_size()
-        + sum(value.numel() * value.element_size() for value in entry.gap_weights)
     )
 
 
