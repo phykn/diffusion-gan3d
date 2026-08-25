@@ -52,7 +52,6 @@ anchor:
     phase_transition_weight: 0.10
 
 vf:
-  max_samples: 4
   weight: 1.0
 
 condition_dropout:

@@ -1,6 +1,8 @@
 from pathlib import Path
 
+import torch
 import yaml
+from torch import nn
 
 
 def load_yaml(path: str | Path) -> dict:
@@ -28,3 +30,20 @@ def prepare_yaml(value: object) -> object:
     if isinstance(value, (tuple, list)):
         return [prepare_yaml(item) for item in value]
     return value
+
+
+def save_model(path: str | Path, model: nn.Module) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), path)
+    return path
+
+
+def load_model(path: str | Path, model: nn.Module) -> nn.Module:
+    state = torch.load(
+        Path(path),
+        map_location="cpu",
+        weights_only=True,
+    )
+    model.load_state_dict(state, strict=True)
+    return model

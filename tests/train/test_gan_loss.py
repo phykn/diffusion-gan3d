@@ -1,12 +1,12 @@
 import torch
 import torch.nn.functional as F
 
-from src.model.critic import CriticScores
-from src.train.loss import (
+from src.loss.gan import (
     get_critic_loss,
     get_critic_r1,
     get_generator_loss,
 )
+from src.model.critic import CriticScores
 
 
 def test_logistic_losses_average_each_head_before_weighting() -> None:

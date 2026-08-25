@@ -4,8 +4,16 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from .. import AXES
+from ..utils import save_model
 from .engine import Metrics, Trainer
-from .weights import GENERATOR_FILE, save_all_weights, save_checkpoint
+
+
+def save_models(root: Path, trainer: Trainer) -> Path:
+    generator = save_model(root / "generator.pt", trainer.ema_denoiser)
+    for axis, critic in trainer.critics.items():
+        save_model(root / f"critic_{axis}.pt", critic)
+    save_model(root / "critic_c.pt", trainer.connectivity_critic)
+    return generator
 
 
 def run_training(
@@ -33,7 +41,7 @@ def run_training(
 
     root = Path(run_dir)
     done = 0
-    weights = root / GENERATOR_FILE
+    weights = root / "generator.pt"
     print("\nTraining")
     print("--------")
     print(f"Steps  : {steps}")
@@ -59,35 +67,17 @@ def run_training(
                 A=metrics.anchor_planes,
             )
             if done % save_every == 0:
-                weights = save_all_weights(
-                    root,
-                    trainer.ema_denoiser,
-                    trainer.critics,
-                    trainer.connectivity_critic,
-                )
+                weights = save_models(root, trainer)
             if checkpoint_every is not None and done % checkpoint_every == 0:
-                checkpoint = save_checkpoint(
-                    root,
-                    done,
-                    trainer.ema_denoiser,
-                    trainer.critics,
-                    trainer.connectivity_critic,
+                checkpoint = save_models(
+                    root / "checkpoints" / f"step_{done:08d}",
+                    trainer,
                 )
                 print(f"Saved checkpoint: {checkpoint}")
         if done % save_every:
-            weights = save_all_weights(
-                root,
-                trainer.ema_denoiser,
-                trainer.critics,
-                trainer.connectivity_critic,
-            )
+            weights = save_models(root, trainer)
     except KeyboardInterrupt:
-        weights = save_all_weights(
-            root,
-            trainer.ema_denoiser,
-            trainer.critics,
-            trainer.connectivity_critic,
-        )
+        weights = save_models(root, trainer)
         print(f"Training interrupted after step {done}; weights={weights}")
         raise
     finally:
@@ -125,8 +115,6 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "conditioning/anchor_shared": float(metrics.anchor_shared),
         "conditioning/vf_active": float(metrics.vf_active),
         "conditioning/vf_active_fraction": metrics.vf_active_fraction,
-        "conditioning/vf_target_resample_rate": metrics.vf_target_resample_rate,
-        "conditioning/vf_hard_mae": metrics.hard_vf_mae,
     }
     for tag, value in scalars.items():
         writer.add_scalar(tag, value, step)
@@ -154,17 +142,3 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
 
     for axis, value in zip(AXES, metrics.critic_axes, strict=True):
         writer.add_scalar(f"loss/critic_axis_{axis}", value, step)
-    for phase, values in enumerate(
-        zip(
-            metrics.target_vfs,
-            metrics.target_vf_stds,
-            metrics.soft_vfs,
-            metrics.hard_vfs,
-            strict=True,
-        )
-    ):
-        target, target_std, soft, hard = values
-        writer.add_scalar(f"conditioning/vf_target_{phase}", target, step)
-        writer.add_scalar(f"conditioning/vf_target_std_{phase}", target_std, step)
-        writer.add_scalar(f"conditioning/vf_soft_{phase}", soft, step)
-        writer.add_scalar(f"conditioning/vf_hard_{phase}", hard, step)

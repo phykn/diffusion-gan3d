@@ -56,11 +56,6 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         critic_local=1.6,
         vf_loss=0.15,
         vf_active=True,
-        target_vfs=(0.5, 0.1, 0.4),
-        target_vf_stds=(0.02, 0.01, 0.03),
-        soft_vfs=(0.48, 0.12, 0.4),
-        hard_vfs=(0.46, 0.14, 0.4),
-        hard_vf_mae=0.026,
     )
 
     write_metrics(writer, 10, metrics)
@@ -88,11 +83,6 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
     assert "train/volume_size" in tags
     assert "train/domain" in tags
     assert "conditioning/vf_active" in tags
-    assert "conditioning/vf_hard_mae" in tags
-    assert "conditioning/vf_target_0" in tags
-    assert "conditioning/vf_target_std_0" in tags
-    assert "conditioning/vf_soft_0" in tags
-    assert "conditioning/vf_hard_0" in tags
     writer.add_image.assert_not_called()
 
 
@@ -168,7 +158,7 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
                     "phase_transition_weight": 0.1,
                 },
             },
-            "vf": {"max_samples": 4, "weight": 1.0},
+            "vf": {"weight": 1.0},
             "condition_dropout": {"joint_each_prob": 0.0},
             "optim": {
                 "generator_lr": 0.001,

@@ -20,8 +20,7 @@ from src.evaluate import (
     measure_distance_divergence,
     measure_slice_smoothness,
 )
-from src.train.weights import save_weights
-from src.utils import save_yaml
+from src.utils import save_model, save_yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,7 +35,7 @@ def test_boundary_continuation_defaults_to_an_unconditioned_reference(
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
     model, _, _ = build_models(cfg)
-    weights = save_weights(run_dir, model)
+    weights = save_model(run_dir / "generator.pt", model)
     output_path = tmp_path / "continuation.tiff"
 
     module = _load_script("05_check_continuation.py")
@@ -72,7 +71,7 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
     model, _, _ = build_models(cfg)
-    weights = save_weights(run_dir, model)
+    weights = save_model(run_dir / "generator.pt", model)
     source = np.indices((18, 20)).sum(axis=0) % cfg["data"]["num_phase"]
     anchor_path = tmp_path / "anchor.png"
     Image.fromarray(source.astype(np.uint8)).save(anchor_path)
@@ -189,7 +188,7 @@ def test_anchor_check_script_runs_with_generated_reference(
     model, _, _ = build_models(cfg)
     with torch.no_grad():
         model.anchor_input.weight.fill_(0.01)
-    weights = save_weights(run_dir, model)
+    weights = save_model(run_dir / "generator.pt", model)
 
     filename = "03_check_anchor.py"
     module = _load_script(filename)
@@ -620,7 +619,7 @@ def _config(root: Path) -> dict:
                 "phase_transition_weight": 0.0,
             },
         },
-        "vf": {"max_samples": 4, "weight": 1.0},
+        "vf": {"weight": 1.0},
         "condition_dropout": {"joint_each_prob": 0.05},
         "optim": {
             "generator_lr": 1e-3,

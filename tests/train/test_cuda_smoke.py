@@ -57,7 +57,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
                 "phase_transition_weight": 0.0,
             },
         },
-        "vf": {"max_samples": 4, "weight": 1.0},
+        "vf": {"weight": 1.0},
         "optim": {
             "generator_lr": 0.00016,
             "critic_lr": 0.0001,
@@ -125,7 +125,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
                 "phase_transition_weight"
             ],
             vf_loss_weight=cfg["vf"]["weight"],
-            vf_target_average_max_samples=cfg["vf"]["max_samples"],
             domain_dropout=1.0 - data["domain_prob"],
             cfg_drop_each_probability=0.0,
             latent_channels=model["generator"]["latent_channels"],

@@ -19,8 +19,7 @@ from .model.denoiser import Denoiser3D
 from .train.augment import CriticAugment
 from .train.ema import build_ema
 from .train.engine import Trainer, TrainerComponents, TrainerSettings
-from .train.weights import load_all_weights, load_weights
-from .utils import load_yaml
+from .utils import load_model, load_yaml
 
 
 def get_generator_channels(model: Mapping[str, object]) -> tuple[int, tuple[int, ...]]:
@@ -151,7 +150,7 @@ def load_generator(
     cfg = load_yaml(config)
     denoiser = build_denoiser(cfg, checkpointing=False).to(device)
     try:
-        load_weights(path, denoiser)
+        load_model(path, denoiser)
     except (TypeError, RuntimeError, ValueError) as exc:
         raise ValueError(
             f"weights file is not compatible with the configured denoiser: {path}"
@@ -205,13 +204,12 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     ema = build_ema(denoiser)
     initial_weights = train.get("init_weights")
     if initial_weights is not None:
-        load_all_weights(
-            initial_weights,
-            denoiser,
-            ema,
-            critics,
-            connectivity_critic,
-        )
+        root = Path(initial_weights)
+        load_model(root / "generator.pt", denoiser)
+        load_model(root / "generator.pt", ema)
+        for axis, critic_model in critics.items():
+            load_model(root / f"critic_{axis}.pt", critic_model)
+        load_model(root / "critic_c.pt", connectivity_critic)
     denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
         denoiser,
         critics,
@@ -270,7 +268,6 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             normal_transition_weight=connectivity["phase_transition_weight"],
             connectivity_max_gap=connectivity.get("max_gap", 1),
             vf_loss_weight=vf["weight"],
-            vf_target_average_max_samples=vf["max_samples"],
             domain_dropout=1.0 - data["domain_prob"],
             cfg_drop_each_probability=conditioning["joint_each_prob"],
             latent_channels=generator["latent_channels"],

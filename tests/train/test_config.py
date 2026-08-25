@@ -97,7 +97,6 @@ def test_repository_training_config_uses_soft_anchor_and_connectivity() -> (
     assert cfg["anchor"]["pixel_weight"] == 0.05
     assert "reverse_invariant" not in cfg["anchor"]["connectivity"]
     assert tuple(cfg["condition_dropout"]) == ("joint_each_prob",)
-    assert cfg["vf"]["max_samples"] == 4
     assert cfg["train"]["init_weights"] is None
     assert "relation" not in cfg
 

@@ -55,8 +55,7 @@ def preserve_generation_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 from src.train.ema import build_ema
-from src.train.weights import save_checkpoint, save_weights
-from src.utils import save_yaml
+from src.utils import save_model, save_yaml
 
 
 def test_build_models_uses_boolean_anchor_multiscale(
@@ -91,7 +90,7 @@ def test_ema_weights_generate_categorical_volume(
     save_yaml(run_dir / "train.yaml", cfg)
     denoiser, _, _ = build_models(cfg)
     ema = build_ema(denoiser)
-    weights = save_weights(run_dir, ema)
+    weights = save_model(run_dir / "generator.pt", ema)
 
     generator = load_generator(weights, device=torch.device("cpu"))
     probs = generator.generate_probs(vf=None)
@@ -116,13 +115,10 @@ def test_generator_loads_numbered_checkpoint_with_run_config(tmp_path: Path) -> 
     run_dir = tmp_path / "run" / "sample"
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
-    denoiser, critics, connectivity = build_models(cfg)
-    weights = save_checkpoint(
-        run_dir,
-        10,
+    denoiser, _, _ = build_models(cfg)
+    weights = save_model(
+        run_dir / "checkpoints" / "step_00000010" / "generator.pt",
         build_ema(denoiser),
-        critics,
-        connectivity,
     )
 
     generator = load_generator(weights, device=torch.device("cpu"))
@@ -145,7 +141,7 @@ def test_anchor_aware_weights_accept_soft_plane_condition(
         ema.anchor_input.weight.fill_(0.01)
         for projection in ema.anchor_pyramid:
             projection.weight.fill_(0.01)
-    weights = save_weights(run_dir, ema)
+    weights = save_model(run_dir / "generator.pt", ema)
     generator = load_generator(weights, device=torch.device("cpu"))
     anchor = PlaneAnchor(
         image=torch.randint(
@@ -176,7 +172,7 @@ def test_generator_accepts_anchors_when_training_never_reaches_start(
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
     denoiser, _, _ = build_models(cfg)
-    weights = save_weights(run_dir, build_ema(denoiser))
+    weights = save_model(run_dir / "generator.pt", build_ema(denoiser))
 
     generator = load_generator(weights, device=torch.device("cpu"))
     anchor = PlaneAnchor(
@@ -2518,7 +2514,7 @@ def _config(root: Path) -> dict:
                 "phase_transition_weight": 0.0,
             },
         },
-        "vf": {"max_samples": 4, "weight": 1.0},
+        "vf": {"weight": 1.0},
         "condition_dropout": {"joint_each_prob": 0.0},
         "optim": {
             "generator_lr": 1e-3,

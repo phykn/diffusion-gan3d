@@ -8,7 +8,6 @@ from ..anchor import PlaneAnchor
 from ..build import load_generator
 from ..config import find_train_config, load_generation_settings
 from ..scale import ScaledGenerator
-from ..train.weights import GENERATOR_FILE
 from ..utils import load_yaml
 
 
@@ -147,7 +146,7 @@ def _positive_int(value: object, name: str) -> int:
 def _resolve_weights(weights: str | Path) -> Path:
     path = Path(weights).expanduser().resolve()
     if path.is_dir():
-        path = path / GENERATOR_FILE
+        path = path / "generator.pt"
     if not path.is_file():
         raise FileNotFoundError(f"generator weights do not exist: {path}")
     return path

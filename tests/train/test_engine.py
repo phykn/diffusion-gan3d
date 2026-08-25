@@ -11,10 +11,11 @@ from torch import nn
 from src.anchor import PlaneAnchor, build_anchors
 from src.build import build_models, build_optimizers
 from src.diffusion import Diffusion
+from src.loss import vf
+from src.loss.connect import TripletBatch
+from src.loss.gan import get_critic_r1
 from src.model.common import NULL_DOMAIN
-from src.train import vf
 from src.train.augment import CriticAugment
-from src.train.connect import TripletBatch
 from src.train.ema import build_ema
 from src.train.engine import (
     ConditionPresence,
@@ -23,7 +24,6 @@ from src.train.engine import (
     TrainerComponents,
     TrainerSettings,
 )
-from src.train.loss import get_critic_r1
 from src.train.runner import run_training
 
 
@@ -119,8 +119,8 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
         reconcile=False,
     )
     assert anchor is not None
-    trainer.connect = Mock()
-    trainer.connect.match_anchor.return_value = (real, fake)
+    trainer.anchor_triplets = Mock()
+    trainer.anchor_triplets.sample.return_value = (real, fake)
     trainer.critic_augment = Mock()
     trainer.critic_augment.apply_together.return_value = (
         real.values + 2.0,
@@ -422,7 +422,6 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
 
     assert metrics.domain == 0
     assert metrics.anchor_shared
-    assert metrics.target_vfs == pytest.approx((0.5, 0.5))
     assert streams[0][0].calls == 1
     assert streams[1][0].calls == 0
     assert streams[1][1].calls == 1
@@ -658,12 +657,12 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     )
     vf_batch_ids = []
     critic_batch_ids = []
-    original_build_pool = vf.build_pool
+    original_compute_vf = vf.compute_vf
     original_update_critics = trainer.update_critics
 
     def track_vfs(batches, num_phases):
         vf_batch_ids.extend(id(batches[axis]) for axis in (0, 1, 2))
-        return original_build_pool(batches, num_phases)
+        return original_compute_vf(batches, num_phases)
 
     def track_critics(transition, fake, batches, step, domain, **kwargs):
         critic_batch_ids.extend(id(batches[axis]) for axis in (0, 1, 2))
@@ -677,7 +676,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         )
 
     with (
-        patch.object(vf, "build_pool", side_effect=track_vfs),
+        patch.object(vf, "compute_vf", side_effect=track_vfs),
         patch.object(trainer, "update_critics", side_effect=track_critics),
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
@@ -691,10 +690,6 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     assert all(stream.calls == 1 for stream in streams.values())
     assert metrics.vf_active
     assert metrics.vf_loss > 0.0
-    assert len(metrics.target_vfs) == 3
-    assert math.isclose(sum(metrics.target_vfs), 1.0, rel_tol=1e-6)
-    assert math.isclose(sum(metrics.soft_vfs), 1.0, rel_tol=1e-6)
-    assert math.isclose(sum(metrics.hard_vfs), 1.0, rel_tol=1e-6)
 
     calls = [*forward.call_args_list, *compute_logits.call_args_list]
     vfs = [call.kwargs["vf"] for call in calls]
@@ -702,11 +697,11 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     assert len(compute_logits.call_args_list) == 2
     assert all(vf is vfs[0] for vf in vfs)
     assert vfs[0].shape == (1, 3)
-    expected_pool = vf.build_pool(
+    expected_vf = vf.compute_vf(
         {axis: streams[axis].images for axis in (0, 1, 2)},
         num_phases=3,
     )
-    assert any(torch.allclose(vfs[0][0], target) for target in expected_pool)
+    assert torch.allclose(vfs[0][0], expected_vf)
     assert vf_batch_ids == critic_batch_ids
 
     gradient = denoiser.vf_mlp[-1].weight.grad
@@ -850,50 +845,6 @@ def test_real_anchor_preserves_a_rectangular_observation() -> None:
     assert int(condition.mask.sum()) == 4 * 8
 
 
-def test_incompatible_shared_anchor_falls_back_to_an_owned_axis() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.volume_batch_size = 1
-    trainer.num_phases = 2
-    trainer.device = torch.device("cpu")
-    trainer.anchor_shared_axis_probability = 1.0
-    trainer.vf_target_average_max_samples = 1
-    own = torch.zeros(1, 8, 8, dtype=torch.long)
-    borrowed = torch.ones(1, 8, 8, dtype=torch.long)
-    batches = {0: own, 1: borrowed}
-    pool = vf.build_pool({0: own}, num_phases=2)
-
-    shared = trainer.sample_real_anchor(
-        batches,
-        volume_size=8,
-        owned_axes=(0,),
-    )
-
-    assert shared.source == "shared"
-    assert not vf.anchor_is_compatible(
-        shared.condition,
-        pool,
-        batch_size=1,
-        num_phases=2,
-    )
-
-    fallback = trainer.sample_real_anchor(
-        {0: own},
-        volume_size=8,
-        owned_axes=(0,),
-    )
-    target, _ = vf.sample_target(
-        pool,
-        fallback.condition,
-        batch_size=1,
-        num_phases=2,
-        device=torch.device("cpu"),
-        max_samples=1,
-    )
-
-    assert fallback.source == "real"
-    assert target.tolist() == [[1.0, 0.0]]
-
-
 def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
     trainer, denoiser, streams = _conditioning_trainer(
         anchored=False,
@@ -1032,7 +983,7 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
 
     with (
         patch.object(trainer, "sample_anchor", return_value=selection),
-        patch.object(vf, "sample_target", return_value=(target, 0.0)),
+        patch.object(vf, "compute_vf", return_value=target[0]),
         patch.object(
             trainer,
             "generate_pair",
@@ -1274,7 +1225,6 @@ def _make_trainer(
             connectivity_weight=cfg.anchor.connectivity.weight,
             normal_transition_weight=(cfg.anchor.connectivity.phase_transition_weight),
             vf_loss_weight=cfg.vf.weight,
-            vf_target_average_max_samples=cfg.vf.max_samples,
             domain_dropout=1.0 - cfg.data.domain_prob,
             cfg_drop_each_probability=cfg.condition_dropout.joint_each_prob,
             latent_channels=cfg.model.generator.latent_channels,
@@ -1336,7 +1286,7 @@ def _config(
         condition_dropout=(
             ConditioningConfig() if conditioning is None else conditioning
         ),
-        vf=(VfConfig(max_samples=1, weight=1.0) if vf is None else vf),
+        vf=(VfConfig(weight=1.0) if vf is None else vf),
         optim=OptimConfig(
             generator_lr=optim.denoiser_lr,
             critic_lr=optim.critic_lr,

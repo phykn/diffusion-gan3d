@@ -11,18 +11,18 @@ from .. import AXES
 from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
 from ..dataset import BatchStream
 from ..diffusion import Diffusion
-from ..model.common import NULL_DOMAIN
-from ..model.denoiser import Denoiser3D
-from . import vf
-from .anchor_loss import pool_size_from_downsampling, soft_anchor_loss
-from .augment import CriticAugment
-from .connect import Connectivity, TripletBatch, normal_transition_loss
-from .ema import update_ema
-from .loss import (
+from ..loss import vf
+from ..loss.anchor import SoftAnchorLoss
+from ..loss.connect import AnchorTripletSampler, TripletBatch, compute_transition_loss
+from ..loss.gan import (
     get_critic_loss,
     get_critic_r1,
     get_generator_loss,
 )
+from ..model.common import NULL_DOMAIN
+from ..model.denoiser import Denoiser3D
+from .augment import CriticAugment
+from .ema import update_ema
 
 
 @dataclass(frozen=True)
@@ -50,12 +50,6 @@ class Metrics:
     critic_local: float = 0.0
     vf_loss: float = 0.0
     vf_active: bool = False
-    target_vfs: tuple[float, ...] = ()
-    target_vf_stds: tuple[float, ...] = ()
-    soft_vfs: tuple[float, ...] = ()
-    hard_vfs: tuple[float, ...] = ()
-    hard_vf_mae: float = 0.0
-    vf_target_resample_rate: float = 0.0
     anchor_input_active_fraction: float = 0.0
     vf_active_fraction: float = 0.0
     condition_state_fractions: tuple[float, float, float, float] = (
@@ -116,7 +110,6 @@ class StepPreparation:
     presence: "ConditionPresence"
     model_conditions: dict[str, torch.Tensor]
     anchor_ramp: float
-    vf_target_resample_rate: float
 
 
 @dataclass(frozen=True)
@@ -207,7 +200,6 @@ class TrainerSettings:
     domain_dropout: float
     anchor_pixel_loss_weight: float
     anchor_shared_axis_probability: float
-    vf_target_average_max_samples: int
     connectivity_max_gap: int = 1
 
     def __post_init__(self) -> None:
@@ -251,7 +243,6 @@ class TrainerSettings:
             "slice_pairs_per_axis": self.slice_pairs_per_axis,
             "r1_interval": self.r1_interval,
             "latent_channels": self.latent_channels,
-            "vf_target_average_max_samples": self.vf_target_average_max_samples,
             "connectivity_max_gap": self.connectivity_max_gap,
         }
         for name, value in values.items():
@@ -342,19 +333,20 @@ class Trainer:
         self.anchor_shared_axis_probability = float(
             settings.anchor_shared_axis_probability
         )
-        self.anchor_pool_size = pool_size_from_downsampling(
-            self.denoiser.downsample_factor
+        pool_exponent = math.ceil(
+            math.log2(self.denoiser.downsample_factor) / 2.0
         )
-        self.anchor_pixel_loss_weight = settings.anchor_pixel_loss_weight
+        self.anchor_loss = SoftAnchorLoss(
+            pool_size=2**pool_exponent,
+            pixel_weight=settings.anchor_pixel_loss_weight,
+        )
         self.connectivity_weight = settings.connectivity_weight
         self.normal_transition_weight = settings.normal_transition_weight
-        self.connect = Connectivity(
-            num_phases=settings.num_phases,
+        self.anchor_triplets = AnchorTripletSampler(
             max_gap=settings.connectivity_max_gap,
         )
         self.use_multi_anchor_next = False
         self.vf_loss_weight = settings.vf_loss_weight
-        self.vf_target_average_max_samples = settings.vf_target_average_max_samples
         self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
         self.domain_dropout = float(settings.domain_dropout)
         self.latent_channels = settings.latent_channels
@@ -364,9 +356,6 @@ class Trainer:
             if components.critic_augment is None
             else components.critic_augment
         )
-        self.target_count = 0
-        self.target_mean = torch.zeros(settings.num_phases, dtype=torch.float64)
-        self.target_m2 = torch.zeros(settings.num_phases, dtype=torch.float64)
 
     def step(
         self,
@@ -499,7 +488,6 @@ class Trainer:
             critic_connectivity=critic_connectivity,
             connectivity_r1=connectivity_r1,
             connectivity_fake=connectivity_fake,
-            clean_probs=clean_probs,
         )
 
     def _sample_fake_pairs(
@@ -589,7 +577,8 @@ class Trainer:
             model_domain,
             batch_domains,
         )
-        vf_pool = vf.build_pool(own_batches, num_phases=self.num_phases)
+        target_vf = vf.compute_vf(own_batches, self.num_phases)
+        target_vf = target_vf.unsqueeze(0).expand(self.volume_batch_size, -1)
         ramp = self.get_anchor_ramp(step)
         selection = (
             None
@@ -601,31 +590,7 @@ class Trainer:
                 owned_axes=tuple(own_batches),
             )
         )
-        if (
-            selection is not None
-            and selection.condition is not None
-            and selection.source == "shared"
-            and not vf.anchor_is_compatible(
-                selection.condition,
-                vf_pool,
-                batch_size=self.volume_batch_size,
-                num_phases=self.num_phases,
-            )
-        ):
-            selection = self.sample_real_anchor(
-                own_batches,
-                self.patch_size,
-                owned_axes=tuple(own_batches),
-            )
         anchor = None if selection is None else selection.condition
-        target_vf, resample_rate = vf.sample_target(
-            vf_pool,
-            anchor,
-            batch_size=self.volume_batch_size,
-            num_phases=self.num_phases,
-            device=self.device,
-            max_samples=self.vf_target_average_max_samples,
-        )
         presence = self.sample_condition_presence(selection is not None)
         model_conditions = self.make_model_conditions(
             anchor,
@@ -646,7 +611,6 @@ class Trainer:
             presence=presence,
             model_conditions=model_conditions,
             anchor_ramp=ramp,
-            vf_target_resample_rate=resample_rate,
         )
 
     def finish_step(
@@ -661,14 +625,7 @@ class Trainer:
         critic_connectivity: float,
         connectivity_r1: float,
         connectivity_fake: TripletBatch,
-        clean_probs: torch.Tensor,
     ) -> Metrics:
-        target_values, soft_values, hard_values, hard_mae = vf.summarize(
-            clean_probs,
-            prepared.target_vf,
-            prepared.presence.vf,
-        )
-        target_stds = self.update_target_stats(prepared.target_vf)
         update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
         anchor = prepared.anchor
         presence = prepared.presence
@@ -696,12 +653,6 @@ class Trainer:
             critic_local=critic_local,
             vf_loss=denoiser_update.vf,
             vf_active=bool(presence.vf.any()),
-            target_vfs=target_values,
-            target_vf_stds=target_stds,
-            soft_vfs=soft_values,
-            hard_vfs=hard_values,
-            hard_vf_mae=hard_mae,
-            vf_target_resample_rate=prepared.vf_target_resample_rate,
             anchor_input_active_fraction=float(
                 presence.anchor.to(torch.float32).mean()
             ),
@@ -747,7 +698,7 @@ class Trainer:
         if not bool(anchor.mask.any()):
             return empty, empty
 
-        real, fake = self.connect.match_anchor(
+        real, fake = self.anchor_triplets.sample(
             prediction,
             reference_prediction,
             anchor,
@@ -1406,7 +1357,7 @@ class Trainer:
                     connectivity_loss = connectivity_head.combine(local_weight)
                 normal_loss = adversarial_loss.new_zeros(())
                 if len(batch.connectivity_fake) and self.normal_transition_weight > 0.0:
-                    normal_loss = normal_transition_loss(
+                    normal_loss = compute_transition_loss(
                         batch.connectivity_real,
                         batch.connectivity_fake,
                     )
@@ -1415,24 +1366,22 @@ class Trainer:
                 anchor_pixel = adversarial_loss.new_zeros(())
                 anchor_accuracy = adversarial_loss.new_zeros(())
                 if batch.anchor is not None:
-                    anchor_result = soft_anchor_loss(
+                    anchor_result = self.anchor_loss(
                         batch.logits,
                         batch.anchor,
                         batch.anchor_present,
-                        pool_size=self.anchor_pool_size,
-                        pixel_weight=self.anchor_pixel_loss_weight,
-                        observed_mask=batch.anchor_observed_mask,
-                        observed_axis_masks=batch.anchor_observed_axis_masks,
+                        batch.anchor_observed_mask,
+                        batch.anchor_observed_axis_masks,
                     )
                     anchor_loss = anchor_result.total
                     anchor_coarse = anchor_result.coarse
                     anchor_pixel = anchor_result.pixel
                     anchor_accuracy = anchor_result.accuracy
-                vf_loss = adversarial_loss.new_zeros(())
-                if bool(batch.vf_present.any()):
-                    pred_vf = batch.clean_probs.mean(dim=(2, 3, 4))
-                    per_sample = 0.5 * (pred_vf - batch.target_vf).abs().sum(dim=1)
-                    vf_loss = per_sample[batch.vf_present].mean()
+                vf_loss = vf.compute_vf_loss(
+                    batch.clean_probs,
+                    batch.target_vf,
+                    batch.vf_present,
+                )
                 total = (
                     adversarial_loss
                     + batch.anchor_ramp
@@ -1463,23 +1412,6 @@ class Trainer:
             anchor_accuracy=float(anchor_accuracy.detach()),
             vf=float(vf_loss.detach()),
         )
-
-    def update_target_stats(
-        self,
-        target: torch.Tensor,
-    ) -> tuple[float, ...]:
-        values = target.detach().to(device="cpu", dtype=torch.float64)
-        if values.ndim != 2 or values.shape[1] != self.num_phases:
-            raise ValueError("target VF statistics require shape [B, num_phases].")
-        for value in values:
-            self.target_count += 1
-            delta = value - self.target_mean
-            self.target_mean.add_(delta / self.target_count)
-            self.target_m2.add_(delta * (value - self.target_mean))
-        if self.target_count < 2:
-            return tuple(0.0 for _ in range(self.num_phases))
-        std = (self.target_m2 / (self.target_count - 1)).sqrt()
-        return tuple(float(value) for value in std)
 
     def make_time(self, transition: int, batch: int) -> torch.Tensor:
         return torch.full(
