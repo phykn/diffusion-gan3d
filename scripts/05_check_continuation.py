@@ -31,8 +31,7 @@ from src.evaluate import (
     measure_slice_smoothness,
     voxel_accuracy,
 )
-from src.utils import load_yaml
-from src.volume import save_volume
+from src.utils import load_yaml, save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
 show_napari = partial(show_volume_napari, name="Generated output")

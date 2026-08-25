@@ -3,29 +3,12 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.train.augment import (
-    ALL_TRANSFORMS,
-    ANISOTROPIC_TRANSFORMS,
-    SHAPE_PRESERVING_TRANSFORMS,
-    CriticAugment,
-)
-
-
-def test_augment_presets_select_expected_transforms() -> None:
-    isotropic = CriticAugment("isotropic")
-    anisotropic = CriticAugment("anisotropic")
-
-    assert isotropic.allowed_transforms() == ALL_TRANSFORMS
-    assert anisotropic.allowed_transforms() == ANISOTROPIC_TRANSFORMS
+from src.dataset.augment import CriticAugment
 
 
 def test_all_square_symmetries_are_distinct() -> None:
-    image = torch.arange(9).reshape(1, 1, 3, 3)
-
-    actual = {
-        tuple(CriticAugment.transform(image, index).flatten().tolist())
-        for index in ALL_TRANSFORMS
-    }
+    maps = CriticAugment("isotropic").get_index_maps(torch.device("cpu"), 3, 3)
+    actual = {tuple(mapping.tolist()) for mapping in maps}
 
     assert len(actual) == 8
 
@@ -52,14 +35,8 @@ def test_augment_presets_are_parsed(mode: bool | str, expected: str | None) -> N
     ("transverse_0", "transverse_1", "transverse_2", "directional"),
 )
 def test_removed_augment_presets_are_rejected(mode: str) -> None:
-    with pytest.raises(ValueError, match="anisotropic, isotropic"):
+    with pytest.raises(ValueError, match="false, isotropic"):
         CriticAugment(mode)
-
-
-@pytest.mark.parametrize("probability", [-0.1, 1.1, float("nan"), True])
-def test_augment_probability_is_validated(probability: float) -> None:
-    with pytest.raises(ValueError, match="augment_prob"):
-        CriticAugment("isotropic", probability)
 
 
 def test_pair_shares_one_transform_and_preserves_gradients() -> None:
@@ -73,9 +50,8 @@ def test_pair_shares_one_transform_and_preserves_gradients() -> None:
         "sample_transforms",
         return_value=torch.tensor([1, 6]),
     ):
-        transformed_previous, transformed_current = augment.apply_pair(
-            previous,
-            current,
+        transformed_previous, transformed_current = augment.apply_together(
+            (previous, current),
         )
 
     assert torch.equal(
@@ -129,7 +105,7 @@ def test_rectangular_inputs_use_only_shape_preserving_transforms() -> None:
             square=False,
         )
 
-    assert all(int(index) in SHAPE_PRESERVING_TRANSFORMS for index in transforms)
+    assert all(int(index) in (0, 2, 4, 6) for index in transforms)
     actual = augment.apply_transforms(inputs, transforms)
     assert actual.shape == inputs.shape
 
@@ -156,9 +132,8 @@ def test_anisotropic_pair_uses_only_left_right_flips_and_preserves_gradients() -
     assert transforms.tolist() == [0, 4]
 
     with patch.object(augment, "sample_transforms", return_value=transforms):
-        transformed_previous, transformed_current = augment.apply_pair(
-            previous,
-            current,
+        transformed_previous, transformed_current = augment.apply_together(
+            (previous, current),
         )
 
     assert transformed_previous.shape == previous.shape

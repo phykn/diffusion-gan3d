@@ -68,7 +68,7 @@ def test_generation_settings_support_missing_values(
 
 
 def test_repository_generation_config_has_expected_defaults() -> None:
-    assert load_generation_settings() == GenerationSettings(1.0, 0.9, 8, 0.1)
+    assert load_generation_settings() == GenerationSettings(1.0, 1.0, 8, 0.1)
 
 
 def test_repository_training_config_uses_soft_anchor_and_connectivity() -> (

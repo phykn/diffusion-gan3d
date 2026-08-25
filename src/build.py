@@ -11,14 +11,14 @@ from .config import (
     get_schedule_steps,
     load_generation_settings,
 )
+from .dataset.augment import CriticAugment
 from .dataset.build import build_datasets, build_stream
-from .diffusion import Diffusion
-from .generate import Generator
+from .engine import Trainer, TrainerComponents, TrainerSettings
 from .model.critic import ConnectivityCritic2D, PairCritic2D
 from .model.denoiser import Denoiser3D
-from .train.augment import CriticAugment
-from .train.ema import build_ema
-from .train.engine import Trainer, TrainerComponents, TrainerSettings
+from .model.diffusion import Diffusion
+from .model.ema import build_ema
+from .model.generator import Generator
 from .utils import load_model, load_yaml
 
 

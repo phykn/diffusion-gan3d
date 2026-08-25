@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.diffusion import Diffusion
+from src.model.diffusion import Diffusion
 
 
 def _extract(
@@ -25,11 +25,6 @@ def test_vp_schedule_is_monotonic() -> None:
     assert bool(torch.all(process.alpha_bars[1:] < process.alpha_bars[:-1]))
     assert process.betas[0].item() == 0.0
     assert bool(torch.all((process.betas[1:] > 0) & (process.betas[1:] < 1)))
-
-
-def test_vp_schedule_rejects_float32_underflow() -> None:
-    with pytest.raises(ValueError, match="not representable in float32"):
-        Diffusion(10, beta_min=0.1, beta_max=10_000.0)
 
 
 def test_sample_pair_uses_correlated_markov_transition() -> None:

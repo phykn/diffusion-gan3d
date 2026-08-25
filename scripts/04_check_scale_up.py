@@ -31,7 +31,7 @@ from src.evaluate import (
     voxel_accuracy,
 )
 from src.scale import ScaledGenerator, ScalePlan
-from src.volume import load_volume, save_volume
+from src.utils import load_volume, save_volume
 
 AXIS = 0
 show_napari = partial(show_volume_napari, name="scaled phases")
@@ -150,11 +150,7 @@ def generate_base(
         return BaseResult(base, None, (), None)
 
     assert args.gt is not None
-    target = load_volume(
-        args.gt,
-        shape=(generator.patch_size,) * 3,
-        num_phases=generator.num_phases,
-    )
+    target = load_volume(args.gt)
     slices = target.movedim(AXIS, 0)
     indices = select_indices(slices.shape[0], anchor_count)
     anchors = tuple(
@@ -386,19 +382,6 @@ def print_plan(plan: ScalePlan, device: torch.device) -> None:
         f"Plan    : {' × '.join(map(str, plan.grid))} tiles "
         f"({plan.tile_count} total), overlap {plan.overlap}, {device}"
     )
-    print(
-        f"Memory  : CUDA {format_bytes(plan.cuda_bytes)}, "
-        f"CPU {format_bytes(plan.cpu_bytes)}"
-    )
-
-
-def format_bytes(size: int) -> str:
-    value = float(size)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024.0 or unit == "TiB":
-            return f"{value:.2f} {unit}"
-        value /= 1024.0
-    raise RuntimeError("unreachable")
 
 
 def get_accuracy(

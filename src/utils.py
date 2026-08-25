@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import numpy as np
+import tifffile
 import torch
 import yaml
 from torch import nn
@@ -30,6 +32,18 @@ def prepare_yaml(value: object) -> object:
     if isinstance(value, (tuple, list)):
         return [prepare_yaml(item) for item in value]
     return value
+
+
+def load_volume(path: str | Path) -> torch.Tensor:
+    values = np.asarray(tifffile.imread(Path(path)))
+    return torch.from_numpy(np.array(values, copy=True)).to(torch.long)
+
+
+def save_volume(volume: torch.Tensor, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    values = volume.detach().to(device="cpu", dtype=torch.uint8)
+    tifffile.imwrite(path, values.numpy())
 
 
 def save_model(path: str | Path, model: nn.Module) -> Path:

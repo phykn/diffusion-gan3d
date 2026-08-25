@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.anchor import PlaneAnchor, build_anchors
+from src.anchor import PlaneAnchor, encode_anchors
 
 
 def test_plane_anchor_builds_dense_condition_for_every_axis() -> None:
@@ -9,7 +9,7 @@ def test_plane_anchor_builds_dense_condition_for_every_axis() -> None:
     image = torch.arange(size * size).reshape(size, size).remainder(3).long()
 
     for axis in (0, 1, 2):
-        condition = build_anchors(
+        condition = encode_anchors(
             (PlaneAnchor(image=image, axis=axis, index=2),),
             batch_size=1,
             num_phases=3,
@@ -36,7 +36,7 @@ def test_plane_anchor_builds_dense_condition_for_every_axis() -> None:
 
 def test_cross_axis_anchor_conflicts_are_rejected() -> None:
     with pytest.raises(ValueError, match="conflicting intersections"):
-        build_anchors(
+        encode_anchors(
             (
                 PlaneAnchor(
                     image=torch.zeros(4, 4, dtype=torch.long),
@@ -59,7 +59,7 @@ def test_cross_axis_anchor_conflicts_are_rejected() -> None:
 
 def test_cross_axis_training_anchors_reconcile_intersections() -> None:
     size = 4
-    condition = build_anchors(
+    condition = encode_anchors(
         (
             PlaneAnchor(
                 image=torch.zeros(size, size, dtype=torch.long),
@@ -94,7 +94,7 @@ def test_cross_axis_training_anchors_reconcile_intersections() -> None:
 
 def test_partial_anchor_is_centered_without_resizing() -> None:
     image = torch.tensor([[0, 1], [2, 0]], dtype=torch.long)
-    condition = build_anchors(
+    condition = encode_anchors(
         (PlaneAnchor(image=image, axis=0, index=1),),
         batch_size=1,
         num_phases=3,
@@ -115,7 +115,7 @@ def test_partial_anchor_is_centered_without_resizing() -> None:
 
 def test_partial_anchor_accepts_an_explicit_position() -> None:
     image = torch.ones(2, 3, dtype=torch.long)
-    condition = build_anchors(
+    condition = encode_anchors(
         (PlaneAnchor(image=image, axis=2, index=3, position=(2, 1)),),
         batch_size=1,
         num_phases=3,
@@ -131,7 +131,7 @@ def test_partial_anchor_accepts_an_explicit_position() -> None:
 
 def test_partial_anchor_preserves_batch_and_axis_coordinates() -> None:
     images = torch.arange(12).reshape(2, 2, 3).remainder(3).long()
-    condition = build_anchors(
+    condition = encode_anchors(
         (PlaneAnchor(image=images, axis=1, index=4, position=(1, 0)),),
         batch_size=2,
         num_phases=3,
@@ -148,7 +148,7 @@ def test_partial_anchor_preserves_batch_and_axis_coordinates() -> None:
 
 def test_anchor_image_must_fit_generation_size_and_phase_count() -> None:
     with pytest.raises(ValueError, match="fit inside"):
-        build_anchors(
+        encode_anchors(
             (
                 PlaneAnchor(
                     image=torch.zeros(5, 3, dtype=torch.long),
@@ -164,7 +164,7 @@ def test_anchor_image_must_fit_generation_size_and_phase_count() -> None:
         )
 
     with pytest.raises(ValueError, match="outside num_phases"):
-        build_anchors(
+        encode_anchors(
             (
                 PlaneAnchor(
                     image=torch.full((4, 4), 3, dtype=torch.long),
@@ -182,7 +182,7 @@ def test_anchor_image_must_fit_generation_size_and_phase_count() -> None:
 
 def test_anchor_image_rejects_fractional_phase_labels() -> None:
     with pytest.raises(TypeError, match="integer dtype"):
-        build_anchors(
+        encode_anchors(
             (
                 PlaneAnchor(
                     image=torch.tensor([[0.2, 1.8]], dtype=torch.float32),

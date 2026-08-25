@@ -7,10 +7,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from . import scale_storage
-from .generate import Generator
-from .model.denoiser import Denoiser3D
-from .scale_storage import TileBuffer, VolumeState
+from .model.generator import Generator
 
 
 @dataclass(frozen=True)
@@ -21,15 +18,7 @@ class ScalePlan:
     stride: int
     grid: tuple[int, int, int]
     tile_count: int
-    states_bytes: int
-    fusion_bytes: int
-    tile_bytes: int
-    workspace_bytes: int
-    cuda_bytes: int
-    output_bytes: int
-    cpu_bytes: int
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
-    guidance_bytes: int = 0
     generation_shape: tuple[int, int, int] | None = None
     margin: int = 0
 
@@ -60,6 +49,109 @@ class Fusion:
     pred_sum: torch.Tensor
 
 
+class VolumeState:
+    def __init__(
+        self,
+        num_phases: int,
+        shape: tuple[int, int, int],
+        device: torch.device,
+    ) -> None:
+        self.values = torch.empty(
+            (1, num_phases, *shape),
+            device=device,
+            dtype=torch.float16,
+        )
+
+    def read(
+        self,
+        region: tuple[slice, slice, slice],
+    ) -> torch.Tensor:
+        return self.values[(slice(None), slice(None), *region)]
+
+    def write(
+        self,
+        region: tuple[slice, slice, slice],
+        values: torch.Tensor,
+    ) -> None:
+        self.values[(slice(None), slice(None), *region)].copy_(
+            values.to(device=self.values.device, dtype=torch.float16)
+        )
+
+
+class TileBuffer:
+    def __init__(
+        self,
+        num_phases: int,
+        tile_size: int,
+        enabled: bool,
+    ) -> None:
+        self.upload: torch.Tensor | None = None
+        self.download: torch.Tensor | None = None
+        self.workspace: torch.Tensor | None = None
+        self.capacity = num_phases * tile_size**3
+        if enabled:
+            try:
+                self.upload = torch.empty(
+                    self.capacity,
+                    dtype=torch.float32,
+                    pin_memory=True,
+                )
+                self.download = torch.empty(
+                    self.capacity,
+                    dtype=torch.float32,
+                    pin_memory=True,
+                )
+            except RuntimeError:
+                self.upload = None
+                self.download = None
+
+    def read(
+        self,
+        state: VolumeState,
+        region: tuple[slice, slice, slice],
+        device: torch.device,
+    ) -> torch.Tensor:
+        source = state.read(region)
+        shape = source.shape
+        numel = math.prod(shape)
+        if state.values.device != device and self.upload is not None:
+            values = self.upload[:numel].view(shape)
+        else:
+            if (
+                self.workspace is None
+                or self.workspace.device != state.values.device
+                or self.workspace.numel() < numel
+            ):
+                self.workspace = torch.empty(
+                    max(self.capacity, numel),
+                    device=state.values.device,
+                    dtype=torch.float32,
+                )
+            values = self.workspace[:numel].view(shape)
+
+        values.copy_(source)
+        if values.device == device:
+            return values
+        return values.to(
+            device=device,
+            dtype=torch.float32,
+            non_blocking=self.upload is not None,
+        )
+
+    def stage(self, values: torch.Tensor, device: torch.device) -> torch.Tensor:
+        if values.device == device:
+            return values
+        if (
+            device.type == "cpu"
+            and self.download is not None
+            and values.numel() <= self.download.numel()
+        ):
+            downloaded = self.download[: values.numel()].view(values.shape)
+            downloaded.copy_(values)
+            return downloaded
+        return values.to(device)
+
+
 class ScaledGenerator:
     def __init__(self, generator: Generator) -> None:
         self.generator = generator
@@ -71,8 +163,8 @@ class ScaledGenerator:
         overlap: int = 8,
     ) -> ScalePlan:
         shape = self.parse_shape(shape)
-        factor = self.get_downsample_factor()
-        if not isinstance(overlap, int) or isinstance(overlap, bool) or overlap < 0:
+        factor = self.generator.default_margin
+        if overlap < 0:
             raise ValueError("overlap must be a non-negative integer.")
         tile_size = self.generator.patch_size
         if 2 * overlap >= tile_size:
@@ -87,18 +179,6 @@ class ScaledGenerator:
             raise ValueError("shape must not be smaller than patch_size.")
         starts = tuple(self.axis_starts(size, tile_size, stride) for size in shape)
         grid = tuple(len(axis) for axis in starts)
-        voxels = math.prod(shape)
-        tile_voxels = tile_size**3
-        tile_bytes = self.generator.num_phases * tile_voxels * 4
-        input_layer = getattr(self.generator.model, "input", None)
-        width = getattr(input_layer, "out_channels", self.generator.num_phases)
-        if not isinstance(width, int) or isinstance(width, bool) or width < 1:
-            width = self.generator.num_phases
-        workspace_bytes = 12 * width * tile_voxels * 4
-        states_bytes = 2 * self.generator.num_phases * voxels * 2
-        fusion_bytes = (self.generator.num_phases + 1) * voxels * 4
-        output_bytes = voxels
-        cpu_workspace = workspace_bytes if self.generator.device.type == "cpu" else 0
         seams = tuple(
             tuple((left + tile_size + right) // 2 for left, right in pairwise(axis))
             for axis in starts
@@ -110,46 +190,7 @@ class ScaledGenerator:
             stride=stride,
             grid=grid,
             tile_count=math.prod(grid),
-            states_bytes=states_bytes,
-            fusion_bytes=fusion_bytes,
-            tile_bytes=tile_bytes,
-            workspace_bytes=workspace_bytes,
-            cuda_bytes=states_bytes + fusion_bytes + workspace_bytes,
-            output_bytes=output_bytes,
-            cpu_bytes=(
-                states_bytes
-                + fusion_bytes
-                + output_bytes
-                + 2 * tile_bytes
-                + cpu_workspace
-            ),
             seams=seams,
-        )
-
-    def _account_guidance_memory(
-        self,
-        plan: ScalePlan,
-        guidance: float,
-        conditioned: bool,
-    ) -> ScalePlan:
-        if not conditioned or guidance in {0.0, 1.0}:
-            return plan
-        bytes_per_logit = 2 if self.generator.use_amp else 4
-        # Keep both logits and their two float32 guidance work buffers.
-        guidance_bytes = (
-            self.generator.num_phases
-            * plan.tile_size**3
-            * (2 * bytes_per_logit + 2 * 4)
-        )
-        cpu_bytes = plan.cpu_bytes
-        if self.generator.device.type == "cpu":
-            cpu_bytes += guidance_bytes
-        return replace(
-            plan,
-            guidance_bytes=guidance_bytes,
-            workspace_bytes=plan.workspace_bytes + guidance_bytes,
-            cuda_bytes=plan.cuda_bytes + guidance_bytes,
-            cpu_bytes=cpu_bytes,
         )
 
     @torch.no_grad()
@@ -166,8 +207,6 @@ class ScaledGenerator:
         base_offset: Sequence[int | None] | None = None,
     ) -> torch.Tensor:
         self.stats = None
-        if not isinstance(progress, bool):
-            raise TypeError("progress must be a boolean.")
         margin = self.generator.default_margin if margin is None else margin
         output_shape = self.parse_shape(shape)
         plan = self._generation_plan(
@@ -175,25 +214,14 @@ class ScaledGenerator:
             overlap,
             margin,
         )
-        plan = self._account_guidance_memory(
-            plan,
-            guidance,
-            vf is not None,
-        )
-        if plan.states_bytes > 1024**3:
-            raise ValueError(
-                "generate_probs only supports small in-memory volumes; "
-                "use generate for large output."
-            )
-        output_bytes = 4 * self.generator.num_phases * math.prod(plan.shape)
-        storage = self.select_storage(plan, "auto", output_bytes)
+        storage = self.select_storage("auto")
         tiles = self.make_tiles(plan)
         vf = self.generator.prepare_vf(vf)
         domain = self.generator.prepare_domain(domain)
         base = self.prepare_base(base, plan, offset=base_offset)
         current, next_state = self.make_states(plan, storage)
         self.fill_noise(current, tiles)
-        current = self.run(
+        current = self.sample(
             current,
             next_state,
             tiles,
@@ -205,10 +233,9 @@ class ScaledGenerator:
             progress=progress,
             guidance=guidance,
         )
-        probs = current.values.float()
-        probs.add_(1.0).mul_(0.5).clamp_(0.0, 1.0)
-        probs.div_(
-            probs.sum(dim=1, keepdim=True).clamp_min_(torch.finfo(probs.dtype).eps)
+        probs = ((current.values.float() + 1.0) * 0.5).clamp(0.0, 1.0)
+        probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(
+            torch.finfo(probs.dtype).eps,
         )
         probs = self.crop_output(probs.squeeze(0).cpu(), output_shape, margin)
         self.stats = self._output_plan(plan, output_shape)
@@ -223,7 +250,6 @@ class ScaledGenerator:
         vf: Sequence[float] | None = None,
         storage: str = "auto",
         progress: bool = True,
-        *,
         shape: int | Sequence[int] | None = None,
         guidance: float = 1.0,
         domain: int | None = None,
@@ -231,8 +257,6 @@ class ScaledGenerator:
         base_offset: Sequence[int | None] | None = None,
     ) -> torch.Tensor:
         self.stats = None
-        if not isinstance(progress, bool):
-            raise TypeError("progress must be a boolean.")
         margin = self.generator.default_margin if margin is None else margin
         if blocks is None:
             if shape is None:
@@ -243,12 +267,7 @@ class ScaledGenerator:
                 raise ValueError("blocks and shape cannot be provided together.")
             output_shape = self.shape_from_blocks(blocks, overlap)
         plan = self._generation_plan(output_shape, overlap, margin)
-        plan = self._account_guidance_memory(
-            plan,
-            guidance,
-            vf is not None,
-        )
-        selected = self.select_storage(plan, storage)
+        selected = self.select_storage(storage)
         tiles = self.make_tiles(plan)
         vf = self.generator.prepare_vf(vf)
         domain = self.generator.prepare_domain(domain)
@@ -256,7 +275,7 @@ class ScaledGenerator:
         current, next_state = self.make_states(plan, selected)
         labels = torch.empty(plan.shape, dtype=torch.uint8)
         self.fill_noise(current, tiles)
-        self.run(
+        self.sample(
             current,
             next_state,
             tiles,
@@ -279,7 +298,7 @@ class ScaledGenerator:
     ) -> tuple[int, int, int]:
         counts = self.parse_shape(blocks)
         patch_size = self.generator.patch_size
-        if not isinstance(overlap, int) or isinstance(overlap, bool) or overlap < 0:
+        if overlap < 0:
             raise ValueError("overlap must be a non-negative integer.")
         if 2 * overlap >= patch_size:
             raise ValueError("twice overlap must be smaller than patch_size.")
@@ -292,10 +311,10 @@ class ScaledGenerator:
         overlap: int,
         margin: int,
     ) -> ScalePlan:
-        if not isinstance(margin, int) or isinstance(margin, bool) or margin < 0:
+        if margin < 0:
             raise ValueError("margin must be a non-negative integer.")
-        # Preserve the public minimum-size contract for the requested output.
-        self.plan(output_shape, overlap)
+        if any(size < self.generator.patch_size for size in output_shape):
+            raise ValueError("shape must not be smaller than patch_size.")
         generation_shape = tuple(size + 2 * margin for size in output_shape)
         plan = self.plan(generation_shape, overlap)
         return replace(
@@ -360,17 +379,6 @@ class ScaledGenerator:
             raise ValueError("shape must contain exactly three positive integers.")
         return shape
 
-    def get_downsample_factor(self) -> int:
-        model = self.generator.model
-        factor = getattr(model, "downsample_factor", None)
-        if factor is None:
-            if isinstance(model, Denoiser3D):
-                raise AttributeError("Denoiser3D must expose downsample_factor.")
-            factor = 1
-        if not isinstance(factor, int) or isinstance(factor, bool) or factor < 1:
-            raise ValueError("model.downsample_factor must be a positive integer.")
-        return factor
-
     @staticmethod
     def make_tiles(
         plan: ScalePlan,
@@ -380,7 +388,11 @@ class ScaledGenerator:
             for size in plan.shape
         )
         tiles = []
-        for idx in product(*(range(count) for count in plan.grid)):
+        for idx in product(
+            range(plan.grid[0]),
+            range(plan.grid[1]),
+            range(plan.grid[2]),
+        ):
             source = []
             target = []
             margins = []
@@ -414,7 +426,6 @@ class ScaledGenerator:
         self,
         base: torch.Tensor | None,
         plan: ScalePlan,
-        *,
         offset: Sequence[int | None] | None = None,
     ) -> Base | None:
         if base is None:
@@ -432,9 +443,6 @@ class ScaledGenerator:
             raise ValueError("base must use torch.uint8.")
         if int(base.max()) >= generator.num_phases:
             raise ValueError("base contains a phase outside num_phases.")
-        if any(size < generator.patch_size for size in plan.shape):
-            raise ValueError("shape must not be smaller than the base.")
-
         output_shape = tuple(size - 2 * plan.margin for size in plan.shape)
         output_offset, explicit = self._resolve_base_offset(offset, output_shape)
         start = tuple(plan.margin + value for value in output_offset)
@@ -443,7 +451,8 @@ class ScaledGenerator:
             base.to(device=generator.device, dtype=torch.long),
             num_classes=generator.num_phases,
         )
-        clean = clean.movedim(-1, 0).unsqueeze(0).to(torch.float32).mul_(2.0).sub_(1.0)
+        clean = clean.movedim(-1, 0).unsqueeze(0).to(torch.float32)
+        clean = clean * 2.0 - 1.0
 
         weight_axes = []
         for axis in range(3):
@@ -462,9 +471,6 @@ class ScaledGenerator:
                 ramp = (
                     positions.div(plan.base_shell + 1).mul(math.pi / 2).sin().square()
                 )
-                # The default centered placement keeps its historical two-sided
-                # transition. Explicit boundary placement only tapers the side
-                # that meets newly generated output.
                 if not explicit[axis] or output_offset[axis] > 0:
                     weight_axis[: plan.base_shell] = ramp
                 if (
@@ -490,17 +496,8 @@ class ScaledGenerator:
         offset: Sequence[int | None] | None,
         output_shape: tuple[int, int, int],
     ) -> tuple[tuple[int, int, int], tuple[bool, bool, bool]]:
-        """Resolve a base origin in requested-output coordinates.
-
-        ``None`` centers the complete base. Within a three-axis offset, a
-        per-axis ``None`` keeps centering on that axis while an integer fixes
-        the base origin. Generation margins are deliberately excluded from
-        these public coordinates.
-        """
         patch_size = self.generator.patch_size
         maximum = tuple(size - patch_size for size in output_shape)
-        if any(value < 0 for value in maximum):
-            raise ValueError("shape must not be smaller than the base.")
         if offset is None:
             values: tuple[int | None, ...] = (None, None, None)
         elif isinstance(offset, Sequence) and not isinstance(offset, (str, bytes)):
@@ -529,45 +526,16 @@ class ScaledGenerator:
 
     def select_storage(
         self,
-        plan: ScalePlan,
         storage: str,
-        output_bytes: int | None = None,
     ) -> str:
         if storage not in {"auto", "cuda", "cpu"}:
             raise ValueError("storage must be 'auto', 'cuda', or 'cpu'.")
-
-        cuda_output_bytes = 0 if output_bytes is None else output_bytes
-        output_bytes = plan.output_bytes if output_bytes is None else output_bytes
-        cuda_required = plan.cuda_bytes + cuda_output_bytes
         device = self.generator.device
-        free_cuda = 0
-        if device.type == "cuda":
-            free_cuda = scale_storage.get_cuda_available_memory(device)
-            if plan.workspace_bytes > free_cuda:
-                raise MemoryError("the planned tile workspace does not fit on CUDA.")
-        elif storage == "cuda":
+        if storage == "cuda" and device.type != "cuda":
             raise ValueError("storage='cuda' requires a CUDA generator.")
-
-        if storage == "cuda":
-            if cuda_required > free_cuda:
-                raise MemoryError(
-                    "the planned CUDA state, workspace, and output do not fit."
-                )
-            selected = "cuda"
-        elif storage == "cpu" or device.type != "cuda":
-            selected = "cpu"
-        elif cuda_required <= int(free_cuda * 0.8):
-            selected = "cuda"
-        else:
-            selected = "cpu"
-
-        cpu_bytes = output_bytes
-        if selected == "cpu":
-            cpu_bytes += plan.states_bytes + plan.fusion_bytes + 2 * plan.tile_bytes
-            if device.type == "cpu":
-                cpu_bytes += plan.workspace_bytes
-        scale_storage.check_cpu_memory(cpu_bytes)
-        return selected
+        if storage == "auto":
+            return "cuda" if device.type == "cuda" else "cpu"
+        return storage
 
     def make_states(
         self,
@@ -675,14 +643,14 @@ class ScaledGenerator:
         if not overlap:
             return axis
         positions = torch.arange(overlap, device=device, dtype=torch.float32)
-        ramp = torch.sin(positions.mul(math.pi / (2 * overlap))).square()
+        ramp = torch.sin(positions * (math.pi / (2 * overlap))).square()
         if left_margin:
             axis[:left_margin] = ramp[-left_margin:]
         if right_margin:
             axis[-right_margin:] = ramp.flip(0)[:right_margin]
         return axis
 
-    def run(
+    def sample(
         self,
         current: VolumeState,
         next_state: VolumeState,
@@ -702,12 +670,11 @@ class ScaledGenerator:
             current.values.device.type == "cpu" and generator.device.type == "cuda",
         )
         fusion = self.make_fusion(plan, tiles, current.values.device)
-        bar = tqdm(
+        with tqdm(
             total=generator.diffusion.timesteps,
             desc="Scale up",
             disable=not progress,
-        )
-        try:
+        ) as bar:
             for transition in reversed(range(generator.diffusion.timesteps)):
                 time = torch.full(
                     (1,),
@@ -747,8 +714,6 @@ class ScaledGenerator:
                 if final_labels is None:
                     current, next_state = next_state, current
                 bar.update()
-        finally:
-            bar.close()
         return current
 
     def step(
@@ -799,14 +764,10 @@ class ScaledGenerator:
                 raise ValueError(f"model prediction must have shape {expected}.")
             self.add_prediction(fusion, tile, pred, tile_buffer, plan.overlap)
 
-        self.update_state(
-            current,
-            next_state,
-            tiles,
-            fusion,
-            transition,
-            labels,
-        )
+        if labels is None:
+            self.update_state(current, next_state, tiles, fusion, transition)
+        else:
+            self.write_labels(labels, tiles, fusion)
 
     @staticmethod
     def add_prediction(
@@ -838,15 +799,11 @@ class ScaledGenerator:
         tiles: tuple[Tile, ...],
         fusion: Fusion,
         transition: int,
-        labels: torch.Tensor | None,
     ) -> None:
         generator = self.generator
         for tile in tiles:
             region = (slice(None), slice(None), *tile.target)
             clean = fusion.pred_sum[region] / fusion.weight_sum[region]
-            if labels is not None:
-                self.write_output(labels, tile.target, clean)
-                continue
             previous = current.read(tile.target).float()
             updated = generator.diffusion.sample_posterior(
                 previous,
@@ -854,6 +811,17 @@ class ScaledGenerator:
                 transition,
             )
             next_state.write(tile.target, updated)
+
+    def write_labels(
+        self,
+        labels: torch.Tensor,
+        tiles: tuple[Tile, ...],
+        fusion: Fusion,
+    ) -> None:
+        for tile in tiles:
+            region = (slice(None), slice(None), *tile.target)
+            clean = fusion.pred_sum[region] / fusion.weight_sum[region]
+            self.write_output(labels, tile.target, clean)
 
     @staticmethod
     def condition_base(

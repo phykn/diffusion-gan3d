@@ -27,7 +27,7 @@ from src.evaluate import (
     measure_slice_smoothness,
     voxel_accuracy,
 )
-from src.volume import save_volume
+from src.utils import save_volume
 
 
 def main() -> None:

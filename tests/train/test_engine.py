@@ -8,23 +8,23 @@ import pytest
 import torch
 from torch import nn
 
-from src.anchor import PlaneAnchor, build_anchors
+from src.anchor import PlaneAnchor, encode_anchors
 from src.build import build_models, build_optimizers
-from src.diffusion import Diffusion
-from src.loss import vf
-from src.loss.connect import TripletBatch
-from src.loss.gan import get_critic_r1
-from src.model.common import NULL_DOMAIN
-from src.train.augment import CriticAugment
-from src.train.ema import build_ema
-from src.train.engine import (
+from src.dataset.augment import CriticAugment
+from src.engine import (
     ConditionPresence,
     Metrics,
     Trainer,
     TrainerComponents,
     TrainerSettings,
+    run_train,
 )
-from src.train.runner import run_training
+from src.loss import vf
+from src.loss.connect import TripletBatch
+from src.loss.gan import get_critic_r1
+from src.model.common import NULL_DOMAIN
+from src.model.diffusion import Diffusion
+from src.model.ema import build_ema
 
 
 class Config(dict):
@@ -109,7 +109,7 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
         gaps=torch.ones(2, dtype=torch.long),
         center_slots=fake_centers,
     )
-    anchor = build_anchors(
+    anchor = encode_anchors(
         (PlaneAnchor(torch.zeros(3, 3, dtype=torch.uint8), axis=0, index=1),),
         batch_size=1,
         num_phases=2,
@@ -146,23 +146,23 @@ def test_anchor_transitions_prioritize_the_final_step() -> None:
     trainer.diffusion = Diffusion(11)
 
     with (
-        patch("src.train.engine.torch.rand", return_value=torch.tensor(0.1)),
-        patch("src.train.engine.torch.randint") as randint,
+        patch("src.engine.torch.rand", return_value=torch.tensor(0.1)),
+        patch("src.engine.torch.randint") as randint,
     ):
         assert trainer.sample_transition(anchored=True) == 0
         randint.assert_not_called()
 
     with (
-        patch("src.train.engine.torch.rand", return_value=torch.tensor(0.5)),
+        patch("src.engine.torch.rand", return_value=torch.tensor(0.5)),
         patch(
-            "src.train.engine.torch.randint", return_value=torch.tensor(7)
+            "src.engine.torch.randint", return_value=torch.tensor(7)
         ) as randint,
     ):
         assert trainer.sample_transition(anchored=True) == 7
         randint.assert_called_once_with(1, 11, ())
 
     with patch(
-        "src.train.engine.torch.randint",
+        "src.engine.torch.randint",
         return_value=torch.tensor(6),
     ) as randint:
         assert trainer.sample_transition(anchored=False) == 6
@@ -324,13 +324,13 @@ def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
     trainer.device = torch.device("cpu")
     trainer.sample_real_anchor = Mock(return_value=Mock(source="real"))
 
-    with patch("src.train.engine.torch.rand", return_value=torch.tensor(0.9)):
-        assert trainer.sample_anchor({}, 2, domain=0, owned_axes=()) is None
+    with patch("src.engine.torch.rand", return_value=torch.tensor(0.9)):
+        assert trainer.sample_anchor({}, 2, owned_axes=()) is None
     assert not trainer.use_multi_anchor_next
 
     trainer.anchor_training_probability = 1.0
     sources = [
-        trainer.sample_anchor({}, 2, domain=0, owned_axes=()).source for _ in range(3)
+        trainer.sample_anchor({}, 2, owned_axes=()).source for _ in range(3)
     ]
 
     assert sources == ["real", "multi", "real"]
@@ -494,7 +494,7 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
         r1_values.append(float(penalties.combine(optim.local_loss_weight).detach()))
         return penalties
 
-    with patch("src.train.engine.get_critic_r1", side_effect=track_r1):
+    with patch("src.engine.get_critic_r1", side_effect=track_r1):
         metrics = trainer.step(0)
 
     assert math.isfinite(metrics.generator)
@@ -507,7 +507,7 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     assert metrics.generator_connectivity == 0.0
     assert metrics.critic_connectivity == 0.0
     assert len(r1_values) == 3
-    assert trainer.critic_augment.apply_pair.call_count == 6
+    assert trainer.critic_augment.apply_together.call_count == 6
     assert math.isclose(metrics.r1, sum(r1_values), rel_tol=1e-6)
     assert math.isclose(
         metrics.generator,
@@ -740,7 +740,7 @@ def test_generate_pair_keeps_initial_noise_and_posterior_unprojected() -> None:
         device=trainer.device,
     )
     with (
-        patch("src.train.engine.torch.randn", return_value=initial.clone()),
+        patch("src.engine.torch.randn", return_value=initial.clone()),
         patch.object(trainer, "sample_latent", return_value=latent),
     ):
         previous, current, _, prediction = trainer.generate_pair(
@@ -887,14 +887,13 @@ def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
     trainer.cfg_drop_each_probability = 0.1
 
     with patch(
-        "src.train.engine.torch.rand",
+        "src.engine.torch.rand",
         return_value=torch.tensor((0.05, 0.15, 0.25, 0.35)),
     ):
         presence = trainer.sample_condition_presence(has_anchor=True)
 
     assert presence.anchor.tolist() == [False, False, True, True]
     assert presence.vf.tolist() == [False, True, False, True]
-    assert presence.fractions() == (0.25, 0.25, 0.25, 0.25)
 
 
 def test_single_condition_dropout_matches_joint_marginal_visibility() -> None:
@@ -904,7 +903,7 @@ def test_single_condition_dropout_matches_joint_marginal_visibility() -> None:
     trainer.cfg_drop_each_probability = 0.1
 
     with patch(
-        "src.train.engine.torch.rand",
+        "src.engine.torch.rand",
         return_value=torch.tensor((0.19, 0.21)),
     ):
         presence = trainer.sample_condition_presence(has_anchor=False)
@@ -918,7 +917,7 @@ def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
         anchored=True,
         connectivity_weight=0.25,
     )
-    observed = build_anchors(
+    observed = encode_anchors(
         (PlaneAnchor(torch.zeros(8, 8, dtype=torch.uint8), axis=0, index=4),),
         batch_size=1,
         num_phases=3,
@@ -1007,7 +1006,7 @@ def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
     trainer.step = Mock(side_effect=KeyboardInterrupt)
 
     with pytest.raises(KeyboardInterrupt):
-        run_training(
+        run_train(
             trainer,
             steps=1,
             save_every=1,
@@ -1021,19 +1020,6 @@ def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
         "critic_2.pt",
         "critic_c.pt",
     )
-
-
-def test_fit_rejects_invalid_checkpoint_interval(tmp_path: Path) -> None:
-    trainer = object.__new__(Trainer)
-
-    with pytest.raises(ValueError, match="checkpoint_every"):
-        run_training(
-            trainer,
-            steps=1,
-            save_every=1,
-            checkpoint_every=0,
-            run_dir=tmp_path,
-        )
 
 
 def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
@@ -1062,11 +1048,10 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
             critic_connectivity=0.0,
             connectivity_r1=0.0,
             anchor_ramp=0.0,
-            connectivity_triplets=0,
         )
     )
 
-    weights = run_training(
+    weights = run_train(
         trainer,
         steps=3,
         save_every=1,

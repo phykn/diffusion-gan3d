@@ -40,7 +40,7 @@ from src.evaluate import (
     tortuosity,
 )
 from src.scale import ScaledGenerator
-from src.volume import save_volume
+from src.utils import save_volume
 
 SEEDS = (0, 1, 2, 3)
 REAL_REFERENCE_SEED = 10_000

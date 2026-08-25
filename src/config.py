@@ -6,9 +6,6 @@ from pathlib import Path
 from . import AXES
 from .utils import load_yaml
 
-DEFAULT_ANCHOR_STRENGTH = 0.90
-DEFAULT_ANCHOR_SPREAD = 0.20
-
 
 def get_domains(
     data: Mapping[str, object],
@@ -38,14 +35,14 @@ def get_domains(
 @dataclass(frozen=True)
 class GenerationSettings:
     guidance: float = 1.0
-    anchor_strength: float = DEFAULT_ANCHOR_STRENGTH
+    anchor_strength: float = 1.0
     overlap: int = 8
-    anchor_spread: float = DEFAULT_ANCHOR_SPREAD
+    anchor_spread: float = 0.1
 
 
 def load_generation_settings() -> GenerationSettings:
     section = load_yaml(Path(__file__).resolve().parents[1] / "config" / "gen.yaml")
-    unknown = section.keys() - {
+    unknown = set(section) - {
         "guidance",
         "anchor_strength",
         "anchor_spread",
@@ -55,8 +52,8 @@ def load_generation_settings() -> GenerationSettings:
         names = ", ".join(sorted(unknown))
         raise ValueError(f"unknown generation setting: {names}")
 
-    guidance = section.get("guidance", 1.0)
-    anchor_strength = section.get("anchor_strength", DEFAULT_ANCHOR_STRENGTH)
+    guidance = float(section.get("guidance", 1.0))
+    anchor_strength = section.get("anchor_strength", 1.0)
     if (
         not isinstance(anchor_strength, (int, float))
         or isinstance(anchor_strength, bool)
@@ -64,7 +61,7 @@ def load_generation_settings() -> GenerationSettings:
         or not 0.0 <= anchor_strength <= 1.0
     ):
         raise ValueError("anchor_strength must be between zero and one.")
-    anchor_spread = section.get("anchor_spread", DEFAULT_ANCHOR_SPREAD)
+    anchor_spread = section.get("anchor_spread", 0.1)
     if (
         not isinstance(anchor_spread, (int, float))
         or isinstance(anchor_spread, bool)
@@ -72,19 +69,15 @@ def load_generation_settings() -> GenerationSettings:
         or anchor_spread <= 0.0
     ):
         raise ValueError("anchor_spread must be positive and finite.")
-    overlap = _non_negative_int(section.get("overlap", 8), "overlap")
+    overlap = section.get("overlap", 8)
+    if not isinstance(overlap, int) or isinstance(overlap, bool) or overlap < 0:
+        raise ValueError("overlap must be a non-negative integer.")
     return GenerationSettings(
-        float(guidance),
-        float(anchor_strength),
-        overlap,
-        float(anchor_spread),
+        guidance=guidance,
+        anchor_strength=float(anchor_strength),
+        overlap=overlap,
+        anchor_spread=float(anchor_spread),
     )
-
-
-def _non_negative_int(value: object, name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError(f"{name} must be a non-negative integer.")
-    return value
 
 
 def get_schedule_steps(
@@ -100,16 +93,9 @@ def get_schedule_steps(
 
 
 def find_train_config(weights: str | Path) -> Path:
-    """Find the run configuration that owns a generator weight file."""
     path = Path(weights).resolve()
-    config = next(
-        (
-            parent / "train.yaml"
-            for parent in path.parents
-            if (parent / "train.yaml").is_file()
-        ),
-        None,
-    )
-    if config is None:
-        raise FileNotFoundError(f"train.yaml was not found above weights file: {path}")
-    return config.resolve()
+    for parent in path.parents:
+        config = parent / "train.yaml"
+        if config.is_file():
+            return config
+    raise FileNotFoundError(f"train.yaml was not found above weights file: {path}")

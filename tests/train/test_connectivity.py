@@ -2,7 +2,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.anchor import PlaneAnchor, build_anchors
+from src.anchor import PlaneAnchor, encode_anchors
 from src.loss.connect import (
     AnchorTripletSampler,
     TripletBatch,
@@ -191,7 +191,7 @@ def _condition(
     num_phases: int,
     volume_size: int,
 ):
-    condition = build_anchors(
+    condition = encode_anchors(
         seeds,
         batch_size=1,
         num_phases=num_phases,

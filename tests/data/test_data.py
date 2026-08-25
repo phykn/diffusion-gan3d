@@ -11,7 +11,7 @@ from src.config import get_domains
 from src.dataset import FolderBatchSampler
 from src.dataset.build import build_datasets, build_stream
 from src.dataset.real import RealDataset
-from src.train.engine import Trainer
+from src.engine import Trainer
 
 
 def _save_image(path: Path, image: np.ndarray) -> None:

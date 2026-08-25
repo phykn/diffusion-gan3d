@@ -4,9 +4,9 @@ import pytest
 import torch
 
 from src.build import build_models, build_optimizers
-from src.diffusion import Diffusion
-from src.train.ema import build_ema
-from src.train.engine import Trainer, TrainerComponents, TrainerSettings
+from src.engine import Trainer, TrainerComponents, TrainerSettings
+from src.model.diffusion import Diffusion
+from src.model.ema import build_ema
 
 
 class CudaStream:

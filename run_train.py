@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from src.build import build_trainer
-from src.train.runner import run_training
+from src.engine import run_train
 from src.utils import load_yaml, save_yaml
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config" / "train.yaml"
@@ -45,7 +45,7 @@ def main() -> None:
     else:
         run_dir = make_explicit_run_dir(args.run_dir)
     save_yaml(run_dir / "train.yaml", cfg)
-    run_training(
+    run_train(
         trainer,
         steps=cfg["train"]["steps"],
         save_every=cfg["train"]["update_weights_every"],

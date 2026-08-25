@@ -9,8 +9,7 @@ import pytest
 from PIL import Image
 
 from run_train import make_run_dir
-from src.train.engine import Metrics
-from src.train.runner import write_metrics
+from src.engine import Metrics, write_metrics
 from src.utils import save_yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +48,6 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         critic_connectivity=0.4,
         connectivity_r1=0.05,
         anchor_ramp=0.5,
-        connectivity_triplets=3,
         generator_global=0.6,
         generator_local=0.8,
         critic_global=1.2,
@@ -61,28 +59,23 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
     write_metrics(writer, 10, metrics)
 
     tags = {call.args[0] for call in writer.add_scalar.call_args_list}
-    assert "conditioning/anchor_planes" in tags
-    assert "conditioning/anchor_conflict_rate" in tags
-    assert "loss/anchor_3_planes" in tags
-    assert "conditioning/anchor_accuracy_3_planes" in tags
-    assert "loss/generator_global" in tags
-    assert "loss/generator_local_raw" in tags
-    assert "loss/critic_global" in tags
-    assert "loss/critic_local_raw" in tags
-    assert "loss/generator_connectivity" in tags
-    assert "loss/critic_connectivity" in tags
-    assert "loss/connectivity_r1_raw" in tags
-    assert "conditioning/anchor_ramp" in tags
-    assert "train/connectivity_triplets" in tags
-    assert "loss/vf" in tags
-    assert "loss/normal_transition" in tags
-    assert "loss/anchor_coarse" in tags
-    assert "loss/anchor_pixel" in tags
-    assert "conditioning/anchor_shared" in tags
-    assert "conditioning/state_joint_null_fraction" in tags
-    assert "train/volume_size" in tags
-    assert "train/domain" in tags
-    assert "conditioning/vf_active" in tags
+    assert tags == {
+        "loss/generator",
+        "loss/generator_total",
+        "loss/critic",
+        "loss/r1",
+        "loss/generator_connectivity",
+        "loss/critic_connectivity",
+        "loss/connectivity_r1",
+        "loss/normal_transition",
+        "loss/anchor",
+        "loss/vf",
+        "conditioning/anchor_fraction",
+        "conditioning/vf_fraction",
+        "conditioning/anchor_ramp",
+        "conditioning/anchor_planes",
+        "conditioning/anchor_accuracy",
+    }
     writer.add_image.assert_not_called()
 
 

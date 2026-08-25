@@ -17,22 +17,8 @@ def make_plan() -> ScalePlan:
         stride=4,
         grid=(2, 2, 2),
         tile_count=8,
-        states_bytes=6144,
-        fusion_bytes=8192,
-        tile_bytes=2592,
-        workspace_bytes=4096,
-        cuda_bytes=18432,
-        output_bytes=512,
-        cpu_bytes=18736,
         seams=((4,), (4,), (4,)),
     )
-
-
-def test_memory_size_is_human_readable() -> None:
-    module = importlib.import_module("scripts.04_check_scale_up")
-
-    assert module.format_bytes(96 * 1024**3) == "96.00 GiB"
-    assert module.format_bytes(8 * 1024**3) == "8.00 GiB"
 
 
 @pytest.mark.parametrize("count", (None, "0"))
@@ -138,8 +124,7 @@ def test_main_prints_plan_before_scaled_generation(
     ]
     assert output.index("Plan    :") < output.index("Scaling...")
     assert "Plan    : 2 × 2 × 2 tiles (8 total), overlap 1, cpu" in output
-    assert "Memory  : CUDA 18.00 KiB, CPU 18.30 KiB" in output
-    assert "Fusion memory" not in output
+    assert "Memory  :" not in output
     assert not (weights.parent / "scaled_4x4x4.tiff").exists()
 
 

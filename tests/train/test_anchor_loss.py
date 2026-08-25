@@ -1,6 +1,6 @@
 import torch
 
-from src.anchor import PlaneAnchor, build_anchors
+from src.anchor import PlaneAnchor, encode_anchors
 from src.loss.anchor import SoftAnchorLoss
 
 
@@ -122,7 +122,7 @@ def test_visibility_selects_individual_anchor_batch_items() -> None:
             torch.ones(4, 4, dtype=torch.uint8),
         )
     )
-    condition = build_anchors(
+    condition = encode_anchors(
         (PlaneAnchor(images, axis=0, index=1),),
         batch_size=2,
         num_phases=2,
@@ -197,7 +197,7 @@ def test_observed_and_generated_coarse_groups_are_balanced() -> None:
 
 
 def _condition(anchors: tuple[PlaneAnchor, ...], *, size: int):
-    condition = build_anchors(
+    condition = encode_anchors(
         anchors,
         batch_size=1,
         num_phases=2,

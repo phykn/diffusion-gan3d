@@ -1,28 +1,32 @@
 import math
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
-from .. import AXES
-from ..anchor import AnchorCondition, PlaneAnchor, build_anchors
-from ..dataset import BatchStream
-from ..diffusion import Diffusion
-from ..loss import vf
-from ..loss.anchor import SoftAnchorLoss
-from ..loss.connect import AnchorTripletSampler, TripletBatch, compute_transition_loss
-from ..loss.gan import (
+from . import AXES
+from .anchor import AnchorCondition, PlaneAnchor, encode_anchors
+from .dataset import BatchStream
+from .dataset.augment import CriticAugment
+from .loss import vf
+from .loss.anchor import SoftAnchorLoss
+from .loss.connect import AnchorTripletSampler, TripletBatch, compute_transition_loss
+from .loss.gan import (
     get_critic_loss,
     get_critic_r1,
     get_generator_loss,
 )
-from ..model.common import NULL_DOMAIN
-from ..model.denoiser import Denoiser3D
-from .augment import CriticAugment
-from .ema import update_ema
+from .model.common import NULL_DOMAIN
+from .model.denoiser import Denoiser3D
+from .model.diffusion import Diffusion
+from .model.ema import update_ema
+from .utils import save_model
 
 
 @dataclass(frozen=True)
@@ -43,7 +47,6 @@ class Metrics:
     critic_connectivity: float
     connectivity_r1: float
     anchor_ramp: float
-    connectivity_triplets: int
     generator_global: float = 0.0
     generator_local: float = 0.0
     critic_global: float = 0.0
@@ -52,12 +55,6 @@ class Metrics:
     vf_active: bool = False
     anchor_input_active_fraction: float = 0.0
     vf_active_fraction: float = 0.0
-    condition_state_fractions: tuple[float, float, float, float] = (
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-    )
     normal_transition_loss: float = 0.0
     anchor_coarse_loss: float = 0.0
     anchor_pixel_loss: float = 0.0
@@ -105,7 +102,6 @@ class StepPreparation:
     critic_domains: dict[int, int]
     real: dict[int, torch.Tensor]
     selection: "AnchorSelection | None"
-    anchor: AnchorCondition | None
     target_vf: torch.Tensor
     presence: "ConditionPresence"
     model_conditions: dict[str, torch.Tensor]
@@ -125,25 +121,6 @@ class ConditionPresence:
     anchor: torch.Tensor
     vf: torch.Tensor
 
-    def __post_init__(self) -> None:
-        if self.anchor.dtype != torch.bool or self.vf.dtype != torch.bool:
-            raise TypeError("condition presence masks must be boolean tensors.")
-        if self.anchor.ndim != 1 or self.anchor.shape != self.vf.shape:
-            raise ValueError("condition presence masks must have matching shape [B].")
-        if self.anchor.device != self.vf.device:
-            raise ValueError("condition presence masks must be on the same device.")
-
-    def fractions(self) -> tuple[float, float, float, float]:
-        anchor = self.anchor
-        vf = self.vf
-        states = (
-            anchor & vf,
-            anchor & ~vf,
-            ~anchor & vf,
-            ~anchor & ~vf,
-        )
-        return tuple(float(state.to(torch.float32).mean()) for state in states)
-
 
 @dataclass(frozen=True)
 class TrainerComponents:
@@ -159,23 +136,6 @@ class TrainerComponents:
     scaler: torch.amp.GradScaler
     device: torch.device
     critic_augment: CriticAugment | None = None
-
-    def __post_init__(self) -> None:
-        if set(self.streams) != set(range(len(self.streams))):
-            raise ValueError("stream domain IDs must be contiguous and start at zero.")
-        if any(not streams for streams in self.streams.values()):
-            raise ValueError("each domain must contain at least one axis stream.")
-        if any(not set(streams).issubset(AXES) for streams in self.streams.values()):
-            raise ValueError("domain streams may contain only axes 0, 1, and 2.")
-        available = {axis for streams in self.streams.values() for axis in streams}
-        expected = {str(axis) for axis in available}
-        if set(self.critics) != expected or set(self.critic_optims) != expected:
-            raise ValueError("critics and optimizers must match the available axes.")
-        if self.critic_augment is not None and not isinstance(
-            self.critic_augment,
-            CriticAugment,
-        ):
-            raise TypeError("critic_augment must be a CriticAugment or None.")
 
 
 @dataclass(frozen=True)
@@ -202,96 +162,6 @@ class TrainerSettings:
     anchor_shared_axis_probability: float
     connectivity_max_gap: int = 1
 
-    def __post_init__(self) -> None:
-        self._validate_positive_integers()
-        self._validate_non_negative_integers()
-        self._validate_probabilities()
-        if 3.0 * self.cfg_drop_each_probability > 1.0:
-            raise ValueError(
-                "the three two-condition dropout states must have total "
-                "probability at most one."
-            )
-        if (
-            not isinstance(self.ema_decay, (int, float))
-            or isinstance(self.ema_decay, bool)
-            or not math.isfinite(self.ema_decay)
-            or not 0.0 <= self.ema_decay < 1.0
-        ):
-            raise ValueError("ema_decay must be between zero and one, excluding one.")
-        self._validate_non_negative_values()
-        if not isinstance(self.amp_enabled, bool):
-            raise TypeError("amp_enabled must be a boolean.")
-
-    def validate_denoiser(self, denoiser: Denoiser3D) -> None:
-        downsample_factor = getattr(denoiser, "downsample_factor", None)
-        if (
-            not isinstance(downsample_factor, int)
-            or isinstance(downsample_factor, bool)
-            or downsample_factor < 1
-        ):
-            raise ValueError("denoiser.downsample_factor must be a positive integer.")
-        if self.patch_size % downsample_factor:
-            raise ValueError(
-                "patch_size must be divisible by the denoiser downsample factor."
-            )
-
-    def _validate_positive_integers(self) -> None:
-        values = {
-            "volume_batch_size": self.volume_batch_size,
-            "num_phases": self.num_phases,
-            "patch_size": self.patch_size,
-            "slice_pairs_per_axis": self.slice_pairs_per_axis,
-            "r1_interval": self.r1_interval,
-            "latent_channels": self.latent_channels,
-            "connectivity_max_gap": self.connectivity_max_gap,
-        }
-        for name, value in values.items():
-            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-                raise ValueError(f"{name} must be a positive integer.")
-
-    def _validate_non_negative_integers(self) -> None:
-        values = {
-            "anchor_start_step": self.anchor_start_step,
-            "anchor_ramp_steps": self.anchor_ramp_steps,
-        }
-        for name, value in values.items():
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise ValueError(f"{name} must be a non-negative integer.")
-
-    def _validate_probabilities(self) -> None:
-        values = {
-            "anchor_training_probability": self.anchor_training_probability,
-            "cfg_drop_each_probability": self.cfg_drop_each_probability,
-            "domain_dropout": self.domain_dropout,
-            "anchor_shared_axis_probability": (self.anchor_shared_axis_probability),
-        }
-        for name, value in values.items():
-            if (
-                not isinstance(value, (int, float))
-                or isinstance(value, bool)
-                or not math.isfinite(value)
-                or not 0.0 <= value <= 1.0
-            ):
-                raise ValueError(f"{name} must be between zero and one.")
-
-    def _validate_non_negative_values(self) -> None:
-        values = {
-            "r1_gamma": self.r1_gamma,
-            "critic_local_weight": self.critic_local_weight,
-            "anchor_pixel_loss_weight": self.anchor_pixel_loss_weight,
-            "connectivity_weight": self.connectivity_weight,
-            "normal_transition_weight": self.normal_transition_weight,
-            "vf_loss_weight": self.vf_loss_weight,
-        }
-        for name, value in values.items():
-            if (
-                not isinstance(value, (int, float))
-                or isinstance(value, bool)
-                or not math.isfinite(value)
-                or value < 0.0
-            ):
-                raise ValueError(f"{name} must be finite and non-negative.")
-
 
 class Trainer:
     def __init__(
@@ -299,13 +169,11 @@ class Trainer:
         components: TrainerComponents,
         settings: TrainerSettings,
     ) -> None:
-        settings.validate_denoiser(components.denoiser)
         self.denoiser = components.denoiser
         self.ema_denoiser = components.ema_denoiser
         self.critics = components.critics
         self.connectivity_critic = components.connectivity_critic
         self.streams = components.streams
-        self.num_domains = len(components.streams)
         self.active_axes = tuple(int(axis) for axis in components.critics)
         self.axis_domains = {
             axis: tuple(
@@ -385,7 +253,7 @@ class Trainer:
             with torch.no_grad():
                 reference = self.generate_pair(
                     transition,
-                    self.without_anchor_conditions(prepared.model_conditions),
+                    self.remove_anchor_conditions(prepared.model_conditions),
                     volume_size,
                 )
             if selection.source == "multi":
@@ -393,7 +261,6 @@ class Trainer:
                 prepared = replace(
                     prepared,
                     selection=selection,
-                    anchor=selection.condition,
                     model_conditions=self.make_model_conditions(
                         selection.condition,
                         prepared.target_vf,
@@ -412,7 +279,7 @@ class Trainer:
             prepared.model_conditions,
             volume_size,
         )
-        anchor = prepared.anchor
+        anchor = None if selection is None else selection.condition
         clean_probs = (prediction + 1.0) * 0.5
         fake = self._sample_fake_pairs(
             previous,
@@ -487,7 +354,6 @@ class Trainer:
             critic_local=critic_local,
             critic_connectivity=critic_connectivity,
             connectivity_r1=connectivity_r1,
-            connectivity_fake=connectivity_fake,
         )
 
     def _sample_fake_pairs(
@@ -504,8 +370,8 @@ class Trainer:
             else anchor.axis_masks & anchor_present.reshape(-1, 1, 1, 1, 1)
         )
         return {
-            axis: self.critic_augment.apply_pair(
-                *self.sample_pairs(
+            axis: self.critic_augment.apply_together(
+                self.sample_pairs(
                     previous,
                     current,
                     axis,
@@ -518,7 +384,6 @@ class Trainer:
 
     @staticmethod
     def _make_denoiser_batch(
-        *,
         prepared: StepPreparation,
         connectivity_domains: torch.Tensor,
         fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
@@ -537,7 +402,7 @@ class Trainer:
             connectivity_fake=connectivity_fake,
             logits=logits,
             clean_probs=clean_probs,
-            anchor=prepared.anchor,
+            anchor=None if selection is None else selection.condition,
             anchor_observed_mask=(
                 None if selection is None else selection.observed_mask
             ),
@@ -555,19 +420,11 @@ class Trainer:
         step: int,
         transition: int | None,
     ) -> StepPreparation:
-        if not isinstance(step, int) or isinstance(step, bool) or step < 0:
-            raise ValueError("step must be a non-negative integer.")
         self.denoiser.train()
         self.critics.train()
         self.connectivity_critic.train()
-        if transition is not None and (
-            not isinstance(transition, int)
-            or isinstance(transition, bool)
-            or not 0 <= transition < self.diffusion.timesteps
-        ):
-            raise ValueError("transition is outside the diffusion schedule.")
 
-        domain = self.select_target_domain(step)
+        domain = self.sample_target_domain()
         model_domain = self.sample_domain_condition(domain)
         batch_domains = self.select_batch_domains(domain)
         batches = self.get_batches(domain, batch_domains)
@@ -586,7 +443,6 @@ class Trainer:
             else self.sample_anchor(
                 batches,
                 self.patch_size,
-                domain=domain,
                 owned_axes=tuple(own_batches),
             )
         )
@@ -606,7 +462,6 @@ class Trainer:
             critic_domains=critic_domains,
             real=batches,
             selection=selection,
-            anchor=anchor,
             target_vf=target_vf,
             presence=presence,
             model_conditions=model_conditions,
@@ -615,7 +470,6 @@ class Trainer:
 
     def finish_step(
         self,
-        *,
         prepared: StepPreparation,
         denoiser_update: DenoiserUpdate,
         critic_vals: list[float],
@@ -624,10 +478,10 @@ class Trainer:
         critic_local: float,
         critic_connectivity: float,
         connectivity_r1: float,
-        connectivity_fake: TripletBatch,
     ) -> Metrics:
         update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
-        anchor = prepared.anchor
+        selection = prepared.selection
+        anchor = None if selection is None else selection.condition
         presence = prepared.presence
         return Metrics(
             generator=denoiser_update.adversarial,
@@ -646,7 +500,6 @@ class Trainer:
             critic_connectivity=critic_connectivity,
             connectivity_r1=connectivity_r1,
             anchor_ramp=prepared.anchor_ramp,
-            connectivity_triplets=len(connectivity_fake),
             generator_global=denoiser_update.global_loss,
             generator_local=denoiser_update.local_loss,
             critic_global=critic_global,
@@ -657,7 +510,6 @@ class Trainer:
                 presence.anchor.to(torch.float32).mean()
             ),
             vf_active_fraction=float(presence.vf.to(torch.float32).mean()),
-            condition_state_fractions=presence.fractions(),
             normal_transition_loss=denoiser_update.normal_transition,
             anchor_coarse_loss=denoiser_update.anchor_coarse,
             anchor_pixel_loss=denoiser_update.anchor_pixel,
@@ -739,24 +591,15 @@ class Trainer:
     ) -> AnchorCondition:
         if visible is None:
             return anchor
-        if visible.shape != (anchor.mask.shape[0],) or visible.dtype != torch.bool:
-            raise ValueError("anchor visibility must be boolean with shape [B].")
-        if visible.device != anchor.mask.device:
-            raise ValueError("anchor visibility and condition must share a device.")
         mask = visible.reshape(-1, 1, 1, 1, 1)
-        return AnchorCondition(
+        return replace(
+            anchor,
             image=anchor.image * mask,
             mask=anchor.mask & mask,
             axis_masks=anchor.axis_masks & mask,
-            target=anchor.target,
-            planes=anchor.planes,
-            conflicts=anchor.conflicts,
-            source_voxels=anchor.source_voxels,
         )
 
     def sample_transition(self, anchored: bool) -> int:
-        if not isinstance(anchored, bool):
-            raise TypeError("anchored must be a boolean.")
         if not anchored:
             return int(torch.randint(self.diffusion.timesteps, ()).item())
         if self.diffusion.timesteps == 1 or bool(torch.rand(()) < 0.25):
@@ -764,7 +607,7 @@ class Trainer:
         return int(torch.randint(1, self.diffusion.timesteps, ()).item())
 
     @staticmethod
-    def without_anchor_conditions(
+    def remove_anchor_conditions(
         conditions: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         return {
@@ -804,10 +647,7 @@ class Trainer:
         return selected
 
     def sample_target_domain(self) -> int:
-        return int(torch.randint(self.num_domains, ()).item())
-
-    def select_target_domain(self, step: int) -> int:
-        return self.sample_target_domain()
+        return int(torch.randint(len(self.streams), ()).item())
 
     def get_batches(
         self,
@@ -858,21 +698,7 @@ class Trainer:
         size: int | tuple[int, int],
         centers: list[tuple[int, int]] | None = None,
     ) -> torch.Tensor:
-        if images.ndim not in (3, 4):
-            raise ValueError("images must have shape [B, H, W] or [B, C, H, W].")
-        if isinstance(size, int) and not isinstance(size, bool):
-            crop_h = crop_w = size
-        elif (
-            isinstance(size, tuple)
-            and len(size) == 2
-            and all(
-                isinstance(value, int) and not isinstance(value, bool) and value > 0
-                for value in size
-            )
-        ):
-            crop_h, crop_w = size
-        else:
-            raise ValueError("crop size must be a positive integer.")
+        crop_h, crop_w = (size, size) if isinstance(size, int) else size
         if crop_h < 1 or crop_w < 1:
             raise ValueError("crop size must be a positive integer.")
         height, width = images.shape[-2:]
@@ -884,8 +710,6 @@ class Trainer:
         top = torch.randint(height - crop_h + 1, (images.shape[0],)).tolist()
         left = torch.randint(width - crop_w + 1, (images.shape[0],)).tolist()
         if centers is not None:
-            if len(centers) > images.shape[0]:
-                raise ValueError("centers must not outnumber images.")
             for index, (row, col) in enumerate(centers):
                 top[index] = min(max(row - crop_h // 2, 0), height - crop_h)
                 left[index] = min(max(col - crop_w // 2, 0), width - crop_w)
@@ -897,8 +721,6 @@ class Trainer:
         )
 
     def sample_condition_presence(self, has_anchor: bool) -> ConditionPresence:
-        if not isinstance(has_anchor, bool):
-            raise TypeError("has_anchor must be a boolean.")
         batch = self.volume_batch_size
         anchor = torch.full(
             (batch,),
@@ -916,8 +738,6 @@ class Trainer:
             anchor = ~(joint_null | anchor_null)
             vf = ~(joint_null | vf_null)
         else:
-            # Match the marginal visibility of either condition in the four-state
-            # joint CFG distribution: joint-null plus its own null state.
             vf = random >= 2.0 * self.cfg_drop_each_probability
         return ConditionPresence(anchor=anchor, vf=vf)
 
@@ -949,15 +769,10 @@ class Trainer:
             1.0,
         )
 
-    def anchor_schedule_complete(self, step: int) -> bool:
-        return self.get_anchor_ramp(step) >= 1.0
-
     def sample_anchor(
         self,
         batches: dict[int, torch.Tensor],
         volume_size: int,
-        *,
-        domain: int,
         owned_axes: tuple[int, ...] | None = None,
     ) -> AnchorSelection | None:
         probability = self.anchor_training_probability
@@ -984,15 +799,10 @@ class Trainer:
         self,
         batches: dict[int, torch.Tensor],
         volume_size: int,
-        *,
         owned_axes: tuple[int, ...] | None = None,
     ) -> AnchorSelection:
-        if not batches:
-            raise ValueError("anchor batches must not be empty.")
         if owned_axes is None:
             owned_axes = tuple(batches)
-        if not owned_axes or any(axis not in batches for axis in owned_axes):
-            raise ValueError("owned anchor axes must be present in the batches.")
         shared_axes = tuple(axis for axis in batches if axis not in owned_axes)
         use_shared = (
             bool(shared_axes)
@@ -1002,10 +812,6 @@ class Trainer:
         axes = shared_axes if use_shared else owned_axes
         axis = axes[int(torch.randint(len(axes), ()).item())]
         images = batches[axis]
-        if images.shape[0] < self.volume_batch_size:
-            raise ValueError(
-                "the real image batch must cover the generated volume batch."
-            )
         batch_indices = torch.randperm(
             images.shape[0],
             device=images.device,
@@ -1023,7 +829,7 @@ class Trainer:
             index=plane_index,
             position=position,
         )
-        condition = build_anchors(
+        condition = encode_anchors(
             (plane,),
             batch_size=self.volume_batch_size,
             num_phases=self.num_phases,
@@ -1032,8 +838,6 @@ class Trainer:
             dtype=torch.float32,
             reconcile=False,
         )
-        if condition is None:
-            raise RuntimeError("real anchor construction returned no condition.")
         return AnchorSelection(
             condition=condition,
             observed_mask=condition.mask,
@@ -1042,8 +846,6 @@ class Trainer:
         )
 
     def sample_multi_anchor(self, prediction: torch.Tensor) -> AnchorSelection:
-        if prediction.ndim != 5 or prediction.shape[1] != self.num_phases:
-            raise ValueError("prediction must have shape [B, C, D, H, W].")
         labels = prediction.detach().argmax(dim=1)
         count = int(torch.randint(2, len(AXES) + 1, ()).item())
         axes = torch.randperm(len(AXES), device=prediction.device)[:count].tolist()
@@ -1063,7 +865,7 @@ class Trainer:
                     index=index,
                 )
             )
-        condition = build_anchors(
+        condition = encode_anchors(
             tuple(planes),
             batch_size=prediction.shape[0],
             num_phases=self.num_phases,
@@ -1072,8 +874,6 @@ class Trainer:
             dtype=torch.float32,
             reconcile=False,
         )
-        if condition is None:
-            raise RuntimeError("multi-anchor construction returned no condition.")
         return AnchorSelection(
             condition=condition,
             observed_mask=torch.zeros_like(condition.mask),
@@ -1138,20 +938,6 @@ class Trainer:
         axis_masks: torch.Tensor | None = None,
         crop_shape: int | tuple[int, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if previous.shape != current.shape:
-            raise ValueError("previous and current volumes must have the same shape.")
-        if previous.ndim != 5:
-            raise ValueError("volumes must have shape [B, C, D, H, W].")
-        if axis not in AXES:
-            raise ValueError("axis must be 0, 1, or 2.")
-        if axis_masks is not None and (
-            axis_masks.shape != (previous.shape[0], 3, *previous.shape[2:])
-            or axis_masks.device != previous.device
-        ):
-            raise ValueError(
-                "axis_masks must match the volume batch and spatial shape."
-            )
-
         count = self.slice_pairs_per_axis
         batch_indices = torch.randint(
             previous.shape[0],
@@ -1228,9 +1014,8 @@ class Trainer:
                     real,
                     transition,
                 )
-                real_prev, real_curr = self.critic_augment.apply_pair(
-                    real_prev,
-                    real_curr,
+                real_prev, real_curr = self.critic_augment.apply_together(
+                    (real_prev, real_curr),
                 )
             else:
                 real_prev, real_curr = real_pairs[axis]
@@ -1274,15 +1059,11 @@ class Trainer:
     ) -> tuple[float, float]:
         if not len(fake):
             return 0.0, 0.0
-        if real.shape != fake.values.shape:
-            raise ValueError("real and fake connectivity triplets must match.")
 
         apply_r1 = self.r1_gamma > 0.0 and (step + 1) % self.r1_interval == 0
         self.connectivity_optim.zero_grad(set_to_none=True)
         real = real.detach().float().requires_grad_(apply_r1)
         fake_values = fake.values.detach().float()
-        if domains.shape != (len(fake),):
-            raise ValueError("connectivity domains must have shape [B].")
         autocast = self.autocast(self.amp_enabled and not apply_r1)
         with autocast:
             real_score = self.connectivity_critic(
@@ -1440,3 +1221,77 @@ class Trainer:
             dtype=torch.float16,
             enabled=enabled,
         )
+
+
+def run_train(
+    trainer: Trainer,
+    steps: int,
+    save_every: int,
+    run_dir: str | Path,
+    checkpoint_every: int | None = None,
+) -> Path:
+    root = Path(run_dir)
+    done = 0
+    weights = root / "generator.pt"
+    writer = SummaryWriter(root / "tensorboard")
+    bar = tqdm(
+        range(steps),
+        desc="Diffusion GAN3D",
+        dynamic_ncols=True,
+    )
+    model_files = {
+        "generator.pt": trainer.ema_denoiser,
+        **{
+            f"critic_{axis}.pt": critic
+            for axis, critic in trainer.critics.items()
+        },
+        "critic_c.pt": trainer.connectivity_critic,
+    }
+    try:
+        for step in bar:
+            metrics = trainer.step(step)
+            done = step + 1
+            write_metrics(writer, done, metrics)
+            if done % save_every == 0:
+                for name, model in model_files.items():
+                    save_model(root / name, model)
+            if checkpoint_every is not None and done % checkpoint_every == 0:
+                checkpoint_root = root / "checkpoints" / f"step_{done:08d}"
+                for name, model in model_files.items():
+                    save_model(checkpoint_root / name, model)
+        if done % save_every:
+            for name, model in model_files.items():
+                save_model(root / name, model)
+    except KeyboardInterrupt:
+        for name, model in model_files.items():
+            save_model(root / name, model)
+        raise
+    finally:
+        bar.close()
+        writer.close()
+    return weights
+
+
+def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
+    scalars = {
+        "loss/generator": metrics.generator,
+        "loss/generator_total": metrics.generator_total,
+        "loss/critic": metrics.critic,
+        "loss/r1": metrics.r1,
+        "loss/generator_connectivity": metrics.generator_connectivity,
+        "loss/critic_connectivity": metrics.critic_connectivity,
+        "loss/connectivity_r1": metrics.connectivity_r1,
+        "loss/normal_transition": metrics.normal_transition_loss,
+        "loss/anchor": metrics.anchor_loss,
+        "loss/vf": metrics.vf_loss,
+        "conditioning/anchor_fraction": metrics.anchor_input_active_fraction,
+        "conditioning/vf_fraction": metrics.vf_active_fraction,
+        "conditioning/anchor_ramp": metrics.anchor_ramp,
+    }
+
+    if metrics.anchor_planes:
+        scalars["conditioning/anchor_planes"] = metrics.anchor_planes
+        scalars["conditioning/anchor_accuracy"] = metrics.anchor_accuracy
+
+    for tag, value in scalars.items():
+        writer.add_scalar(tag, value, step)

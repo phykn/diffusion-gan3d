@@ -7,22 +7,20 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src import scale_storage
 from src.anchor import PlaneAnchor
 from src.build import (
     build_models,
     build_trainer,
     load_generator,
 )
-from src.diffusion import Diffusion
 from src.evaluate import measure_seams
-from src.generate import (
-    Generator,
-    _SpatialAnchorDenoiser,
-)
 from src.model.denoiser import Denoiser3D
-from src.scale import ScaledGenerator
-from src.scale_storage import TileBuffer, VolumeState
+from src.model.diffusion import Diffusion
+from src.model.generator import (
+    Generator,
+    SpatialAnchorDenoiser,
+)
+from src.scale import ScaledGenerator, TileBuffer, VolumeState
 
 _SCALED_GENERATE = ScaledGenerator.generate
 _SCALED_GENERATE_PROBS = ScaledGenerator.generate_probs
@@ -54,7 +52,7 @@ def preserve_generation_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Generator, "generate_probs", direct_generate_probs)
 
 
-from src.train.ema import build_ema
+from src.model.ema import build_ema
 from src.utils import save_model, save_yaml
 
 
@@ -407,7 +405,6 @@ def test_guidance_routes_direct_and_scaled_predictions() -> None:
 
     scaled_model = _GuidanceTraceModel()
     scaled = ScaledGenerator(_generator(scaled_model, Diffusion(2)))
-    baseline_plan = scaled.plan((6, 4, 4), overlap=0)
     scaled.generate(
         shape=(6, 4, 4),
         vf=(0.5, 0.1, 0.4),
@@ -415,18 +412,8 @@ def test_guidance_routes_direct_and_scaled_predictions() -> None:
         progress=False,
         guidance=1.75,
     )
-    guided_plan = scaled.stats
-
     assert direct_model.guidances == [1.75, 1.75]
     assert scaled_model.guidances == [1.75] * 4
-    assert guided_plan is not None
-    expected_guidance = 3 * guided_plan.tile_size**3 * 16
-    assert guided_plan.guidance_bytes == expected_guidance
-    assert guided_plan.workspace_bytes == (
-        baseline_plan.workspace_bytes + expected_guidance
-    )
-    assert guided_plan.cuda_bytes == baseline_plan.cuda_bytes + expected_guidance
-    assert guided_plan.cpu_bytes == baseline_plan.cpu_bytes + expected_guidance
 
     for offset in range(0, len(scaled_model.guidance_inputs), 2):
         left, right = scaled_model.guidance_inputs[offset : offset + 2]
@@ -532,8 +519,6 @@ def test_scaled_guidance_one_preserves_default_rng_path() -> None:
     )
 
     assert torch.equal(explicit, baseline)
-    assert scaled.stats is not None
-    assert scaled.stats.guidance_bytes == 0
 
 
 def test_base_only_guidance_is_a_no_op() -> None:
@@ -565,8 +550,6 @@ def test_base_only_guidance_is_a_no_op() -> None:
     )
 
     assert torch.equal(guided, baseline)
-    assert scaled.stats is not None
-    assert scaled.stats.guidance_bytes == 0
 
 
 def test_regular_sampling_accepts_direct_volume_size() -> None:
@@ -774,7 +757,7 @@ def test_anchor_timing_separates_plane_fidelity_from_context() -> None:
     time = torch.tensor((9, 0))
     diffusion = Diffusion(10)
 
-    plane, context = _SpatialAnchorDenoiser.temporal_scales(
+    plane, context = SpatialAnchorDenoiser.compute_temporal_scales(
         time,
         diffusion.alpha_bars,
     )
@@ -786,7 +769,7 @@ def test_anchor_timing_separates_plane_fidelity_from_context() -> None:
         torch.stack((torch.tensor(2.0).sqrt(), expected_final)),
     )
     single_diffusion = Diffusion(1)
-    single_plane, single_context = _SpatialAnchorDenoiser.temporal_scales(
+    single_plane, single_context = SpatialAnchorDenoiser.compute_temporal_scales(
         torch.zeros(1, dtype=torch.long),
         single_diffusion.alpha_bars,
     )
@@ -902,7 +885,7 @@ def test_anchor_prediction_residual_is_gaussian_blended_before_posterior() -> No
         device=torch.device("cpu"),
     )
     expected_logits = torch.zeros((1, 3, 4, 4, 4))
-    plane, context = _SpatialAnchorDenoiser.temporal_scales(
+    plane, context = SpatialAnchorDenoiser.compute_temporal_scales(
         torch.zeros(1, dtype=torch.long),
         diffusion.alpha_bars,
     )
@@ -1300,11 +1283,6 @@ def test_cpu_and_cuda_storage_use_the_same_fusion() -> None:
             device=device,
         )
     )
-    required = cuda_scaled.plan((8, 4, 4), overlap=1).cuda_bytes
-    free, _ = torch.cuda.mem_get_info(device)
-    if required > free:
-        pytest.skip("CUDA does not have enough free memory for the planned workspace")
-
     cpu_vol = cpu_scaled.generate(
         shape=(8, 4, 4),
         overlap=1,
@@ -1350,144 +1328,6 @@ def test_scale_plan_calculates_2048_layout_without_allocating(
     assert plan.stride == 192
     assert plan.grid == (11, 11, 11)
     assert plan.tile_count == 1331
-    assert plan.states_bytes == 96 * 1024**3
-    assert plan.fusion_bytes == 128 * 1024**3
-    assert plan.tile_bytes == 3 * 224**3 * 4
-    assert plan.cuda_bytes == (
-        plan.states_bytes + plan.fusion_bytes + plan.workspace_bytes
-    )
-    assert plan.output_bytes == 8 * 1024**3
-    assert plan.cpu_bytes == (
-        plan.states_bytes
-        + plan.fusion_bytes
-        + plan.output_bytes
-        + 2 * plan.tile_bytes
-        + plan.workspace_bytes
-    )
-
-
-def test_auto_storage_uses_cuda_only_with_workspace_margin(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    generator = _generator(_ControlledModel(), Diffusion(1))
-    generator.device = torch.device("cuda")
-    scaled = ScaledGenerator(generator)
-    plan = scaled.plan(64, overlap=0)
-    monkeypatch.setattr(
-        scale_storage,
-        "get_available_memory",
-        lambda: 2 * plan.cpu_bytes,
-    )
-    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
-    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 0)
-
-    monkeypatch.setattr(
-        torch.cuda,
-        "mem_get_info",
-        lambda device: (2 * plan.cuda_bytes, 2 * plan.cuda_bytes),
-    )
-    assert scaled.select_storage(plan, "auto") == "cuda"
-
-    monkeypatch.setattr(
-        torch.cuda,
-        "mem_get_info",
-        lambda device: (plan.cuda_bytes, plan.cuda_bytes),
-    )
-    assert scaled.select_storage(plan, "auto") == "cpu"
-
-
-def test_auto_storage_counts_reclaimable_cuda_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    generator = _generator(_ControlledModel(), Diffusion(1))
-    generator.device = torch.device("cuda")
-    scaled = ScaledGenerator(generator)
-    plan = scaled.plan(64, overlap=0)
-    monkeypatch.setattr(
-        scale_storage,
-        "get_available_memory",
-        lambda: 2 * plan.cpu_bytes,
-    )
-    monkeypatch.setattr(
-        torch.cuda,
-        "mem_get_info",
-        lambda device: (plan.cuda_bytes // 2, 2 * plan.cuda_bytes),
-    )
-    monkeypatch.setattr(
-        torch.cuda,
-        "memory_reserved",
-        lambda device: plan.cuda_bytes,
-    )
-    monkeypatch.setattr(
-        torch.cuda,
-        "memory_allocated",
-        lambda device: plan.cuda_bytes // 4,
-    )
-
-    assert scaled.select_storage(plan, "auto") == "cuda"
-
-
-def test_storage_selection_uses_storage_module_memory_boundary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    generator = _generator(_ControlledModel(), Diffusion(1))
-    generator.device = torch.device("cuda")
-    scaled = ScaledGenerator(generator)
-    plan = scaled.plan(64, overlap=0)
-    checked = []
-    monkeypatch.setattr(
-        scale_storage,
-        "get_cuda_available_memory",
-        lambda _device: 2 * plan.cuda_bytes,
-    )
-    monkeypatch.setattr(
-        scale_storage,
-        "check_cpu_memory",
-        checked.append,
-    )
-
-    assert scaled.select_storage(plan, "auto") == "cuda"
-    assert checked == [plan.output_bytes]
-
-
-def test_probability_output_bytes_are_counted_for_cuda_storage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    generator = _generator(_ControlledModel(), Diffusion(1))
-    generator.device = torch.device("cuda")
-    scaled = ScaledGenerator(generator)
-    plan = scaled.plan(64, overlap=0)
-    output_bytes = 4 * generator.num_phases * math.prod(plan.shape)
-    free = math.ceil(plan.cuda_bytes / 0.8)
-    assert plan.cuda_bytes <= int(free * 0.8)
-    assert plan.cuda_bytes + output_bytes > int(free * 0.8)
-    monkeypatch.setattr(
-        scale_storage,
-        "get_available_memory",
-        lambda: 2 * plan.cpu_bytes,
-    )
-    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
-    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 0)
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free, free))
-
-    assert scaled.select_storage(plan, "auto") == "cuda"
-    assert scaled.select_storage(plan, "auto", output_bytes) == "cpu"
-
-
-def test_default_scale_workspace_does_not_force_small_outputs_to_cpu() -> None:
-    model = Denoiser3D(
-        num_phases=3,
-        base_channels=16,
-        channel_multipliers=(1, 2, 4, 4),
-        embedding_channels=32,
-        latent_channels=8,
-        num_domains=1,
-    )
-    scaled = ScaledGenerator(_generator(model, Diffusion(1), patch_size=64))
-
-    plan = scaled.plan(128, overlap=16)
-
-    assert plan.workspace_bytes == 192 * 1024**2
 
 
 def test_cpu_generation_returns_cpu_uint8_without_creating_files(
@@ -1531,32 +1371,6 @@ def test_failed_generation_creates_no_files(
     assert not tuple(tmp_path.rglob("*"))
 
 
-def test_cpu_generation_checks_memory_before_allocating(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    scaled = ScaledGenerator(_generator(_ControlledModel(), Diffusion(1)))
-    plan = scaled.plan(4, overlap=0)
-    monkeypatch.setattr(
-        scale_storage,
-        "get_available_memory",
-        lambda: plan.cpu_bytes,
-    )
-
-    def reject_allocation(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("memory must be checked before allocation")
-
-    monkeypatch.setattr(torch, "empty", reject_allocation)
-
-    with pytest.raises(MemoryError, match="planned CPU allocation"):
-        scaled.generate(
-            shape=4,
-            overlap=0,
-            storage="cpu",
-            progress=False,
-        )
-
-
 def test_model_input_matches_each_bounded_tile_source() -> None:
     model = _OverlapTraceModel()
     scaled = ScaledGenerator(_generator(model, Diffusion(2)))
@@ -1577,13 +1391,6 @@ def test_model_input_matches_each_bounded_tile_source() -> None:
 
     assert observed == expected
     assert all(max(shape) <= plan.tile_size for shape in observed)
-
-
-def test_generate_probs_rejects_large_streaming_volume_before_allocation() -> None:
-    scaled = ScaledGenerator(_generator(_ControlledModel(), Diffusion(1)))
-
-    with pytest.raises(ValueError, match="small in-memory"):
-        scaled.generate_probs(shape=512, overlap=0, progress=False)
 
 
 def test_tile_targets_cover_non_divisible_shape_exactly_once() -> None:
@@ -1976,7 +1783,7 @@ def test_single_core_matches_regular_categorical_prediction(
     assert stats.seams == ((), (), ())
 
 
-def test_scaled_generation_validates_shape_overlap_and_progress() -> None:
+def test_scaled_generation_validates_shape_overlap_and_storage() -> None:
     generator = _generator(_TraceModel(), _TraceDiffusion(timesteps=1))
 
     with pytest.raises(TypeError, match="shape must be"):
@@ -1985,8 +1792,6 @@ def test_scaled_generation_validates_shape_overlap_and_progress() -> None:
         ScaledGenerator(generator).generate(shape=(2, 0, 1), overlap=0, progress=False)
     with pytest.raises(ValueError, match="overlap"):
         ScaledGenerator(generator).generate(shape=4, overlap=-1, progress=False)
-    with pytest.raises(TypeError, match="progress must be"):
-        ScaledGenerator(generator).generate(shape=4, overlap=0, progress=1)
     with pytest.raises(ValueError, match="storage must be"):
         ScaledGenerator(generator).generate(
             shape=4,
