@@ -16,7 +16,6 @@ from src.evaluate import (
     BoundaryQuality,
     SliceSmoothness,
     measure_boundaries,
-    measure_distance_changes,
     measure_distance_divergence,
     measure_slice_smoothness,
 )
@@ -453,21 +452,19 @@ def test_anchor_boundary_quality_compares_both_sides_with_ordinary_planes() -> N
         )
     )
 
-    quality = measure_boundaries(vol, (2,), axis=0, num_phases=2)
+    quality = measure_boundaries(vol, (2,), axis=0)
 
     assert quality.anchor_change == pytest.approx(0.75)
     assert quality.ordinary_change == pytest.approx(0.5)
     assert quality.change_ratio == pytest.approx(1.5)
-    assert quality.transition_tv == pytest.approx(0.75)
-    assert quality.continuation_delta == pytest.approx(0.5)
 
 
 def test_anchor_boundary_quality_is_empty_without_anchors() -> None:
     vol = torch.zeros((4, 2, 2), dtype=torch.uint8)
 
-    quality = measure_boundaries(vol, (), axis=0, num_phases=2)
+    quality = measure_boundaries(vol, (), axis=0)
 
-    assert quality == BoundaryQuality(None, None, None, None, None)
+    assert quality == BoundaryQuality(None, None, None)
 
 
 def test_slice_smoothness_detects_a_delayed_jump() -> None:
@@ -481,16 +478,11 @@ def test_slice_smoothness_detects_a_delayed_jump() -> None:
 
     quality = measure_slice_smoothness(abrupt, (1,), axis=0, baseline=baseline)
 
-    assert quality.acceleration_p95 == pytest.approx(1.0)
-    assert quality.acceleration_max == pytest.approx(1.0)
-    assert quality.baseline_p95 == pytest.approx(0.0)
-    assert quality.baseline_max == pytest.approx(0.0)
     assert quality.p95_ratio is None
     assert quality.max_ratio is None
     assert quality.reversal_rate == pytest.approx(0.0)
     assert quality.baseline_reversal_rate == pytest.approx(0.0)
     assert quality.reversal_ratio is None
-    assert quality.peak_index == 2
     assert quality.peak_anchor_distance == 1
 
 
@@ -517,35 +509,7 @@ def test_slice_smoothness_is_empty_for_two_slices() -> None:
         None,
         None,
         None,
-        None,
-        None,
-        None,
-        None,
-        None,
     )
-
-
-def test_anchor_distance_profile_groups_slice_changes_by_nearest_anchor() -> None:
-    checker = torch.tensor([[0, 1], [0, 1]], dtype=torch.uint8)
-    vol = torch.stack(
-        (
-            torch.zeros_like(checker),
-            checker,
-            torch.ones_like(checker),
-            torch.zeros_like(checker),
-        )
-    )
-
-    profile = measure_distance_changes(
-        vol,
-        (2,),
-        axis=0,
-        max_distance=2,
-    )
-
-    assert profile[0] == pytest.approx(0.75)
-    assert profile[1] == pytest.approx(0.5)
-    assert profile[2] is None
 
 
 def test_anchor_divergence_profile_compares_same_distance_slices() -> None:

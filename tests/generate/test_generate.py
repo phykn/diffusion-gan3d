@@ -1825,9 +1825,9 @@ def test_scale_quality_skips_axes_without_seams() -> None:
         3,
     )
 
-    assert quality.change_ratio[0] is not None
-    assert quality.change_ratio[1:] == (None, None)
+    assert quality.transition_tv[0] is not None
     assert quality.transition_tv[1:] == (None, None)
+    assert quality.continuation_delta[0] is not None
     assert quality.continuation_delta[1:] == (None, None)
 
 

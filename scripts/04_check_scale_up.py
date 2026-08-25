@@ -319,7 +319,7 @@ def main() -> None:
     center = assessment.center
     print("\nQuality")
     print(f"Phase VF        : {format_phases(vfs)}")
-    print(f"Seam ratio      : {format_axes(quality.change_ratio)}")
+    print(f"Seam TV         : {format_axes(quality.transition_tv)}")
     print(f"Seam continuity : {format_axes(quality.continuation_delta)}")
     if base is not None:
         print(f"Base interior   : {format_score(base_interior_match)}")

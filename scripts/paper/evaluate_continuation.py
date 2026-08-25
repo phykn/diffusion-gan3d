@@ -263,7 +263,7 @@ def measure_case(
 ) -> dict[str, object]:
     generated_plane = generated.movedim(axis, 0)[index]
     baseline_plane = baseline.movedim(axis, 0)[index]
-    boundary = measure_boundaries(generated, (index,), axis, num_phases)
+    boundary = measure_boundaries(generated, (index,), axis)
     smoothness = measure_slice_smoothness(generated, (index,), axis, baseline)
     profile = measure_distance_divergence(
         generated,

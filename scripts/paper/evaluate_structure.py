@@ -33,8 +33,7 @@ from provenance import (
 from src.build import load_generator
 from src.config import load_generation_settings
 from src.evaluate import (
-    fid_score,
-    make_fid_metric,
+    compute_fid,
     percolating_fractions,
     phase_fraction,
     tortuosity,
@@ -213,63 +212,65 @@ def evaluate(
     generation_times: dict[tuple[str, int], float],
 ) -> list[dict[str, object]]:
     real_reference = sample_real_crops(REAL_REFERENCE_SEED, patch_size)
-    metric = make_fid_metric(
-        real_reference,
-        device,
-        feature=FID_FEATURE_DIMENSIONS,
-    )
     rows = []
-    try:
-        for seed in REAL_EVALUATION_SEEDS:
-            crops = sample_real_crops(seed, patch_size)
-            rows.append(
-                make_row(
-                    "Real 2D crops",
-                    seed,
-                    fid=fid_score(metric, crops, device),
-                    phase_0_fraction=phase_fraction(crops, PORE_PHASE),
-                    interface_density_value=interface_density(
-                        crops, spatial_dimensions=2
-                    ),
-                )
+    for seed in REAL_EVALUATION_SEEDS:
+        crops = sample_real_crops(seed, patch_size)
+        rows.append(
+            make_row(
+                "Real 2D crops",
+                seed,
+                fid=compute_fid(
+                    real_reference,
+                    crops,
+                    device,
+                    FID_FEATURE_DIMENSIONS,
+                ),
+                phase_0_fraction=phase_fraction(crops, PORE_PHASE),
+                interface_density_value=interface_density(
+                    crops, spatial_dimensions=2
+                ),
             )
-        for condition in CONDITIONS:
-            for seed in SEEDS:
-                volume = load_binary_volume(volume_path(condition, seed))
-                sections = select_metric_slices(
+        )
+    for condition in CONDITIONS:
+        for seed in SEEDS:
+            volume = load_binary_volume(volume_path(condition, seed))
+            sections = select_metric_slices(
+                volume,
+                axis=0,
+                count=REAL_CROP_COUNT,
+                output_size=patch_size,
+                seed=seed,
+            )
+            row = make_row(
+                condition,
+                seed,
+                guidance=guidance,
+                fid=compute_fid(
+                    real_reference,
+                    sections,
+                    device,
+                    FID_FEATURE_DIMENSIONS,
+                ),
+                phase_0_fraction=phase_fraction(volume, PORE_PHASE),
+                interface_density_value=interface_density(
+                    volume, spatial_dimensions=3
+                ),
+                tortuosity_axis0=tortuosity(
                     volume,
+                    phase=PORE_PHASE,
                     axis=0,
-                    count=REAL_CROP_COUNT,
-                    output_size=patch_size,
-                    seed=seed,
-                )
-                row = make_row(
-                    condition,
-                    seed,
-                    guidance=guidance,
-                    fid=fid_score(metric, sections, device),
-                    phase_0_fraction=phase_fraction(volume, PORE_PHASE),
-                    interface_density_value=interface_density(
-                        volume, spatial_dimensions=3
-                    ),
-                    tortuosity_axis0=tortuosity(
-                        volume,
-                        phase=PORE_PHASE,
-                        axis=0,
-                        device=device,
-                        convergence=TAUFACTOR_CONVERGENCE,
-                    ),
-                    percolation=float(
-                        np.mean(percolating_fractions(volume, PORE_PHASE))
-                    ),
-                    generation_seconds=generation_times[(condition, seed)],
-                )
-                rows.append(row)
-                print_result(row)
-    finally:
-        del metric
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+                    device=device,
+                    convergence=TAUFACTOR_CONVERGENCE,
+                ),
+                percolation=float(
+                    np.mean(percolating_fractions(volume, PORE_PHASE))
+                ),
+                generation_seconds=generation_times[(condition, seed)],
+            )
+            rows.append(row)
+            print_result(row)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     return rows
 
 

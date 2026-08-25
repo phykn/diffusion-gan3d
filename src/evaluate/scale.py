@@ -5,7 +5,6 @@ import torch
 
 from .connect import (
     continuation_delta,
-    phase_change_rate,
     transition_counts,
     transition_tv,
 )
@@ -13,7 +12,6 @@ from .connect import (
 
 @dataclass(frozen=True)
 class SeamQuality:
-    change_ratio: tuple[float | None, float | None, float | None]
     transition_tv: tuple[float | None, float | None, float | None]
     continuation_delta: tuple[float | None, float | None, float | None]
 
@@ -24,12 +22,10 @@ def measure_seams(
     band_size: int,
     num_phases: int,
 ) -> SeamQuality:
-    changes = []
     tvs = []
     deltas = []
     for axis, positions in enumerate(seams):
         if not positions:
-            changes.append(None)
             tvs.append(None)
             deltas.append(None)
             continue
@@ -52,8 +48,6 @@ def measure_seams(
             inner_idx = [inner_idx[idx] for idx in selected]
         selected_idx = sorted(band_set | set(inner_idx))
         inner_set = set(inner_idx)
-        inner_rates = []
-        band_rates = {}
         inner_counts = torch.zeros(
             num_phases,
             num_phases,
@@ -67,25 +61,15 @@ def measure_seams(
             prev = prev[::stride, ::stride]
             curr = curr[::stride, ::stride]
             counts = transition_counts(prev, curr, num_phases)
-            rate = phase_change_rate(counts)
             if idx in band_set:
-                band_rates[idx] = rate
                 band_counts[idx] = counts
             elif idx in inner_set:
-                inner_rates.append(rate)
                 inner_counts.add_(counts)
 
-        if not inner_rates or not band_idx:
-            changes.append(None)
+        if not inner_idx or not band_idx:
             tvs.append(None)
             deltas.append(None)
             continue
-        inner_rate = float(torch.tensor(inner_rates).median())
-        if inner_rate > 0.0:
-            ratios = torch.tensor([band_rates[idx] for idx in band_idx]) / inner_rate
-            changes.append(float(ratios[(ratios - 1.0).abs().argmax()]))
-        else:
-            changes.append(None)
 
         axis_tv = []
         axis_delta = []
@@ -96,7 +80,6 @@ def measure_seams(
         tvs.append(max(axis_tv))
         deltas.append(max(axis_delta))
     return SeamQuality(
-        change_ratio=tuple(changes),
         transition_tv=tuple(tvs),
         continuation_delta=tuple(deltas),
     )

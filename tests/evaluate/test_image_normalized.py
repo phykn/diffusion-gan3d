@@ -1,14 +1,14 @@
 import numpy as np
 import torch
 
-from src.evaluate import metric_images
+from src.evaluate import prepare_fid_images
 
 
-def test_metric_images_preserves_input_and_scales_normalized_grayscale() -> None:
+def test_prepare_fid_images_preserves_input_and_scales_normalized_grayscale() -> None:
     sections = np.asarray((((0.0, 0.5), (1.0, 0.25)),), dtype=np.float32)
     original = sections.copy()
 
-    images = metric_images(sections)
+    images = prepare_fid_images(sections)
 
     assert np.array_equal(sections, original)
     assert torch.equal(

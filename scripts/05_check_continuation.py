@@ -214,7 +214,7 @@ def print_quality(
 ) -> None:
     slices = generated.movedim(axis, 0)
     accuracy = voxel_accuracy(slices[index], anchor)
-    boundary = measure_boundaries(generated, (index,), axis, num_phases)
+    boundary = measure_boundaries(generated, (index,), axis)
     smoothness = measure_slice_smoothness(generated, (index,), axis, baseline)
     profile = measure_distance_divergence(
         generated,
