@@ -12,9 +12,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..anchor import PlaneAnchor
 from .inference import InferenceAPI
-from .metrics import TORTUOSITY_AXIS, VolumeMetrics, measure_volume
+from .metrics import measure_volume
 
-Dimension = int | tuple[int, int, int]
 FRONT_DIR = Path(__file__).resolve().parents[2] / "front" / "dist"
 
 
@@ -45,8 +44,8 @@ class AnchorRequest(BaseModel):
 
 class GenerateRequest(BaseModel):
     anchors: list[AnchorRequest] = Field(default_factory=list)
-    blocks: Dimension | None = None
-    shape: Dimension | None = None
+    blocks: int | tuple[int, int, int] | None = None
+    shape: int | tuple[int, int, int] | None = None
     size: int | None = Field(default=None, ge=1)
     vf: list[float] | None = None
     domain: int | None = None
@@ -61,11 +60,9 @@ class GenerateRequest(BaseModel):
 
 def create_app(
     weights: str | Path | None = None,
-    *,
     device: str | torch.device | None = None,
     inference: InferenceAPI | None = None,
 ) -> FastAPI:
-    """Create a single-model inference server."""
     if inference is None:
         if weights is None:
             raise ValueError("weights are required when inference is not provided.")
@@ -120,7 +117,17 @@ def create_app(
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        headers = _volume_headers(volume, metrics)
+        tortuosity = (
+            "unavailable" if metrics.tortuosity is None else f"{metrics.tortuosity:.8g}"
+        )
+        headers = {
+            "X-Volume-Shape": ",".join(str(value) for value in volume.shape),
+            "X-Volume-Dtype": "uint8",
+            "X-Porosity": f"{metrics.porosity:.8g}",
+            "X-Tortuosity": tortuosity,
+            "X-Pore-Phase": "0",
+            "X-Tortuosity-Axis": "1",
+        }
         if request.format == "raw":
             output = BytesIO(volume.numpy().tobytes(order="C"))
             media_type = "application/octet-stream"
@@ -139,20 +146,3 @@ def create_app(
     if FRONT_DIR.is_dir():
         app.mount("/", StaticFiles(directory=FRONT_DIR, html=True), name="front")
     return app
-
-
-def _volume_headers(
-    volume: torch.Tensor,
-    metrics: VolumeMetrics,
-) -> dict[str, str]:
-    tortuosity_value = (
-        "unavailable" if metrics.tortuosity is None else f"{metrics.tortuosity:.8g}"
-    )
-    return {
-        "X-Volume-Shape": ",".join(str(value) for value in volume.shape),
-        "X-Volume-Dtype": "uint8",
-        "X-Porosity": f"{metrics.porosity:.8g}",
-        "X-Tortuosity": tortuosity_value,
-        "X-Pore-Phase": "0",
-        "X-Tortuosity-Axis": str(TORTUOSITY_AXIS),
-    }

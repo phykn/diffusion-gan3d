@@ -1,8 +1,5 @@
-"""Check one-sided 3D continuation from a real boundary section."""
-
 import argparse
 import sys
-from functools import partial
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -17,10 +14,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.diagnostic import (
     format_percent,
     format_ratio,
-    unit_interval,
-)
-from scripts.diagnostic import (
-    show_napari as show_volume_napari,
+    parse_unit_interval,
+    show_napari,
 )
 from src.anchor import PlaneAnchor
 from src.build import load_generator
@@ -34,11 +29,10 @@ from src.evaluate import (
 from src.utils import load_yaml, save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
-show_napari = partial(show_volume_napari, name="Generated output")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser()
     parser.add_argument("--weight", type=Path, required=True)
     parser.add_argument(
         "--anchor",
@@ -51,7 +45,7 @@ def main() -> None:
     parser.add_argument("--side", choices=("start", "end"), default="start")
     parser.add_argument(
         "--anchor-strength",
-        type=unit_interval,
+        type=parse_unit_interval,
         help="normalized anchor prediction strength (default: config/gen.yaml)",
     )
     parser.add_argument("--guidance", type=float)
@@ -92,25 +86,17 @@ def main() -> None:
         anchor_image = reference.movedim(args.axis, 0)[index]
     else:
         train_config = load_yaml(find_train_config(args.weight))
-        data_config = train_config.get("data")
-        if not isinstance(data_config, dict):
-            raise ValueError("train.yaml must contain a data mapping.")
+        data_config = train_config["data"]
         crop_size = int(data_config["crop_size"])
-        input_size = int(data_config["input_size"])
-        if input_size != generator.patch_size:
-            raise ValueError(
-                "train.yaml input_size does not match the loaded generator: "
-                f"{input_size} != {generator.patch_size}."
-            )
         anchor_image, crop = load_anchor_image(
             args.anchor,
             crop_size,
-            input_size,
+            generator.patch_size,
             generator.num_phases,
         )
         print(
             f"Anchor  : {args.anchor.resolve()}, crop {crop} -> "
-            f"input {input_size} x {input_size}"
+            f"input {generator.patch_size} x {generator.patch_size}"
         )
     anchor = PlaneAnchor(anchor_image, args.axis, index)
 
@@ -146,7 +132,6 @@ def main() -> None:
         anchor_image,
         args.axis,
         index,
-        generator.num_phases,
     )
     if args.figure is not None or (not args.no_view and not args.napari):
         render_strip(
@@ -170,8 +155,6 @@ def load_anchor_image(
 ) -> tuple[torch.Tensor, tuple[int, int, int, int]]:
     if not path.is_file():
         raise FileNotFoundError(f"anchor image was not found: {path}")
-    if crop_size < 1 or input_size < 1:
-        raise ValueError("crop_size and input_size must be positive.")
     with Image.open(path) as image:
         values = np.asarray(image)
     if values.ndim != 2 or values.dtype != np.uint8:
@@ -210,7 +193,6 @@ def print_quality(
     anchor: torch.Tensor,
     axis: int,
     index: int,
-    num_phases: int,
 ) -> None:
     slices = generated.movedim(axis, 0)
     accuracy = voxel_accuracy(slices[index], anchor)
@@ -251,7 +233,6 @@ def render_strip(
     axis: int,
     side: str,
     num_phases: int,
-    *,
     output: Path | None,
     show: bool,
 ) -> None:
@@ -260,15 +241,15 @@ def render_strip(
         slices = slices.flip(0)
     distances = tuple(
         distance
-        for distance in (*DISPLAY_DISTANCES, len(slices) - 1)
+        for distance in DISPLAY_DISTANCES + (len(slices) - 1,)
         if distance < len(slices)
     )
     distances = tuple(dict.fromkeys(distances))
-    images = (anchor, *(slices[distance] for distance in distances))
+    images = (anchor,) + tuple(slices[distance] for distance in distances)
     index = 0 if side == "start" else len(slices) - 1
     titles = (
         f"Condition input (target)\naxis {axis}, index {index}",
-        *(
+        tuple(
             (
                 f"Generated output\naxis {axis}, index {index}"
                 if distance == 0

@@ -1,7 +1,6 @@
 import argparse
 import sys
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from time import perf_counter
 
@@ -14,12 +13,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.diagnostic import (
+    parse_unit_interval,
     select_display_index,
     select_indices,
-    unit_interval,
-)
-from scripts.diagnostic import (
-    show_napari as show_volume_napari,
+    show_napari,
 )
 from src.anchor import PlaneAnchor
 from src.build import load_generator
@@ -34,7 +31,6 @@ from src.scale import ScaledGenerator, ScalePlan
 from src.utils import load_volume, save_volume
 
 AXIS = 0
-show_napari = partial(show_volume_napari, name="scaled phases")
 
 
 @dataclass(frozen=True)
@@ -57,7 +53,7 @@ class ScaleAssessment:
 
 
 def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--weight",
         type=Path,
@@ -100,7 +96,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     )
     parser.add_argument(
         "--anchor-strength",
-        type=unit_interval,
+        type=parse_unit_interval,
         help="normalized base anchor strength (default: config/gen.yaml)",
     )
     parser.add_argument(
@@ -149,7 +145,6 @@ def generate_base(
         )
         return BaseResult(base, None, (), None)
 
-    assert args.gt is not None
     target = load_volume(args.gt)
     slices = target.movedim(AXIS, 0)
     indices = select_indices(slices.shape[0], anchor_count)
@@ -299,7 +294,6 @@ def main() -> None:
         domain=args.domain,
     )
     stats = scaled.stats
-    assert stats is not None
     elapsed = perf_counter() - start
     if args.out is not None:
         save_volume(vol, args.out)
@@ -340,7 +334,7 @@ def main() -> None:
     if args.no_view:
         return
     if args.napari:
-        show_napari(vol)
+        show_napari(vol, name="scaled phases")
     elif base is not None and center is not None:
         if target is None:
             show_unanchored_base_result(

@@ -43,7 +43,8 @@ def main() -> None:
     if args.run_dir is None:
         run_dir = make_run_dir(RUN_ROOT)
     else:
-        run_dir = make_explicit_run_dir(args.run_dir)
+        run_dir = args.run_dir.expanduser()
+        run_dir.mkdir(parents=True, exist_ok=False)
     save_yaml(run_dir / "train.yaml", cfg)
     run_train(
         trainer,
@@ -56,22 +57,16 @@ def main() -> None:
 
 def make_run_dir(root: Path) -> Path:
     name = datetime.now().astimezone().strftime("%m%d%H%M")
-    for sequence in range(1, 100):
+    sequence = 1
+    while True:
         suffix = "" if sequence == 1 else f"{sequence:02d}"
         run_dir = root / f"{name}{suffix}"
         try:
             run_dir.mkdir(parents=True, exist_ok=False)
         except FileExistsError:
+            sequence += 1
             continue
         return run_dir
-    raise FileExistsError(f"too many runs already exist for minute {name}.")
-
-
-def make_explicit_run_dir(path: Path) -> Path:
-    """Create the user-selected run directory without overwriting an existing run."""
-    path = path.expanduser()
-    path.mkdir(parents=True, exist_ok=False)
-    return path
 
 
 if __name__ == "__main__":

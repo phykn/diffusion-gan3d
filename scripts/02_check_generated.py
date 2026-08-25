@@ -14,7 +14,7 @@ from src.utils import save_volume
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--weight",
         type=Path,

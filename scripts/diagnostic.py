@@ -3,7 +3,7 @@ import argparse
 import torch
 
 
-def unit_interval(value: str) -> float:
+def parse_unit_interval(value: str) -> float:
     parsed = float(value)
     if not 0.0 <= parsed <= 1.0:
         raise argparse.ArgumentTypeError("value must be between zero and one")
@@ -11,9 +11,7 @@ def unit_interval(value: str) -> float:
 
 
 def select_indices(size: int, count: int) -> tuple[int, ...]:
-    if size < 1:
-        raise ValueError("volume depth must be positive.")
-    if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= size:
+    if count < 0 or count > size:
         raise ValueError("count must be between 0 and the volume depth.")
     if count == 0:
         return ()
@@ -35,7 +33,7 @@ def format_ratio(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}x"
 
 
-def show_napari(volume: torch.Tensor, name: str = "generated phases") -> None:
+def show_napari(volume: torch.Tensor, name: str = "Generated output") -> None:
     import napari
 
     viewer = napari.Viewer()

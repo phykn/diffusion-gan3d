@@ -12,12 +12,9 @@ from ..utils import load_yaml
 
 
 class InferenceAPI:
-    """Inference-only facade for direct, anchored, and scaled generation."""
-
     def __init__(
         self,
         weights: str | Path,
-        *,
         device: str | torch.device | None = None,
     ) -> None:
         self.device = _resolve_device(device)
@@ -25,12 +22,7 @@ class InferenceAPI:
         self.settings = load_generation_settings()
         self.generator = load_generator(self.weights, device=self.device)
         data = load_yaml(find_train_config(self.weights))["data"]
-        self._crop_size = _positive_int(data["crop_size"], "data.crop_size")
-        configured_input = _positive_int(data["input_size"], "data.input_size")
-        if configured_input != self.generator.patch_size:
-            raise ValueError(
-                "data.input_size does not match the loaded generator patch size."
-            )
+        self._crop_size = data["crop_size"]
         self.scaled = ScaledGenerator(self.generator)
 
     @property
@@ -47,7 +39,6 @@ class InferenceAPI:
 
     def generate(
         self,
-        *,
         anchors: Sequence[PlaneAnchor] = (),
         blocks: int | Sequence[int] | None = None,
         shape: int | Sequence[int] | None = None,
@@ -62,13 +53,6 @@ class InferenceAPI:
         storage: str = "auto",
         progress: bool = False,
     ) -> torch.Tensor:
-        """Generate one categorical volume and return a CPU uint8 tensor.
-
-        No anchors and no scale geometry performs unconditional direct generation.
-        Anchors enable direct anchor-conditioned generation. ``blocks`` or ``shape``
-        selects scale-up; when anchors are also supplied, their direct result becomes
-        the scale-up base.
-        """
         anchors = _validate_anchors(anchors)
         scaled = blocks is not None or shape is not None
         if blocks is not None and shape is not None:
@@ -81,8 +65,6 @@ class InferenceAPI:
             raise ValueError("base and anchors cannot be provided together.")
         if not scaled and (storage != "auto" or overlap is not None):
             raise ValueError("storage and overlap apply only to scale-up.")
-        if not isinstance(progress, bool):
-            raise TypeError("progress must be a boolean.")
 
         guidance = self.settings.guidance if guidance is None else guidance
         anchor_strength = (
@@ -127,20 +109,14 @@ class InferenceAPI:
 
 
 def _resolve_device(device: str | torch.device | None) -> torch.device:
-    if device is None:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    resolved = torch.device(device)
+    resolved = torch.device(
+        device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     if resolved.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available.")
     if resolved.type not in {"cpu", "cuda"}:
         raise ValueError("device must be CPU or CUDA.")
     return resolved
-
-
-def _positive_int(value: object, name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise ValueError(f"{name} must be a positive integer.")
-    return value
 
 
 def _resolve_weights(weights: str | Path) -> Path:
@@ -153,8 +129,6 @@ def _resolve_weights(weights: str | Path) -> Path:
 
 
 def _validate_anchors(anchors: Sequence[PlaneAnchor]) -> tuple[PlaneAnchor, ...]:
-    if isinstance(anchors, (str, bytes)) or not isinstance(anchors, Sequence):
-        raise TypeError("anchors must be a sequence of PlaneAnchor values.")
     values = tuple(anchors)
     if any(not isinstance(anchor, PlaneAnchor) for anchor in values):
         raise TypeError("anchors must contain only PlaneAnchor values.")
@@ -164,7 +138,6 @@ def _validate_anchors(anchors: Sequence[PlaneAnchor]) -> tuple[PlaneAnchor, ...]
 def _anchor_base_offset(
     anchors: Sequence[PlaneAnchor],
 ) -> tuple[int | None, int | None, int | None]:
-    """Keep anchor coordinates global while centering unconstrained axes."""
     fixed_axes = {anchor.axis for anchor in anchors}
     for anchor in anchors:
         if anchor.position is not None:
@@ -177,8 +150,6 @@ def _seeded_rng(seed: int | None, device: torch.device):
     if seed is None:
         yield
         return
-    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
-        raise ValueError("seed must be a non-negative integer.")
     devices = []
     if device.type == "cuda":
         index = device.index

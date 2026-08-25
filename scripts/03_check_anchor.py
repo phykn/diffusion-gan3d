@@ -13,10 +13,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.diagnostic import (
     format_percent,
     format_ratio,
+    parse_unit_interval,
     select_display_index,
     select_indices,
     show_napari,
-    unit_interval,
 )
 from src.anchor import PlaneAnchor
 from src.build import load_generator
@@ -31,7 +31,7 @@ from src.utils import save_volume
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--weight",
         type=Path,
@@ -65,7 +65,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--anchor-strength",
-        type=unit_interval,
+        type=parse_unit_interval,
         help="normalized anchor prediction strength (default: config/gen.yaml)",
     )
     parser.add_argument(
@@ -361,10 +361,6 @@ def show_result(
 
 
 def get_slices(vol: torch.Tensor, axis: int) -> torch.Tensor:
-    if vol.ndim != 3:
-        raise ValueError("volume must have shape [D, H, W].")
-    if axis not in (0, 1, 2):
-        raise ValueError("axis must be 0, 1, or 2.")
     return vol.movedim(axis, 0)
 
 

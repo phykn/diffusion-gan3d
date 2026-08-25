@@ -1,4 +1,3 @@
-import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -26,7 +25,6 @@ def pack(
         small_vf,
         big_elongation,
     )
-    # Packing outside the retained field reduces boundary-biased particle VF values.
     work_size = size * 3 // 2
     volume = np.zeros((work_size,) * 3, dtype=np.uint8)
     occupied = np.zeros_like(volume, dtype=bool)
@@ -48,7 +46,9 @@ def pack(
             elongation=big_elongation,
         )
 
-    return crop(volume, size)
+    low = (volume.shape[0] - size) // 2
+    region = (slice(low, low + size),) * 3
+    return volume[region].copy()
 
 
 def check_geometry(
@@ -59,31 +59,16 @@ def check_geometry(
     small_vf: float,
     big_elongation: float,
 ) -> None:
-    if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+    if size < 1:
         raise ValueError("size must be a positive integer.")
-    for name, radius in (
-        ("big_radius", big_radius),
-        ("small_radius", small_radius),
-    ):
-        if not isinstance(radius, int) or isinstance(radius, bool) or radius < 1:
-            raise ValueError(f"{name} must be a positive integer.")
-    for name, vf in (("big_vf", big_vf), ("small_vf", small_vf)):
-        if (
-            not isinstance(vf, (int, float))
-            or isinstance(vf, bool)
-            or not math.isfinite(vf)
-            or not 0.0 <= vf <= 1.0
-        ):
-            raise ValueError(f"{name} must be between zero and one.")
+    if big_radius < 1 or small_radius < 1:
+        raise ValueError("radii must be positive.")
+    if not 0.0 <= big_vf <= 1.0 or not 0.0 <= small_vf <= 1.0:
+        raise ValueError("volume fractions must be between zero and one.")
     if big_vf + small_vf > 1.0:
         raise ValueError("big_vf and small_vf must sum to at most one.")
-    if (
-        not isinstance(big_elongation, (int, float))
-        or isinstance(big_elongation, bool)
-        or not math.isfinite(big_elongation)
-        or big_elongation <= 0.0
-    ):
-        raise ValueError("big_elongation must be finite and positive.")
+    if big_elongation <= 0.0:
+        raise ValueError("big_elongation must be positive.")
 
 
 def place(
@@ -142,16 +127,6 @@ def place(
         )
         placed += 1
         invalidate_centers(valid_centers, center, axes, axes)
-
-
-def crop(
-    volume: np.ndarray,
-    size: int,
-) -> np.ndarray:
-    low = (volume.shape[0] - size) // 2
-    high = low + size
-    region = (slice(low, high),) * 3
-    return volume[region].copy()
 
 
 def make_particle_shape(

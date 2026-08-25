@@ -6,7 +6,7 @@ import tifffile
 from PIL import Image
 
 from .. import AXES
-from .geometry import check_geometry, pack
+from .geometry import pack
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253
 
@@ -21,9 +21,8 @@ def generate(cfg: dict) -> Export:
     output = cfg["output"]
     geometry = cfg["geometry"]
     count = output["count"]
-    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+    if count < 1:
         raise ValueError("output count must be a positive integer.")
-    check_geometry(**geometry)
     root = Path(output["data_dir"])
     vol_dir, slice_dirs = make_dirs(root)
     volumes: list[Path] = []
@@ -61,7 +60,7 @@ def generate(cfg: dict) -> Export:
 def make_dirs(root: Path) -> tuple[Path, dict[int, Path]]:
     vol_dir = root / "volumes"
     slice_dirs = {axis: root / "slices" / str(axis) for axis in AXES}
-    paths = (vol_dir, *slice_dirs.values())
+    paths = (vol_dir,) + tuple(slice_dirs.values())
     for path in paths:
         if path.exists() and (not path.is_dir() or any(path.iterdir())):
             raise FileExistsError(f"output directory is not empty: {path}")
@@ -77,15 +76,11 @@ def save_slices(
     stem: str,
 ) -> list[Path]:
     stack = np.moveaxis(vol, axis, 0)
-    paths = []
+    paths: list[Path] = []
     for idx in range(stack.shape[0]):
         path = dst / f"{stem}_{axis}_{idx:03d}.png"
-        write_image(path, stack[idx])
+        image = Image.fromarray(stack[idx])
+        image.putpalette(PALETTE)
+        image.save(path)
         paths.append(path)
     return paths
-
-
-def write_image(path: Path, data: np.ndarray) -> None:
-    img = Image.fromarray(data)
-    img.putpalette(PALETTE)
-    img.save(path)
