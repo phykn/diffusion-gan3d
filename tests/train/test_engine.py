@@ -9,22 +9,24 @@ import torch
 from torch import nn
 
 from src.anchor import PlaneAnchor, encode_anchors
-from src.build import build_models, build_optimizers
-from src.dataset.augment import CriticAugment
-from src.engine import (
+from src.build.model import build_models
+from src.build.trainer import build_optimizers
+from src.data.augment import CriticAugment
+from src.model.diffusion import Diffusion
+from src.model.layers import NULL_DOMAIN
+from src.plane import PLANES
+from src.train.ema import build_ema
+from src.train.loss import vf
+from src.train.loss.connect import TripletBatch
+from src.train.loss.gan import get_critic_r1
+from src.train.run import run_train
+from src.train.trainer import (
     ConditionPresence,
     Metrics,
     Trainer,
     TrainerComponents,
     TrainerSettings,
-    run_train,
 )
-from src.loss import vf
-from src.loss.connect import TripletBatch
-from src.loss.gan import get_critic_r1
-from src.model.common import NULL_DOMAIN
-from src.model.diffusion import Diffusion
-from src.model.ema import build_ema
 
 
 class Config(dict):
@@ -146,23 +148,23 @@ def test_anchor_transitions_prioritize_the_final_step() -> None:
     trainer.diffusion = Diffusion(11)
 
     with (
-        patch("src.engine.torch.rand", return_value=torch.tensor(0.1)),
-        patch("src.engine.torch.randint") as randint,
+        patch("src.train.trainer.torch.rand", return_value=torch.tensor(0.1)),
+        patch("src.train.trainer.torch.randint") as randint,
     ):
         assert trainer.sample_transition(anchored=True) == 0
         randint.assert_not_called()
 
     with (
-        patch("src.engine.torch.rand", return_value=torch.tensor(0.5)),
+        patch("src.train.trainer.torch.rand", return_value=torch.tensor(0.5)),
         patch(
-            "src.engine.torch.randint", return_value=torch.tensor(7)
+            "src.train.trainer.torch.randint", return_value=torch.tensor(7)
         ) as randint,
     ):
         assert trainer.sample_transition(anchored=True) == 7
         randint.assert_called_once_with(1, 11, ())
 
     with patch(
-        "src.engine.torch.randint",
+        "src.train.trainer.torch.randint",
         return_value=torch.tensor(6),
     ) as randint:
         assert trainer.sample_transition(anchored=False) == 6
@@ -324,14 +326,12 @@ def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
     trainer.device = torch.device("cpu")
     trainer.sample_real_anchor = Mock(return_value=Mock(source="real"))
 
-    with patch("src.engine.torch.rand", return_value=torch.tensor(0.9)):
+    with patch("src.train.trainer.torch.rand", return_value=torch.tensor(0.9)):
         assert trainer.sample_anchor({}, 2, owned_axes=()) is None
     assert not trainer.use_multi_anchor_next
 
     trainer.anchor_training_probability = 1.0
-    sources = [
-        trainer.sample_anchor({}, 2, owned_axes=()).source for _ in range(3)
-    ]
+    sources = [trainer.sample_anchor({}, 2, owned_axes=()).source for _ in range(3)]
 
     assert sources == ["real", "multi", "real"]
 
@@ -406,7 +406,7 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
     )
     observed_domains = {axis: [] for axis in (0, 1, 2)}
     hooks = [
-        critics[str(axis)].register_forward_pre_hook(
+        critics[PLANES[axis]].register_forward_pre_hook(
             lambda _module, args, axis=axis: observed_domains[axis].append(
                 args[3].tolist()
             )
@@ -482,9 +482,9 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     )
     trainer.critic_augment = Mock(wraps=CriticAugment("isotropic", prob=1.0))
     denoiser_before = _parameters(denoiser)
-    critic_before = {axis: _parameters(critics[str(axis)]) for axis in (0, 1, 2)}
+    critic_before = {axis: _parameters(critics[PLANES[axis]]) for axis in (0, 1, 2)}
     local_before = {
-        axis: _parameters(critics[str(axis)].local_output) for axis in (0, 1, 2)
+        axis: _parameters(critics[PLANES[axis]].local_output) for axis in (0, 1, 2)
     }
 
     r1_values = []
@@ -494,7 +494,7 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
         r1_values.append(float(penalties.combine(optim.local_loss_weight).detach()))
         return penalties
 
-    with patch("src.engine.get_critic_r1", side_effect=track_r1):
+    with patch("src.train.trainer.get_critic_r1", side_effect=track_r1):
         metrics = trainer.step(0)
 
     assert math.isfinite(metrics.generator)
@@ -524,9 +524,11 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     assert 0 <= metrics.transition < 2
     assert metrics.volume_size == 8
     assert _changed(denoiser_before, denoiser)
-    assert all(_changed(critic_before[axis], critics[str(axis)]) for axis in (0, 1, 2))
     assert all(
-        _changed(local_before[axis], critics[str(axis)].local_output)
+        _changed(critic_before[axis], critics[PLANES[axis]]) for axis in (0, 1, 2)
+    )
+    assert all(
+        _changed(local_before[axis], critics[PLANES[axis]].local_output)
         for axis in (0, 1, 2)
     )
     assert all(not parameter.requires_grad for parameter in ema.parameters())
@@ -539,20 +541,20 @@ def test_training_step_with_one_axis_updates_only_that_critic(axis: int) -> None
         axes=(axis,),
     )
     denoiser_before = _parameters(denoiser)
-    critic_before = _parameters(trainer.critics[str(axis)])
+    critic_before = _parameters(trainer.critics[PLANES[axis]])
 
     metrics = trainer.step(0, transition=1)
 
     assert trainer.active_axes == (axis,)
-    assert set(trainer.critics) == {str(axis)}
-    assert set(trainer.critic_optims) == {str(axis)}
+    assert set(trainer.critics) == {PLANES[axis]}
+    assert set(trainer.critic_optims) == {PLANES[axis]}
     assert streams[axis].calls == 1
     assert metrics.critic_axes[axis] != 0.0
     assert all(
         value == 0.0 for index, value in enumerate(metrics.critic_axes) if index != axis
     )
     assert _changed(denoiser_before, denoiser)
-    assert _changed(critic_before, trainer.critics[str(axis)])
+    assert _changed(critic_before, trainer.critics[PLANES[axis]])
 
 
 def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
@@ -740,7 +742,7 @@ def test_generate_pair_keeps_initial_noise_and_posterior_unprojected() -> None:
         device=trainer.device,
     )
     with (
-        patch("src.engine.torch.randn", return_value=initial.clone()),
+        patch("src.train.trainer.torch.randn", return_value=initial.clone()),
         patch.object(trainer, "sample_latent", return_value=latent),
     ):
         previous, current, _, prediction = trainer.generate_pair(
@@ -809,7 +811,7 @@ def test_training_critics_match_each_axis_rectangular_real_shape() -> None:
 
     observed = {axis: [] for axis in (0, 1, 2)}
     hooks = [
-        trainer.critics[str(axis)].register_forward_pre_hook(
+        trainer.critics[PLANES[axis]].register_forward_pre_hook(
             lambda _module, args, axis=axis: observed[axis].append(
                 tuple(args[0].shape[-2:])
             )
@@ -887,7 +889,7 @@ def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
     trainer.cfg_drop_each_probability = 0.1
 
     with patch(
-        "src.engine.torch.rand",
+        "src.train.trainer.torch.rand",
         return_value=torch.tensor((0.05, 0.15, 0.25, 0.35)),
     ):
         presence = trainer.sample_condition_presence(has_anchor=True)
@@ -903,7 +905,7 @@ def test_single_condition_dropout_matches_joint_marginal_visibility() -> None:
     trainer.cfg_drop_each_probability = 0.1
 
     with patch(
-        "src.engine.torch.rand",
+        "src.train.trainer.torch.rand",
         return_value=torch.tensor((0.19, 0.21)),
     ):
         presence = trainer.sample_condition_presence(has_anchor=False)
@@ -970,6 +972,7 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
     prediction = torch.full((1, 3, 8, 8, 8), -1.0)
     prediction[:, 0] = 1.0
     prediction.requires_grad_()
+    prediction = prediction + 0.0 * next(trainer.denoiser.parameters()).sum()
     raw_probs = (prediction.detach() + 1.0) * 0.5
     target = raw_probs.mean(dim=(2, 3, 4))
     projected = torch.where(
@@ -1001,7 +1004,9 @@ def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
     trainer = object.__new__(Trainer)
     trainer.device = torch.device("cpu")
     trainer.ema_denoiser = nn.Linear(2, 2)
-    trainer.critics = nn.ModuleDict({str(axis): nn.Linear(2, 1) for axis in range(3)})
+    trainer.critics = nn.ModuleDict(
+        {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
+    )
     trainer.connectivity_critic = nn.Linear(2, 1)
     trainer.step = Mock(side_effect=KeyboardInterrupt)
 
@@ -1015,10 +1020,10 @@ def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
 
     assert (tmp_path / "generator.pt").is_file()
     assert tuple(path.name for path in sorted(tmp_path.glob("critic_*.pt"))) == (
-        "critic_0.pt",
-        "critic_1.pt",
-        "critic_2.pt",
         "critic_c.pt",
+        "critic_xy.pt",
+        "critic_xz.pt",
+        "critic_yz.pt",
     )
 
 
@@ -1028,7 +1033,9 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
     trainer = object.__new__(Trainer)
     trainer.device = torch.device("cpu")
     trainer.ema_denoiser = nn.Linear(2, 2)
-    trainer.critics = nn.ModuleDict({str(axis): nn.Linear(2, 1) for axis in range(3)})
+    trainer.critics = nn.ModuleDict(
+        {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
+    )
     trainer.connectivity_critic = nn.Linear(2, 1)
     trainer.step = Mock(
         return_value=Metrics(

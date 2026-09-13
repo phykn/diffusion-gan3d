@@ -10,8 +10,8 @@ import tifffile
 import torch
 from PIL import Image
 
-from src.build import build_models
-from src.config import GenerationSettings
+from src.build.model import build_models
+from src.config import GenerationSettings, save_yaml
 from src.evaluate import (
     BoundaryQuality,
     SliceSmoothness,
@@ -19,7 +19,7 @@ from src.evaluate import (
     measure_distance_divergence,
     measure_slice_smoothness,
 )
-from src.utils import save_model, save_yaml
+from src.storage import save_model
 
 ROOT = Path(__file__).resolve().parents[1]
 

@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 import torch
 
-from src.api import metrics as metrics_module
-from src.api.metrics import measure_volume
+from src.evaluate import volume as metrics_module
+from src.evaluate.volume import measure_volume
 
 
 def test_measure_volume_uses_phase_zero_and_axis_one(

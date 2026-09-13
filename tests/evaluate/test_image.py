@@ -2,10 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.evaluate import (
-    compute_fid,
-    prepare_fid_images,
-)
+from src.evaluate import compute_fid, prepare_fid_images
 from src.evaluate import image as image_module
 
 

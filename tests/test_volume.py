@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-from src.utils import load_volume, save_volume
+from src.storage import load_volume, save_volume
 
 
 def test_label_volume_round_trip(tmp_path: Path) -> None:

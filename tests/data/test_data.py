@@ -7,11 +7,11 @@ import numpy as np
 import torch
 from PIL import Image
 
+from src.build.data import build_datasets, build_stream
 from src.config import get_domains
-from src.dataset import FolderBatchSampler
-from src.dataset.build import build_datasets, build_stream
-from src.dataset.real import RealDataset
-from src.engine import Trainer
+from src.data.loader import FolderBatchSampler
+from src.data.real import RealDataset
+from src.train.trainer import Trainer
 
 
 def _save_image(path: Path, image: np.ndarray) -> None:

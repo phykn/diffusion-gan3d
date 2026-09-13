@@ -9,10 +9,35 @@ import pytest
 from PIL import Image
 
 from run_train import make_run_dir
-from src.engine import Metrics, write_metrics
-from src.utils import save_yaml
+from src.config import save_yaml
+from src.plane import PLANES
+from src.train.run import run_train, write_metrics
+from src.train.trainer import Metrics
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("steps", 0),
+        ("steps", -1),
+        ("save_every", 0),
+        ("save_every", -1),
+        ("checkpoint_every", 0),
+        ("checkpoint_every", -1),
+    ],
+)
+def test_invalid_schedule_fails_before_training_or_creating_logs(
+    tmp_path, field, value
+):
+    trainer = Mock(critics={})
+    schedule = {"steps": 1, "save_every": 1, "checkpoint_every": None}
+    schedule[field] = value
+    with pytest.raises(ValueError, match=f"{field} must be a positive integer"):
+        run_train(trainer, run_dir=tmp_path, **schedule)
+    trainer.step.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_run_directory_uses_minute_name_and_numeric_collision_suffix(
@@ -75,6 +100,12 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         "conditioning/anchor_ramp",
         "conditioning/anchor_planes",
         "conditioning/anchor_accuracy",
+        "sampling/transition",
+        "timestep/1/generator",
+        "timestep/1/critic",
+        "critic_plane/xy",
+        "critic_plane/xz",
+        "critic_plane/yz",
     }
     writer.add_image.assert_not_called()
 
@@ -205,7 +236,9 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     assert run_dirs[0].name.isdigit()
     weights = run_dirs[0] / "generator.pt"
     assert weights.is_file()
-    expected_critics = tuple(f"critic_{axis}.pt" for axis in axes) + ("critic_c.pt",)
+    expected_critics = ("critic_c.pt",) + tuple(
+        f"critic_{PLANES[axis]}.pt" for axis in axes
+    )
     assert (
         tuple(path.name for path in sorted(run_dirs[0].glob("critic_*.pt")))
         == expected_critics

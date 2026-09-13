@@ -1,7 +1,7 @@
 import torch
 
 from src.anchor import PlaneAnchor, encode_anchors
-from src.loss.anchor import SoftAnchorLoss
+from src.train.loss.anchor import SoftAnchorLoss
 
 
 def test_soft_anchor_loss_uses_each_anchor_plane_as_a_2d_field() -> None:

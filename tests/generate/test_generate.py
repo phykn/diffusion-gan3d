@@ -8,19 +8,17 @@ import torch
 import torch.nn.functional as F
 
 from src.anchor import PlaneAnchor
-from src.build import (
-    build_models,
-    build_trainer,
-    load_generator,
-)
+from src.build.model import build_models
+from src.build.predict import load_generator
+from src.build.trainer import build_trainer
+from src.config import save_yaml
 from src.evaluate import measure_seams
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
-from src.model.generator import (
-    Generator,
-    SpatialAnchorDenoiser,
-)
-from src.scale import ScaledGenerator, TileBuffer, VolumeState
+from src.predict.generator import Generator, SpatialAnchorDenoiser
+from src.predict.scale import ScaledGenerator, TileBuffer, VolumeState
+from src.storage import save_model
+from src.train.ema import build_ema
 
 _SCALED_GENERATE = ScaledGenerator.generate
 _SCALED_GENERATE_PROBS = ScaledGenerator.generate_probs
@@ -50,10 +48,6 @@ def preserve_generation_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ScaledGenerator, "generate_probs", generate_probs)
     monkeypatch.setattr(Generator, "generate", direct_generate)
     monkeypatch.setattr(Generator, "generate_probs", direct_generate_probs)
-
-
-from src.model.ema import build_ema
-from src.utils import save_model, save_yaml
 
 
 def test_build_models_uses_boolean_anchor_multiscale(
@@ -193,7 +187,7 @@ def test_build_trainer_rejects_anchor_batch_larger_than_real_batch(
     cfg["anchor"]["train_prob"] = 1.0
     cfg["train"]["volume_batch_size"] = 3
 
-    with pytest.raises(ValueError, match="volume_batch.*data.batch_size"):
+    with pytest.raises(ValueError, match="volume_batch.*train.real_batch_size"):
         build_trainer(cfg, torch.device("cpu"))
 
 

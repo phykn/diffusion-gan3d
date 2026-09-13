@@ -30,16 +30,11 @@ from provenance import (
     validate_output_paths,
 )
 
-from src.build import load_generator
+from src.build.predict import load_generator
 from src.config import load_generation_settings
-from src.evaluate import (
-    compute_fid,
-    percolating_fractions,
-    phase_fraction,
-    tortuosity,
-)
-from src.scale import ScaledGenerator
-from src.utils import save_volume
+from src.evaluate import compute_fid, percolating_fractions, phase_fraction, tortuosity
+from src.predict.scale import ScaledGenerator
+from src.storage import save_volume
 
 SEEDS = (0, 1, 2, 3)
 REAL_REFERENCE_SEED = 10_000
@@ -226,9 +221,7 @@ def evaluate(
                     FID_FEATURE_DIMENSIONS,
                 ),
                 phase_0_fraction=phase_fraction(crops, PORE_PHASE),
-                interface_density_value=interface_density(
-                    crops, spatial_dimensions=2
-                ),
+                interface_density_value=interface_density(crops, spatial_dimensions=2),
             )
         )
     for condition in CONDITIONS:
@@ -252,9 +245,7 @@ def evaluate(
                     FID_FEATURE_DIMENSIONS,
                 ),
                 phase_0_fraction=phase_fraction(volume, PORE_PHASE),
-                interface_density_value=interface_density(
-                    volume, spatial_dimensions=3
-                ),
+                interface_density_value=interface_density(volume, spatial_dimensions=3),
                 tortuosity_axis0=tortuosity(
                     volume,
                     phase=PORE_PHASE,
@@ -262,9 +253,7 @@ def evaluate(
                     device=device,
                     convergence=TAUFACTOR_CONVERGENCE,
                 ),
-                percolation=float(
-                    np.mean(percolating_fractions(volume, PORE_PHASE))
-                ),
+                percolation=float(np.mean(percolating_fractions(volume, PORE_PHASE))),
                 generation_seconds=generation_times[(condition, seed)],
             )
             rows.append(row)

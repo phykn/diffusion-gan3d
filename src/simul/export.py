@@ -5,8 +5,8 @@ import numpy as np
 import tifffile
 from PIL import Image
 
-from .. import AXES
-from .geometry import pack
+from src import AXES
+from src.simul.geometry import pack
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253
 

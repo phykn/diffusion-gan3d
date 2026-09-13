@@ -6,7 +6,7 @@ import tifffile
 import torch
 
 from src.config import GenerationSettings
-from src.scale import ScalePlan
+from src.predict.scale import ScalePlan
 
 
 def make_plan() -> ScalePlan:

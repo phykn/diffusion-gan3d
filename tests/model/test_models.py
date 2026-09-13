@@ -2,9 +2,9 @@ import unittest
 
 import torch
 
-from src.model.common import AdaptiveNorm
 from src.model.critic import CriticScores, GroupNorm, PairCritic2D
 from src.model.denoiser import ChannelNorm3D, Denoiser3D
+from src.model.layers import AdaptiveNorm
 
 
 def _denoiser(

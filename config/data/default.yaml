@@ -1,0 +1,15 @@
+# 도메인 ID는 0부터 시작. 각 이미지는 정수 phase ID를 담은 2D 단면이다.
+domains:
+  0:
+    xy: [data]
+    xz: [data]
+    yz: [data]
+
+num_phases: 2
+
+# 두께 방향의 반전·축 교환을 증강에서 금지. 방향 제약이 없으면 null.
+thickness_axis: z
+
+# 원본에서 관찰할 범위와 모델 격자 크기는 독립적이다.
+crop_size: 128
+lo_res_size: 64

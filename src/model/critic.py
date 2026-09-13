@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from .common import (
+from src.model.layers import (
     INV_SQRT_TWO,
     AdaptiveNorm,
     SinusoidalEmbedding,
@@ -146,6 +146,7 @@ class PairCritic2D(CriticBase):
         embedding_channels: int,
         num_domains: int,
         gradient_checkpointing: bool = False,
+        time_scale: float = 1.0,
     ) -> None:
         super().__init__(
             input_channels=2 * num_phases,
@@ -155,6 +156,7 @@ class PairCritic2D(CriticBase):
             gradient_checkpointing=gradient_checkpointing,
         )
         self.time_embedding = SinusoidalEmbedding(embedding_channels)
+        self.time_scale = time_scale
         self.time_mlp = nn.Sequential(
             nn.Linear(embedding_channels, embedding_channels),
             nn.SiLU(),
@@ -169,7 +171,7 @@ class PairCritic2D(CriticBase):
         domain: torch.Tensor,
     ) -> CriticScores:
         embedding = self.time_mlp(
-            self.time_embedding(time.to(device=x_previous.device)).to(
+            self.time_embedding(time.to(device=x_previous.device) * self.time_scale).to(
                 dtype=x_previous.dtype
             )
         )
@@ -184,6 +186,7 @@ class ConnectivityCritic2D(CriticBase):
         embedding_channels: int,
         num_domains: int,
         gradient_checkpointing: bool = False,
+        directed_axis: int | None = None,
     ) -> None:
         super().__init__(
             input_channels=3 * num_phases,
@@ -193,6 +196,7 @@ class ConnectivityCritic2D(CriticBase):
             gradient_checkpointing=gradient_checkpointing,
         )
         self.axis_embedding = nn.Embedding(3, embedding_channels)
+        self.directed_axis = directed_axis
         self.gap_embedding = SinusoidalEmbedding(embedding_channels)
         self.gap_mlp = nn.Sequential(
             nn.Linear(embedding_channels, embedding_channels),
@@ -222,9 +226,22 @@ class ConnectivityCritic2D(CriticBase):
 
         forward = self.score_once(triplets, axes, gaps, domain)
         reverse = self.score_once(triplets.flip(1), axes, gaps, domain)
+        directed = (
+            axes == self.directed_axis
+            if self.directed_axis is not None
+            else torch.zeros_like(axes, dtype=torch.bool)
+        )
         return CriticScores(
-            logits_global=(forward.logits_global + reverse.logits_global) * 0.5,
-            logits_local=(forward.logits_local + reverse.logits_local) * 0.5,
+            logits_global=torch.where(
+                directed,
+                forward.logits_global,
+                (forward.logits_global + reverse.logits_global) * 0.5,
+            ),
+            logits_local=torch.where(
+                directed[:, None, None],
+                forward.logits_local,
+                (forward.logits_local + reverse.logits_local) * 0.5,
+            ),
         )
 
     def score_once(
@@ -235,9 +252,7 @@ class ConnectivityCritic2D(CriticBase):
         domain: torch.Tensor,
     ) -> CriticScores:
         axis_embedding = self.axis_embedding(axes).to(dtype=triplets.dtype)
-        gap_embedding = self.gap_mlp(self.gap_embedding(gaps)).to(
-            dtype=triplets.dtype
-        )
+        gap_embedding = self.gap_mlp(self.gap_embedding(gaps)).to(dtype=triplets.dtype)
         embedding = (axis_embedding + gap_embedding) * INV_SQRT_TWO
         return self.score(
             self.connectivity_images(triplets).flatten(1, 2), embedding, domain

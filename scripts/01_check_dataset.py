@@ -8,10 +8,10 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.dataset.build import build_datasets
-from src.utils import load_yaml
+from src.build.data import build_datasets
+from src.config import load_train_config
 
-DEFAULT_CONFIG = PROJECT_ROOT / "config" / "train.yaml"
+DEFAULT_CONFIG = PROJECT_ROOT / "config" / "train" / "low_res.yaml"
 SAMPLES = 4
 
 
@@ -25,7 +25,7 @@ def main() -> None:
         help="numeric domain ID (default: 0)",
     )
     args = parser.parse_args()
-    cfg = load_yaml(args.config)
+    cfg = load_train_config(args.config)
     datasets = build_datasets(cfg)
     axes = tuple(datasets[args.domain])
     fig, panels = plt.subplots(
@@ -44,7 +44,7 @@ def main() -> None:
                 img,
                 cmap="gray",
                 vmin=-0.5,
-                vmax=cfg["data"]["num_phase"] - 0.5,
+                vmax=cfg["data"]["num_phases"] - 0.5,
                 interpolation="nearest",
             )
             panels[row, col].set_title(f"axis {axis}")

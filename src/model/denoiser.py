@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from .common import (
+from src.model.layers import (
     INV_SQRT_THREE,
     INV_SQRT_TWO,
     AdaptiveNorm,
@@ -101,6 +101,7 @@ class Denoiser3D(nn.Module):
         num_domains: int,
         gradient_checkpointing: bool = False,
         anchor_multiscale: bool = False,
+        time_scale: float = 1.0,
     ) -> None:
         super().__init__()
         if not isinstance(anchor_multiscale, bool):
@@ -114,6 +115,7 @@ class Denoiser3D(nn.Module):
         self.anchor_multiscale = anchor_multiscale
 
         self.time_emb = SinusoidalEmbedding(embedding_channels)
+        self.time_scale = time_scale
         self.time_mlp = nn.Sequential(
             nn.Linear(embedding_channels, embedding_channels),
             nn.SiLU(),
@@ -336,7 +338,9 @@ class Denoiser3D(nn.Module):
     ) -> torch.Tensor:
         time = time.to(device=inputs.device)
         latent = latent.to(device=inputs.device, dtype=inputs.dtype)
-        time_emb = self.time_mlp(self.time_emb(time).to(dtype=inputs.dtype))
+        time_emb = self.time_mlp(
+            self.time_emb(time * self.time_scale).to(dtype=inputs.dtype)
+        )
         latent_emb = self.latent_mlp(latent)
         domain_emb = embed_domain(
             self.domain_embedding,

@@ -1,0 +1,37 @@
+from pathlib import Path
+
+import numpy as np
+import tifffile
+import torch
+from torch import nn
+
+
+def load_volume(path: str | Path) -> torch.Tensor:
+    values = np.asarray(tifffile.imread(Path(path)))
+    if values.ndim != 3 or not np.issubdtype(values.dtype, np.integer):
+        raise ValueError("volume must be a 3D TIFF with integer phase labels.")
+    return torch.from_numpy(np.array(values, copy=True)).to(torch.long)
+
+
+def save_volume(volume: torch.Tensor, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    values = volume.detach().to(device="cpu", dtype=torch.uint8)
+    tifffile.imwrite(path, values.numpy())
+
+
+def save_model(path: str | Path, model: nn.Module) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), path)
+    return path
+
+
+def load_model(path: str | Path, model: nn.Module) -> nn.Module:
+    state = torch.load(
+        Path(path),
+        map_location="cpu",
+        weights_only=True,
+    )
+    model.load_state_dict(state, strict=True)
+    return model

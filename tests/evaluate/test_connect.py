@@ -2,11 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.evaluate import (
-    continuation_delta,
-    transition_counts,
-    transition_tv,
-)
+from src.evaluate import continuation_delta, transition_counts, transition_tv
 
 
 def test_transition_metrics_count_multiphase_pairs() -> None:
@@ -22,6 +18,8 @@ def test_transition_metrics_count_multiphase_pairs() -> None:
             dtype=torch.float64,
         ),
     )
+
+
 def test_transition_comparisons_report_distribution_and_continuation_gaps() -> None:
     first = torch.tensor(((3.0, 1.0), (1.0, 1.0)))
     second = torch.tensor(((1.0, 3.0), (0.0, 2.0)))

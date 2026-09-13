@@ -1,0 +1,65 @@
+stage: low_res
+data: config/data/default.yaml
+
+# 자주 조정하는 값만 표시. 생략한 세부 기본값도 실행 설정에 함께 저장된다.
+# 네트워크 구조와 diffusion 과정
+model:
+  generator:
+    channels: [16, 32, 64, 64]
+
+  critic:
+    # 1개: [[xy, xz, yz]], 2개: [[xy], [xz, yz]], 3개: 아래 설정
+    plane_groups: [[xy], [xz], [yz]]
+    channels: [32, 64, 128, 256]
+
+  diffusion:
+    num_steps: 10
+
+# 단면의 행/열: xy=(y,x), xz=(z,x), yz=(z,y). 그룹 공유와 별도로 설정한다.
+augmentation:
+  probability: 0.5
+
+  planes:
+    xy:
+      flip_axes: [x, y]
+      rotate_90: true
+
+    xz:
+      flip_axes: [x]
+      rotate_90: false
+
+    yz:
+      flip_axes: [y]
+      rotate_90: false
+
+# anchor 조건을 제공할 확률
+conditioning:
+  anchor:
+    probability: 0.8
+
+# 학습 목표와 정규화 강도
+loss:
+  r1_weight: 0.2
+
+  anchor_pixel_weight: 0.05
+  volume_fraction_weight: 1.0
+
+  connectivity:
+    max_slice_gap: 8  # LR 격자에서 단면 사이의 최대 간격
+    adversarial_weight: 0.25
+    normal_transition_weight: 0.1
+
+optim:
+  generator_lr: 0.00016
+  critic_lr: 0.0001
+
+train:
+  stability_version: 2  # 갱신 횟수 기준 정규화와 그룹 평균 loss
+  total_steps: 20000
+
+  real_batch_size: 8  # 단면별 실제 2D 이미지 수
+  volume_batch_size: 1  # 한 번에 생성할 3D 볼륨 수
+  slice_pairs_per_plane: 16  # 단면별로 뽑는 diffusion 시점 쌍 수
+
+  weights_every_steps: 100
+  archive_every_steps: 5000  # null이면 단계별 가중치 보관을 끈다

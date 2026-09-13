@@ -9,8 +9,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.diagnostic import show_napari
-from src.build import load_generator
-from src.utils import save_volume
+from src.build.predict import load_generator
+from src.storage import save_volume
 
 
 def main() -> None:

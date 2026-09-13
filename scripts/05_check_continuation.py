@@ -18,15 +18,15 @@ from scripts.diagnostic import (
     show_napari,
 )
 from src.anchor import PlaneAnchor
-from src.build import load_generator
-from src.config import find_train_config, load_generation_settings
+from src.build.predict import load_generator
+from src.config import find_train_config, load_generation_settings, load_train_config
 from src.evaluate import (
     measure_boundaries,
     measure_distance_divergence,
     measure_slice_smoothness,
     voxel_accuracy,
 )
-from src.utils import load_yaml, save_volume
+from src.storage import save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
 
@@ -85,7 +85,7 @@ def main() -> None:
         )
         anchor_image = reference.movedim(args.axis, 0)[index]
     else:
-        train_config = load_yaml(find_train_config(args.weight))
+        train_config = load_train_config(find_train_config(args.weight))
         data_config = train_config["data"]
         crop_size = int(data_config["crop_size"])
         anchor_image, crop = load_anchor_image(

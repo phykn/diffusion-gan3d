@@ -6,9 +6,9 @@ import tifffile
 import torch
 from fastapi.testclient import TestClient
 
-from src.api import server as server_module
-from src.api.metrics import VolumeMetrics
-from src.api.server import create_app
+from src.evaluate.volume import VolumeMetrics
+from src.serve import app as server_module
+from src.serve.app import create_app
 
 
 class FakeInference:

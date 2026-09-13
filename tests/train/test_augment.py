@@ -3,7 +3,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.dataset.augment import CriticAugment
+from src.data.augment import CriticAugment
 
 
 def test_all_square_symmetries_are_distinct() -> None:
@@ -146,3 +146,72 @@ def test_anisotropic_pair_uses_only_left_right_flips_and_preserves_gradients() -
     transformed_previous.sum().backward()
     assert previous.grad is not None
     assert torch.equal(previous.grad, torch.ones_like(previous))
+
+
+@pytest.mark.parametrize("plane,flip", [("xy", "x"), ("xz", "x"), ("yz", "y")])
+def test_physical_horizontal_flips_preserve_rows_and_transform_conditions_together(
+    plane, flip
+):
+    inputs = torch.arange(24, dtype=torch.float32).reshape(2, 1, 3, 4).requires_grad_()
+    depth = torch.arange(3).reshape(1, 1, 3, 1).expand(2, 1, 3, 4)
+    aug = CriticAugment(
+        planes={plane: {"flip_axes": [flip], "rotate_90": False}}, thickness_axis="z"
+    )
+    image, coordinates, mask = aug.apply_together(
+        (inputs, depth, depth > 0), plane=plane
+    )
+    assert torch.equal(image, inputs.flip(-1))
+    assert torch.equal(coordinates, depth)
+    assert torch.equal(mask, depth > 0)
+    image.sum().backward()
+    assert torch.equal(inputs.grad, torch.ones_like(inputs))
+
+
+def test_mixed_plane_triplets_use_each_planes_physical_axes():
+    data = torch.arange(3 * 3 * 2 * 4 * 4).reshape(3, 3, 2, 4, 4).float()
+    aug = CriticAugment(
+        planes={
+            "xy": {"flip_axes": ["y"]},
+            "xz": {"flip_axes": ["x"]},
+            "yz": {"flip_axes": []},
+        },
+        thickness_axis="z",
+    )
+    real, fake = aug.apply_together((data, data + 1000), plane=torch.tensor([0, 1, 2]))
+    assert torch.equal(real[0], data[0].flip(-2))
+    assert torch.equal(real[1], data[1].flip(-1))
+    assert torch.equal(real[2], data[2])
+    assert torch.equal(fake - real, torch.full_like(data, 1000))
+
+
+@pytest.mark.parametrize(
+    "plane,policy",
+    [
+        ("xz", {"flip_axes": ["z"]}),
+        ("yz", {"flip_axes": ["z"]}),
+        ("xz", {"rotate_90": True}),
+        ("yz", {"rotate_90": True}),
+    ],
+)
+def test_thickness_reversals_and_axis_exchanges_are_rejected(plane, policy):
+    with pytest.raises(ValueError, match="preserve thickness"):
+        CriticAugment(planes={plane: policy}, thickness_axis="z")
+
+
+def test_plane_rotation_policy_preserves_rectangular_shapes():
+    aug = CriticAugment(
+        planes={"xy": {"flip_axes": [], "rotate_90": True}}, thickness_axis="z"
+    )
+    data = torch.arange(12).reshape(1, 1, 3, 4)
+    (out,) = aug.apply_together((data,), plane="xy")
+    assert torch.equal(out, data.flip((-2, -1)))
+
+
+def test_plane_policy_does_not_allow_an_implicit_axis_or_global_mode():
+    aug = CriticAugment(planes={"xy": {"flip_axes": []}})
+    with pytest.raises(ValueError, match="plane is required"):
+        aug.apply_together((torch.zeros(2, 1, 3, 3),))
+    with pytest.raises(ValueError, match="not both"):
+        CriticAugment("isotropic", planes={"xy": {"flip_axes": []}})
+    with pytest.raises(ValueError, match="augmentation.planes"):
+        CriticAugment("isotropic", thickness_axis="z")

@@ -1,20 +1,27 @@
 import argparse
+import copy
 from datetime import datetime
 from pathlib import Path
 
 import torch
 
-from src.build import build_trainer
-from src.engine import run_train
-from src.utils import load_yaml, save_yaml
+from src.build.trainer import build_trainer
+from src.config import load_train_config, normalize_train_config, save_yaml
+from src.train.run import run_train
+from src.train.state import resume_training
 
-DEFAULT_CONFIG = Path(__file__).resolve().parent / "config" / "train.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "config" / "train" / "low_res.yaml"
 RUN_ROOT = Path(__file__).resolve().parent / "run"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--resume", type=Path)
+    parser.add_argument(
+        "--steps", type=int, help="Total target steps, including completed steps."
+    )
+    parser.add_argument("--data", type=Path, help="Data YAML; overrides config.data.")
     parser.add_argument(
         "--device",
         choices=("cuda", "cpu"),
@@ -34,12 +41,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    cfg = load_yaml(args.config)
+    payload = None
+    if args.resume:
+        if args.config is not None or args.data is not None:
+            raise ValueError(
+                "--resume uses saved settings; only --steps may override them."
+            )
+        payload = torch.load(args.resume, map_location="cpu", weights_only=True)
+        if payload.get("format") not in (
+            "diffusion-gan3d.lr.train.v1",
+            "diffusion-gan3d.lr.train.v2",
+        ):
+            raise ValueError("--resume requires an LR training checkpoint.")
+        cfg = normalize_train_config(payload["config"])
+    else:
+        cfg = load_train_config(args.config or DEFAULT_CONFIG, data=args.data)
+    if args.steps is not None:
+        cfg["train"]["total_steps"] = args.steps
+    start = 0 if payload is None else payload["step"]
+    if cfg["train"]["total_steps"] <= start:
+        raise ValueError("total steps must exceed completed steps.")
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available.")
 
-    trainer = build_trainer(cfg, device)
+    build_cfg = copy.deepcopy(cfg)
+    if payload:
+        build_cfg["train"]["initial_weights"] = None
+    trainer = build_trainer(build_cfg, device)
+    trainer.cfg = cfg
+    if payload:
+        resume_training(trainer, payload)
     if args.run_dir is None:
         run_dir = make_run_dir(RUN_ROOT)
     else:
@@ -48,10 +80,11 @@ def main() -> None:
     save_yaml(run_dir / "train.yaml", cfg)
     run_train(
         trainer,
-        steps=cfg["train"]["steps"],
-        save_every=cfg["train"]["update_weights_every"],
+        steps=cfg["train"]["total_steps"],
+        save_every=cfg["train"]["weights_every_steps"],
         run_dir=run_dir,
-        checkpoint_every=cfg["train"].get("archive_every"),
+        checkpoint_every=cfg["train"].get("archive_every_steps"),
+        start_step=start,
     )
 
 

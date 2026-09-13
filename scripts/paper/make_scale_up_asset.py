@@ -30,9 +30,9 @@ from provenance import (
 )
 
 from src.anchor import PlaneAnchor
-from src.build import load_generator
+from src.build.predict import load_generator
 from src.config import load_generation_settings
-from src.scale import ScaledGenerator
+from src.predict.scale import ScaledGenerator
 
 BLOCKS = (3, 3, 3)
 SCALE_MARGIN = 0

@@ -9,9 +9,7 @@ def transition_counts(previous, current, num_phases: int) -> torch.Tensor:
     previous = torch.as_tensor(previous, dtype=torch.long)
     current = torch.as_tensor(current, dtype=torch.long, device=previous.device)
     pairs = previous.reshape(-1) * num_phases + current.reshape(-1)
-    if bool((pairs < 0).any()) or bool(
-        (pairs >= num_phases * num_phases).any()
-    ):
+    if bool((pairs < 0).any()) or bool((pairs >= num_phases * num_phases).any()):
         raise ValueError(f"labels must contain phases from 0 to {num_phases - 1}.")
     counts = torch.bincount(pairs, minlength=num_phases * num_phases)
     return counts.reshape(num_phases, num_phases).to(torch.float64)

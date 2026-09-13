@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -5,7 +7,7 @@ import pytest
 import torch
 
 from src.api import InferenceAPI, PlaneAnchor
-from src.api import inference as inference_module
+from src.predict import inference as inference_module
 
 
 class FakeGenerator:
@@ -46,7 +48,7 @@ def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> InferenceAPI:
     monkeypatch.setattr(inference_module, "find_train_config", lambda _weights: weights)
     monkeypatch.setattr(
         inference_module,
-        "load_yaml",
+        "load_train_config",
         lambda _path: {"data": {"crop_size": 6, "input_size": 8}},
     )
     monkeypatch.setattr(inference_module, "ScaledGenerator", FakeScaledGenerator)
@@ -170,3 +172,19 @@ def test_generate_rejects_ambiguous_inputs(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         api.generate(**kwargs)
+
+
+def test_public_inference_import_does_not_load_training():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            "import sys; from src.api import InferenceAPI, PlaneAnchor, create_app, SuperResolutionAPI; "
+            "assert not [name for name in sys.modules if name.startswith('src.train')]",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

@@ -17,7 +17,7 @@ from make_assets import OUTPUT_DIR
 from provenance import build_provenance, file_record, validate_output_paths
 
 from src.anchor import PlaneAnchor
-from src.build import load_generator
+from src.build.predict import load_generator
 from src.config import load_generation_settings
 from src.evaluate import voxel_accuracy
 

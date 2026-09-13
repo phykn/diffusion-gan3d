@@ -8,8 +8,10 @@ from src.config import (
     find_train_config,
     get_schedule_steps,
     load_generation_settings,
+    load_train_config,
+    load_yaml,
+    save_yaml,
 )
-from src.utils import load_yaml, save_yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -71,34 +73,24 @@ def test_repository_generation_config_has_expected_defaults() -> None:
     assert load_generation_settings() == GenerationSettings(1.0, 1.0, 8, 0.1)
 
 
-def test_repository_training_config_uses_soft_anchor_and_connectivity() -> (
-    None
-):
-    cfg = load_yaml(ROOT / "config" / "train.yaml")
-
-    assert tuple(cfg) == (
+def test_repository_training_config_uses_soft_anchor_and_connectivity() -> None:
+    cfg = load_train_config(ROOT / "config/train/low_res.yaml")
+    assert set(cfg) == {
+        "stage",
         "data",
         "model",
-        "diffusion",
-        "anchor",
-        "vf",
-        "condition_dropout",
+        "augmentation",
+        "conditioning",
+        "loss",
         "optim",
         "train",
-    )
-    assert tuple(cfg["model"]) == ("grad_checkpoint", "generator", "critic")
-    assert "connectivity" not in cfg
-    assert "conditioning" not in cfg
-    assert cfg["data"]["domain_prob"] == 0.8
-    assert cfg["anchor"]["multiscale_input"] is True
-    assert cfg["anchor"]["cross_domain_prob"] == 0.20
-    assert "pool_size" not in cfg["anchor"]
-    assert "coarse_weight" not in cfg["anchor"]
-    assert cfg["anchor"]["pixel_weight"] == 0.05
-    assert "reverse_invariant" not in cfg["anchor"]["connectivity"]
-    assert tuple(cfg["condition_dropout"]) == ("joint_each_prob",)
-    assert cfg["train"]["init_weights"] is None
-    assert "relation" not in cfg
+    }
+    assert cfg["conditioning"]["domain_keep_probability"] == 0.8
+    assert cfg["model"]["generator"]["anchor_multiscale_input"] is True
+    assert cfg["conditioning"]["anchor"]["borrowed_plane_probability"] == 0.20
+    assert cfg["loss"]["anchor_pixel_weight"] == 0.05
+    assert cfg["train"]["initial_weights"] is None
+    assert "batch_size" not in cfg["data"]
 
 
 @pytest.mark.parametrize(
@@ -151,12 +143,13 @@ def test_invalid_yaml_reports_the_source(tmp_path: Path) -> None:
         load_yaml(path)
 
 
-def test_training_runtime_has_no_3d_reference_input() -> None:
+def test_stage1_training_has_no_measured_3d_target() -> None:
     paths = [
-        ROOT / "config" / "train.yaml",
+        ROOT / "config/train/low_res.yaml",
         ROOT / "run_train.py",
-        *sorted((ROOT / "src" / "train").glob("*.py")),
-        *sorted((ROOT / "src" / "dataset").glob("*.py")),
+        ROOT / "src" / "train" / "trainer.py",
+        ROOT / "src" / "data" / "real.py",
+        ROOT / "src" / "data" / "resolution.py",
     ]
     forbidden = (
         "generated/volumes",

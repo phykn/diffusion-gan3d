@@ -1,0 +1,55 @@
+stage: sr
+data: config/data/default.yaml
+
+# 자주 조정하는 값만 표시. 생략한 세부 기본값도 실행 설정에 함께 저장된다.
+# 1단계 모델과 별도로 학습하는 SR 네트워크
+model:
+  generator:
+    scale_factor: 2  # HR 크기 = data.lo_res_size * scale_factor → 현재 128
+    channels: 16  # 내부 특징 채널 수
+    blocks: 3  # 3D residual block 수
+
+  critic:
+    # 1개: [[xy, xz, yz]], 2개: [[xy], [xz, yz]], 3개: 아래 설정
+    plane_groups: [[xy], [xz], [yz]]
+    channels: [32, 64, 128]
+
+# 단면의 행/열: xy=(y,x), xz=(z,x), yz=(z,y). 그룹 공유와 별도로 설정한다.
+augmentation:
+  probability: 0.5
+
+  planes:
+    xy:
+      flip_axes: [x, y]
+      rotate_90: true
+
+    xz:
+      flip_axes: [x]
+      rotate_90: false
+
+    yz:
+      flip_axes: [y]
+      rotate_90: false
+
+loss:
+  gradient_penalty_weight: 10.0
+
+  # HR 출력을 LR로 축소했을 때 입력 LR과 일치하도록 유도
+  downsample_consistency_weight: 10.0
+
+optim:
+  generator_lr: 0.0001  # critic_lr를 생략하면 같은 학습률 사용
+
+# 고정된 1단계 모델로 생성하여 SR 학습 내내 재사용하는 LR 볼륨
+lr_bank:
+  samples_per_domain: 8
+  guidance: 0.9  # bank 생성 시 도메인 조건 강도. gen.yaml과 독립적이다.
+
+train:
+  total_steps: 20000
+
+  volume_batch_size: 1
+  slices_per_plane: 8
+  critic_updates_per_step: 3  # 생성기 1회 갱신당 critic 갱신 횟수
+
+  checkpoint_every_steps: 100

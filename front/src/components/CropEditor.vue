@@ -159,7 +159,7 @@ watch(() => [props.file, props.cropSize], ([file]) => {
 function getAnchorImage() {
   if (!state.image || !state.crop) return null
   if (!state.sourceLabels) throw new Error('The image does not contain raw PNG label values.')
-  const labels = cropAndResizeLabels(state.sourceLabels, state.crop, props.inputSize)
+  const labels = cropAndResizeLabels(state.sourceLabels, state.crop, props.cropSize)
   if (new Set(labels.flat()).size < 2) throw new Error('The selected crop contains only one visible phase.')
   return labels
 }

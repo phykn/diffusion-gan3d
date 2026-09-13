@@ -19,7 +19,7 @@ from scripts.diagnostic import (
     show_napari,
 )
 from src.anchor import PlaneAnchor
-from src.build import load_generator
+from src.build.predict import load_generator
 from src.config import load_generation_settings
 from src.evaluate import (
     SliceSmoothness,
@@ -27,7 +27,7 @@ from src.evaluate import (
     measure_slice_smoothness,
     voxel_accuracy,
 )
-from src.utils import save_volume
+from src.storage import save_volume
 
 
 def main() -> None:

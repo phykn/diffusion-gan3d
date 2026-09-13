@@ -19,16 +19,11 @@ from scripts.diagnostic import (
     show_napari,
 )
 from src.anchor import PlaneAnchor
-from src.build import load_generator
+from src.build.predict import load_generator
 from src.config import load_generation_settings
-from src.evaluate import (
-    SeamQuality,
-    measure_seams,
-    phase_fractions,
-    voxel_accuracy,
-)
-from src.scale import ScaledGenerator, ScalePlan
-from src.utils import load_volume, save_volume
+from src.evaluate import SeamQuality, measure_seams, phase_fractions, voxel_accuracy
+from src.predict.scale import ScaledGenerator, ScalePlan
+from src.storage import load_volume, save_volume
 
 AXIS = 0
 

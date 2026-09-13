@@ -2,11 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.evaluate import (
-    phase_fraction,
-    phase_fractions,
-    voxel_accuracy,
-)
+from src.evaluate import phase_fraction, phase_fractions, voxel_accuracy
 
 
 def test_phase_fractions_support_multiphase_numpy_and_torch_inputs() -> None:

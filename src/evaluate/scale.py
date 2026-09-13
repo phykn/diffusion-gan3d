@@ -3,11 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .connect import (
-    continuation_delta,
-    transition_counts,
-    transition_tv,
-)
+from src.evaluate.connect import continuation_delta, transition_counts, transition_tv
 
 
 @dataclass(frozen=True)

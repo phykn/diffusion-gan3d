@@ -3,10 +3,11 @@ import math
 import pytest
 import torch
 
-from src.build import build_models, build_optimizers
-from src.engine import Trainer, TrainerComponents, TrainerSettings
+from src.build.model import build_models
+from src.build.trainer import build_optimizers
 from src.model.diffusion import Diffusion
-from src.model.ema import build_ema
+from src.train.ema import build_ema
+from src.train.trainer import Trainer, TrainerComponents, TrainerSettings
 
 
 class CudaStream:

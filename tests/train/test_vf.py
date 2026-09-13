@@ -1,6 +1,6 @@
 import torch
 
-from src.loss import vf
+from src.train.loss import vf
 
 
 def test_compute_vf_aggregates_all_images_and_axes() -> None:
@@ -22,10 +22,7 @@ def test_compute_vf_loss_uses_only_present_samples() -> None:
     probs[1, 1] = 0.0
     target = torch.tensor(((0.25, 0.75), (0.0, 1.0)))
     present = torch.tensor((True, False))
-    expected = (
-        target[0]
-        * (target[0].log() - torch.tensor((0.5, 0.5)).log())
-    ).sum()
+    expected = (target[0] * (target[0].log() - torch.tensor((0.5, 0.5)).log())).sum()
 
     torch.testing.assert_close(
         vf.compute_vf_loss(probs, target, present),

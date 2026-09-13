@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch import nn
 
@@ -10,8 +12,20 @@ class Diffusion(nn.Module):
         beta_max: float = 20.0,
     ) -> None:
         super().__init__()
-        if beta_max <= beta_min:
-            raise ValueError("beta_max must be greater than beta_min.")
+        if (
+            isinstance(timesteps, bool)
+            or not isinstance(timesteps, int)
+            or timesteps < 1
+        ):
+            raise ValueError("timesteps must be a positive integer.")
+        if not (
+            math.isfinite(beta_min)
+            and math.isfinite(beta_max)
+            and 0 <= beta_min < beta_max
+        ):
+            raise ValueError(
+                "beta_min/beta_max must be finite with 0 <= beta_min < beta_max."
+            )
 
         time = torch.linspace(
             0.0,
@@ -203,9 +217,7 @@ class Diffusion(nn.Module):
         if time.ndim == 0:
             time = time.expand(ref.shape[0])
         elif time.shape != (ref.shape[0],):
-            raise ValueError(
-                f"{name} must be scalar or have one value per batch item."
-            )
+            raise ValueError(f"{name} must be scalar or have one value per batch item.")
         if bool(((time < 0) | (time > limit)).any()):
             raise ValueError(f"{name} must be between 0 and {limit}.")
         return time

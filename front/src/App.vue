@@ -54,12 +54,23 @@ watch(blocks, invalidateResult, { deep: true })
 async function generate() {
   const token = requestGate.begin()
   try {
-    const image = cropEditor.value?.getAnchorImage()
-    if (!image) throw new Error(`Choose a valid ${health.value?.crop_size ?? 128} × ${health.value?.crop_size ?? 128} crop first.`)
+    const crop = cropEditor.value?.getAnchorImage()
+    if (!crop) throw new Error(`Choose a valid ${health.value?.crop_size ?? 128} × ${health.value?.crop_size ?? 128} crop first.`)
     const requestSeed = normalizeSeed(seed.value)
     const requestBlocks = normalizeBlocks(blocks.value)
     busy.value = true
     error.value = false
+    const prepared = await fetch('/prepare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: crop }),
+    })
+    if (!prepared.ok) {
+      const problem = await prepared.json().catch(() => ({}))
+      throw new Error(problem.detail || `Image preparation failed with HTTP ${prepared.status}.`)
+    }
+    const { image } = await prepared.json()
+    if (!requestGate.accepts(token)) return
     const response = await fetch('/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
