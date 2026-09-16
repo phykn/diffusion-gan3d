@@ -1,5 +1,6 @@
 import copy
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from src.config import (
     get_sr_sizes,
     load_train_config,
 )
+from src.data.slice import sample_slices
 from src.predict.inference import InferenceAPI
 from src.predict.sr import SuperResolutionAPI
 from src.prepare.resize import (
@@ -25,7 +27,8 @@ from src.prepare.resize import (
     scaled_size,
 )
 from src.serve.app import create_app
-from src.train.sr_loss import consistency_loss, sample_slices
+from src.train.loss.sr import consistency_loss
+from src.train.sr import SRTrainer
 
 
 def sr_config(tmp_path, scale=1.5, phases=3):
@@ -293,3 +296,60 @@ def test_multidomain_and_invalid_inference_contract(tmp_path):
         api.super_resolve(low.float(), domain=0)
     with pytest.raises(ValueError, match="multiples of 2"):
         api.super_resolve(low, domain=0, tile_size=5, overlap=1)
+
+
+def test_sr_corruption_does_not_modify_clean_coarse_target():
+    trainer = object.__new__(SRTrainer)
+    trainer.cfg = {
+        "conditioning": {
+            "coarse_corruption_probability": 1,
+            "coarse_corruption_strength": 1,
+        }
+    }
+    low = torch.zeros(8, 3, 8, 8, 8)
+    low[:, 0] = 1
+    original = low.clone()
+    corrupted, level = trainer.corrupt_coarse(low)
+    assert torch.equal(low, original)
+    assert not torch.equal(corrupted, low)
+    torch.testing.assert_close(corrupted.sum(1), torch.ones_like(corrupted[:, 0]))
+
+
+def test_sr_loss_targets_clean_coarse_while_model_receives_corrupted_input(tmp_path):
+    Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(tmp_path / "sample.png")
+    cfg = load_train_config("config/train/sr.yaml", "sr")
+    cfg["data"].update(crop_size=8, lo_res_size=8, domains={0: {"xy": [str(tmp_path)]}})
+    cfg["model"]["generator"].update(channels=4, blocks=1, scale_factor=1)
+    cfg["model"]["critic"].update(channels=[4, 8], plane_groups=[["xy"]])
+    cfg["train"].update(
+        mixed_precision=False, critic_updates_per_step=1, slices_per_plane=1
+    )
+    trainer = build_sr_trainer(
+        cfg,
+        {
+            0: torch.nn.functional.one_hot(torch.zeros(2, 8, 8, 8, dtype=torch.long), 2)
+            .movedim(-1, 1)
+            .float()
+        },
+        torch.device("cpu"),
+    )
+    with (
+        patch.object(
+            trainer,
+            "corrupt_coarse",
+            side_effect=lambda low: (low.flip(1), low.new_ones(len(low))),
+        ),
+        patch.object(trainer.model, "forward", wraps=trainer.model.forward) as forward,
+        patch("src.train.sr.consistency_loss", wraps=consistency_loss) as consistency,
+    ):
+        trainer.train_step()
+    assert all(call.args[0][:, 1].eq(1).all() for call in forward.call_args_list)
+    assert consistency.call_args.args[1][:, 0].eq(1).all()
+
+
+def test_fractional_consistency_does_not_sharpen_coarse():
+    low = torch.empty(1, 2, 4, 4, 4)
+    low[:, 0], low[:, 1] = 0.3, 0.7
+    high = torch.nn.functional.interpolate(low, scale_factor=2).requires_grad_()
+    loss, error = consistency_loss(high, low, 0)
+    assert float(loss.detach()) < 1e-12 and float(error.detach()) < 1e-12

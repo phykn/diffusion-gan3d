@@ -207,3 +207,31 @@ class CriticAugment:
             maps = torch.stack(maps)
             self._index_cache[key] = maps
         return maps
+
+
+def crop_images(
+    images: torch.Tensor,
+    size: int | tuple[int, int],
+    centers: list[tuple[int, int]] | None = None,
+) -> torch.Tensor:
+    crop_h, crop_w = (size, size) if isinstance(size, int) else size
+    if crop_h < 1 or crop_w < 1:
+        raise ValueError("crop size must be a positive integer.")
+    height, width = images.shape[-2:]
+    if crop_h > height or crop_w > width:
+        raise ValueError("crop size must fit inside the images.")
+    if (height, width) == (crop_h, crop_w):
+        return images
+
+    top = torch.randint(height - crop_h + 1, (images.shape[0],)).tolist()
+    left = torch.randint(width - crop_w + 1, (images.shape[0],)).tolist()
+    if centers is not None:
+        for index, (row, col) in enumerate(centers):
+            top[index] = min(max(row - crop_h // 2, 0), height - crop_h)
+            left[index] = min(max(col - crop_w // 2, 0), width - crop_w)
+    return torch.stack(
+        [
+            image[..., row : row + crop_h, col : col + crop_w]
+            for image, row, col in zip(images, top, left, strict=True)
+        ]
+    )

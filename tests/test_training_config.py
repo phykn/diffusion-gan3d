@@ -164,3 +164,17 @@ def test_saved_yaml_uses_inline_lists_and_separates_groups(tmp_path):
     assert "channels: [4, 8]\n\ndata:" in content
     assert "paths: [images]" in content
     assert load_yaml(path)["model"]["channels"] == [4, 8]
+
+
+@pytest.mark.parametrize(
+    "section,key",
+    [
+        ("train", "seed"),
+        ("train", "stability_version"),
+        ("optim", "generatr_lr"),
+        ("data", "input_size"),
+    ],
+)
+def test_obsolete_and_unknown_config_keys_fail_with_full_path(section, key):
+    with pytest.raises(ValueError, match=rf"{section}\.{key}"):
+        normalize_train_config({section: {key: 1}})

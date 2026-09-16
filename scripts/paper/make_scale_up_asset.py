@@ -32,7 +32,7 @@ from provenance import (
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.config import load_generation_settings
-from src.predict.scale import ScaledGenerator
+from src.predict.tiled import TiledGenerator
 
 BLOCKS = (3, 3, 3)
 SCALE_MARGIN = 0
@@ -126,7 +126,7 @@ def main() -> None:
         margin=base_margin,
     )
 
-    scaled = ScaledGenerator(generator)
+    scaled = TiledGenerator(generator)
     shape = scaled.shape_from_blocks(BLOCKS, overlap)
     plan = scaled.plan(shape, overlap)
     print(f"Shape   : {shape}")

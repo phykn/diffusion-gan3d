@@ -33,7 +33,7 @@ from provenance import (
 from src.build.predict import load_generator
 from src.config import load_generation_settings
 from src.evaluate import compute_fid, percolating_fractions, phase_fraction, tortuosity
-from src.predict.scale import ScaledGenerator
+from src.predict.tiled import TiledGenerator
 from src.storage import save_volume
 
 SEEDS = (0, 1, 2, 3)
@@ -74,7 +74,7 @@ def main() -> None:
     guidance = settings.guidance if args.guidance is None else args.guidance
     generator = load_generator(weights, device=device)
     patch_size = generator.patch_size
-    scaled_shape = ScaledGenerator(generator).shape_from_blocks(
+    scaled_shape = TiledGenerator(generator).shape_from_blocks(
         SCALE_BLOCKS, settings.overlap
     )
     generation = {
@@ -171,7 +171,7 @@ def generate_volumes(
     overlap: int,
 ) -> dict[tuple[str, int], float]:
     elapsed = {}
-    scaled = ScaledGenerator(generator)
+    scaled = TiledGenerator(generator)
     for condition in CONDITIONS:
         for seed in SEEDS:
             set_seed(seed, generator.device)

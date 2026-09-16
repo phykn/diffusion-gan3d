@@ -491,7 +491,7 @@ src/
   config.py          YAML, domain and resolution contracts
   build/             model, data-loader and trainer assembly
   model/             neural networks and diffusion equations
-  data/              datasets, phase maps, sampling and augmentation
+  data/              datasets, loaders, LR banks, slice sampling and augmentation
   prepare/           shared phase conversion and resolution transforms
   train/             stage-1 and SR training, losses and EMA
   predict/           generation, volume extension and SR inference
@@ -511,14 +511,28 @@ re-export them, so importing the public inference API does not load training.
 
 `train/trainer.py` owns stage-1 updates, while `train/run.py` owns its step loop,
 TensorBoard records and periodic weights. `train/sr.py` owns SR updates, training
-validation and resumable state. `train/sr_run.py` owns frozen LR bank preparation,
-resume checks, the SR loop and run artifacts; `run_sr_train.py` parses CLI arguments.
+state and inference exports; `config.py` owns configuration validation.
+`train/sr_run.py` owns frozen LR bank preparation, resume checks, the SR loop and
+run artifacts; `run_sr_train.py` parses CLI arguments.
 Stage-1 step counts and save intervals must be positive integers; omit
 `archive_every_steps` (or set it to null) to disable archival checkpoints.
 
-Internal paths formerly under `src.dataset`, `src.engine`, `src.loss`,
-`src.model.generator`, `src.scale` and `src.utils` now live with their owners above.
-The public `src.api` exports and stage-1 state-dictionary format remain available.
+`train/loss/` contains loss calculations, including SR consistency and gradient
+penalties in `sr.py`, transition consistency in `connectivity.py` and phase-fraction
+loss in `volume_fraction.py`. `data/slice.py` samples sections, aligned diffusion
+pairs and anchor triplets; `evaluate/` owns measurement calculations. `data/dataset.py`
+contains label and fractional-resolution datasets, `data/loader.py` contains their
+batch streams, and `data/bank.py` reads and validates fractional LR banks.
+`plane.py` owns plane names, numeric axes and row/column directions.
+
+`predict/tiled.py` runs tiled diffusion and continuation. `predict/tile.py` owns
+tile geometry, volume buffers and overlap blending. Evaluation files name their
+measurement: `fid.py`, `connectivity.py`, `seam.py` and `tortuosity.py`.
+Tests follow these source responsibilities under `tests/data/`, `tests/model/`,
+`tests/prepare/`, `tests/predict/`, `tests/serve/`, `tests/train/` and
+`tests/evaluate/`; cross-module tests stay at the test root. Internal imports use
+the owning modules directly. The public
+`src.api` exports and model state-dictionary formats remain available.
 Existing paper assets and run files retain their paths. `PAPER.md` records prior
 128³ experiments, not results for this new LR/SR configuration.
 The synthetic-data command moved from `gen_data.py` to `scripts/prepare_data.py`:

@@ -1,6 +1,7 @@
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ from src.build.trainer import build_trainer
 from src.config import load_train_config, load_yaml, save_yaml
 from src.storage import load_volume
 from src.train.run import run_train
+from src.train.sr_run import file_hash, refresh_bank
 
 
 @pytest.mark.parametrize("scale", [1.5, 4])
@@ -149,3 +151,48 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(tmp_path, scale):
         ]
     )
     assert torch.equal(load_volume(out), load_volume(out2))
+
+
+def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "generator.pt"
+    source.write_bytes(b"frozen weights")
+    source_config = tmp_path / "train.yaml"
+    source_config.write_text("stage: low_res\n", encoding="utf-8")
+    old_bank = tmp_path / "lr_bank.pt"
+    old_bank.write_bytes(b"original bank")
+    cfg = {
+        "data": {},
+        "source": {
+            "weights": str(source),
+            "weights_sha256": file_hash(source),
+            "config_sha256": file_hash(source_config),
+            "bank": str(old_bank),
+        },
+        "lr_bank": {"refresh_every_steps": 2, "guidance": 1},
+    }
+    trainer = SimpleNamespace(
+        cfg=cfg,
+        step=2,
+        device=torch.device("cpu"),
+        bank={0: torch.full((2, 2, 8, 8, 8), 0.5)},
+    )
+    monkeypatch.setattr(
+        "src.train.sr_run.load_generator",
+        lambda *args: SimpleNamespace(
+            generate_probs=lambda **kwargs: torch.stack(
+                (torch.ones(8, 8, 8), torch.zeros(8, 8, 8))
+            )
+        ),
+    )
+    refresh_bank(trainer, tmp_path)
+    assert old_bank.read_bytes() == b"original bank"
+    assert trainer.bank[0][0, 0].eq(1).all()
+    assert trainer.bank[0][1].eq(0.5).all()
+    assert cfg["source"]["bank_sha256"] == file_hash(
+        tmp_path / "lr_bank_step_00000002.pt"
+    )
+    source_config.write_text("stage: sr\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="configuration changed"):
+        refresh_bank(trainer, tmp_path)

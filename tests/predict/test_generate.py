@@ -16,12 +16,19 @@ from src.evaluate import measure_seams
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.predict.generator import Generator
-from src.predict.scale import ScaledGenerator, TileBuffer, VolumeState
+from src.predict.tile import (
+    TileBuffer,
+    VolumeState,
+    crop_output,
+    make_fusion,
+    make_tiles,
+)
+from src.predict.tiled import TiledGenerator
 from src.storage import save_model
 from src.train.ema import build_ema
 
-_SCALED_GENERATE = ScaledGenerator.generate
-_SCALED_GENERATE_PROBS = ScaledGenerator.generate_probs
+_SCALED_GENERATE = TiledGenerator.generate
+_SCALED_GENERATE_PROBS = TiledGenerator.generate_probs
 _GENERATOR_GENERATE = Generator.generate
 _GENERATOR_GENERATE_PROBS = Generator.generate_probs
 
@@ -44,8 +51,8 @@ def preserve_generation_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
         kwargs.setdefault("margin", 0)
         return _GENERATOR_GENERATE_PROBS(self, *args, **kwargs)
 
-    monkeypatch.setattr(ScaledGenerator, "generate", generate)
-    monkeypatch.setattr(ScaledGenerator, "generate_probs", generate_probs)
+    monkeypatch.setattr(TiledGenerator, "generate", generate)
+    monkeypatch.setattr(TiledGenerator, "generate_probs", generate_probs)
     monkeypatch.setattr(Generator, "generate", direct_generate)
     monkeypatch.setattr(Generator, "generate_probs", direct_generate_probs)
 
@@ -295,7 +302,7 @@ def test_regular_sampling_keeps_unconditional_reverse_steps_unconditioned() -> N
 def test_scaled_sampling_reuses_domain_for_every_tile_and_step() -> None:
     model = _TraceModel()
     model.num_domains = 2
-    scaled = ScaledGenerator(_generator(model, Diffusion(2)))
+    scaled = TiledGenerator(_generator(model, Diffusion(2)))
 
     scaled.generate(
         shape=(6, 4, 4),
@@ -397,7 +404,7 @@ def test_guidance_routes_direct_and_scaled_predictions() -> None:
     )
 
     scaled_model = _GuidanceTraceModel()
-    scaled = ScaledGenerator(_generator(scaled_model, Diffusion(2)))
+    scaled = TiledGenerator(_generator(scaled_model, Diffusion(2)))
     scaled.generate(
         shape=(6, 4, 4),
         vf=(0.5, 0.1, 0.4),
@@ -444,7 +451,7 @@ def test_amp_guidance_runs_direct_and_scaled_with_float32_diffusion_state() -> N
         vf=(0.5, 0.1, 0.4),
         guidance=1.5,
     )
-    scaled = ScaledGenerator(generator).generate(
+    scaled = TiledGenerator(generator).generate(
         shape=4,
         overlap=0,
         vf=(0.5, 0.1, 0.4),
@@ -484,7 +491,7 @@ def test_guided_sampling_uses_anchor_as_a_condition() -> None:
 
 
 def test_scaled_guidance_one_preserves_default_rng_path() -> None:
-    scaled = ScaledGenerator(_generator(_ControlledModel(), Diffusion(2)))
+    scaled = TiledGenerator(_generator(_ControlledModel(), Diffusion(2)))
 
     torch.manual_seed(73)
     baseline = scaled.generate(
@@ -514,7 +521,7 @@ def test_base_only_guidance_is_a_no_op() -> None:
         latent_channels=4,
         num_domains=1,
     ).eval()
-    scaled = ScaledGenerator(_generator(model, Diffusion(2)))
+    scaled = TiledGenerator(_generator(model, Diffusion(2)))
     base = torch.randint(0, 3, (4, 4, 4), dtype=torch.uint8)
 
     torch.manual_seed(79)
@@ -558,7 +565,7 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
     diffusion = _TraceDiffusion(timesteps=3, events=events)
     generator = _generator(model, diffusion)
 
-    scaled = ScaledGenerator(generator)
+    scaled = TiledGenerator(generator)
     vol = scaled.generate(
         shape=(6, 4, 4),
         overlap=0,
@@ -690,7 +697,7 @@ def test_scaled_generation_reuses_vf_for_every_tile_and_transition() -> None:
     model = _TraceModel()
     generator = _generator(model, _TraceDiffusion(timesteps=3))
 
-    ScaledGenerator(generator).generate(
+    TiledGenerator(generator).generate(
         shape=(6, 4, 4),
         vf=(0.5, 0.1, 0.4),
         overlap=0,
@@ -707,7 +714,7 @@ def test_scaled_generation_reuses_vf_for_every_tile_and_transition() -> None:
 
 
 def test_scaled_generator_returns_probabilities_and_categorical_volume() -> None:
-    scaled = ScaledGenerator(_generator(_ControlledModel(), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_ControlledModel(), Diffusion(1)))
 
     probs = scaled.generate_probs(shape=(6, 4, 4), overlap=0, progress=False)
     vol = scaled.generate(shape=(6, 4, 4), overlap=0, progress=False)
@@ -721,7 +728,7 @@ def test_scaled_generator_returns_probabilities_and_categorical_volume() -> None
 
 
 def test_blocks_define_fixed_tiles_and_margin_reduced_output() -> None:
-    scaled = ScaledGenerator(_generator(_ControlledModel(), Diffusion(1), patch_size=8))
+    scaled = TiledGenerator(_generator(_ControlledModel(), Diffusion(1), patch_size=8))
 
     volume = scaled.generate(
         blocks=(3, 2, 1),
@@ -738,14 +745,12 @@ def test_blocks_define_fixed_tiles_and_margin_reduced_output() -> None:
     assert plan.seams == ((6, 10), (6,), ())
     assert all(
         tuple(region.stop - region.start for region in tile.source) == (8, 8, 8)
-        for tile in scaled.make_tiles(plan)
+        for tile in make_tiles(plan)
     )
 
 
 def test_scaled_generator_uses_default_overlap() -> None:
-    scaled = ScaledGenerator(
-        _generator(_ControlledModel(), Diffusion(1), patch_size=32)
-    )
+    scaled = TiledGenerator(_generator(_ControlledModel(), Diffusion(1), patch_size=32))
 
     plan = scaled.plan(shape=(48, 32, 32))
     probs = scaled.generate_probs(shape=(48, 32, 32), progress=False)
@@ -761,7 +766,7 @@ def test_scaled_generator_uses_default_overlap() -> None:
 def test_scaled_generation_uses_model_derived_outer_margin() -> None:
     model = _PhaseModel(phase=1)
     model.downsample_factor = 8
-    scaled = ScaledGenerator(_generator(model, Diffusion(1), patch_size=32))
+    scaled = TiledGenerator(_generator(model, Diffusion(1), patch_size=32))
 
     volume = _SCALED_GENERATE(
         scaled,
@@ -783,7 +788,7 @@ def test_scaled_generation_uses_model_derived_outer_margin() -> None:
 def test_crop_output_keeps_the_requested_rectangular_center() -> None:
     volume = torch.arange(7 * 8 * 9).reshape(7, 8, 9)
 
-    cropped = ScaledGenerator.crop_output(volume, (3, 4, 5), 2)
+    cropped = crop_output(volume, (3, 4, 5), 2)
 
     assert torch.equal(cropped, volume[2:5, 2:6, 2:7])
     assert cropped.untyped_storage().data_ptr() != volume.untyped_storage().data_ptr()
@@ -792,7 +797,7 @@ def test_crop_output_keeps_the_requested_rectangular_center() -> None:
 def test_overlapping_tiles_read_the_same_unchanged_global_state() -> None:
     model = _OverlapTraceModel()
 
-    ScaledGenerator(_generator(model, _TraceDiffusion(timesteps=2))).generate(
+    TiledGenerator(_generator(model, _TraceDiffusion(timesteps=2))).generate(
         shape=(6, 4, 4),
         overlap=1,
         progress=False,
@@ -808,7 +813,7 @@ def test_overlapping_tiles_read_the_same_unchanged_global_state() -> None:
 def test_posterior_receives_clean_prediction_before_state_quantization() -> None:
     diffusion = _TraceDiffusion(timesteps=2)
 
-    ScaledGenerator(_generator(_PreciseModel(), diffusion)).generate(
+    TiledGenerator(_generator(_PreciseModel(), diffusion)).generate(
         shape=4,
         overlap=0,
         storage="cpu",
@@ -828,7 +833,7 @@ def test_overlap_fuses_clean_predictions_before_posterior() -> None:
     )
     diffusion = _TraceDiffusion(timesteps=2)
 
-    ScaledGenerator(_generator(model, diffusion, patch_size=8)).generate_probs(
+    TiledGenerator(_generator(model, diffusion, patch_size=8)).generate_probs(
         shape=(12, 8, 8),
         overlap=2,
         progress=False,
@@ -852,14 +857,14 @@ def test_overlap_fuses_clean_predictions_before_posterior() -> None:
 
 def test_final_labels_use_the_fused_prediction() -> None:
     predictions = ((0.55, 0.45, 0.0), (0.05, 0.95, 0.0))
-    probs = ScaledGenerator(
+    probs = TiledGenerator(
         _generator(_TileProbabilityModel(predictions), Diffusion(1))
     ).generate_probs(
         shape=(8, 4, 4),
         overlap=1,
         progress=False,
     )
-    vol = ScaledGenerator(
+    vol = TiledGenerator(
         _generator(_TileProbabilityModel(predictions), Diffusion(1))
     ).generate(
         shape=(8, 4, 4),
@@ -875,7 +880,7 @@ def test_final_labels_use_the_fused_prediction() -> None:
 def test_boundary_tiles_use_only_real_volume_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scaled = ScaledGenerator(_generator(_PaddingModel(), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_PaddingModel(), Diffusion(1)))
 
     def fill_ones(state: VolumeState, tiles: object) -> None:
         del tiles
@@ -903,7 +908,7 @@ def test_real_denoiser_accepts_one_sided_boundary_tiles() -> None:
         latent_channels=4,
         num_domains=1,
     ).eval()
-    scaled = ScaledGenerator(_generator(model, Diffusion(1)))
+    scaled = TiledGenerator(_generator(model, Diffusion(1)))
 
     volume = scaled.generate(
         shape=8,
@@ -921,14 +926,14 @@ def test_cpu_and_cuda_storage_use_the_same_fusion() -> None:
     predictions = ((0.8, 0.2, 0.0), (0.2, 0.8, 0.0))
     cpu_diffusion = _TraceDiffusion(timesteps=2)
     cuda_diffusion = _TraceDiffusion(timesteps=2)
-    cpu_scaled = ScaledGenerator(
+    cpu_scaled = TiledGenerator(
         _generator(
             _TileProbabilityModel(predictions).to(device),
             cpu_diffusion,
             device=device,
         )
     )
-    cuda_scaled = ScaledGenerator(
+    cuda_scaled = TiledGenerator(
         _generator(
             _TileProbabilityModel(predictions).to(device),
             cuda_diffusion,
@@ -965,7 +970,7 @@ def test_scale_plan_calculates_2048_layout_without_allocating(
 ) -> None:
     model = _ControlledModel()
     model.downsample_factor = 8
-    scaled = ScaledGenerator(_generator(model, Diffusion(1), patch_size=224))
+    scaled = TiledGenerator(_generator(model, Diffusion(1), patch_size=224))
 
     def reject_allocation(*args, **kwargs):
         del args, kwargs
@@ -988,7 +993,7 @@ def test_cpu_generation_returns_cpu_uint8_without_creating_files(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     diffusion = _TraceDiffusion(timesteps=2)
-    scaled = ScaledGenerator(_generator(_PhaseModel(phase=2), diffusion))
+    scaled = TiledGenerator(_generator(_PhaseModel(phase=2), diffusion))
 
     vol = scaled.generate(
         shape=(6, 5, 4),
@@ -1010,7 +1015,7 @@ def test_failed_generation_creates_no_files(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    scaled = ScaledGenerator(_generator(_FailModel(), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_FailModel(), Diffusion(1)))
 
     with pytest.raises(RuntimeError, match="failed prediction"):
         scaled.generate(
@@ -1025,9 +1030,9 @@ def test_failed_generation_creates_no_files(
 
 def test_model_input_matches_each_bounded_tile_source() -> None:
     model = _OverlapTraceModel()
-    scaled = ScaledGenerator(_generator(model, Diffusion(2)))
+    scaled = TiledGenerator(_generator(model, Diffusion(2)))
     plan = scaled.plan((9, 7, 5), overlap=1)
-    tiles = scaled.make_tiles(plan)
+    tiles = make_tiles(plan)
 
     scaled.generate(
         shape=plan.shape,
@@ -1046,9 +1051,9 @@ def test_model_input_matches_each_bounded_tile_source() -> None:
 
 
 def test_tile_targets_cover_non_divisible_shape_exactly_once() -> None:
-    scaled = ScaledGenerator(_generator(_OverlapTraceModel(), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_OverlapTraceModel(), Diffusion(1)))
     plan = scaled.plan((9, 7, 5), overlap=1)
-    tiles = scaled.make_tiles(plan)
+    tiles = make_tiles(plan)
     coverage = torch.zeros(plan.shape, dtype=torch.int32)
 
     for tile in tiles:
@@ -1070,7 +1075,7 @@ def test_scale_plan_uses_configured_overlap_and_patch_core() -> None:
     model = _ControlledModel()
     model.downsample_factor = 4
 
-    plan = ScaledGenerator(_generator(model, Diffusion(1), patch_size=64)).plan(
+    plan = TiledGenerator(_generator(model, Diffusion(1), patch_size=64)).plan(
         128, overlap=16
     )
 
@@ -1084,9 +1089,9 @@ def test_scale_plan_uses_configured_overlap_and_patch_core() -> None:
 
 def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
     model = _LocalModel()
-    scaled = ScaledGenerator(_generator(model, Diffusion(1)))
+    scaled = TiledGenerator(_generator(model, Diffusion(1)))
     plan = scaled.plan((7, 6, 6), overlap=1)
-    tiles = scaled.make_tiles(plan)
+    tiles = make_tiles(plan)
     current = VolumeState(3, plan.shape, torch.device("cpu"))
     next_state = VolumeState(3, plan.shape, torch.device("cpu"))
     assert current.values.dtype == next_state.values.dtype == torch.float16
@@ -1095,7 +1100,13 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
     current.values.copy_(values)
     time = torch.zeros(1, dtype=torch.long)
     latent = torch.zeros(1, 4)
-    fusion = scaled.make_fusion(plan, tiles, current.values.device)
+    fusion = make_fusion(
+        plan,
+        tiles,
+        scaled.generator.num_phases,
+        current.values.device,
+        scaled.generator.device,
+    )
 
     scaled.step(
         current,
@@ -1119,9 +1130,9 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
 
 def test_boundary_tile_reads_only_bounded_context() -> None:
     model = _OverlapTraceModel()
-    scaled = ScaledGenerator(_generator(model, Diffusion(1)))
+    scaled = TiledGenerator(_generator(model, Diffusion(1)))
     plan = scaled.plan((12, 12, 12), overlap=1)
-    tiles = scaled.make_tiles(plan)
+    tiles = make_tiles(plan)
     tile = tiles[0]
     current = VolumeState(3, plan.shape, torch.device("cpu"))
     next_state = VolumeState(3, plan.shape, torch.device("cpu"))
@@ -1130,7 +1141,13 @@ def test_boundary_tile_reads_only_bounded_context() -> None:
     )
     current.values.zero_()
     current.values[0, 0].copy_(coordinates)
-    fusion = scaled.make_fusion(plan, tiles, current.values.device)
+    fusion = make_fusion(
+        plan,
+        tiles,
+        scaled.generator.num_phases,
+        current.values.device,
+        scaled.generator.device,
+    )
 
     scaled.step(
         current,
@@ -1174,7 +1191,7 @@ def test_bounded_tile_reads_reuse_the_workspace() -> None:
 
 
 def test_scaled_generation_supports_anisotropic_shape() -> None:
-    scaled = ScaledGenerator(_generator(_TraceModel(), _TraceDiffusion(timesteps=1)))
+    scaled = TiledGenerator(_generator(_TraceModel(), _TraceDiffusion(timesteps=1)))
     vol = scaled.generate(
         shape=(6, 4, 8),
         overlap=0,
@@ -1192,7 +1209,7 @@ def test_scaled_generation_supports_anisotropic_shape() -> None:
 
 def test_scaled_generation_does_not_force_the_base_into_the_output() -> None:
     diffusion = _TraceDiffusion(timesteps=1)
-    scaled = ScaledGenerator(_generator(_PhaseModel(phase=0), diffusion))
+    scaled = TiledGenerator(_generator(_PhaseModel(phase=0), diffusion))
     base = torch.full((4, 4, 4), 2, dtype=torch.uint8)
 
     vol = scaled.generate(
@@ -1207,7 +1224,7 @@ def test_scaled_generation_does_not_force_the_base_into_the_output() -> None:
 
 
 def test_zero_overlap_keeps_the_complete_base_active() -> None:
-    scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_TraceModel(), Diffusion(1)))
     base = torch.zeros((4, 4, 4), dtype=torch.uint8)
     plan = scaled.plan((6, 4, 4), overlap=0)
 
@@ -1219,7 +1236,7 @@ def test_zero_overlap_keeps_the_complete_base_active() -> None:
 
 
 def test_base_uses_cosine_transition_only_on_expanded_axes() -> None:
-    scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1), patch_size=8))
+    scaled = TiledGenerator(_generator(_TraceModel(), Diffusion(1), patch_size=8))
     plan = scaled.plan((12, 8, 8), overlap=2)
 
     condition = scaled.prepare_base(
@@ -1234,7 +1251,7 @@ def test_base_uses_cosine_transition_only_on_expanded_axes() -> None:
 
 
 def test_base_condition_blends_the_transition() -> None:
-    scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1), patch_size=8))
+    scaled = TiledGenerator(_generator(_TraceModel(), Diffusion(1), patch_size=8))
     plan = scaled.plan((12, 8, 8), overlap=2)
     condition = scaled.prepare_base(
         torch.zeros((8, 8, 8), dtype=torch.uint8),
@@ -1256,7 +1273,7 @@ def test_base_condition_blends_the_transition() -> None:
 def test_scaled_generation_allows_the_complete_base_to_adapt() -> None:
     base = torch.full((8, 8, 8), 2, dtype=torch.uint8)
     generator = _generator(_PhaseModel(phase=0), Diffusion(1), patch_size=8)
-    scaled = ScaledGenerator(generator)
+    scaled = TiledGenerator(generator)
 
     probs = scaled.generate_probs(
         shape=(12, 8, 8),
@@ -1280,7 +1297,7 @@ def test_scaled_generation_allows_the_complete_base_to_adapt() -> None:
 def test_scaled_generation_centers_base_in_anisotropic_shape(
     shape: tuple[int, int, int],
 ) -> None:
-    scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_TraceModel(), Diffusion(1)))
     plan = scaled.plan(shape, overlap=0)
 
     condition = scaled.prepare_base(
@@ -1296,7 +1313,7 @@ def test_scaled_generation_centers_base_in_anisotropic_shape(
 
 
 def test_scaled_base_offset_uses_output_coordinates_outside_generation_margin() -> None:
-    scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1), patch_size=8))
+    scaled = TiledGenerator(_generator(_TraceModel(), Diffusion(1), patch_size=8))
     plan = scaled._generation_plan((12, 12, 12), overlap=2, margin=2)
 
     condition = scaled.prepare_base(
@@ -1314,7 +1331,7 @@ def test_scaled_base_offset_uses_output_coordinates_outside_generation_margin() 
 
 
 def test_scaled_base_offset_rejects_out_of_bounds_and_requires_base() -> None:
-    scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_TraceModel(), Diffusion(1)))
     plan = scaled.plan((6, 6, 6), overlap=0)
 
     with pytest.raises(ValueError, match="axis 0 must be between 0 and 2"):
@@ -1332,7 +1349,7 @@ def test_scaled_base_keeps_constant_prediction_in_every_core() -> None:
     diffusion = _TraceDiffusion(timesteps=3)
     base = torch.zeros((4, 4, 4), dtype=torch.uint8)
 
-    vol = ScaledGenerator(_generator(model, diffusion)).generate(
+    vol = TiledGenerator(_generator(model, diffusion)).generate(
         shape=(6, 6, 6),
         base=base,
         overlap=0,
@@ -1352,7 +1369,7 @@ def test_scaled_generation_conditions_every_step_with_one_base_noise() -> None:
     model = _TraceModel()
     diffusion = _NoiseTraceDiffusion(timesteps=3)
 
-    ScaledGenerator(_generator(model, diffusion)).generate(
+    TiledGenerator(_generator(model, diffusion)).generate(
         shape=(6, 4, 4),
         base=torch.zeros((4, 4, 4), dtype=torch.uint8),
         overlap=0,
@@ -1371,7 +1388,7 @@ def test_scaled_generation_conditions_every_step_with_one_base_noise() -> None:
 
 def test_single_block_base_does_not_replace_prediction() -> None:
     base = torch.arange(4 * 4 * 4).reshape(4, 4, 4).remainder(3).to(torch.uint8)
-    scaled = ScaledGenerator(_generator(_PhaseModel(phase=0), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_PhaseModel(phase=0), Diffusion(1)))
 
     vol = scaled.generate(
         shape=(4, 4, 4),
@@ -1385,7 +1402,7 @@ def test_single_block_base_does_not_replace_prediction() -> None:
 
 def test_zero_overlap_does_not_force_the_whole_base() -> None:
     base = torch.arange(4 * 4 * 4).reshape(4, 4, 4).remainder(3).to(torch.uint8)
-    scaled = ScaledGenerator(_generator(_PhaseModel(phase=0), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_PhaseModel(phase=0), Diffusion(1)))
 
     vol = scaled.generate(
         shape=(6, 4, 4),
@@ -1409,7 +1426,7 @@ def test_scaled_generation_rejects_invalid_base(
     base: torch.Tensor,
     error: str,
 ) -> None:
-    scaled = ScaledGenerator(_generator(_TraceModel(), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_TraceModel(), Diffusion(1)))
 
     with pytest.raises(ValueError, match=error):
         scaled.generate(shape=6, overlap=0, base=base, progress=False)
@@ -1420,7 +1437,7 @@ def test_single_core_matches_regular_categorical_prediction(
     vf: tuple[float, ...] | None,
 ) -> None:
     expected = _generator(_PhaseModel(phase=2), Diffusion(1)).generate(vf=vf)
-    scaled = ScaledGenerator(_generator(_PhaseModel(phase=2), Diffusion(1)))
+    scaled = TiledGenerator(_generator(_PhaseModel(phase=2), Diffusion(1)))
     actual = scaled.generate(
         shape=(4, 4, 4),
         vf=vf,
@@ -1439,19 +1456,19 @@ def test_scaled_generation_validates_shape_overlap_and_storage() -> None:
     generator = _generator(_TraceModel(), _TraceDiffusion(timesteps=1))
 
     with pytest.raises(TypeError, match="shape must be"):
-        ScaledGenerator(generator).generate(shape="2", overlap=0, progress=False)
+        TiledGenerator(generator).generate(shape="2", overlap=0, progress=False)
     with pytest.raises(ValueError, match="three positive integers"):
-        ScaledGenerator(generator).generate(shape=(2, 0, 1), overlap=0, progress=False)
+        TiledGenerator(generator).generate(shape=(2, 0, 1), overlap=0, progress=False)
     with pytest.raises(ValueError, match="overlap"):
-        ScaledGenerator(generator).generate(shape=4, overlap=-1, progress=False)
+        TiledGenerator(generator).generate(shape=4, overlap=-1, progress=False)
     with pytest.raises(ValueError, match="storage must be"):
-        ScaledGenerator(generator).generate(
+        TiledGenerator(generator).generate(
             shape=4,
             overlap=0,
             storage="mmap",
             progress=False,
         )
-    vol = ScaledGenerator(generator).generate(
+    vol = TiledGenerator(generator).generate(
         shape=4,
         overlap=0,
         storage="cpu",
@@ -1459,7 +1476,7 @@ def test_scaled_generation_validates_shape_overlap_and_storage() -> None:
     )
     assert vol.device.type == "cpu"
     with pytest.raises(ValueError, match="requires a CUDA"):
-        ScaledGenerator(generator).generate(
+        TiledGenerator(generator).generate(
             shape=4,
             overlap=0,
             storage="cuda",

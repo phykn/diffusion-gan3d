@@ -6,11 +6,11 @@ import tifffile
 import torch
 
 from src.config import GenerationSettings
-from src.predict.scale import ScalePlan
+from src.predict.tile import TilePlan
 
 
-def make_plan() -> ScalePlan:
-    return ScalePlan(
+def make_plan() -> TilePlan:
+    return TilePlan(
         shape=(8, 8, 8),
         tile_size=6,
         overlap=1,
@@ -90,7 +90,7 @@ def test_main_prints_plan_before_scaled_generation(
         "load_generation_settings",
         lambda: GenerationSettings(),
     )
-    monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: scaled)
+    monkeypatch.setattr(module, "TiledGenerator", lambda _generator: scaled)
     monkeypatch.setattr(module, "show_slices", lambda *args, **kwargs: None)
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(
@@ -175,7 +175,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
         "load_generation_settings",
         lambda: GenerationSettings(),
     )
-    monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
+    monkeypatch.setattr(module, "TiledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(
         module,
         "show_unanchored_base_result",

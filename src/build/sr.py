@@ -8,10 +8,12 @@ from src.config import (
     get_plane_groups,
     get_sr_sizes,
     normalize_train_config,
+    validate_sr_config,
 )
-from src.data.sr import SliceStream, validate_bank
+from src.data.bank import validate_bank
+from src.data.loader import SliceStream
 from src.model.sr_critic import SliceCritic
-from src.train.sr import SRTrainer, validate_sr_config
+from src.train.sr import SRTrainer
 
 
 def build_sr_trainer(

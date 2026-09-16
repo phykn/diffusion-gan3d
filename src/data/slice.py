@@ -2,8 +2,9 @@ from dataclasses import dataclass
 
 import torch
 
-from src import AXES
 from src.anchor import AnchorCondition
+from src.data.augment import crop_images
+from src.plane import AXES
 
 
 @dataclass(frozen=True)
@@ -25,99 +26,92 @@ class LocatedTriplets:
     relations: tuple[tuple[int, int, int], ...] = ()
 
 
-@torch.no_grad()
-def anchor_boundary_metrics(prediction, condition) -> dict[str, torch.Tensor]:
-    """Measured-plane neighbor agreement and excess over measured in-plane variation."""
-    total = prediction.new_zeros(())
-    excess = prediction.new_zeros(())
-    count = prediction.new_zeros(())
+def sample_slices(volume: torch.Tensor, axis: int, count: int) -> torch.Tensor:
+    planes = volume.movedim(axis + 2, 1)
+    planes = planes.flatten(0, 1)
+    indices = torch.randint(planes.shape[0], (count,), device=volume.device)
+    return planes[indices]
+
+
+def sample_pairs(
+    previous: torch.Tensor,
+    current: torch.Tensor,
+    axis: int,
+    count: int,
+    crop_shape: int | tuple[int, int],
+    anchor: AnchorCondition | None = None,
+    measured: AnchorCondition | None = None,
+    height: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, ...]:
+    size = previous.shape[axis + 2]
+    excluded = (
+        set()
+        if measured is None
+        else {r.index for r in measured.regions if r.axis == axis}
+    )
     active = (
-        range(prediction.shape[0])
-        if condition.active_batches is None
-        else condition.active_batches
+        ()
+        if measured is None
+        else (
+            range(previous.shape[0])
+            if measured.active_batches is None
+            else measured.active_batches
+        )
     )
-    for region in condition.regions:
-        axis, index = region.axis, region.index
-        patch = (
-            slice(region.row, region.row + region.height),
-            slice(region.col, region.col + region.width),
-        )
-        target = condition.image.select(axis + 2, index)[..., patch[0], patch[1]]
-        tangent = []
-        if region.height > 1:
-            tangent.append(
-                (target[..., 1:, :] - target[..., :-1, :]).abs().sum(1).mean((1, 2))
-                * 0.25
-            )
-        if region.width > 1:
-            tangent.append(
-                (target[..., 1:] - target[..., :-1]).abs().sum(1).mean((1, 2)) * 0.25
-            )
-        baseline = (
-            torch.stack(tangent).mean(0)
-            if tangent
-            else target.new_zeros(target.shape[0])
-        )
-        for neighbor in (index - 1, index + 1):
-            if not 0 <= neighbor < prediction.shape[axis + 2]:
-                continue
-            values = prediction.select(axis + 2, neighbor)[..., patch[0], patch[1]]
-            unknown = ~condition.mask.select(axis + 2, neighbor)[
-                :, 0, patch[0], patch[1]
+    candidates = [
+        (batch, index)
+        for batch in range(previous.shape[0])
+        for index in range(size)
+        if batch not in active or index not in excluded
+    ]
+    if not candidates:
+        shape = previous.movedim(axis + 2, 2).shape
+        empty = previous.new_empty((0, shape[1], *shape[-2:]))
+        return (empty, empty) if height is None else (empty, empty, empty[:, :1])
+    choices = torch.randint(len(candidates), (count,)).tolist()
+    selected = [candidates[i] for i in choices]
+    centers = []
+    if anchor is not None:
+        axes = [normal for normal in AXES if normal != axis]
+        for slot, (batch, index) in enumerate(selected[: max(1, count // 2)]):
+            regions = [
+                r
+                for r in anchor.regions
+                if r.axis != axis
+                and (anchor.active_batches is None or batch in anchor.active_batches)
             ]
-            jump = (values - target).abs().sum(1) * 0.25
-            for batch in active:
-                valid = unknown[batch]
-                total += ((1 - jump[batch]) * valid).sum()
-                excess += ((jump[batch] - baseline[batch]) * valid).sum()
-                count += valid.sum()
-    return {
-        "anchor/boundary_pairs": count,
-        "anchor/neighbor_agreement": total / count.clamp_min(1),
-        "anchor/neighbor_excess_jump": excess / count.clamp_min(1),
-    }
-
-
-def compute_transition_loss(real: TripletBatch, fake: TripletBatch) -> torch.Tensor:
-    if real.values.shape != fake.values.shape:
-        raise ValueError("real and fake triplets must have the same shape.")
-    if not (
-        (real.axes is fake.axes or torch.equal(real.axes, fake.axes))
-        and (real.gaps is fake.gaps or torch.equal(real.gaps, fake.gaps))
-        and (
-            real.center_slots is fake.center_slots
-            or torch.equal(real.center_slots, fake.center_slots)
-        )
-    ):
-        raise ValueError("real and fake triplets must use matching metadata.")
-    if len(fake) == 0:
-        return fake.values.sum().mul(0.0)
-
-    triplet_indices = torch.arange(len(real), device=real.values.device)
-    center_slots = real.center_slots
-    valid_neighbors = torch.stack(
-        (center_slots > 0, center_slots < 2),
-        dim=1,
+            if not regions:
+                break
+            region = regions[int(torch.randint(len(regions), ()))]
+            coordinates = {region.axis: region.index}
+            other = [normal for normal in AXES if normal != region.axis]
+            coordinates[other[0]] = region.row + int(torch.randint(region.height, ()))
+            coordinates[other[1]] = region.col + int(torch.randint(region.width, ()))
+            start = region.row if other[0] == axis else region.col
+            length = region.height if other[0] == axis else region.width
+            allowed = [
+                i for b, i in candidates if b == batch and start <= i < start + length
+            ]
+            if not allowed:
+                break
+            selected[slot] = (batch, allowed[int(torch.randint(len(allowed), ()))])
+            centers.append(tuple(coordinates[normal] for normal in axes))
+    batch_indices, plane_indices = zip(*selected)
+    batch_indices = torch.tensor(batch_indices, device=previous.device)
+    plane_indices = torch.tensor(plane_indices, device=previous.device)
+    previous = previous.movedim(axis + 2, 2)[batch_indices, :, plane_indices]
+    current = current.movedim(axis + 2, 2)[batch_indices, :, plane_indices]
+    channels = previous.shape[1]
+    values = (previous, current)
+    if height is not None:
+        values += (height.movedim(axis + 2, 2)[batch_indices, :, plane_indices],)
+    pairs = crop_images(
+        torch.cat(values, dim=1),
+        crop_shape,
+        centers,
     )
-    probs = torch.stack(
-        (
-            real.values.to(torch.float32),
-            fake.values.to(torch.float32),
-        )
-    )
-    probs = (probs + 1.0) * 0.5
-    centers = probs[:, triplet_indices, center_slots]
-    left = probs[:, triplet_indices, (center_slots - 1).clamp_min(0)]
-    right = probs[:, triplet_indices, (center_slots + 1).clamp_max(2)]
-    changes = torch.stack((left - centers, right - centers), dim=2)
-    transition_error = (changes[0] - changes[1]).abs().mean(dim=(2, 3, 4))
-    valid_count = valid_neighbors.sum(dim=1)
-    per_triplet = (transition_error * valid_neighbors).sum(dim=1) / valid_count
-    middle = center_slots == 1
-    bend = changes[:, :, 1] - changes[:, :, 0]
-    bend_error = 0.5 * (bend[0] - bend[1]).abs().mean(dim=(1, 2, 3))
-    per_triplet = torch.where(middle, 0.5 * (per_triplet + bend_error), per_triplet)
-    return per_triplet.mean()
+    result = (pairs[:, :channels], pairs[:, channels : 2 * channels])
+    return result if height is None else (*result, pairs[:, 2 * channels :].detach())
 
 
 class AnchorTripletSampler:

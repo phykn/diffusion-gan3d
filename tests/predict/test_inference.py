@@ -20,7 +20,7 @@ class FakeGenerator:
         return torch.randint(0, 2, (8, 8, 8), dtype=torch.uint8)
 
 
-class FakeScaledGenerator:
+class FakeTiledGenerator:
     def __init__(self, generator: FakeGenerator) -> None:
         self.generator = generator
         self.calls: list[dict] = []
@@ -51,7 +51,7 @@ def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> InferenceAPI:
         "load_train_config",
         lambda _path: {"data": {"crop_size": 6, "lo_res_size": 8}},
     )
-    monkeypatch.setattr(inference_module, "ScaledGenerator", FakeScaledGenerator)
+    monkeypatch.setattr(inference_module, "TiledGenerator", FakeTiledGenerator)
     return InferenceAPI(weights, device="cpu")
 
 

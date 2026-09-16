@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 import torch
 
+import src.evaluate.fid as fid_module
 from src.evaluate import compute_fid, prepare_fid_images
-from src.evaluate import image as image_module
 
 
 def test_prepare_fid_images_expands_binary_sections_to_uint8_rgb() -> None:
@@ -47,10 +47,23 @@ def test_fid_scores_real_and_generated_images(
 
     real = np.zeros((2, 4, 4), dtype=np.uint8)
     generated = np.ones((2, 4, 4), dtype=np.uint8)
-    monkeypatch.setattr(image_module, "FrechetInceptionDistance", FakeMetric)
+    monkeypatch.setattr(fid_module, "FrechetInceptionDistance", FakeMetric)
     assert compute_fid(real, generated, "cpu", 64) == pytest.approx(4.5)
 
     assert len(created) == 1
     metric = created[0]
     assert metric.kwargs["feature"] == 64
     assert [real_flag for _, real_flag in metric.updates] == [True, False]
+
+
+def test_prepare_fid_images_preserves_input_and_scales_normalized_grayscale() -> None:
+    sections = np.asarray((((0.0, 0.5), (1.0, 0.25)),), dtype=np.float32)
+    original = sections.copy()
+
+    images = prepare_fid_images(sections)
+
+    assert np.array_equal(sections, original)
+    assert torch.equal(
+        images[0, 0],
+        torch.tensor(((0, 128), (255, 64)), dtype=torch.uint8),
+    )

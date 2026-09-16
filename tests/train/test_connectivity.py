@@ -3,12 +3,9 @@ import torch
 import torch.nn.functional as F
 
 from src.anchor import PlaneAnchor, encode_anchors
+from src.data.slice import AnchorTripletSampler, TripletBatch
 from src.model.critic import ConnectivityCritic2D
-from src.train.loss.connect import (
-    AnchorTripletSampler,
-    TripletBatch,
-    compute_transition_loss,
-)
+from src.train.loss.connectivity import compute_transition_loss
 
 
 def test_anchor_triplets_cover_all_axes_and_intersect_the_anchor() -> None:

@@ -1,6 +1,7 @@
 import torch
 
-from src.train.loss import vf
+from src.evaluate.label import compute_vf
+from src.train.loss.volume_fraction import compute_vf_loss
 
 
 def test_compute_vf_aggregates_all_images_and_axes() -> None:
@@ -11,7 +12,7 @@ def test_compute_vf_aggregates_all_images_and_axes() -> None:
     }
     expected = torch.tensor((1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0))
 
-    torch.testing.assert_close(vf.compute_vf(batches, num_phases=3), expected)
+    torch.testing.assert_close(compute_vf(batches, num_phases=3), expected)
 
 
 def test_compute_vf_loss_uses_only_present_samples() -> None:
@@ -25,10 +26,10 @@ def test_compute_vf_loss_uses_only_present_samples() -> None:
     expected = (target[0] * (target[0].log() - torch.tensor((0.5, 0.5)).log())).sum()
 
     torch.testing.assert_close(
-        vf.compute_vf_loss(probs, target, present),
+        compute_vf_loss(probs, target, present),
         expected,
     )
     torch.testing.assert_close(
-        vf.compute_vf_loss(probs, target, torch.zeros(2, dtype=torch.bool)),
+        compute_vf_loss(probs, target, torch.zeros(2, dtype=torch.bool)),
         torch.tensor(0.0),
     )

@@ -286,6 +286,58 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     return cfg
 
 
+def validate_sr_config(cfg: dict) -> None:
+    cfg = normalize_train_config(cfg, "sr")
+    get_sr_sizes(cfg)
+    get_plane_groups(cfg)
+    for name in (
+        "total_steps",
+        "volume_batch_size",
+        "slices_per_plane",
+        "critic_updates_per_step",
+        "checkpoint_every_steps",
+    ):
+        value = cfg["train"][name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"train.{name} must be a positive integer.")
+    count = cfg["lr_bank"]["samples_per_domain"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise ValueError("lr_bank.samples_per_domain must be a positive integer.")
+    guidance = cfg["lr_bank"]["guidance"]
+    refresh = cfg["lr_bank"]["refresh_every_steps"]
+    if type(refresh) is not int or refresh < 0:
+        raise ValueError("lr_bank.refresh_every_steps must be a non-negative integer.")
+    for name in ("coarse_corruption_probability", "coarse_corruption_strength"):
+        value = cfg["conditioning"][name]
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(value)
+            or not 0 <= value <= 1
+        ):
+            raise ValueError(f"conditioning.{name} must be between zero and one.")
+    if (
+        isinstance(guidance, bool)
+        or not isinstance(guidance, (int, float))
+        or not math.isfinite(guidance)
+    ):
+        raise ValueError("lr_bank.guidance must be finite.")
+    for name in (
+        "gradient_penalty_weight",
+        "downsample_consistency_weight",
+        "downsample_mse_tolerance",
+    ):
+        value = cfg["loss"][name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (float, int))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError(f"loss.{name} must be non-negative and finite.")
+    if not 0 <= cfg["optim"]["ema_decay"] < 1:
+        raise ValueError("optim.ema_decay must be in [0, 1).")
+
+
 def validate_sr_source(data: Mapping, base_data: Mapping) -> None:
     """Require the same field of view and label/domain contract, not image paths."""
     if "lo_res_size" not in base_data:

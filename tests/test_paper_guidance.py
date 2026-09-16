@@ -403,7 +403,7 @@ def test_scale_asset_writes_renumbered_sidecar(
         "load_generation_settings",
         lambda: SimpleNamespace(guidance=1.0, anchor_strength=0.75, overlap=0),
     )
-    monkeypatch.setattr(module, "ScaledGenerator", lambda _generator: FakeScaled())
+    monkeypatch.setattr(module, "TiledGenerator", lambda _generator: FakeScaled())
     monkeypatch.setattr(
         module, "load_center_roi", lambda _size: torch.zeros((4, 4), dtype=torch.long)
     )

@@ -12,13 +12,14 @@ from src.anchor import PlaneAnchor, encode_anchors
 from src.build.model import build_models
 from src.build.trainer import build_optimizers
 from src.data.augment import CriticAugment
+from src.data.slice import TripletBatch
+from src.data.slice import sample_pairs as sample_volume_pairs
+from src.evaluate.label import compute_vf
 from src.model.diffusion import Diffusion
 from src.model.layers import NULL_DOMAIN
 from src.plane import PLANES
 from src.train.anchor_bank import AnchorBank
 from src.train.ema import build_ema
-from src.train.loss import vf
-from src.train.loss.connect import TripletBatch
 from src.train.loss.gan import get_critic_r1
 from src.train.run import run_train
 from src.train.trainer import (
@@ -84,9 +85,6 @@ def sample_pairs(
     axis_masks=None,
     crop_shape=None,
 ):
-    trainer = object.__new__(Trainer)
-    trainer.slice_pairs_per_axis = count
-    trainer.patch_size = patch_size
     condition = None
     if axis_masks is not None:
         planes = []
@@ -109,7 +107,14 @@ def sample_pairs(
             previous.device,
             previous.dtype,
         )
-    return trainer.sample_pairs(previous, current, axis, condition, crop_shape)
+    return sample_volume_pairs(
+        previous,
+        current,
+        axis,
+        count,
+        patch_size if crop_shape is None else crop_shape,
+        anchor=condition,
+    )
 
 
 def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
@@ -688,7 +693,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     )
     vf_batch_ids = []
     critic_batch_ids = []
-    original_compute_vf = vf.compute_vf
+    original_compute_vf = compute_vf
     original_update_critics = trainer.update_critics
 
     def track_vfs(batches, num_phases):
@@ -707,7 +712,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         )
 
     with (
-        patch.object(vf, "compute_vf", side_effect=track_vfs),
+        patch("src.train.trainer.compute_vf", side_effect=track_vfs),
         patch.object(trainer, "update_critics", side_effect=track_critics),
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
@@ -728,7 +733,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     assert len(compute_logits.call_args_list) == 2
     assert all(vf is vfs[0] for vf in vfs)
     assert vfs[0].shape == (1, 3)
-    expected_vf = vf.compute_vf(
+    expected_vf = compute_vf(
         {axis: streams[axis].images for axis in (0, 1, 2)},
         num_phases=3,
     )
@@ -1014,7 +1019,7 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
 
     with (
         patch.object(trainer, "sample_anchor", return_value=selection),
-        patch.object(vf, "compute_vf", return_value=target[0]),
+        patch("src.train.trainer.compute_vf", return_value=target[0]),
         patch.object(
             trainer,
             "generate_pair",
@@ -1343,3 +1348,22 @@ def _config(
             num_workers=0,
         ),
     )
+
+
+@pytest.mark.parametrize("size,count", [(8, 4), (16, 8)])
+def test_replay_keeps_measurement_and_plane_density(size, count):
+    bank = AnchorBank(capacity=1, plane_spacing=2)
+    image = torch.stack((torch.full((size, size), 0.2), torch.full((size, size), 0.8)))
+    measured = encode_anchors(
+        [PlaneAnchor(image, 0, 2)], 1, 2, size, torch.device("cpu"), torch.float32
+    )
+    prediction = torch.zeros(1, 2, size, size, size)
+    bank.add(0, prediction, measured, torch.tensor([True]))
+    condition, target, reference, _ = bank.sample(0, 2, torch.device("cpu"))
+    assert condition.planes == count
+    torch.testing.assert_close(
+        condition.image[:, :, 2], measured.image[:, :, 2].expand(2, -1, -1, -1)
+    )
+    torch.testing.assert_close(reference[:, :, 2], target.image[:, :, 2])
+    assert target.regions == measured.regions
+    assert bank.sample(1, 1, torch.device("cpu")) is None

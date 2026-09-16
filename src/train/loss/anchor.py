@@ -4,8 +4,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from src import AXES
 from src.anchor import AnchorCondition
+from src.plane import AXES
 
 
 @dataclass(frozen=True)

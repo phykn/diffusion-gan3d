@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from src.model.diffusion import Diffusion
+from src.model.layers import embed_domain
 
 
 def _extract(
@@ -252,3 +253,20 @@ def test_invalid_state_and_transition_ranges_are_rejected() -> None:
         process.sample_pair(values, 3)
     with pytest.raises(ValueError, match="transition must be between"):
         process.sample_posterior(values, values, torch.tensor([0, -1]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_posterior_and_domain_validation_do_not_read_host_scalars():
+    device = torch.device("cuda")
+    diffusion = Diffusion(2).to(device)
+    current = torch.randn(1, 2, 4, 4, 4, device=device)
+    embedding = torch.nn.Embedding(2, 4).to(device)
+    time = torch.tensor([1], device=device)
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU]
+    ) as profile:
+        diffusion.sample_posterior(current, current, time)
+        embed_domain(embedding, time, torch.float32)
+    assert not any(
+        event.key == "aten::_local_scalar_dense" for event in profile.key_averages()
+    )

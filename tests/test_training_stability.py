@@ -11,8 +11,8 @@ from PIL import Image
 from src.build.model import build_models
 from src.build.trainer import build_trainer
 from src.config import load_train_config, save_yaml
+from src.data.slice import TripletBatch
 from src.model.critic import ConnectivityCritic2D
-from src.train.loss.connect import TripletBatch
 from src.train.state import resume_training, save_training
 from src.train.step import step_optimizer
 

@@ -1,15 +1,14 @@
-import math
-
 import torch
 import torch.nn.functional as F
 
-from src.config import get_plane_groups, get_sr_sizes, normalize_train_config
+from src.config import get_plane_groups, normalize_train_config
 from src.data.augment import CriticAugment
+from src.data.slice import sample_slices
 from src.evaluate.structure import structure_metrics
 from src.prepare.height import height_field
 from src.prepare.resize import phase_channels
 from src.train.ema import build_ema, update_ema
-from src.train.sr_loss import consistency_loss, gradient_penalty, sample_slices
+from src.train.loss.sr import consistency_loss, gradient_penalty
 from src.train.step import check_loss, materialize_metrics, step_optimizer
 
 
@@ -154,7 +153,7 @@ class SRTrainer:
                     fake_conditions = (
                         {} if fake_height is None else {"height": fake_height}
                     )
-                    # GP stays in float32. Average planes within each group, then groups.
+                    # Keep WGAN-GP in float32 for stable gradient norms.
                     fake_score, real_score = (
                         critic(slices, **fake_conditions).mean(),
                         critic(real, **real_conditions).mean(),
@@ -306,7 +305,7 @@ class SRTrainer:
         replacement = F.one_hot(labels, low.shape[1]).movedim(-1, 1).float()
         replacement = F.interpolate(replacement, size=low.shape[2:], mode="nearest")
         corrupted = torch.where(mask, replacement, low)
-        # Realized changed mass, including replacements that happened to match.
+        # Condition on realized change; matching replacements contribute zero.
         level = (corrupted - low).abs().mean(dim=(2, 3, 4)).sum(1) * 0.5
         return corrupted, level
 
@@ -361,55 +360,3 @@ class SRTrainer:
             },
             path,
         )
-
-
-def validate_sr_config(cfg: dict) -> None:
-    cfg = normalize_train_config(cfg, "sr")
-    get_sr_sizes(cfg)
-    get_plane_groups(cfg)
-    for name in (
-        "total_steps",
-        "volume_batch_size",
-        "slices_per_plane",
-        "critic_updates_per_step",
-        "checkpoint_every_steps",
-    ):
-        value = cfg["train"][name]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise ValueError(f"train.{name} must be a positive integer.")
-    count = cfg["lr_bank"]["samples_per_domain"]
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-        raise ValueError("lr_bank.samples_per_domain must be a positive integer.")
-    guidance = cfg["lr_bank"]["guidance"]
-    refresh = cfg["lr_bank"]["refresh_every_steps"]
-    if type(refresh) is not int or refresh < 0:
-        raise ValueError("lr_bank.refresh_every_steps must be a non-negative integer.")
-    for name in ("coarse_corruption_probability", "coarse_corruption_strength"):
-        value = cfg["conditioning"][name]
-        if (
-            type(value) not in (int, float)
-            or not math.isfinite(value)
-            or not 0 <= value <= 1
-        ):
-            raise ValueError(f"conditioning.{name} must be between zero and one.")
-    if (
-        isinstance(guidance, bool)
-        or not isinstance(guidance, (int, float))
-        or not math.isfinite(guidance)
-    ):
-        raise ValueError("lr_bank.guidance must be finite.")
-    for name in (
-        "gradient_penalty_weight",
-        "downsample_consistency_weight",
-        "downsample_mse_tolerance",
-    ):
-        value = cfg["loss"][name]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (float, int))
-            or not math.isfinite(value)
-            or value < 0
-        ):
-            raise ValueError(f"loss.{name} must be non-negative and finite.")
-    if not 0 <= cfg["optim"]["ema_decay"] < 1:
-        raise ValueError("optim.ema_decay must be in [0, 1).")

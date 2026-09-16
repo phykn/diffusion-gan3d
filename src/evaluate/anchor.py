@@ -143,3 +143,56 @@ def _slice_reversal_rate(vol: torch.Tensor, axis: int) -> float:
         return 0.0
     reversals = (slices[:-2] == slices[2:]) & (slices[1:-1] != slices[:-2])
     return float(reversals.to(torch.float32).mean())
+
+
+@torch.no_grad()
+def anchor_boundary_metrics(prediction, condition) -> dict[str, torch.Tensor]:
+    """Measured-plane neighbor agreement and excess over measured in-plane variation."""
+    total = prediction.new_zeros(())
+    excess = prediction.new_zeros(())
+    count = prediction.new_zeros(())
+    active = (
+        range(prediction.shape[0])
+        if condition.active_batches is None
+        else condition.active_batches
+    )
+    for region in condition.regions:
+        axis, index = region.axis, region.index
+        patch = (
+            slice(region.row, region.row + region.height),
+            slice(region.col, region.col + region.width),
+        )
+        target = condition.image.select(axis + 2, index)[..., patch[0], patch[1]]
+        tangent = []
+        if region.height > 1:
+            tangent.append(
+                (target[..., 1:, :] - target[..., :-1, :]).abs().sum(1).mean((1, 2))
+                * 0.25
+            )
+        if region.width > 1:
+            tangent.append(
+                (target[..., 1:] - target[..., :-1]).abs().sum(1).mean((1, 2)) * 0.25
+            )
+        baseline = (
+            torch.stack(tangent).mean(0)
+            if tangent
+            else target.new_zeros(target.shape[0])
+        )
+        for neighbor in (index - 1, index + 1):
+            if not 0 <= neighbor < prediction.shape[axis + 2]:
+                continue
+            values = prediction.select(axis + 2, neighbor)[..., patch[0], patch[1]]
+            unknown = ~condition.mask.select(axis + 2, neighbor)[
+                :, 0, patch[0], patch[1]
+            ]
+            jump = (values - target).abs().sum(1) * 0.25
+            for batch in active:
+                valid = unknown[batch]
+                total += ((1 - jump[batch]) * valid).sum()
+                excess += ((jump[batch] - baseline[batch]) * valid).sum()
+                count += valid.sum()
+    return {
+        "anchor/boundary_pairs": count,
+        "anchor/neighbor_agreement": total / count.clamp_min(1),
+        "anchor/neighbor_excess_jump": excess / count.clamp_min(1),
+    }

@@ -6,9 +6,8 @@ from torch.utils.data import DataLoader
 
 from src.config import get_domains, get_sizes, get_sr_sizes, normalize_train_config
 from src.data.augment import CriticAugment
+from src.data.dataset import RealDataset, ResolutionDataset
 from src.data.loader import BatchStream, FolderBatchSampler
-from src.data.real import RealDataset
-from src.data.resolution import ResolutionDataset
 from src.plane import PLANE_DIRECTIONS, PLANES
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}

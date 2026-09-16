@@ -5,9 +5,9 @@ from PIL import Image
 
 from src.build.trainer import build_trainer
 from src.config import get_domains, load_train_config
+from src.data.slice import sample_slices
 from src.plane import PLANES, get_axis
 from src.storage import save_model
-from src.train.sr_loss import sample_slices
 
 
 def test_numeric_config_planes_are_rejected():

@@ -12,7 +12,7 @@ from src.config import (
     load_generation_settings,
     load_train_config,
 )
-from src.predict.scale import ScaledGenerator
+from src.predict.tiled import TiledGenerator
 from src.prepare.resize import resize_crop
 
 
@@ -29,7 +29,7 @@ class InferenceAPI:
         data = load_train_config(find_train_config(self.weights))["data"]
         self.data = data
         self._crop_size = data["crop_size"]
-        self.scaled = ScaledGenerator(self.generator)
+        self.scaled = TiledGenerator(self.generator)
 
     @property
     def input_size(self) -> int:

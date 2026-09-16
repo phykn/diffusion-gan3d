@@ -22,7 +22,8 @@ from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.config import load_generation_settings
 from src.evaluate import SeamQuality, measure_seams, phase_fractions, voxel_accuracy
-from src.predict.scale import ScaledGenerator, ScalePlan
+from src.predict.tile import TilePlan
+from src.predict.tiled import TiledGenerator
 from src.storage import load_volume, save_volume
 
 AXIS = 0
@@ -165,7 +166,7 @@ def generate_base(
 def assess_result(
     volume: torch.Tensor,
     base_result: BaseResult,
-    stats: ScalePlan,
+    stats: TilePlan,
     patch_size: int,
     num_phases: int,
 ) -> ScaleAssessment:
@@ -260,7 +261,7 @@ def main() -> None:
     guidance = settings.guidance if args.guidance is None else args.guidance
     args.guidance = guidance
     args.margin = margin
-    scaled = ScaledGenerator(generator)
+    scaled = TiledGenerator(generator)
     shape = scaled.shape_from_blocks(tuple(args.blocks), overlap)
     generation_shape = tuple(size + 2 * margin for size in shape)
     plan = scaled.plan(generation_shape, overlap)
@@ -366,7 +367,7 @@ def non_negative_int(value: str) -> int:
     return parsed
 
 
-def print_plan(plan: ScalePlan, device: torch.device) -> None:
+def print_plan(plan: TilePlan, device: torch.device) -> None:
     print(
         f"Plan    : {' × '.join(map(str, plan.grid))} tiles "
         f"({plan.tile_count} total), overlap {plan.overlap}, {device}"

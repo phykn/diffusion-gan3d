@@ -2,6 +2,7 @@ import torch
 
 from src.anchor import PlaneAnchor, encode_anchors
 from src.train.loss.anchor import SoftAnchorLoss
+from src.train.loss.volume_fraction import compute_vf_loss
 
 
 def test_soft_anchor_loss_uses_each_anchor_plane_as_a_2d_field() -> None:
@@ -216,3 +217,27 @@ def _matching_logits(condition, *, phases: int) -> torch.Tensor:
     )
     logits.scatter_(1, condition.target.unsqueeze(1), 10.0)
     return logits
+
+
+def test_anchor_and_vf_losses_do_not_read_device_scalars_for_control_flow():
+    condition = encode_anchors(
+        (PlaneAnchor(torch.zeros(4, 4, dtype=torch.long), 0, 2),),
+        1,
+        2,
+        4,
+        torch.device("cpu"),
+        torch.float32,
+    )
+    logits = torch.randn(1, 2, 4, 4, 4, requires_grad=True)
+    visible = torch.tensor([False])
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU]
+    ) as profile:
+        loss = SoftAnchorLoss(2, 0.05)(logits, condition, visible).total
+        loss = loss + compute_vf_loss(
+            logits.softmax(1), torch.tensor([[0.5, 0.5]]), visible
+        )
+        loss.backward()
+    assert not any(
+        event.key == "aten::_local_scalar_dense" for event in profile.key_averages()
+    )

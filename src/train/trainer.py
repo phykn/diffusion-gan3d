@@ -7,32 +7,29 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from src import AXES
 from src.anchor import AnchorCondition, PlaneAnchor, encode_anchors
-from src.data.augment import CriticAugment
+from src.data.augment import CriticAugment, crop_images
 from src.data.loader import BatchStream
+from src.data.slice import AnchorTripletSampler, TripletBatch, sample_pairs
+from src.evaluate.anchor import anchor_boundary_metrics
+from src.evaluate.label import compute_vf
 from src.evaluate.structure import structure_metrics
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.model.layers import NULL_DOMAIN
-from src.plane import PLANE_AXES
+from src.plane import AXES, PLANE_AXES
 from src.prepare.height import height_field
 from src.train.anchor_bank import AnchorBank
 from src.train.ema import update_ema
-from src.train.loss import vf
 from src.train.loss.anchor import SoftAnchorLoss
-from src.train.loss.connect import (
-    AnchorTripletSampler,
-    TripletBatch,
-    anchor_boundary_metrics,
-    compute_transition_loss,
-)
+from src.train.loss.connectivity import compute_transition_loss
 from src.train.loss.gan import (
     HeadLoss,
     get_critic_loss,
     get_critic_r1,
     get_generator_loss,
 )
+from src.train.loss.volume_fraction import compute_vf_loss
 from src.train.step import check_loss, materialize_metrics, step_optimizer
 
 
@@ -417,12 +414,13 @@ class Trainer:
         self.fake_heights = {}
         for axis in self.active_axes:
             height = self.sampling_height if axis in self.real_heights else None
-            pairs = self.sample_pairs(
+            pairs = sample_pairs(
                 previous,
                 current,
                 axis,
+                self.slice_pairs_per_axis,
+                tuple(real[axis].shape[-2:]),
                 anchor=visible,
-                crop_shape=tuple(real[axis].shape[-2:]),
                 measured=excluded,
                 height=height,
             )
@@ -487,7 +485,7 @@ class Trainer:
             model_domain,
             batch_domains,
         )
-        target_vf = vf.compute_vf(own_batches, self.num_phases)
+        target_vf = compute_vf(own_batches, self.num_phases)
         target_vf = target_vf.unsqueeze(0).expand(self.volume_batch_size, -1)
         ramp = self.get_anchor_ramp(step)
         selection = (
@@ -774,34 +772,6 @@ class Trainer:
             dtype=torch.long,
         )
 
-    @staticmethod
-    def crop_images(
-        images: torch.Tensor,
-        size: int | tuple[int, int],
-        centers: list[tuple[int, int]] | None = None,
-    ) -> torch.Tensor:
-        crop_h, crop_w = (size, size) if isinstance(size, int) else size
-        if crop_h < 1 or crop_w < 1:
-            raise ValueError("crop size must be a positive integer.")
-        height, width = images.shape[-2:]
-        if crop_h > height or crop_w > width:
-            raise ValueError("crop size must fit inside the images.")
-        if (height, width) == (crop_h, crop_w):
-            return images
-
-        top = torch.randint(height - crop_h + 1, (images.shape[0],)).tolist()
-        left = torch.randint(width - crop_w + 1, (images.shape[0],)).tolist()
-        if centers is not None:
-            for index, (row, col) in enumerate(centers):
-                top[index] = min(max(row - crop_h // 2, 0), height - crop_h)
-                left[index] = min(max(col - crop_w // 2, 0), width - crop_w)
-        return torch.stack(
-            [
-                image[..., row : row + crop_h, col : col + crop_w]
-                for image, row, col in zip(images, top, left, strict=True)
-            ]
-        )
-
     def sample_condition_presence(self, has_anchor: bool) -> ConditionPresence:
         batch = self.volume_batch_size
         anchor = torch.full(
@@ -910,7 +880,7 @@ class Trainer:
         )[: self.volume_batch_size]
         selected = images.index_select(0, batch_indices.to(images.device))
         shape = tuple(min(volume_size, size) for size in selected.shape[-2:])
-        selected = self.crop_images(selected, shape)
+        selected = crop_images(selected, shape)
         position = tuple(
             int(torch.randint(volume_size - size + 1, ()).item()) for size in shape
         )
@@ -992,97 +962,6 @@ class Trainer:
                 transition,
             )
         return previous, current, logits, prediction
-
-    def sample_pairs(
-        self,
-        previous,
-        current,
-        axis,
-        anchor=None,
-        crop_shape=None,
-        measured=None,
-        height=None,
-    ):
-        count = self.slice_pairs_per_axis
-        size = previous.shape[axis + 2]
-        excluded = (
-            set()
-            if measured is None
-            else {r.index for r in measured.regions if r.axis == axis}
-        )
-        active = (
-            ()
-            if measured is None
-            else (
-                range(previous.shape[0])
-                if measured.active_batches is None
-                else measured.active_batches
-            )
-        )
-        candidates = [
-            (batch, index)
-            for batch in range(previous.shape[0])
-            for index in range(size)
-            if batch not in active or index not in excluded
-        ]
-        if not candidates:
-            shape = previous.movedim(axis + 2, 2).shape
-            empty = previous.new_empty((0, shape[1], *shape[-2:]))
-            return (empty, empty) if height is None else (empty, empty, empty[:, :1])
-        choices = torch.randint(len(candidates), (count,)).tolist()
-        selected = [candidates[i] for i in choices]
-        centers = []
-        if anchor is not None:
-            axes = [normal for normal in AXES if normal != axis]
-            for slot, (batch, index) in enumerate(selected[: max(1, count // 2)]):
-                regions = [
-                    r
-                    for r in anchor.regions
-                    if r.axis != axis
-                    and (
-                        anchor.active_batches is None or batch in anchor.active_batches
-                    )
-                ]
-                if not regions:
-                    break
-                region = regions[int(torch.randint(len(regions), ()))]
-                coordinates = {region.axis: region.index}
-                other = [normal for normal in AXES if normal != region.axis]
-                coordinates[other[0]] = region.row + int(
-                    torch.randint(region.height, ())
-                )
-                coordinates[other[1]] = region.col + int(
-                    torch.randint(region.width, ())
-                )
-                start = region.row if other[0] == axis else region.col
-                length = region.height if other[0] == axis else region.width
-                allowed = [
-                    i
-                    for b, i in candidates
-                    if b == batch and start <= i < start + length
-                ]
-                if not allowed:
-                    break
-                selected[slot] = (batch, allowed[int(torch.randint(len(allowed), ()))])
-                centers.append(tuple(coordinates[normal] for normal in axes))
-        batch_indices, plane_indices = zip(*selected)
-        batch_indices = torch.tensor(batch_indices, device=previous.device)
-        plane_indices = torch.tensor(plane_indices, device=previous.device)
-        previous = previous.movedim(axis + 2, 2)[batch_indices, :, plane_indices]
-        current = current.movedim(axis + 2, 2)[batch_indices, :, plane_indices]
-        channels = previous.shape[1]
-        values = (previous, current)
-        if height is not None:
-            values += (height.movedim(axis + 2, 2)[batch_indices, :, plane_indices],)
-        pairs = self.crop_images(
-            torch.cat(values, dim=1),
-            self.patch_size if crop_shape is None else crop_shape,
-            centers,
-        )
-        result = (pairs[:, :channels], pairs[:, channels : 2 * channels])
-        return (
-            result if height is None else (*result, pairs[:, 2 * channels :].detach())
-        )
 
     def update_critics(
         self,
@@ -1351,7 +1230,7 @@ class Trainer:
                     anchor_coarse = anchor_result.coarse
                     anchor_pixel = anchor_result.pixel
                     anchor_accuracy = anchor_result.accuracy
-                vf_loss = vf.compute_vf_loss(
+                vf_loss = compute_vf_loss(
                     batch.clean_probs,
                     batch.target_vf,
                     batch.vf_present,

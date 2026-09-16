@@ -11,20 +11,128 @@ from src.build.predict import load_generator
 from src.build.sr import build_sr_trainer
 from src.build.trainer import build_trainer
 from src.config import load_train_config, save_yaml
-from src.evaluate.structure import structure_metrics
-from src.model.critic import PairCritic2D
 from src.model.diffusion import Diffusion
-from src.model.layers import embed_domain
 from src.predict.generator import Generator
-from src.predict.scale import ScaledGenerator
 from src.predict.sr import SuperResolutionAPI
-from src.prepare.height import height_field
-from src.train.anchor_bank import AnchorBank
-from src.train.loss.connect import AnchorTripletSampler
-from src.train.loss.gan import get_critic_loss, get_generator_loss
-from src.train.sr_loss import consistency_loss
+from src.predict.tiled import TiledGenerator
+from src.prepare.resize import resize_crop
+from src.train.loss.anchor import SoftAnchorLoss
 from src.train.state import resume_training, save_training
-from src.train.trainer import Trainer
+
+
+def test_subpixel_phase_fraction_reaches_anchor_and_soft_loss():
+    labels = torch.zeros(4, 4, dtype=torch.long)
+    labels[:, 0] = 1
+    fractions = resize_crop(labels, 2, 2)
+    torch.testing.assert_close(fractions[1], torch.tensor([[0.5, 0], [0.5, 0]]))
+    assert fractions[1].mean() == 0.25
+    condition = encode_anchors(
+        (PlaneAnchor(fractions, 0, 0),), 1, 2, 2, torch.device("cpu"), torch.float32
+    )
+    torch.testing.assert_close((condition.image[0, :, 0] + 1) / 2, fractions)
+    logits = torch.zeros(1, 2, 2, 2, 2, requires_grad=True)
+    result = SoftAnchorLoss(1, 1)(logits, condition, torch.tensor([True]))
+    result.total.backward()
+    assert logits.grad[0, 0, 0, 0, 0] == 0
+    assert logits.grad[0, 1, 0, 0, 0] == 0
+    assert logits.grad[0, 1, 0, 0, 1] > 0
+
+
+class AnchorModel(torch.nn.Module):
+    num_domains = 1
+    downsample_factor = 1
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def forward(
+        self,
+        current,
+        time,
+        latent,
+        domain,
+        vf=None,
+        anchor_image=None,
+        anchor_mask=None,
+    ):
+        self.calls.append((time.clone(), anchor_mask))
+        result = torch.full_like(current, -1)
+        result[:, 0] = 1
+        if anchor_mask is not None:
+            result = torch.lerp(result, anchor_image, anchor_mask.float())
+        return result
+
+
+def generator(model):
+    return Generator(model, Diffusion(3), torch.device("cpu"), 8, 2, 4, False)
+
+
+def test_full_strength_anchor_uses_one_model_evaluation_per_transition():
+    model = AnchorModel()
+    gen = generator(model)
+    anchor = PlaneAnchor(torch.ones(8, 8, dtype=torch.long), 0, 5)
+    vol = gen.generate(anchors=(anchor,), margin=0)
+    assert len(model.calls) == 3
+    assert all(mask is not None for _, mask in model.calls)
+    assert torch.equal(vol[5], anchor.image.to(torch.uint8))
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+@pytest.mark.parametrize("partial", [False, True])
+def test_global_anchor_crosses_tiles_and_keeps_rectangular_coordinates(axis, partial):
+    model = AnchorModel()
+    scaled = TiledGenerator(generator(model))
+    shape = (10, 12, 14)
+    plane_shape = tuple(n for i, n in enumerate(shape) if i != axis)
+    image_shape = (7, 9) if partial else plane_shape
+    labels = (torch.arange(np.prod(image_shape)).reshape(image_shape) % 2).long()
+    position = (2, 3) if partial else None
+    expected = torch.zeros(plane_shape, dtype=torch.uint8)
+    row, col = position or (0, 0)
+    expected[row : row + image_shape[0], col : col + image_shape[1]] = labels.to(
+        torch.uint8
+    )
+    index = shape[axis] - 2
+    result = scaled.generate(
+        shape=shape,
+        overlap=2,
+        anchors=(PlaneAnchor(labels, axis, index, position),),
+        progress=False,
+    )
+    assert result.shape == shape
+    assert torch.equal(result.select(axis, index), expected)
+    assert sum(mask is not None for _, mask in model.calls) > 3
+
+
+def test_nonfinal_real_anchor_does_not_generate_unused_reference(tmp_path):
+    torch.set_num_threads(1)
+    Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(tmp_path / "image.png")
+    cfg = load_train_config("config/train/low_res.yaml")
+    cfg["data"].update(
+        crop_size=8,
+        lo_res_size=8,
+        domains={0: {p: [str(tmp_path)] for p in ("xy", "xz", "yz")}},
+    )
+    cfg["model"]["generator"].update(
+        channels=[4, 8], embedding_channels=8, latent_channels=4
+    )
+    cfg["model"]["critic"]["channels"] = [4, 8]
+    cfg["model"]["diffusion"]["num_steps"] = 3
+    cfg["model"]["gradient_checkpointing"] = False
+    cfg["train"].update(
+        real_batch_size=1, slice_pairs_per_plane=2, mixed_precision=False
+    )
+    cfg["conditioning"]["anchor"].update(probability=1, ramp_steps=2)
+    cfg["loss"]["connectivity"]["ramp_steps"] = 20
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    with patch.object(
+        trainer, "generate_pair", wraps=trainer.generate_pair
+    ) as generate:
+        metrics = trainer.step(0, transition=1)
+    assert generate.call_count == 1
+    assert metrics.anchor_ramp == 0.5
+    assert metrics.connectivity_ramp == 0.05
 
 
 def configuration(tmp_path, stage="low_res", height=False):
@@ -70,45 +178,6 @@ def configuration(tmp_path, stage="low_res", height=False):
     return cfg
 
 
-@pytest.mark.parametrize("axis", range(3))
-def test_measured_parallel_plane_is_excluded_from_adversarial_gradients(axis):
-    trainer = object.__new__(Trainer)
-    trainer.slice_pairs_per_axis = 100
-    trainer.patch_size = 5
-    volume = torch.randn(1, 2, 5, 5, 5, requires_grad=True)
-    condition = encode_anchors(
-        [PlaneAnchor(torch.zeros(5, 5, dtype=torch.long), axis, 2)],
-        1,
-        2,
-        5,
-        torch.device("cpu"),
-        torch.float32,
-    )
-    previous, _ = trainer.sample_pairs(volume, volume, axis, measured=condition)
-    previous.sum().backward()
-    assert volume.grad.select(axis + 2, 2).count_nonzero() == 0
-    assert volume.grad.sum() > 0
-
-
-@pytest.mark.parametrize("size,count", [(8, 4), (16, 8)])
-def test_replay_keeps_measurement_and_plane_density(size, count):
-    bank = AnchorBank(capacity=1, plane_spacing=2)
-    image = torch.stack((torch.full((size, size), 0.2), torch.full((size, size), 0.8)))
-    measured = encode_anchors(
-        [PlaneAnchor(image, 0, 2)], 1, 2, size, torch.device("cpu"), torch.float32
-    )
-    prediction = torch.zeros(1, 2, size, size, size)
-    bank.add(0, prediction, measured, torch.tensor([True]))
-    condition, target, reference, _ = bank.sample(0, 2, torch.device("cpu"))
-    assert condition.planes == count
-    torch.testing.assert_close(
-        condition.image[:, :, 2], measured.image[:, :, 2].expand(2, -1, -1, -1)
-    )
-    torch.testing.assert_close(reference[:, :, 2], target.image[:, :, 2])
-    assert target.regions == measured.regions
-    assert bank.sample(1, 1, torch.device("cpu")) is None
-
-
 def test_replay_training_never_generates_reference_and_survives_resume(tmp_path):
     cfg = configuration(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
@@ -131,60 +200,12 @@ def test_replay_training_never_generates_reference_and_survives_resume(tmp_path)
     assert not any("rng" in key for key in payload)
 
 
-def test_pyramid_averages_losses_after_nonlinearity():
-    critic = PairCritic2D(2, (4, 8), 8, 1)
-    critic.pyramid_min_size = 4
-    previous = torch.randn(2, 2, 16, 16, requires_grad=True)
-    current = torch.randn_like(previous)
-    scores = critic(
-        previous,
-        current,
-        torch.zeros(2, dtype=torch.long),
-        torch.zeros(2, dtype=torch.long),
-    )
-    assert len(scores.levels) == 3
-    assert [s.logits_local.shape[-1] for s in scores.levels] == [8, 4, 2]
-    loss = get_generator_loss(scores)
-    expected = torch.stack(
-        [get_generator_loss(s).global_loss for s in scores.levels]
-    ).mean()
-    torch.testing.assert_close(loss.global_loss, expected)
-    get_critic_loss(scores, scores).combine(0.5).backward()
-    assert torch.isfinite(previous.grad).all()
-
-
-def test_fractional_consistency_does_not_sharpen_coarse():
-    low = torch.empty(1, 2, 4, 4, 4)
-    low[:, 0], low[:, 1] = 0.3, 0.7
-    high = torch.nn.functional.interpolate(low, scale_factor=2).requires_grad_()
-    loss, error = consistency_loss(high, low, 0)
-    assert float(loss.detach()) < 1e-12 and float(error.detach()) < 1e-12
-
-
-def test_structure_metrics_detect_disconnection_and_match_measured_planes():
-    labels = torch.zeros(1, 8, 8, 8, dtype=torch.long)
-    labels[:, :, 3, 3] = 1
-    probs = torch.nn.functional.one_hot(labels, 2).movedim(-1, 1).float()
-    real = {0: probs[:, :, 2]}
-    metrics = structure_metrics(probs, real, {"xy": (0,)})
-    assert metrics["structure/phase_1/percolation_xy"] == 1
-    assert metrics["structure/phase_1/percolation_lower_bound_xy"] == 1
-    assert metrics["structure/phase_1/percolation_xz"] == 0
-    assert metrics["structure/xy/two_point_mae"] == 0
-    assert metrics["structure/xy/chord_tv"] == 0
-    probs[:, :, 4] = torch.tensor([1.0, 0.0]).view(1, 2, 1, 1)
-    assert (
-        structure_metrics(probs, real, {"xy": (0,)})["structure/phase_1/percolation_xy"]
-        == 0
-    )
-
-
 def test_height_origin_survives_loader_training_export_and_tiles(tmp_path):
     cfg = configuration(tmp_path, height=True)
     resolve_height_metadata(cfg)
     assert cfg["data"]["height_extents"] == {0: 24}
     dataset = build_datasets(cfg)[0][1]
-    with patch("src.data.real.np.random.randint", side_effect=[7, 2]):
+    with patch("src.data.dataset.np.random.randint", side_effect=[7, 2]):
         sample = dataset[tmp_path / "images/sample.png"]
     assert sample["height_origin"] == 7
     trainer = build_trainer(cfg, torch.device("cpu"))
@@ -200,7 +221,7 @@ def test_height_origin_survives_loader_training_export_and_tiles(tmp_path):
         heights.append(kwargs["height"].clone())
         return original(*args, **kwargs)
 
-    scaled = ScaledGenerator(generator)
+    scaled = TiledGenerator(generator)
     with patch.object(generator, "predict", side_effect=record):
         result = scaled.generate_probs(
             (12, 8, 8), overlap=1, margin=0, height_origin=3, progress=False
@@ -237,45 +258,6 @@ def test_height_conditioned_sr_uses_fractional_bank_and_zero_level_at_inference(
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_cuda_posterior_and_domain_validation_do_not_read_host_scalars():
-    device = torch.device("cuda")
-    diffusion = Diffusion(2).to(device)
-    current = torch.randn(1, 2, 4, 4, 4, device=device)
-    embedding = torch.nn.Embedding(2, 4).to(device)
-    time = torch.tensor([1], device=device)
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CPU]
-    ) as profile:
-        diffusion.sample_posterior(current, current, time)
-        embed_domain(embedding, time, torch.float32)
-    assert not any(
-        event.key == "aten::_local_scalar_dense" for event in profile.key_averages()
-    )
-
-
-def test_triplet_sampler_uses_integer_regions_without_dense_mask_scan():
-    prediction = torch.zeros(1, 2, 8, 8, 8)
-    condition = encode_anchors(
-        [PlaneAnchor(torch.zeros(8, 8, dtype=torch.long), 0, 3)],
-        1,
-        2,
-        8,
-        torch.device("cpu"),
-        torch.float32,
-    )
-    with (
-        patch.object(
-            torch.Tensor, "nonzero", side_effect=AssertionError("dense mask scan")
-        ),
-        patch.object(torch.Tensor, "cpu", side_effect=AssertionError("host transfer")),
-    ):
-        real, fake = AnchorTripletSampler(windows_per_plane=4).sample(
-            prediction, prediction, condition
-        )
-    assert len(real) == len(fake) == 12
-
-
 def test_partial_anchor_with_cfg_uses_two_forwards_per_transition(tmp_path):
     trainer = build_trainer(configuration(tmp_path), torch.device("cpu"))
     generator = Generator(
@@ -295,13 +277,3 @@ def test_partial_anchor_with_cfg_uses_two_forwards_per_transition(tmp_path):
         if call.kwargs.get("anchor_mask") is not None
     ]
     assert all(mask.max() == 0.8 for mask in masks)
-
-
-def test_height_field_uses_cell_centers_and_physical_pixel_scale():
-    height = height_field((4, 4, 4), 1, [8, 16], 2, 32)
-    torch.testing.assert_close(
-        height[:, 0, 0, :, 0],
-        torch.tensor(
-            [[-0.4375, -0.3125, -0.1875, -0.0625], [0.0625, 0.1875, 0.3125, 0.4375]]
-        ),
-    )

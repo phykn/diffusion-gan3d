@@ -2,7 +2,8 @@ from dataclasses import dataclass
 
 import torch
 
-from src.evaluate import phase_fraction, tortuosity
+from src.evaluate.label import phase_fraction
+from src.evaluate.tortuosity import tortuosity
 
 
 @dataclass(frozen=True)

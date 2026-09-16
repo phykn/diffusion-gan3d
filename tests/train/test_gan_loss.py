@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from src.model.critic import CriticScores
+from src.model.critic import CriticScores, PairCritic2D
 from src.train.loss.gan import get_critic_loss, get_critic_r1, get_generator_loss
 
 
@@ -103,3 +103,25 @@ def _r1_penalty(size: int) -> torch.Tensor:
         logits_local=(3.0 * base[:, None, None]).expand(-1, size, size),
     )
     return get_critic_r1(scores, (inputs,)).combine(0.5)
+
+
+def test_pyramid_averages_losses_after_nonlinearity():
+    critic = PairCritic2D(2, (4, 8), 8, 1)
+    critic.pyramid_min_size = 4
+    previous = torch.randn(2, 2, 16, 16, requires_grad=True)
+    current = torch.randn_like(previous)
+    scores = critic(
+        previous,
+        current,
+        torch.zeros(2, dtype=torch.long),
+        torch.zeros(2, dtype=torch.long),
+    )
+    assert len(scores.levels) == 3
+    assert [s.logits_local.shape[-1] for s in scores.levels] == [8, 4, 2]
+    loss = get_generator_loss(scores)
+    expected = torch.stack(
+        [get_generator_loss(s).global_loss for s in scores.levels]
+    ).mean()
+    torch.testing.assert_close(loss.global_loss, expected)
+    get_critic_loss(scores, scores).combine(0.5).backward()
+    assert torch.isfinite(previous.grad).all()

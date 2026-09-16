@@ -1,8 +1,7 @@
 import numpy as np
 import pytest
 
-from src.evaluate import tau as tau_module
-from src.evaluate import tortuosity
+from src.evaluate.tortuosity import tau, tortuosity
 
 
 def test_tortuosity_orients_selected_phase_for_taufactor(
@@ -18,7 +17,7 @@ def test_tortuosity_orients_selected_phase_for_taufactor(
             calls.append((verbose, conv_crit))
             return np.asarray((1.75,))
 
-    monkeypatch.setattr(tau_module.tau, "Solver", FakeSolver)
+    monkeypatch.setattr(tau, "Solver", FakeSolver)
     volume = np.asarray(
         (
             ((0, 1), (1, 0)),

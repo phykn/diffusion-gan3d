@@ -1,5 +1,7 @@
 """Plane names for volumes stored as D,H,W = z,y,x."""
 
+AXES = (0, 1, 2)
+
 PLANES = ("xy", "xz", "yz")
 PLANE_AXES = {plane: axis for axis, plane in enumerate(PLANES)}
 PLANE_DIRECTIONS = {"xy": ("y", "x"), "xz": ("z", "x"), "yz": ("z", "y")}

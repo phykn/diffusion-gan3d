@@ -37,11 +37,3 @@ def gradient_penalty(
         (gradient,) = torch.autograd.grad(scores.sum(), mixed, create_graph=True)
         penalties.append((gradient.flatten(1).norm(2, dim=1) - 1).square().mean())
     return torch.stack(penalties).mean()
-
-
-def sample_slices(volume: torch.Tensor, axis: int, count: int) -> torch.Tensor:
-    # Move the slicing axis next to batch: B,L,K,H,W.
-    planes = volume.movedim(axis + 2, 1)
-    planes = planes.flatten(0, 1)
-    indices = torch.randint(planes.shape[0], (count,), device=volume.device)
-    return planes[indices]

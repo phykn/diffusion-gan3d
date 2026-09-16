@@ -9,9 +9,10 @@ from PIL import Image
 
 from src.build.data import build_datasets, build_stream
 from src.config import get_domains
+from src.data.augment import crop_images
+from src.data.dataset import RealDataset
 from src.data.loader import FolderBatchSampler
-from src.data.real import RealDataset
-from src.train.trainer import Trainer
+from src.data.slice import sample_pairs
 
 
 def _save_image(path: Path, image: np.ndarray) -> None:
@@ -161,7 +162,7 @@ class AxisDataTest(unittest.TestCase):
             "torch.randint",
             side_effect=(torch.tensor([1, 2]), torch.tensor([3, 1])),
         ):
-            actual = Trainer.crop_images(images, (3, 4))
+            actual = crop_images(images, (3, 4))
 
         expected = torch.stack(
             (
@@ -177,16 +178,15 @@ class AxisDataTest(unittest.TestCase):
             dtype=torch.float32,
         ).reshape(2, 3, 4, 4, 4)
         current = previous + 10_000.0
-        trainer = object.__new__(Trainer)
-        trainer.slice_pairs_per_axis = 7
-        trainer.patch_size = 3
 
         for axis in range(3):
             with self.subTest(axis=axis):
-                previous_slices, current_slices = trainer.sample_pairs(
+                previous_slices, current_slices = sample_pairs(
                     previous,
                     current,
                     axis,
+                    count=7,
+                    crop_shape=3,
                 )
 
                 self.assertEqual(previous_slices.shape, current_slices.shape)

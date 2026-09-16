@@ -16,10 +16,10 @@ from src.config import (
     load_train_config,
     normalize_train_config,
     save_yaml,
+    validate_sr_config,
     validate_sr_source,
 )
-from src.data.sr import load_bank
-from src.train.sr import validate_sr_config
+from src.data.bank import load_bank
 
 
 def run_sr_train(
