@@ -11,10 +11,13 @@ from src import AXES
 from src.anchor import AnchorCondition, PlaneAnchor, encode_anchors
 from src.data.augment import CriticAugment
 from src.data.loader import BatchStream
+from src.evaluate.structure import structure_metrics
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.model.layers import NULL_DOMAIN
 from src.plane import PLANE_AXES
+from src.prepare.height import height_field
+from src.train.anchor_bank import AnchorBank
 from src.train.ema import update_ema
 from src.train.loss import vf
 from src.train.loss.anchor import SoftAnchorLoss
@@ -102,6 +105,7 @@ class DenoiserBatch:
     target_vf: torch.Tensor
     vf_present: torch.Tensor
     connectivity_ramp: float = 1.0
+    fake_heights: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,9 @@ class AnchorSelection:
     observed_mask: torch.Tensor | None
     observed_axis_masks: torch.Tensor | None
     source: Literal["real", "shared", "multi"]
+    measured: AnchorCondition | None = None
+    reference: torch.Tensor | None = None
+    height: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -175,6 +182,9 @@ class TrainerSettings:
     connectivity_start_step: int = 0
     connectivity_ramp_steps: int = 20000
     connectivity_windows_per_plane: int = 4
+    anchor_bank_capacity: int = 4
+    anchor_plane_spacing: int = 16
+    structure_every_steps: int = 100
 
 
 class Trainer:
@@ -235,6 +245,10 @@ class Trainer:
             max_gap=settings.connectivity_max_gap,
             windows_per_plane=settings.connectivity_windows_per_plane,
         )
+        self.anchor_bank = AnchorBank(
+            settings.anchor_bank_capacity, settings.anchor_plane_spacing
+        )
+        self.structure_every_steps = settings.structure_every_steps
         self.use_multi_anchor_next = False
         self.vf_loss_weight = settings.vf_loss_weight
         self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
@@ -253,11 +267,15 @@ class Trainer:
                 "regularization interval must be positive and R2 weight finite/non-negative."
             )
         self.r2_gamma = settings.r2_gamma
-        self.group_divisor = len(self.critics)
         self.updates = {
             name: 0 for name in (*self.critics, "connectivity", "generator")
         }
         self.completed_steps = 0
+        self.height_data = None
+        self.real_heights = {}
+        self.real_origins = {}
+        self.fake_heights = {}
+        self.sampling_height = None
         self.diagnostics = {}
         self.generator_updated = True
         self.critic_augment = (
@@ -279,42 +297,7 @@ class Trainer:
         critic_domains = prepared.critic_domains
         presence = prepared.presence
         selection = prepared.selection
-        needs_reference = selection is not None and (
-            selection.source == "multi"
-            or (
-                selection.source in ("real", "shared")
-                and transition == 0
-                and prepared.connectivity_ramp > 0
-                and (
-                    self.connectivity_weight > 0.0
-                    or self.normal_transition_weight > 0.0
-                )
-            )
-        )
-        self.diagnostics["sampling/reference_passes"] = int(needs_reference)
-        reference = None
-        if needs_reference:
-            # Couple reference/anchored noise within this step, not across runs.
-            rng_state = self.capture_rng_state()
-            with torch.no_grad():
-                reference = self.generate_pair(
-                    transition,
-                    self.remove_anchor_conditions(prepared.model_conditions),
-                    volume_size,
-                )
-            if selection.source == "multi":
-                selection = self.sample_multi_anchor(reference[3])
-                prepared = replace(
-                    prepared,
-                    selection=selection,
-                    model_conditions=self.make_model_conditions(
-                        selection.condition,
-                        prepared.target_vf,
-                        prepared.presence,
-                        prepared.model_conditions["domain"],
-                    ),
-                )
-            self.restore_rng_state(rng_state)
+        self.diagnostics["sampling/reference_passes"] = 0
         (
             previous,
             current,
@@ -327,32 +310,25 @@ class Trainer:
         )
         anchor = None if selection is None else selection.condition
         clean_probs = (prediction + 1.0) * 0.5
+        measured = None if selection is None else selection.measured
+        self.sampling_height = prepared.model_conditions.get("height")
         fake = self._sample_fake_pairs(
-            previous,
-            current,
-            real,
-            anchor,
-            presence.anchor,
+            previous, current, real, anchor, presence.anchor, measured
         )
-
-        reference_pairs = None
-        if selection is not None and selection.source == "multi":
-            assert reference is not None
-            reference_pairs = self._sample_fake_pairs(
-                reference[0],
-                reference[1],
-                real,
-                None,
-                torch.zeros_like(presence.anchor),
-            )
         connectivity_real, connectivity_fake = self.make_connectivity_triplets(
             prediction,
-            None if reference is None else reference[3],
+            None if selection is None else selection.reference,
             anchor,
             transition,
             presence.anchor,
             None if selection is None else selection.source,
         )
+        if measured is not None and transition == 0:
+            self.diagnostics.update(
+                anchor_boundary_metrics(
+                    prediction, self.visible_anchor(measured, presence.anchor)
+                )
+            )
         connectivity_domains = self.get_connectivity_domains(
             prepared.critic_domains,
             connectivity_fake,
@@ -369,7 +345,6 @@ class Trainer:
             real,
             step,
             critic_domains,
-            real_pairs=reference_pairs,
         )
         if self.connectivity_weight > 0.0:
             critic_connectivity, connectivity_r1 = self.update_connectivity_critic(
@@ -391,7 +366,25 @@ class Trainer:
                 clean_probs=clean_probs,
             )
         )
+        if (
+            self.generator_updated
+            and transition == 0
+            and selection is not None
+            and selection.source in ("real", "shared")
+            and measured is not None
+        ):
+            self.anchor_bank.add(
+                prepared.domain,
+                prediction,
+                measured,
+                presence.anchor,
+                prepared.model_conditions.get("height"),
+            )
         self.scaler.update()
+        if self.structure_every_steps and (step + 1) % self.structure_every_steps == 0:
+            self.diagnostics.update(
+                structure_metrics(clean_probs, real, self.critic_groups)
+            )
         self.completed_steps = step + 1
         self.diagnostics["amp/scale"] = self.scaler.get_scale()
         return self.finish_step(
@@ -412,28 +405,35 @@ class Trainer:
         real: dict[int, torch.Tensor],
         anchor: AnchorCondition | None,
         anchor_present: torch.Tensor,
+        measured: AnchorCondition | None = None,
     ) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
-        visible_axis_masks = (
-            None
-            if anchor is None
-            else anchor.axis_masks & anchor_present.reshape(-1, 1, 1, 1, 1)
+        visible = (
+            None if anchor is None else self.visible_anchor(anchor, anchor_present)
         )
-        return {
-            axis: self.critic_augment.apply_together(
-                self.sample_pairs(
-                    previous,
-                    current,
-                    axis,
-                    axis_masks=visible_axis_masks,
-                    crop_shape=tuple(real[axis].shape[-2:]),
-                ),
-                plane=axis,
+        excluded = (
+            None if measured is None else self.visible_anchor(measured, anchor_present)
+        )
+        result = {}
+        self.fake_heights = {}
+        for axis in self.active_axes:
+            height = self.sampling_height if axis in self.real_heights else None
+            pairs = self.sample_pairs(
+                previous,
+                current,
+                axis,
+                anchor=visible,
+                crop_shape=tuple(real[axis].shape[-2:]),
+                measured=excluded,
+                height=height,
             )
-            for axis in self.active_axes
-        }
+            pairs = self.critic_augment.apply_together(pairs, plane=axis)
+            result[axis] = pairs[:2]
+            if len(pairs) == 3:
+                self.fake_heights[axis] = pairs[2]
+        return result
 
-    @staticmethod
     def _make_denoiser_batch(
+        self,
         prepared: StepPreparation,
         connectivity_domains: torch.Tensor,
         fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
@@ -464,6 +464,7 @@ class Trainer:
             connectivity_ramp=prepared.connectivity_ramp,
             target_vf=prepared.target_vf,
             vf_present=prepared.presence.vf,
+            fake_heights=self.fake_heights,
         )
 
     def prepare_step(
@@ -476,6 +477,7 @@ class Trainer:
         self.connectivity_critic.train()
 
         domain = self.sample_target_domain()
+        self.sampled_domain = domain
         model_domain = self.sample_domain_condition(domain)
         batch_domains = self.select_batch_domains(domain)
         batches = self.get_batches(domain, batch_domains)
@@ -495,6 +497,7 @@ class Trainer:
                 batches,
                 self.patch_size,
                 owned_axes=tuple(own_batches),
+                domain=domain,
             )
         )
         anchor = None if selection is None else selection.condition
@@ -505,6 +508,14 @@ class Trainer:
             presence,
             self.make_domain(model_domain, self.volume_batch_size),
         )
+        if self.height_data is not None:
+            height = None if selection is None else selection.height
+            if height is None:
+                axis = next(a for a in self.streams[domain] if a in self.real_origins)
+                height = self.volume_height(
+                    self.real_origins[axis][: self.volume_batch_size], domain
+                )
+            model_conditions["height"] = height
         if transition is None:
             transition = self.sample_transition(anchor is not None)
         return StepPreparation(
@@ -615,14 +626,11 @@ class Trainer:
             not enabled
             or transition != 0
             or anchor is None
-            or source not in ("real", "shared")
+            or source != "multi"
             or reference_prediction is None
         ):
             return empty, empty
         anchor = self.visible_anchor(anchor, visible)
-        self.diagnostics.update(
-            anchor_boundary_metrics(prediction, reference_prediction, anchor)
-        )
 
         real, fake = self.anchor_triplets.sample(
             prediction,
@@ -666,12 +674,13 @@ class Trainer:
     ) -> AnchorCondition:
         if visible is None:
             return anchor
-        mask = visible.reshape(-1, 1, 1, 1, 1)
+        mask = visible.to(anchor.mask.device).reshape(-1, 1, 1, 1, 1)
         return replace(
             anchor,
             image=anchor.image * mask,
             mask=anchor.mask & mask,
             axis_masks=anchor.axis_masks & mask,
+            active_batches=tuple(visible.nonzero().flatten().tolist()),
         )
 
     def sample_transition(self, anchored: bool) -> int:
@@ -680,35 +689,6 @@ class Trainer:
         if self.diffusion.timesteps == 1 or bool(torch.rand(()) < 0.25):
             return 0
         return int(torch.randint(1, self.diffusion.timesteps, ()).item())
-
-    @staticmethod
-    def remove_anchor_conditions(
-        conditions: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        return {
-            name: value
-            for name, value in conditions.items()
-            if name not in {"anchor_image", "anchor_mask"}
-        }
-
-    def capture_rng_state(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        device_state = (
-            torch.cuda.get_rng_state(self.device)
-            if self.device.type == "cuda"
-            else None
-        )
-        return torch.random.get_rng_state(), device_state
-
-    def restore_rng_state(
-        self,
-        state: tuple[torch.Tensor, torch.Tensor | None],
-    ) -> None:
-        cpu_state, device_state = state
-        torch.random.set_rng_state(cpu_state)
-        if device_state is not None:
-            torch.cuda.set_rng_state(device_state, self.device)
 
     def select_batch_domains(self, domain: int) -> dict[int, int]:
         selected = {}
@@ -731,15 +711,42 @@ class Trainer:
     ) -> dict[int, torch.Tensor]:
         if batch_domains is None:
             batch_domains = self.select_batch_domains(domain)
-        return {
-            axis: self.streams[batch_domains[axis]][axis]
-            .next()
-            .to(
-                self.device,
-                non_blocking=True,
-            )
-            for axis in self.active_axes
-        }
+        self.batch_domains = batch_domains
+        batches = {}
+        self.real_origins, self.real_heights = {}, {}
+        for axis in self.active_axes:
+            batch = self.streams[batch_domains[axis]][axis].next()
+            if isinstance(batch, dict):
+                images = batch["image"]
+                origins = batch["height_origin"]
+                thickness = {"z": 0, "y": 1, "x": 2}[self.height_data["thickness_axis"]]
+                if axis != thickness:
+                    self.real_origins[axis] = origins
+                    direction = [a for a in AXES if a != axis].index(thickness)
+                    self.real_heights[axis] = height_field(
+                        images.shape[-2:],
+                        direction,
+                        origins,
+                        self.height_data["crop_size"] / images.shape[-1],
+                        self.height_data["height_extents"][batch_domains[axis]],
+                        self.device,
+                    )
+            else:
+                images = batch
+            batches[axis] = images.to(self.device, non_blocking=True)
+        return batches
+
+    def volume_height(self, origins, domain):
+        data = self.height_data
+        axis = {"z": 0, "y": 1, "x": 2}[data["thickness_axis"]]
+        return height_field(
+            (self.patch_size,) * 3,
+            axis,
+            origins,
+            data["crop_size"] / self.patch_size,
+            data["height_extents"][domain],
+            self.device,
+        )
 
     def sample_domain_condition(self, domain: int) -> int:
         if self.domain_dropout > 0.0 and bool(torch.rand(()) < self.domain_dropout):
@@ -800,11 +807,11 @@ class Trainer:
         anchor = torch.full(
             (batch,),
             has_anchor,
-            device=self.device,
+            device="cpu",
             dtype=torch.bool,
         )
-        vf = torch.ones(batch, device=self.device, dtype=torch.bool)
-        random = torch.rand(batch, device=self.device)
+        vf = torch.ones(batch, device="cpu", dtype=torch.bool)
+        random = torch.rand(batch, device="cpu")
         if has_anchor:
             probability = self.cfg_drop_each_probability
             joint_null = random < probability
@@ -826,10 +833,10 @@ class Trainer:
         conditions = {
             "domain": domain,
             "vf": target_vf,
-            "vf_present": presence.vf,
+            "vf_present": presence.vf.to(target_vf.device),
         }
         if anchor is not None:
-            visible = presence.anchor.reshape(-1, 1, 1, 1, 1)
+            visible = presence.anchor.to(anchor.mask.device).reshape(-1, 1, 1, 1, 1)
             conditions["anchor_image"] = anchor.image
             conditions["anchor_mask"] = anchor.mask * visible.to(anchor.mask.dtype)
         return conditions
@@ -850,6 +857,7 @@ class Trainer:
         batches: dict[int, torch.Tensor],
         volume_size: int,
         owned_axes: tuple[int, ...] | None = None,
+        domain: int = 0,
     ) -> AnchorSelection | None:
         probability = self.anchor_training_probability
         if probability <= 0.0:
@@ -857,13 +865,21 @@ class Trainer:
         if probability < 1.0 and not bool(torch.rand(()) < probability):
             return None
         if self.use_multi_anchor_next:
-            self.use_multi_anchor_next = False
-            return AnchorSelection(
-                condition=None,
-                observed_mask=None,
-                observed_axis_masks=None,
-                source="multi",
+            replay = self.anchor_bank.sample(
+                domain, self.volume_batch_size, self.device
             )
+            self.use_multi_anchor_next = False
+            if replay is not None:
+                condition, measured, reference, height = replay
+                return AnchorSelection(
+                    condition,
+                    measured.mask,
+                    measured.axis_masks,
+                    "multi",
+                    measured,
+                    reference,
+                    height,
+                )
         self.use_multi_anchor_next = True
         return self.sample_real_anchor(
             batches,
@@ -890,9 +906,9 @@ class Trainer:
         images = batches[axis]
         batch_indices = torch.randperm(
             images.shape[0],
-            device=images.device,
+            device="cpu",
         )[: self.volume_batch_size]
-        selected = images.index_select(0, batch_indices)
+        selected = images.index_select(0, batch_indices.to(images.device))
         shape = tuple(min(volume_size, size) for size in selected.shape[-2:])
         selected = self.crop_images(selected, shape)
         position = tuple(
@@ -913,48 +929,19 @@ class Trainer:
             device=self.device,
             dtype=torch.float32,
             reconcile=False,
+            validate=False,
         )
         return AnchorSelection(
             condition=condition,
             observed_mask=condition.mask,
             observed_axis_masks=condition.axis_masks,
             source="shared" if use_shared else "real",
-        )
-
-    def sample_multi_anchor(self, prediction: torch.Tensor) -> AnchorSelection:
-        probs = (prediction.detach().float() + 1) * 0.5
-        probs = probs / probs.sum(1, keepdim=True).clamp_min(1e-8)
-        count = int(torch.randint(2, len(AXES) + 1, ()).item())
-        axes = torch.randperm(len(AXES))[:count].tolist()
-        planes = []
-        for axis in axes:
-            index = int(
-                torch.randint(
-                    prediction.shape[axis + 2],
-                    (),
-                ).item()
+            measured=condition,
+            height=self.volume_height(
+                self.real_origins[axis][batch_indices], self.batch_domains[axis]
             )
-            planes.append(
-                PlaneAnchor(
-                    image=probs.select(axis + 2, index),
-                    axis=axis,
-                    index=index,
-                )
-            )
-        condition = encode_anchors(
-            tuple(planes),
-            batch_size=prediction.shape[0],
-            num_phases=self.num_phases,
-            volume_size=prediction.shape[2],
-            device=prediction.device,
-            dtype=torch.float32,
-            reconcile=False,
-        )
-        return AnchorSelection(
-            condition=condition,
-            observed_mask=torch.zeros_like(condition.mask),
-            observed_axis_masks=torch.zeros_like(condition.axis_masks),
-            source="multi",
+            if axis in self.real_origins
+            else None,
         )
 
     def generate_pair(
@@ -1008,53 +995,94 @@ class Trainer:
 
     def sample_pairs(
         self,
-        previous: torch.Tensor,
-        current: torch.Tensor,
-        axis: int,
-        axis_masks: torch.Tensor | None = None,
-        crop_shape: int | tuple[int, int] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        previous,
+        current,
+        axis,
+        anchor=None,
+        crop_shape=None,
+        measured=None,
+        height=None,
+    ):
         count = self.slice_pairs_per_axis
-        batch_indices = torch.randint(
-            previous.shape[0],
-            (count,),
-            device=previous.device,
+        size = previous.shape[axis + 2]
+        excluded = (
+            set()
+            if measured is None
+            else {r.index for r in measured.regions if r.axis == axis}
         )
-        plane_indices = torch.randint(
-            previous.shape[axis + 2],
-            (count,),
-            device=previous.device,
+        active = (
+            ()
+            if measured is None
+            else (
+                range(previous.shape[0])
+                if measured.active_batches is None
+                else measured.active_batches
+            )
         )
-        focused = 0
-        centers: list[tuple[int, int]] = []
-        if axis_masks is not None:
-            normals = tuple(normal for normal in AXES if normal != axis)
-            focus = axis_masks[:, normals].any(dim=1, keepdim=True)
-            focus = focus.movedim(axis + 2, 2)[:, 0]
-            points = focus.nonzero()
-            if points.numel():
-                focused = min(count, max(1, count // 2))
-                selected = points.index_select(
-                    0,
-                    torch.randint(points.shape[0], (focused,), device=points.device),
-                )
-                batch_indices[:focused] = selected[:, 0]
-                plane_indices[:focused] = selected[:, 1]
-                centers = [
-                    (int(row), int(col)) for row, col in selected[:, 2:].tolist()
+        candidates = [
+            (batch, index)
+            for batch in range(previous.shape[0])
+            for index in range(size)
+            if batch not in active or index not in excluded
+        ]
+        if not candidates:
+            shape = previous.movedim(axis + 2, 2).shape
+            empty = previous.new_empty((0, shape[1], *shape[-2:]))
+            return (empty, empty) if height is None else (empty, empty, empty[:, :1])
+        choices = torch.randint(len(candidates), (count,)).tolist()
+        selected = [candidates[i] for i in choices]
+        centers = []
+        if anchor is not None:
+            axes = [normal for normal in AXES if normal != axis]
+            for slot, (batch, index) in enumerate(selected[: max(1, count // 2)]):
+                regions = [
+                    r
+                    for r in anchor.regions
+                    if r.axis != axis
+                    and (
+                        anchor.active_batches is None or batch in anchor.active_batches
+                    )
                 ]
-        previous = previous.movedim(axis + 2, 2)
-        current = current.movedim(axis + 2, 2)
-        previous = previous[batch_indices, :, plane_indices]
-        current = current[batch_indices, :, plane_indices]
+                if not regions:
+                    break
+                region = regions[int(torch.randint(len(regions), ()))]
+                coordinates = {region.axis: region.index}
+                other = [normal for normal in AXES if normal != region.axis]
+                coordinates[other[0]] = region.row + int(
+                    torch.randint(region.height, ())
+                )
+                coordinates[other[1]] = region.col + int(
+                    torch.randint(region.width, ())
+                )
+                start = region.row if other[0] == axis else region.col
+                length = region.height if other[0] == axis else region.width
+                allowed = [
+                    i
+                    for b, i in candidates
+                    if b == batch and start <= i < start + length
+                ]
+                if not allowed:
+                    break
+                selected[slot] = (batch, allowed[int(torch.randint(len(allowed), ()))])
+                centers.append(tuple(coordinates[normal] for normal in axes))
+        batch_indices, plane_indices = zip(*selected)
+        batch_indices = torch.tensor(batch_indices, device=previous.device)
+        plane_indices = torch.tensor(plane_indices, device=previous.device)
+        previous = previous.movedim(axis + 2, 2)[batch_indices, :, plane_indices]
+        current = current.movedim(axis + 2, 2)[batch_indices, :, plane_indices]
         channels = previous.shape[1]
-        crop_shape = self.patch_size if crop_shape is None else crop_shape
+        values = (previous, current)
+        if height is not None:
+            values += (height.movedim(axis + 2, 2)[batch_indices, :, plane_indices],)
         pairs = self.crop_images(
-            torch.cat((previous, current), dim=1),
-            crop_shape,
+            torch.cat(values, dim=1),
+            self.patch_size if crop_shape is None else crop_shape,
             centers,
         )
-        return pairs[:, :channels], pairs[:, channels:]
+        result = (pairs[:, :channels], pairs[:, channels : 2 * channels])
+        return (
+            result if height is None else (*result, pairs[:, 2 * channels :].detach())
+        )
 
     def update_critics(
         self,
@@ -1063,48 +1091,57 @@ class Trainer:
         batches: dict[int, torch.Tensor],
         step: int,
         domains: dict[int, int],
-        real_pairs: dict[int, tuple[torch.Tensor, torch.Tensor]] | None = None,
     ) -> tuple[list[float], float, float, float]:
         critic_losses = [0.0] * len(AXES)
         r1_sum = 0.0
         global_sum = 0.0
         local_sum = 0.0
         local_weight = self.critic_local_weight
-        for group, axes in self.critic_groups.items():
+        groups = self.active_groups(fake)
+        for group, axes in groups.items():
             count = self.updates[group]
             regularize = (count + 1) % self.r1_interval == 0
             apply_r1 = self.r1_gamma > 0.0 and regularize
             apply_r2 = self.r2_gamma > 0.0 and regularize
-            weight = 1.0 / (len(axes) * self.group_divisor)
+            weight = 1.0 / (len(axes) * len(groups))
             critic = self.critics[group]
             optimizer = self.critic_optims[group]
             optimizer.zero_grad(set_to_none=True)
             for axis in axes:
-                if real_pairs is None:
-                    images = batches[axis]
-                    real = (
-                        (
-                            images
-                            if images.ndim == 4
-                            else F.one_hot(images, num_classes=self.num_phases)
-                            .movedim(-1, 1)
-                            .to(torch.float32)
-                        )
-                        .mul(2.0)
-                        .sub(1.0)
+                images = batches[axis]
+                real = (
+                    (
+                        images
+                        if images.ndim == 4
+                        else F.one_hot(images, num_classes=self.num_phases)
+                        .movedim(-1, 1)
+                        .to(torch.float32)
                     )
-                    real_time = self.make_time(transition, real.shape[0])
-                    real_prev, real_curr = self.diffusion.sample_pair(
-                        real,
-                        transition,
-                    )
-                    real_prev, real_curr = self.critic_augment.apply_together(
-                        (real_prev, real_curr),
-                        plane=axis,
-                    )
-                else:
-                    real_prev, real_curr = real_pairs[axis]
-                    real_time = self.make_time(transition, real_prev.shape[0])
+                    .mul(2.0)
+                    .sub(1.0)
+                )
+                real_time = self.make_time(transition, real.shape[0])
+                real_prev, real_curr = self.diffusion.sample_pair(
+                    real,
+                    transition,
+                )
+                real_height = self.real_heights.get(axis)
+                inputs = (
+                    (real_prev, real_curr)
+                    if real_height is None
+                    else (real_prev, real_curr, real_height)
+                )
+                augmented = self.critic_augment.apply_together(inputs, plane=axis)
+                real_prev, real_curr = augmented[:2]
+                real_conditions = (
+                    {} if real_height is None else {"height": augmented[2]}
+                )
+                fake_conditions = (
+                    {}
+                    if axis not in self.fake_heights
+                    else {"height": self.fake_heights[axis]}
+                )
+
                 real_prev.requires_grad_(regularize)
                 real_curr.requires_grad_(regularize)
                 fake_prev, fake_curr = fake[axis]
@@ -1116,8 +1153,12 @@ class Trainer:
 
                 autocast = self.autocast(self.amp_enabled and not regularize)
                 with autocast:
-                    real_score = critic(real_prev, real_curr, real_time, real_domain)
-                    fake_score = critic(fake_prev, fake_curr, fake_time, fake_domain)
+                    real_score = critic(
+                        real_prev, real_curr, real_time, real_domain, **real_conditions
+                    )
+                    fake_score = critic(
+                        fake_prev, fake_curr, fake_time, fake_domain, **fake_conditions
+                    )
                     losses = get_critic_loss(real_score, fake_score)
                     loss = losses.combine(local_weight)
                 global_sum += losses.global_loss.detach() * weight
@@ -1161,6 +1202,13 @@ class Trainer:
             if step_optimizer(optimizer, self.scaler, self.diagnostics, group):
                 self.updates[group] += 1
         return critic_losses, r1_sum, global_sum, local_sum
+
+    def active_groups(self, fake):
+        groups = {
+            group: tuple(axis for axis in axes if len(fake[axis][0]))
+            for group, axes in self.critic_groups.items()
+        }
+        return {group: axes for group, axes in groups.items() if axes}
 
     def update_connectivity_critic(
         self,
@@ -1231,9 +1279,12 @@ class Trainer:
         try:
             heads = []
             local_weight = self.critic_local_weight
+            groups = self.active_groups(batch.fake)
             with self.autocast():
                 for axis in self.active_axes:
                     fake_prev, fake_curr = batch.fake[axis]
+                    if not len(fake_prev):
+                        continue
                     time = self.make_time(batch.transition, fake_prev.shape[0])
                     domains = self.make_domain(
                         batch.critic_domains[axis],
@@ -1244,17 +1295,27 @@ class Trainer:
                         fake_curr,
                         time,
                         domains,
+                        **(
+                            {"height": batch.fake_heights[axis]}
+                            if axis in batch.fake_heights
+                            else {}
+                        ),
                     )
                     head = get_generator_loss(scores)
-                    count = (
-                        len(self.critic_groups[self.axis_critics[axis]])
-                        * self.group_divisor
-                    )
+                    count = len(groups[self.axis_critics[axis]]) * len(groups)
                     heads.append(
                         HeadLoss(head.global_loss / count, head.local_loss / count)
                     )
-                global_loss = torch.stack([loss.global_loss for loss in heads]).sum()
-                local_loss = torch.stack([loss.local_loss for loss in heads]).sum()
+                global_loss = (
+                    torch.stack([loss.global_loss for loss in heads]).sum()
+                    if heads
+                    else batch.logits.sum() * 0
+                )
+                local_loss = (
+                    torch.stack([loss.local_loss for loss in heads]).sum()
+                    if heads
+                    else batch.logits.sum() * 0
+                )
                 adversarial_loss = global_loss + local_weight * local_loss
                 connectivity_loss = adversarial_loss.new_zeros(())
                 if len(batch.connectivity_fake) and self.connectivity_weight > 0.0:

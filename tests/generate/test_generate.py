@@ -601,7 +601,7 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
         assert right.current.shape == (1, 3, 4, 4, 4)
 
 
-def test_partial_anchor_strength_blends_logits_on_one_state() -> None:
+def test_partial_anchor_strength_scales_mask_on_one_state() -> None:
     model = _AnchorTraceModel()
     diffusion = _TraceDiffusion(timesteps=2)
     gen = _generator(model, diffusion)
@@ -609,12 +609,8 @@ def test_partial_anchor_strength_blends_logits_on_one_state() -> None:
         anchors=(PlaneAnchor(torch.zeros(4, 4, dtype=torch.long), 0, 1),),
         anchor_strength=0.5,
     )
-    assert len(model.calls) == 4
-    assert len(diffusion.calls) == 2
-    for conditioned, plain in zip(model.calls[::2], model.calls[1::2], strict=True):
-        assert conditioned.current_ptr == plain.current_ptr
-        assert conditioned.latent is plain.latent
-        assert conditioned.anchor_mask is not None and plain.anchor_mask is None
+    assert len(model.calls) == len(diffusion.calls) == 2
+    assert all(call.anchor_mask.max() == 0.5 for call in model.calls)
 
 
 def test_anchor_never_overwrites_a_different_model_prediction() -> None:

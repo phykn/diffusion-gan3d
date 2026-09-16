@@ -14,6 +14,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_DEFAULTS = {
     "optim.ema_decay": 0.999,
     "train.mixed_precision": True,
+    "train.structure_every_steps": 100,
+    "model.critic.pyramid_min_size": 16,
+    "conditioning.height_enabled": False,
 }
 STAGE_DEFAULTS = {
     "low_res": {
@@ -29,6 +32,8 @@ STAGE_DEFAULTS = {
         "conditioning.anchor.start_step": 0,
         "conditioning.anchor.ramp_steps": 500,
         "conditioning.anchor.borrowed_plane_probability": 0.2,
+        "conditioning.anchor.bank_capacity": 4,
+        "conditioning.anchor.plane_spacing": 16,
         "loss.critic_local_weight": 0.5,
         "loss.r1_every_steps": 16,
         "loss.r2_weight": 0.0,
@@ -42,7 +47,6 @@ STAGE_DEFAULTS = {
     "sr": {
         "model.generator.noise_channels": 1,
         "loss.downsample_mse_tolerance": 0.005,
-        "loss.downsample_temperature": 0.05,
         "optim.adam_betas": [0.0, 0.9],
         "lr_bank.refresh_every_steps": 1000,
         "conditioning.coarse_corruption_probability": 0.5,
@@ -56,7 +60,14 @@ def validate_config_keys(cfg: Mapping, stage: str) -> None:
     common = {
         "stage": None,
         "data": dict.fromkeys(
-            ("domains", "num_phases", "crop_size", "lo_res_size", "thickness_axis")
+            (
+                "domains",
+                "num_phases",
+                "crop_size",
+                "lo_res_size",
+                "thickness_axis",
+                "height_extents",
+            )
         ),
         "augmentation": {
             "probability": None,
@@ -80,12 +91,15 @@ def validate_config_keys(cfg: Mapping, stage: str) -> None:
                         "anchor_multiscale_input",
                     )
                 ),
-                "critic": dict.fromkeys(("channels", "plane_groups")),
+                "critic": dict.fromkeys(
+                    ("channels", "plane_groups", "pyramid_min_size")
+                ),
                 "diffusion": dict.fromkeys(
                     ("num_steps", "beta_min", "beta_max", "time_embedding")
                 ),
             },
             "conditioning": {
+                "height_enabled": None,
                 "domain_keep_probability": None,
                 "dropout_probability_per_case": None,
                 "anchor": dict.fromkeys(
@@ -94,6 +108,8 @@ def validate_config_keys(cfg: Mapping, stage: str) -> None:
                         "start_step",
                         "ramp_steps",
                         "borrowed_plane_probability",
+                        "bank_capacity",
+                        "plane_spacing",
                     )
                 ),
             },
@@ -130,6 +146,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> None:
                     "slice_pairs_per_plane",
                     "weights_every_steps",
                     "archive_every_steps",
+                    "structure_every_steps",
                 )
             ),
         }
@@ -139,17 +156,22 @@ def validate_config_keys(cfg: Mapping, stage: str) -> None:
                 "generator": dict.fromkeys(
                     ("channels", "blocks", "noise_channels", "scale_factor")
                 ),
-                "critic": dict.fromkeys(("channels", "plane_groups")),
+                "critic": dict.fromkeys(
+                    ("channels", "plane_groups", "pyramid_min_size")
+                ),
             },
             "conditioning": dict.fromkeys(
-                ("coarse_corruption_probability", "coarse_corruption_strength")
+                (
+                    "coarse_corruption_probability",
+                    "coarse_corruption_strength",
+                    "height_enabled",
+                )
             ),
             "loss": dict.fromkeys(
                 (
                     "gradient_penalty_weight",
                     "downsample_consistency_weight",
                     "downsample_mse_tolerance",
-                    "downsample_temperature",
                 )
             ),
             "lr_bank": dict.fromkeys(
@@ -166,6 +188,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> None:
                     "slices_per_plane",
                     "critic_updates_per_step",
                     "checkpoint_every_steps",
+                    "structure_every_steps",
                 )
             ),
         }
@@ -243,6 +266,20 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
             target = target.setdefault(section, {})
         if key not in target:
             target[key] = prepare_yaml(value)
+    if type(cfg["conditioning"]["height_enabled"]) is not bool:
+        raise ValueError("conditioning.height_enabled must be a boolean.")
+    if (
+        type(cfg["train"]["structure_every_steps"]) is not int
+        or cfg["train"]["structure_every_steps"] < 0
+    ):
+        raise ValueError("train.structure_every_steps must be a non-negative integer.")
+    if (
+        type(cfg["model"]["critic"]["pyramid_min_size"]) is not int
+        or cfg["model"]["critic"]["pyramid_min_size"] < 2
+    ):
+        raise ValueError(
+            "model.critic.pyramid_min_size must be an integer of at least two."
+        )
     optim = cfg["optim"]
     if "critic_lr" not in optim and "generator_lr" in optim:
         optim["critic_lr"] = optim["generator_lr"]
@@ -262,6 +299,11 @@ def validate_sr_source(data: Mapping, base_data: Mapping) -> None:
         raise ValueError("SR data.num_phases must match the stage-1 model.")
     if set(get_domains(data)) != set(get_domains(base_data)):
         raise ValueError("SR data domain IDs must match the stage-1 model.")
+    if data.get("height_extents") != base_data.get("height_extents") or (
+        data.get("height_extents")
+        and data.get("thickness_axis") != base_data.get("thickness_axis")
+    ):
+        raise ValueError("SR height coordinates must match the stage-1 model.")
 
 
 def get_sizes(

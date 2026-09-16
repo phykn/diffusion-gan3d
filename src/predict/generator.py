@@ -6,6 +6,7 @@ import torch
 from src.anchor import PlaneAnchor, encode_anchors
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
+from src.prepare.height import height_field
 
 
 class GuidedDenoiser:
@@ -25,6 +26,7 @@ class GuidedDenoiser:
         vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
+        height: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.generator.predict(
             current,
@@ -36,6 +38,7 @@ class GuidedDenoiser:
             vf=vf,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
+            **({"height": height} if height is not None else {}),
         )
 
 
@@ -49,8 +52,10 @@ class Generator:
         num_phases: int,
         latent_channels: int,
         use_amp: bool,
+        height_data: dict | None = None,
     ) -> None:
         self.model = model
+        self.height_data = height_data
         self.num_domains = model.num_domains
         self.diffusion = diffusion
         self.device = device
@@ -77,19 +82,21 @@ class Generator:
         vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
+        height: torch.Tensor | None = None,
         anchor_strength: float = 1.0,
     ) -> torch.Tensor:
         if anchor_strength == 0:
             anchor_image = anchor_mask = None
-        conditions = self.prepare_conditions(domain, vf, anchor_image, anchor_mask)
-        if guidance == 1.0 and (anchor_strength == 1.0 or anchor_image is None):
+        elif anchor_mask is not None:
+            anchor_mask = anchor_mask.float() * anchor_strength
+        conditions = self.prepare_conditions(
+            domain, vf, anchor_image, anchor_mask, height
+        )
+        if guidance == 1.0:
             return self.model(current, time, latent, **conditions)
         logits = self.compute_logits(
             current, time, latent, guidance=guidance, **conditions
         )
-        if anchor_image is not None and anchor_strength != 1.0:
-            baseline = self.compute_logits(current, time, latent, domain, guidance, vf)
-            logits = torch.lerp(baseline.float(), logits.float(), anchor_strength)
         return Denoiser3D.decode(logits).to(current.dtype)
 
     def compute_logits(
@@ -102,8 +109,11 @@ class Generator:
         vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
+        height: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        conditions = self.prepare_conditions(domain, vf, anchor_image, anchor_mask)
+        conditions = self.prepare_conditions(
+            domain, vf, anchor_image, anchor_mask, height
+        )
         if guidance == 1.0:
             return self.model.compute_logits(current, time, latent, **conditions)
         return self.model.apply_guidance_logits(
@@ -120,8 +130,11 @@ class Generator:
         vf: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
+        height: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         conditions = {"domain": domain}
+        if height is not None:
+            conditions["height"] = height
         if vf is not None:
             conditions["vf"] = vf
         if anchor_image is not None:
@@ -181,6 +194,7 @@ class Generator:
         guidance: float = 1.0,
         domain: int | None = None,
         margin: int | None = None,
+        height_origin: float = 0.0,
     ) -> torch.Tensor:
         size = self.patch_size if size is None else size
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
@@ -189,6 +203,7 @@ class Generator:
         if not isinstance(margin, int) or isinstance(margin, bool) or margin < 0:
             raise ValueError("margin must be a non-negative integer.")
         self.validate_anchor_strength(anchor_strength)
+        self.validate_height((size,) * 3, domain, height_origin)
         vf = self.prepare_vf(vf)
         generation_size = size + 2 * margin
         initial_noise = torch.randn(
@@ -212,6 +227,11 @@ class Generator:
                 dtype=initial_noise.dtype,
             )
         conditions = {"domain": self.prepare_domain(domain)}
+        height = self.height_condition(
+            (generation_size,) * 3, domain, height_origin, -margin
+        )
+        if height is not None:
+            conditions["height"] = height
         if vf is not None:
             conditions["vf"] = vf
         if anchor is not None:
@@ -228,6 +248,41 @@ class Generator:
                 conditions=conditions,
             )
         return self.crop_clean(clean, size, margin)
+
+    def height_condition(self, shape, domain, origin, offset=0):
+        if self.height_data is None:
+            return None
+        if not math.isfinite(origin) or origin < 0:
+            raise ValueError(
+                "height_origin must be finite and non-negative (source pixels)."
+            )
+        data = self.height_data
+        domain = 0 if domain is None else domain
+        axis = {"z": 0, "y": 1, "x": 2}[data["thickness_axis"]]
+        spacing = data["crop_size"] / data["lo_res_size"]
+        return height_field(
+            shape,
+            axis,
+            origin + offset * spacing,
+            spacing,
+            data["height_extents"][domain],
+            self.device,
+        )
+
+    def validate_height(self, shape, domain, origin):
+        if self.height_data is None:
+            return
+        domain = 0 if domain is None and self.num_domains == 1 else domain
+        if type(domain) is not int or not 0 <= domain < self.num_domains:
+            raise ValueError("height conditioning requires a valid domain.")
+        data = self.height_data
+        axis = {"z": 0, "y": 1, "x": 2}[data["thickness_axis"]]
+        extent = data["height_extents"][0 if domain is None else domain]
+        length = shape[axis] * data["crop_size"] / data["lo_res_size"]
+        if not math.isfinite(origin) or origin < 0 or origin + length > extent:
+            raise ValueError(
+                "height_origin places the volume outside the measured thickness."
+            )
 
     @staticmethod
     def validate_anchor_strength(strength: float) -> None:
@@ -302,6 +357,7 @@ class Generator:
         guidance: float = 1.0,
         domain: int | None = None,
         margin: int | None = None,
+        height_origin: float = 0.0,
     ) -> torch.Tensor:
         clean = self._sample_clean(
             anchors=anchors,
@@ -311,6 +367,7 @@ class Generator:
             guidance=guidance,
             domain=domain,
             margin=margin,
+            height_origin=height_origin,
         )
         probs = ((clean.float() + 1.0) * 0.5).clamp(0.0, 1.0)
         probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(
@@ -327,6 +384,7 @@ class Generator:
         guidance: float = 1.0,
         domain: int | None = None,
         margin: int | None = None,
+        height_origin: float = 0.0,
     ) -> torch.Tensor:
         return (
             self.generate_probs(
@@ -337,6 +395,7 @@ class Generator:
                 guidance=guidance,
                 domain=domain,
                 margin=margin,
+                height_origin=height_origin,
             )
             .argmax(dim=0)
             .to(torch.uint8)

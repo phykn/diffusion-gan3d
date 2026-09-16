@@ -102,6 +102,7 @@ class Denoiser3D(nn.Module):
         gradient_checkpointing: bool = False,
         anchor_multiscale: bool = False,
         time_scale: float = 1.0,
+        height_enabled: bool = False,
     ) -> None:
         super().__init__()
         if not isinstance(anchor_multiscale, bool):
@@ -129,6 +130,11 @@ class Denoiser3D(nn.Module):
         self.num_domains = num_domains
         self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv3d(num_phases, channels[0], 3, padding=1)
+        self.height_input = (
+            nn.Conv3d(1, channels[0], 3, padding=1, bias=False)
+            if height_enabled
+            else None
+        )
         self.anchor_input = nn.Conv3d(
             num_phases + 1,
             channels[0],
@@ -215,6 +221,7 @@ class Denoiser3D(nn.Module):
         vf_present: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
+        height: torch.Tensor | None = None,
     ) -> torch.Tensor:
         logits = self.compute_logits(
             x_current,
@@ -225,6 +232,7 @@ class Denoiser3D(nn.Module):
             vf_present=vf_present,
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
+            height=height,
         )
         return self.decode(logits)
 
@@ -238,9 +246,14 @@ class Denoiser3D(nn.Module):
         vf_present: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
+        height: torch.Tensor | None = None,
     ) -> torch.Tensor:
         emb = self.embed(x_current, time, latent, domain, vf, vf_present)
         x = self.input(x_current)
+        if self.height_input is not None:
+            if height is None:
+                raise ValueError("height-conditioned denoiser requires a height field.")
+            x = x + self.height_input(height.to(x_current))
         anchor = self._prepare_anchor(
             x_current,
             anchor_image=anchor_image,
@@ -291,11 +304,12 @@ class Denoiser3D(nn.Module):
         vf_present: torch.Tensor | None = None,
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
+        height: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if guidance == 0.0 or (
             vf is None and anchor_image is None and anchor_mask is None
         ):
-            return self.compute_logits(x_current, time, latent, domain)
+            return self.compute_logits(x_current, time, latent, domain, height=height)
         elif guidance == 1.0:
             return self.compute_logits(
                 x_current,
@@ -306,9 +320,12 @@ class Denoiser3D(nn.Module):
                 vf_present=vf_present,
                 anchor_image=anchor_image,
                 anchor_mask=anchor_mask,
+                height=height,
             )
         else:
-            unconditional = self.compute_logits(x_current, time, latent, domain)
+            unconditional = self.compute_logits(
+                x_current, time, latent, domain, height=height
+            )
             conditional = self.compute_logits(
                 x_current,
                 time,
@@ -318,6 +335,7 @@ class Denoiser3D(nn.Module):
                 vf_present=vf_present,
                 anchor_image=anchor_image,
                 anchor_mask=anchor_mask,
+                height=height,
             )
             baseline = unconditional.to(torch.float32)
             conditional = conditional.to(torch.float32)
@@ -395,7 +413,9 @@ class Denoiser3D(nn.Module):
     ) -> torch.Tensor:
         coverage = F.adaptive_avg_pool3d(mask, output_size)
         pooled_values = F.adaptive_avg_pool3d(values, output_size)
-        pooled_values = pooled_values / coverage.clamp_min(
-            torch.finfo(values.dtype).eps,
+        # Keep input strength in both the values and coverage at every scale.
+        strength = F.adaptive_max_pool3d(mask, output_size)
+        pooled_values = (
+            pooled_values / coverage.clamp_min(torch.finfo(values.dtype).eps) * strength
         )
         return torch.cat((pooled_values, coverage), dim=1)

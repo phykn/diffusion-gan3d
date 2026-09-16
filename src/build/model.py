@@ -71,6 +71,7 @@ def build_denoiser(
         gradient_checkpointing=checkpointing,
         anchor_multiscale=generator["anchor_multiscale_input"],
         time_scale=get_time_scale(cfg),
+        height_enabled=cfg["conditioning"]["height_enabled"],
     )
 
 
@@ -106,6 +107,13 @@ def build_models(
         gradient_checkpointing=model["gradient_checkpointing"],
         directed_axis={"z": 0, "y": 1, "x": 2}.get(data.get("thickness_axis")),
     )
+    if cfg["conditioning"]["height_enabled"]:
+        for network in critics.values():
+            network.height_input = nn.Conv2d(
+                1, critic["channels"][0], 3, padding=1, bias=False
+            )
+    for network in (*critics.values(), connectivity_critic):
+        network.pyramid_min_size = critic["pyramid_min_size"]
     return denoiser, critics, connectivity_critic
 
 
@@ -125,5 +133,6 @@ def build_sr_model(cfg: dict) -> SuperResolution:
     return SuperResolution(
         num_phases=cfg["data"]["num_phases"],
         num_domains=len(get_domains(cfg["data"])),
+        height_enabled=cfg["conditioning"]["height_enabled"],
         **cfg["model"]["generator"],
     )

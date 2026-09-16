@@ -27,7 +27,12 @@ def scaled_size(size: int, scale: float) -> int:
 def phase_channels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:
     if labels.dtype.is_floating_point or labels.dtype == torch.bool:
         raise ValueError("phase labels must have an integer dtype.")
-    if labels.numel() == 0 or labels.min() < 0 or labels.max() >= num_phases:
+    if labels.numel() == 0:
+        raise ValueError(f"phase labels must be in [0, {num_phases - 1}].")
+    valid = ((labels >= 0) & (labels < num_phases)).all()
+    if labels.device.type == "cuda":
+        torch._assert_async(valid, "phase labels are outside num_phases.")
+    elif not bool(valid):
         raise ValueError(f"phase labels must be in [0, {num_phases - 1}].")
     return F.one_hot(labels.long(), num_phases).movedim(-1, 1).float()
 
@@ -57,11 +62,6 @@ def resize_crop(
     return resize_phases(probs, (size,) * labels.ndim).squeeze(0)
 
 
-def downsample(
-    probs: torch.Tensor, shape: tuple[int, ...], temperature: float
-) -> torch.Tensor:
-    """Volume mixing followed by differentiable near-one-hot phase selection."""
-    if temperature <= 0 or not math.isfinite(temperature):
-        raise ValueError("temperature must be positive and finite.")
-    mixed = resize_phases(probs.float(), shape)
-    return (mixed / temperature).softmax(dim=1)
+def downsample(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+    """Area-average phase occupancy, matching the fractional coarse contract."""
+    return resize_phases(probs.float(), shape)

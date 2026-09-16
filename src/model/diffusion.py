@@ -226,6 +226,9 @@ class Diffusion(nn.Module):
             time = time.expand(ref.shape[0])
         elif time.shape != (ref.shape[0],):
             raise ValueError(f"{name} must be scalar or have one value per batch item.")
-        if bool(((time < 0) | (time > limit)).any()):
+        valid = ((time >= 0) & (time <= limit)).all()
+        if time.device.type == "cuda":
+            torch._assert_async(valid, f"{name} must be between 0 and {limit}.")
+        elif not bool(valid):
             raise ValueError(f"{name} must be between 0 and {limit}.")
         return time

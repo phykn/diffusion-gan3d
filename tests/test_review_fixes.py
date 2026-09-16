@@ -76,7 +76,7 @@ class AnchorModel(torch.nn.Module):
         result = torch.full_like(current, -1)
         result[:, 0] = 1
         if anchor_mask is not None:
-            result = torch.where(anchor_mask, anchor_image, result)
+            result = torch.lerp(result, anchor_image, anchor_mask.float())
         return result
 
 
@@ -153,7 +153,7 @@ def test_boundary_metric_detects_a_detached_anchor_plane():
     reference[:, 1] = -1
     prediction = reference.clone()
     prediction[:, :, 2] *= -1
-    values = anchor_boundary_metrics(prediction, reference, condition)
+    values = anchor_boundary_metrics(prediction, condition)
     assert values["anchor/neighbor_agreement"] == 0.5
     assert values["anchor/neighbor_excess_jump"] == 0.5
 
@@ -199,7 +199,7 @@ def test_sr_corruption_does_not_modify_clean_coarse_target():
     low = torch.zeros(8, 3, 8, 8, 8)
     low[:, 0] = 1
     original = low.clone()
-    corrupted = trainer.corrupt_coarse(low)
+    corrupted, level = trainer.corrupt_coarse(low)
     assert torch.equal(low, original)
     assert not torch.equal(corrupted, low)
     torch.testing.assert_close(corrupted.sum(1), torch.ones_like(corrupted[:, 0]))
@@ -215,10 +215,20 @@ def test_sr_loss_targets_clean_coarse_while_model_receives_corrupted_input(tmp_p
         mixed_precision=False, critic_updates_per_step=1, slices_per_plane=1
     )
     trainer = build_sr_trainer(
-        cfg, {0: torch.zeros(2, 8, 8, 8, dtype=torch.uint8)}, torch.device("cpu")
+        cfg,
+        {
+            0: torch.nn.functional.one_hot(torch.zeros(2, 8, 8, 8, dtype=torch.long), 2)
+            .movedim(-1, 1)
+            .float()
+        },
+        torch.device("cpu"),
     )
     with (
-        patch.object(trainer, "corrupt_coarse", side_effect=lambda low: low.flip(1)),
+        patch.object(
+            trainer,
+            "corrupt_coarse",
+            side_effect=lambda low: (low.flip(1), low.new_ones(len(low))),
+        ),
         patch.object(trainer.model, "forward", wraps=trainer.model.forward) as forward,
         patch("src.train.sr.consistency_loss", wraps=consistency_loss) as consistency,
     ):
@@ -274,18 +284,20 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
         cfg=cfg,
         step=2,
         device=torch.device("cpu"),
-        bank={0: torch.zeros(2, 8, 8, 8, dtype=torch.uint8)},
+        bank={0: torch.full((2, 2, 8, 8, 8), 0.5)},
     )
     monkeypatch.setattr(
         "src.train.sr_run.load_generator",
         lambda *args: SimpleNamespace(
-            generate=lambda **kwargs: torch.ones(8, 8, 8, dtype=torch.uint8)
+            generate_probs=lambda **kwargs: torch.stack(
+                (torch.ones(8, 8, 8), torch.zeros(8, 8, 8))
+            )
         ),
     )
     refresh_bank(trainer, tmp_path)
     assert old_bank.read_bytes() == b"original bank"
-    assert trainer.bank[0][0].eq(1).all()
-    assert trainer.bank[0][1].eq(0).all()
+    assert trainer.bank[0][0, 0].eq(1).all()
+    assert trainer.bank[0][1].eq(0.5).all()
     assert cfg["source"]["bank_sha256"] == file_hash(
         tmp_path / "lr_bank_step_00000002.pt"
     )

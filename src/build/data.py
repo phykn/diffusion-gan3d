@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from pathlib import Path
 
+from PIL import Image
 from torch.utils.data import DataLoader
 
 from src.config import get_domains, get_sizes, get_sr_sizes, normalize_train_config
@@ -8,9 +9,39 @@ from src.data.augment import CriticAugment
 from src.data.loader import BatchStream, FolderBatchSampler
 from src.data.real import RealDataset
 from src.data.resolution import ResolutionDataset
-from src.plane import PLANES
+from src.plane import PLANE_DIRECTIONS, PLANES
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
+
+
+def resolve_height_metadata(cfg):
+    if not cfg["conditioning"]["height_enabled"]:
+        return
+    data = cfg["data"]
+    thickness = data.get("thickness_axis")
+    if thickness not in ("x", "y", "z"):
+        raise ValueError("height conditioning requires data.thickness_axis.")
+    extents = {}
+    for domain, folders in get_domains(data).items():
+        sizes = set()
+        for axis, paths in folders.items():
+            directions = PLANE_DIRECTIONS[PLANES[axis]]
+            if thickness not in directions:
+                continue
+            direction = directions.index(thickness)
+            for folder in paths:
+                for path in Path(folder).iterdir():
+                    if path.suffix.lower() in IMAGE_EXTENSIONS:
+                        with Image.open(path) as image:
+                            sizes.add(image.size[1 - direction])
+        if len(sizes) != 1:
+            raise ValueError(
+                "height conditioning requires full-thickness side images with one consistent extent per domain."
+            )
+        extents[domain] = sizes.pop()
+    if data.get("height_extents", extents) != extents:
+        raise ValueError("side-image thickness differs from saved height_extents.")
+    data["height_extents"] = extents
 
 
 def build_augmentation(cfg: dict) -> CriticAugment:
@@ -69,6 +100,12 @@ def build_datasets(cfg: dict, high: bool = False) -> dict[int, dict[int, RealDat
                 crop,
                 high_size if high else low,
                 data["num_phases"],
+                height_direction=(
+                    PLANE_DIRECTIONS[PLANES[axis]].index(data["thickness_axis"])
+                    if data.get("thickness_axis") in PLANE_DIRECTIONS[PLANES[axis]]
+                    else None
+                ),
+                height_enabled=cfg["conditioning"]["height_enabled"],
             )
             for axis, path_groups in grouped.items()
         }

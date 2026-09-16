@@ -426,6 +426,7 @@ class Denoiser3DTest(unittest.TestCase):
             vf_present: torch.Tensor | None = None,
             anchor_image: torch.Tensor | None = None,
             anchor_mask: torch.Tensor | None = None,
+            height: torch.Tensor | None = None,
         ) -> torch.Tensor:
             calls.append((x_current, timestep, style, domain, vf, vf_present))
             return original(
@@ -437,6 +438,7 @@ class Denoiser3DTest(unittest.TestCase):
                 vf_present=vf_present,
                 anchor_image=anchor_image,
                 anchor_mask=anchor_mask,
+                height=height,
             )
 
         model.compute_logits = traced

@@ -109,8 +109,16 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
     fake = {
         axis: (torch.zeros(2, 1, 8, 8), torch.zeros(2, 1, 8, 8)) for axis in range(3)
     }
+    trainer.diffusion.sample_pair = lambda images, transition: (
+        images,
+        torch.zeros_like(images),
+    )
     trainer.update_critics(
-        0, fake, {}, 0, {axis: 0 for axis in range(3)}, real_pairs=real
+        0,
+        fake,
+        {axis: (pair[0] + 1) * 0.5 for axis, pair in real.items()},
+        0,
+        {axis: 0 for axis in range(3)},
     )
     for name, axes in trainer.critic_groups.items():
         # At weight=0, d softplus(-w*x)/dw = -x/2. Fake x is zero.
@@ -127,7 +135,7 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
 def test_sr_groups_step_once_per_critic_update_and_restore_state(tmp_path, groups):
     torch.set_num_threads(1)
     cfg = config(tmp_path, "sr", groups)
-    bank = {0: torch.randint(2, (2, 8, 8, 8), dtype=torch.uint8)}
+    bank = {0: torch.rand(2, 2, 8, 8, 8).softmax(1)}
     trainer = build_sr_trainer(cfg, bank, torch.device("cpu"))
     assert len(trainer.critics) == len(groups) == len(trainer.critic_optims)
     for optimizer in trainer.critic_optims.values():
@@ -164,7 +172,7 @@ def test_sr_groups_are_per_domain_and_use_only_observed_members(tmp_path):
     cfg = config(tmp_path, "sr", GROUPS[0])
     paths = cfg["data"]["domains"][0]["xy"]
     cfg["data"]["domains"] = {0: {"xz": paths, "xy": paths}, 1: {"yz": paths}}
-    bank = {domain: torch.zeros(2, 8, 8, 8, dtype=torch.uint8) for domain in (0, 1)}
+    bank = {domain: torch.full((2, 2, 8, 8, 8), 0.5) for domain in (0, 1)}
     trainer = build_sr_trainer(cfg, bank, torch.device("cpu"))
     assert set(trainer.critics) == {"0_xy_xz_yz", "1_xy_xz_yz"}
     assert trainer.critic_groups == {0: {"0_xy_xz_yz": (0, 1)}, 1: {"1_xy_xz_yz": (2,)}}

@@ -26,8 +26,12 @@ def compute_vf(
             total += images.numel() // num_phases
             continue
         values = images.to(torch.long)
-        lower, upper = torch.aminmax(values)
-        if int(lower) < 0 or int(upper) >= num_phases:
+        valid = ((values >= 0) & (values < num_phases)).all()
+        if values.device.type == "cuda":
+            torch._assert_async(
+                valid, "training images contain a phase outside num_phases."
+            )
+        elif not bool(valid):
             raise ValueError("training images contain a phase outside num_phases.")
         counts.append(torch.bincount(values.flatten(), minlength=num_phases).float())
         total += values.numel()
@@ -39,6 +43,7 @@ def compute_vf_loss(
     target: torch.Tensor,
     present: torch.Tensor,
 ) -> torch.Tensor:
+    present = present.to(probs.device)
     predicted = probs.to(torch.float32).mean(dim=(2, 3, 4))
     target = target.to(torch.float32)
     target_log = torch.where(

@@ -65,6 +65,7 @@ class InferenceAPI:
         overlap: int | None = None,
         storage: str = "auto",
         progress: bool = False,
+        height_origin: float = 0.0,
     ) -> torch.Tensor:
         anchors = _validate_anchors(anchors)
         scaled = blocks is not None or shape is not None
@@ -96,6 +97,7 @@ class InferenceAPI:
                     anchor_strength=anchor_strength,
                     guidance=guidance,
                     domain=domain,
+                    height_origin=height_origin,
                 )
 
             return self.scaled.generate(
@@ -110,6 +112,30 @@ class InferenceAPI:
                 progress=progress,
                 guidance=guidance,
                 domain=domain,
+                height_origin=height_origin,
+            )
+
+    def generate_probs(
+        self,
+        anchors=(),
+        vf=None,
+        domain=None,
+        seed=None,
+        guidance=None,
+        anchor_strength=None,
+        height_origin=0.0,
+    ):
+        """Keep fractional occupancy for downstream SR; same sampling as generate."""
+        with _seeded_rng(seed, self.device):
+            return self.generator.generate_probs(
+                anchors=_validate_anchors(anchors),
+                vf=vf,
+                domain=domain,
+                guidance=self.settings.guidance if guidance is None else guidance,
+                anchor_strength=self.settings.anchor_strength
+                if anchor_strength is None
+                else anchor_strength,
+                height_origin=height_origin,
             )
 
 

@@ -12,12 +12,14 @@ from src.model.layers import (
     SinusoidalEmbedding,
     embed_domain,
 )
+from src.model.pyramid import area_pyramid
 
 
 @dataclass(frozen=True)
 class CriticScores:
     logits_global: torch.Tensor
     logits_local: torch.Tensor
+    levels: tuple["CriticScores", ...] = ()
 
 
 class GroupNorm(nn.GroupNorm):
@@ -75,6 +77,8 @@ class CriticBase(nn.Module):
             raise ValueError("channels must contain at least two levels.")
 
         self.gradient_checkpointing = gradient_checkpointing
+        self.pyramid_min_size = 16
+        self.height_input = None
         self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv2d(input_channels, widths[0], 3, padding=1)
         self.blocks = nn.ModuleList(
@@ -100,7 +104,19 @@ class CriticBase(nn.Module):
         inputs: torch.Tensor,
         embedding: torch.Tensor,
         domain: torch.Tensor,
+        height: torch.Tensor | None = None,
     ) -> CriticScores:
+        scores = tuple(
+            self.score_level(level, embedding, domain, height)
+            for level in area_pyramid(inputs, self.pyramid_min_size)
+        )
+        return CriticScores(
+            scores[0].logits_global,
+            scores[0].logits_local,
+            scores if len(scores) > 1 else (),
+        )
+
+    def score_level(self, inputs, embedding, domain, height=None) -> CriticScores:
         domain_emb = embed_domain(
             self.domain_embedding,
             domain,
@@ -108,6 +124,10 @@ class CriticBase(nn.Module):
         )
         embedding = (embedding + domain_emb) * INV_SQRT_TWO
         x = self.input(inputs)
+        if height is not None and self.height_input is not None:
+            x = x + self.height_input(
+                F.interpolate(height.to(inputs), size=inputs.shape[-2:], mode="area")
+            )
         for idx, block in enumerate(self.blocks):
             x = self.apply_block(block, x, embedding)
             if idx == 1:
@@ -169,13 +189,16 @@ class PairCritic2D(CriticBase):
         x_current: torch.Tensor,
         time: torch.Tensor,
         domain: torch.Tensor,
+        height: torch.Tensor | None = None,
     ) -> CriticScores:
         embedding = self.time_mlp(
             self.time_embedding(time.to(device=x_previous.device) * self.time_scale).to(
                 dtype=x_previous.dtype
             )
         )
-        return self.score(torch.cat((x_previous, x_current), dim=1), embedding, domain)
+        return self.score(
+            torch.cat((x_previous, x_current), dim=1), embedding, domain, height
+        )
 
 
 class ConnectivityCritic2D(CriticBase):
@@ -210,6 +233,7 @@ class ConnectivityCritic2D(CriticBase):
         axes: torch.Tensor,
         gaps: torch.Tensor,
         domain: torch.Tensor,
+        height: torch.Tensor | None = None,
     ) -> CriticScores:
         if triplets.ndim != 5 or triplets.shape[1] != 3:
             raise ValueError("triplets must have shape [B, 3, C, H, W].")
@@ -219,10 +243,13 @@ class ConnectivityCritic2D(CriticBase):
             raise ValueError("gaps must have shape [B].")
         axes = axes.to(device=triplets.device, dtype=torch.long)
         gaps = gaps.to(device=triplets.device, dtype=torch.float32)
-        if axes.numel() and (int(axes.min()) < 0 or int(axes.max()) > 2):
-            raise ValueError("axes must contain only 0, 1, or 2.")
-        if gaps.numel() and bool((gaps < 1).any()):
-            raise ValueError("gaps must be positive.")
+        valid = ((axes >= 0) & (axes <= 2) & (gaps >= 1)).all()
+        if axes.device.type == "cuda":
+            torch._assert_async(valid, "invalid connectivity axes or gaps")
+        elif not bool(valid):
+            raise ValueError(
+                "axes must contain only 0, 1, or 2 and gaps must be positive."
+            )
 
         forward = self.score_once(triplets, axes, gaps, domain)
         reverse = self.score_once(triplets.flip(1), axes, gaps, domain)
@@ -231,18 +258,32 @@ class ConnectivityCritic2D(CriticBase):
             if self.directed_axis is not None
             else torch.zeros_like(axes, dtype=torch.bool)
         )
-        return CriticScores(
-            logits_global=torch.where(
-                directed,
-                forward.logits_global,
-                (forward.logits_global + reverse.logits_global) * 0.5,
-            ),
-            logits_local=torch.where(
-                directed[:, None, None],
-                forward.logits_local,
-                (forward.logits_local + reverse.logits_local) * 0.5,
-            ),
-        )
+
+        def combine(forward, reverse):
+            return CriticScores(
+                logits_global=torch.where(
+                    directed,
+                    forward.logits_global,
+                    (forward.logits_global + reverse.logits_global) * 0.5,
+                ),
+                logits_local=torch.where(
+                    directed[:, None, None],
+                    forward.logits_local,
+                    (forward.logits_local + reverse.logits_local) * 0.5,
+                ),
+            )
+
+        result = combine(forward, reverse)
+        if forward.levels:
+            return CriticScores(
+                result.logits_global,
+                result.logits_local,
+                tuple(
+                    combine(f, r)
+                    for f, r in zip(forward.levels, reverse.levels, strict=True)
+                ),
+            )
+        return result
 
     def score_once(
         self,
@@ -250,6 +291,7 @@ class ConnectivityCritic2D(CriticBase):
         axes: torch.Tensor,
         gaps: torch.Tensor,
         domain: torch.Tensor,
+        height: torch.Tensor | None = None,
     ) -> CriticScores:
         axis_embedding = self.axis_embedding(axes).to(dtype=triplets.dtype)
         gap_embedding = self.gap_mlp(self.gap_embedding(gaps)).to(dtype=triplets.dtype)

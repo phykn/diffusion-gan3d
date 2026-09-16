@@ -208,6 +208,7 @@ class ScaledGenerator:
         base_offset: Sequence[int | None] | None = None,
         anchors: Sequence[PlaneAnchor] = (),
         anchor_strength: float = 1.0,
+        height_origin: float = 0.0,
     ) -> torch.Tensor:
         self.stats = None
         margin = self.generator.default_margin if margin is None else margin
@@ -217,10 +218,12 @@ class ScaledGenerator:
             overlap,
             margin,
         )
+        self.generator.validate_height(output_shape, domain, height_origin)
         storage = self.select_storage("auto")
         tiles = self.make_tiles(plan)
         tile_anchors = self.prepare_anchors(anchors, tiles, plan, anchor_strength)
         vf = self.generator.prepare_vf(vf)
+        height_domain = domain
         domain = self.generator.prepare_domain(domain)
         base = self.prepare_base(base, plan, offset=base_offset)
         current, next_state = self.make_states(plan, storage)
@@ -238,6 +241,8 @@ class ScaledGenerator:
             guidance=guidance,
             tile_anchors=tile_anchors,
             anchor_strength=anchor_strength,
+            height_origin=height_origin,
+            height_domain=height_domain,
         )
         probs = ((current.values.float() + 1.0) * 0.5).clamp(0.0, 1.0)
         probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(
@@ -263,6 +268,7 @@ class ScaledGenerator:
         base_offset: Sequence[int | None] | None = None,
         anchors: Sequence[PlaneAnchor] = (),
         anchor_strength: float = 1.0,
+        height_origin: float = 0.0,
     ) -> torch.Tensor:
         self.stats = None
         margin = self.generator.default_margin if margin is None else margin
@@ -275,10 +281,12 @@ class ScaledGenerator:
                 raise ValueError("blocks and shape cannot be provided together.")
             output_shape = self.shape_from_blocks(blocks, overlap)
         plan = self._generation_plan(output_shape, overlap, margin)
+        self.generator.validate_height(output_shape, domain, height_origin)
         selected = self.select_storage(storage)
         tiles = self.make_tiles(plan)
         tile_anchors = self.prepare_anchors(anchors, tiles, plan, anchor_strength)
         vf = self.generator.prepare_vf(vf)
+        height_domain = domain
         domain = self.generator.prepare_domain(domain)
         base = self.prepare_base(base, plan, offset=base_offset)
         current, next_state = self.make_states(plan, selected)
@@ -297,6 +305,8 @@ class ScaledGenerator:
             guidance=guidance,
             tile_anchors=tile_anchors,
             anchor_strength=anchor_strength,
+            height_origin=height_origin,
+            height_domain=height_domain,
         )
         labels = self.crop_output(labels, output_shape, margin)
         self.stats = self._output_plan(plan, output_shape)
@@ -351,6 +361,18 @@ class ScaledGenerator:
                     )
                 )
             result.append(tuple(local))
+            if local:
+                # Validate intersections once, before the reverse loop.
+                encode_anchors(
+                    tuple(
+                        replace(anchor, image=anchor.image.cpu()) for anchor in local
+                    ),
+                    1,
+                    self.generator.num_phases,
+                    plan.tile_size,
+                    torch.device("cpu"),
+                    torch.float32,
+                )
         return tuple(result)
 
     def shape_from_blocks(
@@ -726,6 +748,8 @@ class ScaledGenerator:
         guidance: float = 1.0,
         tile_anchors: tuple = (),
         anchor_strength: float = 1.0,
+        height_origin: float = 0.0,
+        height_domain: int | None = None,
     ) -> VolumeState:
         generator = self.generator
         tile_buffer = TileBuffer(
@@ -776,6 +800,8 @@ class ScaledGenerator:
                     guidance=guidance,
                     tile_anchors=tile_anchors,
                     anchor_strength=anchor_strength,
+                    height_origin=height_origin,
+                    height_domain=height_domain,
                 )
                 if final_labels is None:
                     current, next_state = next_state, current
@@ -799,6 +825,8 @@ class ScaledGenerator:
         guidance: float = 1.0,
         tile_anchors: tuple = (),
         anchor_strength: float = 1.0,
+        height_origin: float = 0.0,
+        height_domain: int | None = None,
     ) -> None:
         generator = self.generator
         if tile_buffer is None:
@@ -823,12 +851,21 @@ class ScaledGenerator:
                     tuple(values.shape[-3:]),
                     generator.device,
                     values.dtype,
+                    validate=False,
                 )
                 conditions = {
                     "anchor_image": anchor.image,
                     "anchor_mask": anchor.mask,
                     "anchor_strength": anchor_strength,
                 }
+            if generator.height_data is not None:
+                axis = {"z": 0, "y": 1, "x": 2}[generator.height_data["thickness_axis"]]
+                conditions["height"] = generator.height_condition(
+                    values.shape[-3:],
+                    height_domain,
+                    height_origin,
+                    tile.source[axis].start - plan.margin,
+                )
             with torch.autocast(
                 device_type=generator.device.type,
                 dtype=torch.float16,

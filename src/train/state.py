@@ -23,7 +23,7 @@ def fingerprint_data(streams: dict) -> dict:
 
 def save_training(path: str | Path, trainer) -> None:
     payload = {
-        "format": "diffusion-gan3d.lr.train.v3",
+        "format": "diffusion-gan3d.lr.train.v4",
         "config": trainer.cfg,
         "step": trainer.completed_steps,
         "model": trainer.denoiser.state_dict(),
@@ -38,6 +38,7 @@ def save_training(path: str | Path, trainer) -> None:
         "scaler": trainer.scaler.state_dict(),
         "updates": trainer.updates,
         "use_multi_anchor_next": trainer.use_multi_anchor_next,
+        "anchor_bank": trainer.anchor_bank.entries,
         "data_fingerprint": trainer.data_fingerprint,
     }
     path = Path(path)
@@ -48,7 +49,7 @@ def save_training(path: str | Path, trainer) -> None:
 
 
 def resume_training(trainer, payload: dict) -> None:
-    if payload.get("format") != "diffusion-gan3d.lr.train.v3":
+    if payload.get("format") != "diffusion-gan3d.lr.train.v4":
         raise ValueError(
             "resume requires an LR training checkpoint, not inference weights."
         )
@@ -73,3 +74,4 @@ def resume_training(trainer, payload: dict) -> None:
     trainer.updates = dict(payload["updates"])
     trainer.completed_steps = payload["step"]
     trainer.use_multi_anchor_next = payload["use_multi_anchor_next"]
+    trainer.anchor_bank.entries = payload["anchor_bank"]

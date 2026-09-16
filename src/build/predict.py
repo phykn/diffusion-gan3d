@@ -39,4 +39,5 @@ def load_generator(
         num_phases=data["num_phases"],
         latent_channels=model["generator"]["latent_channels"],
         use_amp=use_amp,
+        height_data=data if cfg["conditioning"]["height_enabled"] else None,
     )

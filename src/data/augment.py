@@ -119,16 +119,21 @@ class CriticAugment:
             transforms = torch.zeros(
                 first.shape[0], device=first.device, dtype=torch.long
             )
-            for axis in axes.unique().tolist():
-                if axis not in self.plane_transforms:
-                    raise ValueError(
-                        f"missing augmentation policy for plane axis {axis}."
-                    )
+            valid = torch.zeros_like(axes, dtype=torch.bool)
+            for axis in self.plane_transforms:
+                valid |= axes == axis
+            if axes.device.type == "cuda":
+                torch._assert_async(
+                    valid.all(), "missing augmentation policy for plane axis"
+                )
+            elif not bool(valid.all()):
+                raise ValueError("missing augmentation policy for plane axis")
+            for axis in self.plane_transforms:
                 allowed = self.plane_transforms[axis]
                 if first.shape[-2] != first.shape[-1]:
                     allowed = tuple(index for index in allowed if index % 2 == 0)
                 mask = axes == axis
-                count = int(mask.sum())
+                count = first.shape[0]
                 choices = torch.tensor(
                     tuple(index for index in allowed if index != 0) or (0,),
                     device=first.device,
@@ -139,7 +144,7 @@ class CriticAugment:
                 selected.masked_fill_(
                     torch.rand(count, device=first.device) >= self.prob, 0
                 )
-                transforms[mask] = selected
+                transforms = torch.where(mask, selected, transforms)
         return tuple(self.apply_transforms(tensor, transforms) for tensor in tensors)
 
     def sample_transforms(
@@ -169,8 +174,16 @@ class CriticAugment:
         transforms: torch.Tensor,
     ) -> torch.Tensor:
         height, width = inputs.shape[-2:]
-        if height != width and bool((transforms.remainder(2) != 0).any()):
-            raise ValueError("rectangular inputs require shape-preserving transforms.")
+        if height != width:
+            valid = (transforms.remainder(2) == 0).all()
+            if transforms.device.type == "cuda":
+                torch._assert_async(
+                    valid, "rectangular inputs require shape-preserving transforms."
+                )
+            elif not bool(valid):
+                raise ValueError(
+                    "rectangular inputs require shape-preserving transforms."
+                )
         maps = self.get_index_maps(inputs.device, height, width)
         indices = maps.index_select(0, transforms.to(torch.long))
         flattened = inputs.reshape(inputs.shape[0], -1, height * width)

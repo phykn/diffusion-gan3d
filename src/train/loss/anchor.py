@@ -32,7 +32,7 @@ class SoftAnchorLoss(nn.Module):
         observed_axis_masks: torch.Tensor | None = None,
     ) -> AnchorLoss:
         probs = logits.float().softmax(dim=1)
-        visibility = visible.reshape(-1, 1, 1, 1, 1)
+        visibility = visible.to(logits.device).reshape(-1, 1, 1, 1, 1)
         if observed_mask is None:
             observed_mask = condition.mask
             observed_axis_masks = condition.axis_masks

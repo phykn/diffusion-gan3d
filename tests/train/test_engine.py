@@ -15,6 +15,7 @@ from src.data.augment import CriticAugment
 from src.model.diffusion import Diffusion
 from src.model.layers import NULL_DOMAIN
 from src.plane import PLANES
+from src.train.anchor_bank import AnchorBank
 from src.train.ema import build_ema
 from src.train.loss import vf
 from src.train.loss.connect import TripletBatch
@@ -86,7 +87,29 @@ def sample_pairs(
     trainer = object.__new__(Trainer)
     trainer.slice_pairs_per_axis = count
     trainer.patch_size = patch_size
-    return trainer.sample_pairs(previous, current, axis, axis_masks, crop_shape)
+    condition = None
+    if axis_masks is not None:
+        planes = []
+        for normal in range(3):
+            for _, z, y, x in axis_masks[:, normal].nonzero().tolist():
+                coords = [z, y, x]
+                planes.append(
+                    PlaneAnchor(
+                        torch.zeros(1, 1, dtype=torch.long),
+                        normal,
+                        coords[normal],
+                        tuple(c for a, c in enumerate(coords) if a != normal),
+                    )
+                )
+        condition = encode_anchors(
+            planes,
+            previous.shape[0],
+            2,
+            previous.shape[-3:],
+            previous.device,
+            previous.dtype,
+        )
+    return trainer.sample_pairs(previous, current, axis, condition, crop_shape)
 
 
 def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
@@ -135,7 +158,7 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
         torch.zeros(1, 2, 3, 3, 3),
         anchor,
         transition=0,
-        source="real",
+        source="multi",
     )
 
     assert augmented_real.center_slots.tolist() == [1, 1]
@@ -323,6 +346,7 @@ def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
     trainer = object.__new__(Trainer)
     trainer.anchor_training_probability = 0.5
     trainer.use_multi_anchor_next = False
+    trainer.anchor_bank = AnchorBank()
     trainer.volume_batch_size = 1
     trainer.device = torch.device("cpu")
     trainer.sample_real_anchor = Mock(return_value=Mock(source="real"))
@@ -334,7 +358,11 @@ def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
     trainer.anchor_training_probability = 1.0
     sources = [trainer.sample_anchor({}, 2, owned_axes=()).source for _ in range(3)]
 
-    assert sources == ["real", "multi", "real"]
+    assert sources == [
+        "real",
+        "real",
+        "real",
+    ]  # Replay waits for a measured-conditioned sample.
 
 
 def test_training_step_uses_null_critics_for_borrowed_axes() -> None:

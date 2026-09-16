@@ -15,6 +15,16 @@ class PlaneAnchor:
 
 
 @dataclass(frozen=True)
+class AnchorRegion:
+    axis: int
+    index: int
+    row: int
+    col: int
+    height: int
+    width: int
+
+
+@dataclass(frozen=True)
 class AnchorCondition:
     image: torch.Tensor
     mask: torch.Tensor
@@ -23,6 +33,8 @@ class AnchorCondition:
     planes: int
     conflicts: int
     source_voxels: int
+    regions: tuple[AnchorRegion, ...] = ()
+    active_batches: tuple[int, ...] | None = None
 
     @property
     def conflict_rate(self) -> float:
@@ -37,6 +49,7 @@ def encode_anchors(
     device: torch.device,
     dtype: torch.dtype,
     reconcile: bool = False,
+    validate: bool = True,
 ) -> AnchorCondition | None:
     if not anchors:
         return None
@@ -64,6 +77,7 @@ def encode_anchors(
     )
     conflicts = 0
     source_voxels = 0
+    regions = []
     condition_image = torch.zeros(
         (batch_size, num_phases, *shape), dtype=dtype, device=device
     )
@@ -84,14 +98,17 @@ def encode_anchors(
                 raise ValueError(
                     "anchor phase fractions must have shape [C,H,W] or [B,C,H,W]."
                 )
-            valid = (
-                torch.isfinite(image).all() & (image >= 0).all() & (image <= 1).all()
-            )
-            valid = valid & ((image.sum(1) - 1).abs() < 1e-5).all()
-            if not bool(valid):
-                raise ValueError(
-                    "anchor phase fractions must be finite, non-negative and sum to one."
+            if validate:
+                valid = (
+                    torch.isfinite(image).all()
+                    & (image >= 0).all()
+                    & (image <= 1).all()
                 )
+                valid = valid & ((image.sum(1) - 1).abs() < 1e-5).all()
+                if not bool(valid):
+                    raise ValueError(
+                        "anchor phase fractions must be finite, non-negative and sum to one."
+                    )
             probs = image.to(device=device, dtype=dtype)
         else:
             if image.ndim == 2:
@@ -133,7 +150,7 @@ def encode_anchors(
         encoded = probs.mul(2).sub(1)
 
         conflict = mask_patch & ((value_patch - encoded).abs().amax(1) > 1e-5)
-        conflict_count = int(conflict.sum())
+        conflict_count = int(conflict.sum()) if validate else 0
         if conflict_count and not reconcile:
             raise ValueError("anchor planes contain conflicting intersections.")
         conflicts += conflict_count
@@ -142,6 +159,7 @@ def encode_anchors(
         value_patch.copy_(torch.where(mask_patch.unsqueeze(1), value_patch, encoded))
         mask_patch.fill_(True)
         axis_patch.fill_(True)
+        regions.append(AnchorRegion(anchor.axis, anchor.index, row, col, height, width))
 
     return AnchorCondition(
         image=condition_image,
@@ -151,4 +169,5 @@ def encode_anchors(
         planes=len(anchors),
         conflicts=conflicts,
         source_voxels=source_voxels,
+        regions=tuple(regions),
     )

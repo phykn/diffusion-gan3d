@@ -3,7 +3,12 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from src.build.data import build_augmentation, build_datasets, build_stream
+from src.build.data import (
+    build_augmentation,
+    build_datasets,
+    build_stream,
+    resolve_height_metadata,
+)
 from src.build.model import build_diffusion, build_models
 from src.config import (
     get_schedule_steps,
@@ -53,6 +58,7 @@ def build_optimizers(
 def build_trainer(cfg: dict, device: torch.device) -> Trainer:
     cfg = normalize_train_config(cfg)
     train = cfg["train"]
+    resolve_height_metadata(cfg)
     data = cfg["data"]
     model = cfg["model"]
     generator = model["generator"]
@@ -142,6 +148,9 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             anchor_ramp_steps=anchor_ramp_steps,
             anchor_pixel_loss_weight=loss["anchor_pixel_weight"],
             anchor_shared_axis_probability=anchor["borrowed_plane_probability"],
+            anchor_bank_capacity=anchor["bank_capacity"],
+            anchor_plane_spacing=anchor["plane_spacing"],
+            structure_every_steps=train["structure_every_steps"],
             connectivity_weight=connectivity["adversarial_weight"],
             normal_transition_weight=connectivity["normal_transition_weight"],
             connectivity_max_gap=connectivity.get("max_slice_gap", 1),
@@ -157,5 +166,6 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         ),
     )
     trainer.cfg = cfg
+    trainer.height_data = cfg["data"] if cfg["conditioning"]["height_enabled"] else None
     trainer.data_fingerprint = fingerprint_data(streams)
     return trainer

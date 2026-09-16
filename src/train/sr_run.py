@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from tqdm import trange
 
-from src.build.data import build_augmentation
+from src.build.data import build_augmentation, resolve_height_metadata
 from src.build.predict import load_generator
 from src.build.sr import build_sr_trainer
 from src.config import (
@@ -46,7 +46,7 @@ def run_sr_train(
         if bank_size is not None:
             raise ValueError("--bank-size cannot change on resume.")
         payload = torch.load(resume, map_location="cpu", weights_only=True)
-        if payload.get("format") != "diffusion-gan3d.sr.train.v5":
+        if payload.get("format") != "diffusion-gan3d.sr.train.v6":
             raise ValueError("resume requires an SR training checkpoint.")
         cfg = normalize_train_config(payload["config"], "sr")
         bank_path = Path(cfg["source"]["bank"])
@@ -63,7 +63,13 @@ def run_sr_train(
         if base_path.is_dir():
             base_path = base_path / "generator.pt"
         base_cfg = load_train_config(find_train_config(base_path))
+        resolve_height_metadata(cfg)
         validate_sr_source(cfg["data"], base_cfg["data"])
+        if (
+            cfg["conditioning"]["height_enabled"]
+            != base_cfg["conditioning"]["height_enabled"]
+        ):
+            raise ValueError("SR height conditioning must match the frozen LR source.")
         if bank_size is not None:
             cfg["lr_bank"]["samples_per_domain"] = bank_size
         cfg["source"] = {
@@ -87,13 +93,23 @@ def run_sr_train(
     if payload is None:
         generator = load_generator(base_path, device)
         bank = {}
+        origins = {}
         for domain in get_domains(cfg["data"]):
+            origins[domain] = sample_origins(
+                cfg, domain, cfg["lr_bank"]["samples_per_domain"]
+            )
             bank[domain] = torch.stack(
                 [
-                    generator.generate(
-                        domain=domain, guidance=cfg["lr_bank"]["guidance"]
+                    generator.generate_probs(
+                        domain=domain,
+                        guidance=cfg["lr_bank"]["guidance"],
+                        **(
+                            {"height_origin": float(origins[domain][i])}
+                            if cfg["conditioning"]["height_enabled"]
+                            else {}
+                        ),
                     )
-                    for _ in trange(
+                    for i in trange(
                         cfg["lr_bank"]["samples_per_domain"],
                         desc=f"LR bank domain {domain}",
                     )
@@ -103,15 +119,20 @@ def run_sr_train(
         if device.type == "cuda":
             torch.cuda.empty_cache()
         bank_payload = {
-            "format": "diffusion-gan3d.lr-bank.v1",
+            "format": "diffusion-gan3d.lr-bank.v2",
             "volumes": bank,
+            "height_origins": origins
+            if cfg["conditioning"]["height_enabled"]
+            else None,
             "data": cfg["data"],
             "source": dict(cfg["source"]),
         }
         bank_path = run_dir / "lr_bank.pt"
         torch.save(bank_payload, bank_path)
         cfg["source"].update(bank=str(bank_path), bank_sha256=file_hash(bank_path))
-    trainer = build_sr_trainer(cfg, bank_payload["volumes"], device)
+    trainer = build_sr_trainer(
+        cfg, bank_payload["volumes"], device, bank_payload.get("height_origins")
+    )
     if payload:
         trainer.resume(payload)
     save_yaml(run_dir / "config.yaml", cfg)
@@ -152,8 +173,13 @@ def refresh_bank(trainer, run_dir: Path) -> None:
     interval = cfg["lr_bank"]["refresh_every_steps"]
     for domain, volumes in trainer.bank.items():
         index = (trainer.step // interval - 1) % len(volumes)
-        volumes[index] = generator.generate(
-            domain=domain, guidance=cfg["lr_bank"]["guidance"]
+        conditions = {}
+        if cfg.get("conditioning", {}).get("height_enabled", False):
+            origin = sample_origins(cfg, domain, 1)[0]
+            trainer.bank_origins[domain][index] = origin
+            conditions["height_origin"] = float(origin)
+        volumes[index] = generator.generate_probs(
+            domain=domain, guidance=cfg["lr_bank"]["guidance"], **conditions
         )
     del generator
     if trainer.device.type == "cuda":
@@ -161,8 +187,9 @@ def refresh_bank(trainer, run_dir: Path) -> None:
     path = run_dir / f"lr_bank_step_{trainer.step:08d}.pt"
     torch.save(
         {
-            "format": "diffusion-gan3d.lr-bank.v1",
+            "format": "diffusion-gan3d.lr-bank.v2",
             "volumes": trainer.bank,
+            "height_origins": getattr(trainer, "bank_origins", None),
             "data": cfg["data"],
             "source": dict(cfg["source"]),
         },
@@ -170,3 +197,10 @@ def refresh_bank(trainer, run_dir: Path) -> None:
     )
     cfg["source"].update(bank=str(path), bank_sha256=file_hash(path))
     save_yaml(run_dir / "config.yaml", cfg)
+
+
+def sample_origins(cfg, domain, count):
+    if not cfg["conditioning"]["height_enabled"]:
+        return torch.zeros(count)
+    maximum = cfg["data"]["height_extents"][domain] - cfg["data"]["crop_size"]
+    return torch.rand(count) * maximum

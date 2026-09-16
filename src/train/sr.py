@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 from src.config import get_plane_groups, get_sr_sizes, normalize_train_config
 from src.data.augment import CriticAugment
+from src.evaluate.structure import structure_metrics
+from src.prepare.height import height_field
 from src.prepare.resize import phase_channels
 from src.train.ema import build_ema, update_ema
 from src.train.sr_loss import consistency_loss, gradient_penalty, sample_slices
@@ -12,7 +14,17 @@ from src.train.step import check_loss, materialize_metrics, step_optimizer
 
 
 class SRTrainer:
-    def __init__(self, model, critics, streams, bank, cfg, device, augment=None):
+    def __init__(
+        self,
+        model,
+        critics,
+        streams,
+        bank,
+        cfg,
+        device,
+        augment=None,
+        bank_origins=None,
+    ):
         cfg = normalize_train_config(cfg, "sr")
         self.model = model.to(device)
         self.critics = critics.to(device)
@@ -34,6 +46,7 @@ class SRTrainer:
             for domain, groups in self.critic_groups.items()
         }
         self.bank = bank
+        self.bank_origins = bank_origins
         self.cfg = cfg
         self.device = device
         self.step = 0
@@ -63,8 +76,14 @@ class SRTrainer:
         domain = int(torch.randint(len(self.bank), ()).item())
         volumes = self.bank[domain]
         indices = torch.randint(len(volumes), (train["volume_batch_size"],))
-        low = phase_channels(volumes[indices].to(self.device), self.model.num_phases)
-        conditioned = self.corrupt_coarse(low)
+        low = volumes[indices].to(self.device)
+        conditioned, corruption_level = self.corrupt_coarse(low)
+        height = (
+            None
+            if self.bank_origins is None
+            else self.volume_height(low, self.bank_origins[domain][indices], domain)
+        )
+        conditions = {} if height is None else {"height": height}
         domain_ids = torch.full(
             (len(low),), domain, device=self.device, dtype=torch.long
         )
@@ -72,10 +91,17 @@ class SRTrainer:
         self.critics.train().requires_grad_(True)
         d_value = 0.0
         groups = self.critic_groups[domain]
+        real_slices = {}
         for _ in range(train["critic_updates_per_step"]):
             with torch.no_grad(), torch.autocast(self.device.type, enabled=self.amp):
                 fake = (
-                    self.model(conditioned, self.noise(low), domain_ids)
+                    self.model(
+                        conditioned,
+                        self.noise(low),
+                        domain_ids,
+                        corruption_level,
+                        **conditions,
+                    )
                     .float()
                     .softmax(1)
                 )
@@ -85,16 +111,57 @@ class SRTrainer:
                 critic = self.critics[group]
                 total = torch.zeros((), device=self.device)
                 for axis in axes:
-                    real = self.streams[domain][axis].next().to(self.device)
+                    batch = self.streams[domain][axis].next()
+                    real_height = None
+                    if isinstance(batch, dict):
+                        real = batch["image"].to(self.device)
+                        thickness = {"z": 0, "y": 1, "x": 2}[
+                            self.cfg["data"]["thickness_axis"]
+                        ]
+                        if axis != thickness:
+                            direction = [a for a in range(3) if a != axis].index(
+                                thickness
+                            )
+                            real_height = height_field(
+                                real.shape[-2:],
+                                direction,
+                                batch["height_origin"],
+                                self.cfg["data"]["crop_size"] / real.shape[-1],
+                                self.cfg["data"]["height_extents"][domain],
+                                self.device,
+                            )
+                    else:
+                        real = batch.to(self.device)
                     if real.ndim == 3:
                         real = phase_channels(real, self.model.num_phases)
-                    slices = sample_slices(fake, axis, real.shape[0])
-                    real, slices = self.augment.apply_together(
-                        (real, slices), plane=axis
+                    real_slices[axis] = real
+                    slices, fake_height = self.slices_with_height(
+                        fake, height, axis, real.shape[0], domain
+                    )
+                    if real_height is None:
+                        real, slices = self.augment.apply_together(
+                            (real, slices), plane=axis
+                        )
+                    else:
+                        real, slices, real_height, fake_height = (
+                            self.augment.apply_together(
+                                (real, slices, real_height, fake_height), plane=axis
+                            )
+                        )
+                    real_conditions = (
+                        {} if real_height is None else {"height": real_height}
+                    )
+                    fake_conditions = (
+                        {} if fake_height is None else {"height": fake_height}
                     )
                     # GP stays in float32. Average planes within each group, then groups.
-                    fake_score, real_score = critic(slices).mean(), critic(real).mean()
-                    gp = gradient_penalty(critic, real, slices)
+                    fake_score, real_score = (
+                        critic(slices, **fake_conditions).mean(),
+                        critic(real, **real_conditions).mean(),
+                    )
+                    gp = gradient_penalty(
+                        critic, real, slices, real_height, fake_height
+                    )
                     diagnostics[f"score/{group}/{axis}/real"] = real_score.detach()
                     diagnostics[f"score/{group}/{axis}/fake"] = fake_score.detach()
                     diagnostics[f"gp/{group}/{axis}"] = gp.detach()
@@ -110,20 +177,32 @@ class SRTrainer:
         self.generator_optim.zero_grad(set_to_none=True)
         with torch.autocast(self.device.type, enabled=self.amp):
             high = (
-                self.model(conditioned, self.noise(low), domain_ids).float().softmax(1)
+                self.model(
+                    conditioned,
+                    self.noise(low),
+                    domain_ids,
+                    corruption_level,
+                    **conditions,
+                )
+                .float()
+                .softmax(1)
             )
             adversarial = torch.zeros((), device=self.device)
             for axis in self.streams[domain]:
-                slices = sample_slices(high, axis, train["slices_per_plane"])
-                (slices,) = self.augment.apply_together((slices,), plane=axis)
-                group = self.axis_critics[domain][axis]
-                adversarial = adversarial - self.critics[group](slices).mean() / (
-                    len(groups[group]) * len(groups)
+                slices, fake_height = self.slices_with_height(
+                    high, height, axis, train["slices_per_plane"], domain
                 )
+                values = (slices,) if fake_height is None else (slices, fake_height)
+                values = self.augment.apply_together(values, plane=axis)
+                slices = values[0]
+                fake_conditions = {} if fake_height is None else {"height": values[1]}
+                group = self.axis_critics[domain][axis]
+                adversarial = adversarial - self.critics[group](
+                    slices, **fake_conditions
+                ).mean() / (len(groups[group]) * len(groups))
             consistency, error = consistency_loss(
                 high,
                 low,
-                losses["downsample_temperature"],
                 losses["downsample_mse_tolerance"],
             )
             loss = adversarial + losses["downsample_consistency_weight"] * consistency
@@ -137,6 +216,9 @@ class SRTrainer:
         if updated:
             update_ema(self.ema, self.model, self.cfg["optim"]["ema_decay"])
         self.step += 1
+        interval = train["structure_every_steps"]
+        if interval and self.step % interval == 0:
+            diagnostics.update(structure_metrics(high, real_slices, groups))
         with torch.no_grad():
             accuracy = (
                 (
@@ -163,20 +245,58 @@ class SRTrainer:
                 **{f"phase_{i}": value for i, value in enumerate(fractions)},
                 **diagnostics,
                 "coarse_corruption_mse": (conditioned - low).square().mean().detach(),
+                "coarse_corruption_level": corruption_level.mean().detach(),
             }
         )
 
-    def corrupt_coarse(self, low: torch.Tensor) -> torch.Tensor:
+    def volume_height(self, low, origins, domain):
+        data = self.cfg["data"]
+        axis = {"z": 0, "y": 1, "x": 2}[data["thickness_axis"]]
+        return height_field(
+            low.shape[2:],
+            axis,
+            origins,
+            data["crop_size"] / data["lo_res_size"],
+            data["height_extents"][domain],
+            self.device,
+        )
+
+    def slices_with_height(self, volume, height, axis, count, domain):
+        if height is None or axis == {"z": 0, "y": 1, "x": 2}.get(
+            self.cfg["data"].get("thickness_axis")
+        ):
+            return sample_slices(volume, axis, count), None
+        data = self.cfg["data"]
+        thickness = {"z": 0, "y": 1, "x": 2}[data["thickness_axis"]]
+        extent = data["height_extents"][domain]
+        origins = (height[:, 0, 0, 0, 0] + 1) * extent / 2 - data["crop_size"] / data[
+            "lo_res_size"
+        ] / 2
+        height = height_field(
+            volume.shape[2:],
+            thickness,
+            origins,
+            data["crop_size"] / volume.shape[thickness + 2],
+            extent,
+            volume.device,
+        )
+        slices = sample_slices(torch.cat((volume, height), 1), axis, count)
+        return slices[:, :-1], slices[:, -1:].detach()
+
+    def corrupt_coarse(self, low: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         settings = self.cfg["conditioning"]
         probability = settings["coarse_corruption_probability"]
         strength = settings["coarse_corruption_strength"]
         if probability == 0 or strength == 0:
-            return low
+            return low, low.new_zeros(len(low))
         shape = (low.shape[0], 1, *(max(1, n // 4) for n in low.shape[2:]))
         active = torch.rand((len(low), 1, 1, 1, 1), device=low.device) < probability
+        level = (
+            torch.rand((len(low), 1, 1, 1, 1), device=low.device) * strength * active
+        )
         mask = (
             F.interpolate(
-                (torch.rand(shape, device=low.device) < strength).float(),
+                (torch.rand(shape, device=low.device) < level).float(),
                 size=low.shape[2:],
                 mode="nearest",
             ).bool()
@@ -185,7 +305,10 @@ class SRTrainer:
         labels = torch.randint(low.shape[1], (shape[0], *shape[2:]), device=low.device)
         replacement = F.one_hot(labels, low.shape[1]).movedim(-1, 1).float()
         replacement = F.interpolate(replacement, size=low.shape[2:], mode="nearest")
-        return torch.where(mask, replacement, low)
+        corrupted = torch.where(mask, replacement, low)
+        # Realized changed mass, including replacements that happened to match.
+        level = (corrupted - low).abs().mean(dim=(2, 3, 4)).sum(1) * 0.5
+        return corrupted, level
 
     def noise(self, low: torch.Tensor) -> torch.Tensor:
         return torch.randn(
@@ -195,7 +318,7 @@ class SRTrainer:
     def save(self, path) -> None:
         torch.save(
             {
-                "format": "diffusion-gan3d.sr.train.v5",
+                "format": "diffusion-gan3d.sr.train.v6",
                 "config": self.cfg,
                 "step": self.step,
                 "model": self.model.state_dict(),
@@ -215,7 +338,7 @@ class SRTrainer:
         saved_cfg = normalize_train_config(payload["config"], "sr")
         if get_plane_groups(saved_cfg) != get_plane_groups(self.cfg):
             raise ValueError("critic plane_groups cannot change on resume.")
-        if payload.get("format") != "diffusion-gan3d.sr.train.v5":
+        if payload.get("format") != "diffusion-gan3d.sr.train.v6":
             raise ValueError("unsupported SR training checkpoint format.")
         self.model.load_state_dict(payload["model"])
         self.ema.load_state_dict(payload["ema"])
@@ -231,7 +354,7 @@ class SRTrainer:
     def export(self, path) -> None:
         torch.save(
             {
-                "format": "diffusion-gan3d.sr.v1",
+                "format": "diffusion-gan3d.sr.v2",
                 "config": self.cfg,
                 "step": self.step,
                 "model": self.ema.state_dict(),
@@ -261,7 +384,8 @@ def validate_sr_config(cfg: dict) -> None:
     refresh = cfg["lr_bank"]["refresh_every_steps"]
     if type(refresh) is not int or refresh < 0:
         raise ValueError("lr_bank.refresh_every_steps must be a non-negative integer.")
-    for name, value in cfg["conditioning"].items():
+    for name in ("coarse_corruption_probability", "coarse_corruption_strength"):
+        value = cfg["conditioning"][name]
         if (
             type(value) not in (int, float)
             or not math.isfinite(value)
@@ -278,7 +402,6 @@ def validate_sr_config(cfg: dict) -> None:
         "gradient_penalty_weight",
         "downsample_consistency_weight",
         "downsample_mse_tolerance",
-        "downsample_temperature",
     ):
         value = cfg["loss"][name]
         if (
@@ -288,7 +411,5 @@ def validate_sr_config(cfg: dict) -> None:
             or value < 0
         ):
             raise ValueError(f"loss.{name} must be non-negative and finite.")
-    if cfg["loss"]["downsample_temperature"] == 0:
-        raise ValueError("loss.downsample_temperature must be positive.")
     if not 0 <= cfg["optim"]["ema_decay"] < 1:
         raise ValueError("optim.ema_decay must be in [0, 1).")

@@ -139,7 +139,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(tmp_path, scale):
     run_predict.main(
         [
             "--input",
-            str(tmp_path / "result_lr.tiff"),
+            str(tmp_path / "result_lr_probs.pt"),
             "--sr-weights",
             str(resumed / "weights/model.pt"),
             "--output",

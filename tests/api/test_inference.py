@@ -73,6 +73,7 @@ def test_generate_without_geometry_uses_direct_generator(api: InferenceAPI) -> N
             "anchor_strength": 0.9,
             "guidance": 1.2,
             "domain": 0,
+            "height_origin": 0.0,
         }
     ]
     assert api.scaled.calls == []

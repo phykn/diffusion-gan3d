@@ -49,6 +49,9 @@ class RealDataset(Dataset[torch.Tensor]):
         return np.array(data, copy=True)
 
     def crop(self, img: np.ndarray) -> np.ndarray:
+        return self.crop_with_origin(img)[0]
+
+    def crop_with_origin(self, img: np.ndarray):
         self.check_image(img)
 
         h, w = img.shape
@@ -59,7 +62,7 @@ class RealDataset(Dataset[torch.Tensor]):
         crop_w = min(w, self.crop_size) if self.allow_part else self.crop_size
         top = int(np.random.randint(0, h - crop_h + 1))
         left = int(np.random.randint(0, w - crop_w + 1))
-        return img[top : top + crop_h, left : left + crop_w]
+        return img[top : top + crop_h, left : left + crop_w], (top, left)
 
     def resize(self, img: np.ndarray) -> np.ndarray:
         self.check_image(img)

@@ -48,7 +48,7 @@ def main() -> None:
                 "--resume uses saved settings; only --steps may override them."
             )
         payload = torch.load(args.resume, map_location="cpu", weights_only=True)
-        if payload.get("format") != "diffusion-gan3d.lr.train.v3":
+        if payload.get("format") != "diffusion-gan3d.lr.train.v4":
             raise ValueError("--resume requires an LR training checkpoint.")
         cfg = normalize_train_config(payload["config"])
     else:
@@ -66,6 +66,7 @@ def main() -> None:
     if payload:
         build_cfg["train"]["initial_weights"] = None
     trainer = build_trainer(build_cfg, device)
+    cfg["data"] = trainer.cfg["data"]
     trainer.cfg = cfg
     if payload:
         resume_training(trainer, payload)

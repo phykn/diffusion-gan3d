@@ -52,7 +52,7 @@ reloading that snapshot retains its values even if the code defaults later chang
 |---|---|
 | Calculated from other inputs | HR grid from LR size × SR scale; domain count from data; critic count from plane groups |
 | Optional fallback | `optim.critic_lr` follows `optim.generator_lr` when omitted |
-| Advanced defaults | Embedding/latent/noise channels, diffusion beta limits, anchor schedule and dropout, local critic weighting and R1 interval, SR downsampling tolerance/temperature, Adam betas, EMA, precision and loader options |
+| Advanced defaults | Embedding/latent/noise channels, diffusion beta limits, anchor schedule and dropout, local critic weighting and R1 interval, SR downsampling tolerance, Adam betas, EMA, precision and loader options |
 | Explicit experiment choices | Image/phase meanings, crop and LR sizes, SR scale, network widths, plane groups and augmentation, loss weights, batch/slice counts, training duration and saving intervals |
 
 To override an advanced option, add its original key to the appropriate existing
@@ -196,8 +196,8 @@ Group names use canonical plane order: `critic_xy.pt`, `critic_xz_yz.pt` and the
 separate `critic_c.pt`. SR names include the domain, such as `0_xz_yz`.
 `plane_groups` must be explicit and cannot change on resume.
 
-Current training formats are `diffusion-gan3d.lr.train.v3` and
-`diffusion-gan3d.sr.train.v5`, with one optimizer per critic and no RNG state.
+Current training formats are `diffusion-gan3d.lr.train.v4` and
+`diffusion-gan3d.sr.train.v6`, with one optimizer per critic and no RNG state.
 Earlier checkpoint formats and numeric critic filenames are rejected.
 
 ### Plane orientation and augmentation
@@ -235,15 +235,18 @@ disable transformations that do not match the material. Use `flip_axes: []` and
 when those planes share a critic.
 
 `data.thickness_axis` rejects flips of that axis and quarter-turn rotations in
-planes containing it. Set it to `null` only when no thickness direction needs
-protection. This setting guards augmentation; **absolute crop depth and
-depth-conditioned generation are not implemented yet**. Preserving orientation
-alone does not teach the model where a crop lies within the full thickness.
-It also disables reversal averaging in the connectivity critic along the
-thickness normal. Other normals retain reversal symmetry. Height conditioning
-requires per-image physical height, crop origin, full specimen thickness and a
-matching inference coordinate contract; the current folder datasets provide none
-of these. Do not infer absolute height from crop pixel rows.
+planes containing it, and disables connectivity reversal along the thickness normal.
+
+Set `conditioning.height_enabled: true` in both stages for nonuniform thickness.
+The loader retains crop origins and derives `data.height_extents` per domain from
+full-thickness side images (the row or column containing the thickness direction).
+Side images within a domain must have the same extent and pixel scale, and must
+already cover the full thickness. Resolved extents are saved with the model.
+`height_origin` in Python/HTTP and `--height-origin` in the CLI specify the output
+origin in source-image pixels. LR, SR and tiles use the same cell-center coordinates.
+Side-plane critics receive aligned coordinate fields; sections normal to the
+thickness axis have unknown absolute positions and remain marginal comparisons.
+Keep the option false for homogeneous material or images with unknown cropping.
 
 For explicit policies, `probability` is the probability of selecting an allowed
 non-identity transform. Quarter turns include their compositions; rectangular
@@ -274,20 +277,33 @@ augmentation schedule is enabled without evidence that it is needed.
 
 Anchor supervision and continuity have independent schedules:
 `conditioning.anchor.start_step/ramp_steps` default to 0/500, while
-`loss.connectivity.start_step/ramp_steps` default to 0/20000. Both resolve into
-saved run settings. Connectivity compares a generated reference only at the final
-diffusion transition; other real-anchor transitions avoid that extra reverse pass.
-Multi-anchor pseudo-targets still require a reference realization.
+`loss.connectivity.start_step/ramp_steps` default to 0/20000.
+Measured anchor positions are excluded from parallel fake slices for both critic
+and generator updates. Crossing slices remain available to judge their surroundings.
 
-`loss.connectivity.windows_per_plane` defaults to 4 local windows per anchor
-plane and orientation. The first uses adjacent slices (gap 1); others sample up
-to `max_slice_gap`. All parallel anchor planes are sampled. Their matched real
-and fake windows retain the same positions and transformations.
-`anchor_neighbor_agreement` measures adjacent phase agreement across the
-observed/unobserved boundary, and `anchor_neighbor_excess_jump` compares that
-jump with the unconditioned reference. These are boundary diagnostics, not
-percolation or tortuosity measurements. They are recorded when a visible real
-anchor has a final-transition reference.
+Final-transition volumes generated with visible measured anchors enter a bounded
+per-domain replay bank (`conditioning.anchor.bank_capacity`, default 4). Replay
+always includes the original measured plane, plus generated planes at a density
+controlled by `conditioning.anchor.plane_spacing` (default 16 grid cells).
+The measured plane retains pixel supervision; generated planes are coarse targets.
+No reference reverse pass is run. Connectivity uses detached replay volumes as
+pseudo references, never as measured 3D ground truth. The bank is checkpointed.
+
+`loss.connectivity.windows_per_plane` defaults to 4 local windows per plane and
+orientation. Sampling uses integer plane regions. The first window uses gap 1;
+others sample up to `max_slice_gap`. Matched windows share crops and augmentation.
+`anchor_neighbor_agreement` compares generated neighbors with the measured plane;
+`anchor_neighbor_excess_jump` subtracts the measured plane's in-plane variation.
+These diagnostics work without a generated reference and are not connectivity guarantees.
+
+Both stages evaluate area-average critic pyramids down to
+`model.critic.pyramid_min_size` (default 16), averaging losses across levels.
+`train.structure_every_steps` (default 100, 0 disables) logs phase-specific 6-connected
+percolating fractions, straight-path lower bounds, and axis gaps for shared critic
+groups. Generated slices are also compared with measurements using directional
+2-point correlation and chord-length distribution distances. Chords include runs
+censored at crop edges on both sides. These finite-volume diagnostics require no
+3D truth, but do not establish target tortuosity or reconstruction accuracy.
 
 Scalar logging values are transferred together at the end of a step. Finite-loss
 and finite-gradient checks remain synchronous before optimizer updates.
@@ -360,7 +376,8 @@ The implementation follows the two central objectives of
 gradient penalty, and agreement between LR input and downsampled SR output.
 This is an adaptation, not an exact paper reproduction: it uses residual 3D
 convolutions with interpolation to support fractional scales, and area mixing
-with temperature sharpening instead of the paper's Gaussian imaging kernel.
+instead of the paper's Gaussian imaging kernel. LR banks and consistency targets
+retain phase fractions; no temperature sharpening is applied.
 The LR consistency loss has a tolerance so boundaries can adapt.
 
 SR run artifacts:
@@ -388,7 +405,9 @@ probability `coarse_corruption_strength: 0.2`. The consistency target remains th
 uncorrupted generated LR volume. Setting either value to 0 disables corruption.
 This supplies corrupted/clean coarse pairs, not measured 3D truth; it cannot
 establish correction of systematic LR bias without held-out experiments.
-`coarse_corruption_mse` records the actual input perturbation. Validate on LR
+`coarse_corruption_mse` records the actual input perturbation. The SR model also
+receives the realized changed phase mass as `corruption_level`; clean inference
+always uses level zero. Validate on LR
 seeds outside every training bank.
 
 ```bash
@@ -426,9 +445,9 @@ the image within the full output plane. No preliminary anchored base block is
 created. This changes the old implicit base-placement behavior.
 
 Anchored inference uses the same conditional denoiser and one evolving diffusion
-state as training. At `guidance=1` and `anchor_strength=1` there is one denoiser
-call per transition. Intermediate strength blends conditioned/unconditioned
-logits on that same state. Anchors are learned conditions, not overwritten output
+state as training. `anchor_strength` scales the input mask and its multiscale
+features. At `guidance=1` there is one forward per transition at every strength;
+nontrivial classifier-free guidance needs at most two. Anchors are learned conditions, not overwritten output
 labels. Gaussian spread, temporal correction and coupled-state sampler options
 have been removed.
 
@@ -573,3 +592,9 @@ CLI above for the separate super-resolution pass.
   url = {https://github.com/phykn/diffusion-gan3d}
 }
 ```
+
+Generated LR → SR inference keeps fractional channels throughout. The CLI saves
+`<output>_lr_probs.pt` for lossless reuse with `--input`, plus `<output>_lr.tiff`
+for label-based inspection. Supplying a label TIFF intentionally supplies one-hot
+coarse data instead. `InferenceAPI.generate_probs()` and SR's `predict_probs()`
+provide the fractional Python path.

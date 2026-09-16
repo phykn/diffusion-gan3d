@@ -62,7 +62,7 @@ def sr_config(tmp_path, scale=1.5, phases=3):
 def export_model(path, cfg):
     model = build_sr_model(cfg)
     torch.save(
-        {"format": "diffusion-gan3d.sr.v1", "config": cfg, "model": model.state_dict()},
+        {"format": "diffusion-gan3d.sr.v2", "config": cfg, "model": model.state_dict()},
         path,
     )
     return model
@@ -181,17 +181,17 @@ def test_web_anchor_preparation_matches_new_dataset(tmp_path):
 def test_consistency_has_gradient_and_a_dead_zone():
     logits = torch.randn(1, 3, 12, 12, 12, requires_grad=True)
     low = phase_channels(torch.randint(3, (1, 8, 8, 8)), 3)
-    loss, error = consistency_loss(logits.softmax(1), low, 0.05, 0.005)
+    loss, error = consistency_loss(logits.softmax(1), low, 0.005)
     loss.backward()
     assert error > 0 and logits.grad.abs().sum() > 0
     constant = torch.zeros(1, 2, 8, 8, 8)
     constant[:, 0] = 1
     loss, _ = consistency_loss(
-        torch.nn.functional.interpolate(constant, scale_factor=2), constant, 0.05, 0.005
+        torch.nn.functional.interpolate(constant, scale_factor=2), constant, 0.005
     )
     assert loss == 0
     assert torch.allclose(
-        downsample(constant, (4, 4, 4), 0.05).sum(1), torch.ones(1, 4, 4, 4)
+        downsample(constant, (4, 4, 4)).sum(1), torch.ones(1, 4, 4, 4)
     )
 
 
@@ -206,7 +206,7 @@ def test_axis_slicing_keeps_channel_and_plane_semantics():
 def test_sr_training_restores_state_without_rng(tmp_path):
     torch.set_num_threads(1)
     cfg = sr_config(tmp_path)
-    bank = {0: torch.randint(3, (2, 8, 8, 8), dtype=torch.uint8)}
+    bank = {0: torch.rand(2, 3, 8, 8, 8).softmax(1)}
     trainer = build_sr_trainer(cfg, bank, torch.device("cpu"))
     before = copy.deepcopy(trainer.model.state_dict())
     critic_before = copy.deepcopy(trainer.critics.state_dict())
@@ -225,7 +225,7 @@ def test_sr_training_restores_state_without_rng(tmp_path):
     expected_critics = copy.deepcopy(trainer.critics.state_dict())
     restored = build_sr_trainer(cfg, bank, torch.device("cpu"))
     payload = torch.load(checkpoint, weights_only=True)
-    assert payload["format"] == "diffusion-gan3d.sr.train.v5"
+    assert payload["format"] == "diffusion-gan3d.sr.train.v6"
     assert not {"torch_rng", "cuda_rng", "numpy_rng"} & payload.keys()
     assert set(trainer.critics) == {"0_xy", "0_yz"}
     rng = torch.get_rng_state().clone()

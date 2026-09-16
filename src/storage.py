@@ -20,6 +20,23 @@ def save_volume(volume: torch.Tensor, path: str | Path) -> None:
     tifffile.imwrite(path, values.numpy())
 
 
+def load_probabilities(path: str | Path) -> torch.Tensor:
+    probs = torch.load(path, map_location="cpu", weights_only=True)
+    if (
+        not isinstance(probs, torch.Tensor)
+        or probs.ndim != 4
+        or not probs.dtype.is_floating_point
+    ):
+        raise ValueError("fractional volume must be a C,D,H,W floating tensor.")
+    return probs
+
+
+def save_probabilities(probs: torch.Tensor, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(probs.detach().float().cpu(), path)
+
+
 def save_model(path: str | Path, model: nn.Module) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -56,6 +56,7 @@ class GenerateRequest(BaseModel):
     seed: int | None = Field(default=None, ge=0)
     guidance: float | None = None
     anchor_strength: float | None = None
+    height_origin: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     overlap: int | None = Field(default=None, ge=0)
     storage: Literal["auto", "cpu", "cuda"] = "auto"
     progress: bool = False
@@ -119,6 +120,7 @@ def create_app(
                     seed=request.seed,
                     guidance=request.guidance,
                     anchor_strength=request.anchor_strength,
+                    height_origin=request.height_origin,
                     overlap=request.overlap,
                     storage=request.storage,
                     progress=request.progress,

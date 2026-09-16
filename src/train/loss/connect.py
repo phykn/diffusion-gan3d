@@ -26,24 +26,51 @@ class LocatedTriplets:
 
 
 @torch.no_grad()
-def anchor_boundary_metrics(
-    prediction, reference, condition
-) -> dict[str, torch.Tensor]:
-    """One-voxel phase agreement across the observed/unobserved boundary; not percolation."""
+def anchor_boundary_metrics(prediction, condition) -> dict[str, torch.Tensor]:
+    """Measured-plane neighbor agreement and excess over measured in-plane variation."""
     total = prediction.new_zeros(())
     excess = prediction.new_zeros(())
     count = prediction.new_zeros(())
-    for axis in AXES:
-        left = [slice(None)] * 5
-        right = [slice(None)] * 5
-        left[axis + 2], right[axis + 2] = slice(None, -1), slice(1, None)
-        left, right = tuple(left), tuple(right)
-        boundary = (condition.mask[left] ^ condition.mask[right]).squeeze(1)
-        jump = (prediction[left] - prediction[right]).abs().sum(1) * 0.25
-        ref_jump = (reference[left] - reference[right]).abs().sum(1) * 0.25
-        total += ((1 - jump) * boundary).sum()
-        excess += ((jump - ref_jump) * boundary).sum()
-        count += boundary.sum()
+    active = (
+        range(prediction.shape[0])
+        if condition.active_batches is None
+        else condition.active_batches
+    )
+    for region in condition.regions:
+        axis, index = region.axis, region.index
+        patch = (
+            slice(region.row, region.row + region.height),
+            slice(region.col, region.col + region.width),
+        )
+        target = condition.image.select(axis + 2, index)[..., patch[0], patch[1]]
+        tangent = []
+        if region.height > 1:
+            tangent.append(
+                (target[..., 1:, :] - target[..., :-1, :]).abs().sum(1).mean((1, 2))
+                * 0.25
+            )
+        if region.width > 1:
+            tangent.append(
+                (target[..., 1:] - target[..., :-1]).abs().sum(1).mean((1, 2)) * 0.25
+            )
+        baseline = (
+            torch.stack(tangent).mean(0)
+            if tangent
+            else target.new_zeros(target.shape[0])
+        )
+        for neighbor in (index - 1, index + 1):
+            if not 0 <= neighbor < prediction.shape[axis + 2]:
+                continue
+            values = prediction.select(axis + 2, neighbor)[..., patch[0], patch[1]]
+            unknown = ~condition.mask.select(axis + 2, neighbor)[
+                :, 0, patch[0], patch[1]
+            ]
+            jump = (values - target).abs().sum(1) * 0.25
+            for batch in active:
+                valid = unknown[batch]
+                total += ((1 - jump[batch]) * valid).sum()
+                excess += ((jump[batch] - baseline[batch]) * valid).sum()
+                count += valid.sum()
     return {
         "anchor/boundary_pairs": count,
         "anchor/neighbor_agreement": total / count.clamp_min(1),
@@ -167,30 +194,29 @@ class AnchorTripletSampler:
 
         triplets, axes, gaps, center_slots, locations, regions = [], [], [], [], [], []
         relations = []
-        # One mask transfer replaces scalar GPU reads inside the sampling loops.
-        masks = torch.cat((condition.axis_masks, condition.mask), dim=1).detach().cpu()
-        for batch in range(volume.shape[0]):
+        active = (
+            range(volume.shape[0])
+            if condition.active_batches is None
+            else condition.active_batches
+        )
+        for batch in active:
             for axis in AXES:
                 moved = volume[batch].movedim(axis + 1, 1)
-                own_mask = masks[batch, axis].movedim(axis, 0)
-                full_mask = masks[batch, 3].movedim(axis, 0)
                 depth, height, width = moved.shape[1:]
                 if depth < 3:
                     continue
-                own_indices = (
-                    own_mask.flatten(1).any(dim=1).nonzero().flatten().tolist()
-                )
-                candidates = (
-                    own_indices
-                    or full_mask.flatten(1).any(dim=1).nonzero().flatten().tolist()
-                )
-                if not candidates:
-                    continue
-                plane_indices = own_indices or [
-                    candidates[self._random_index(len(candidates), generator)]
-                ]
-                for index_value in plane_indices:
-                    points = full_mask[index_value].nonzero()
+                own = [region for region in condition.regions if region.axis == axis]
+                selected = own or list(condition.regions[:1])
+                for region in selected:
+                    other = [normal for normal in AXES if normal != region.axis]
+                    coordinates = {
+                        region.axis: region.index,
+                        other[0]: region.row
+                        + self._random_index(region.height, generator),
+                        other[1]: region.col
+                        + self._random_index(region.width, generator),
+                    }
+                    index_value = coordinates[axis]
                     for window in range(self.windows_per_plane):
                         gap = (
                             1
@@ -208,15 +234,32 @@ class AnchorTripletSampler:
                         crop_w = (
                             width if self.windows_per_plane == 1 else max(1, width // 2)
                         )
-                        point = points[
-                            self._random_index(len(points), generator)
-                        ].tolist()
-                        row = min(max(point[0] - crop_h // 2, 0), height - crop_h)
-                        col = min(max(point[1] - crop_w // 2, 0), width - crop_w)
-                        mask = full_mask[
-                            list(slice_indices), row : row + crop_h, col : col + crop_w
-                        ]
-                        if bool(mask.all()):
+                        coordinates[other[0]] = region.row + self._random_index(
+                            region.height, generator
+                        )
+                        coordinates[other[1]] = region.col + self._random_index(
+                            region.width, generator
+                        )
+                        tangents = [normal for normal in AXES if normal != axis]
+                        row = min(
+                            max(coordinates[tangents[0]] - crop_h // 2, 0),
+                            height - crop_h,
+                        )
+                        col = min(
+                            max(coordinates[tangents[1]] - crop_w // 2, 0),
+                            width - crop_w,
+                        )
+                        if all(
+                            any(
+                                r.index == i
+                                and r.row <= row
+                                and r.col <= col
+                                and r.row + r.height >= row + crop_h
+                                and r.col + r.width >= col + crop_w
+                                for r in own
+                            )
+                            for i in slice_indices
+                        ):
                             continue
                         values = moved[
                             :,

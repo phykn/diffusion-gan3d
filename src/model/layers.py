@@ -15,9 +15,10 @@ def embed_domain(
     dtype: torch.dtype,
 ) -> torch.Tensor:
     domain = domain.to(device=embedding.weight.device, dtype=torch.long)
-    if domain.numel() and (
-        int(domain.min()) < NULL_DOMAIN or int(domain.max()) >= embedding.num_embeddings
-    ):
+    valid = ((domain >= NULL_DOMAIN) & (domain < embedding.num_embeddings)).all()
+    if domain.device.type == "cuda":
+        torch._assert_async(valid, "domain contains an invalid ID.")
+    elif not bool(valid):
         raise ValueError("domain contains an invalid ID.")
     present = domain != NULL_DOMAIN
     values = embedding(domain.clamp_min(0)).to(dtype=dtype)
