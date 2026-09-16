@@ -3,6 +3,7 @@ fastapi
 napari[all]
 numpy
 Pillow
+psutil
 PyYAML
 scipy
 tensorboard

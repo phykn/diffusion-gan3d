@@ -13,6 +13,7 @@ from src.config import get_plane_groups, load_train_config
 from src.model.critic import CriticScores
 from src.plane import PLANES
 from src.train.run import run_train
+from src.train.sr import resume_sr_training, save_sr_training
 
 GROUPS = [[["xy", "xz", "yz"]], [["xy"], ["xz", "yz"]], [["xy"], ["xz"], ["yz"]]]
 
@@ -42,9 +43,14 @@ def config(tmp_path, stage, groups):
         cfg["loss"].update(r1_weight=0.01, r1_every_steps=1)
         cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2, num_workers=0)
     else:
-        cfg["model"]["generator"].update(channels=4, blocks=1, scale_factor=1.5)
+        cfg["model"]["generator"].update(
+            channels=[4, 8], embedding_channels=8, latent_channels=4
+        )
+        cfg["model"]["diffusion"]["num_steps"] = 2
+        cfg["model"]["gradient_checkpointing"] = False
+        cfg["data"]["hi_res_size"] = 12
         cfg["train"].update(
-            critic_updates_per_step=2, slices_per_plane=2, checkpoint_every_steps=1
+            real_batch_size=2, slice_pairs_per_plane=2, checkpoint_every_steps=1
         )
         cfg["lr_bank"]["samples_per_domain"] = 2
     return cfg
@@ -140,31 +146,33 @@ def test_sr_groups_step_once_per_critic_update_and_restore_state(tmp_path, group
     assert len(trainer.critics) == len(groups) == len(trainer.critic_optims)
     for optimizer in trainer.critic_optims.values():
         optimizer.step = Mock(wraps=optimizer.step)
-    trainer.train_step()
+    trainer.step(0)
     for optimizer in trainer.critic_optims.values():
-        assert optimizer.step.call_count == cfg["train"]["critic_updates_per_step"]
+        assert optimizer.step.call_count == 1
     path = tmp_path / "last.pt"
-    trainer.save(path)
-    expected = copy.deepcopy(trainer.model.state_dict())
+    save_sr_training(trainer, path)
+    expected = copy.deepcopy(trainer.denoiser.state_dict())
     restored = build_sr_trainer(cfg, bank, torch.device("cpu"))
-    restored.resume(torch.load(path, weights_only=True))
+    resume_sr_training(restored, torch.load(path, weights_only=True))
     for key, value in expected.items():
         torch.testing.assert_close(
-            restored.model.state_dict()[key], value, rtol=0, atol=0
+            restored.denoiser.state_dict()[key], value, rtol=0, atol=0
         )
     for group in trainer.critic_optims:
         torch.testing.assert_close(
             restored.critic_optims[group].state_dict(),
             trainer.critic_optims[group].state_dict(),
         )
-    assert restored.train_step()["step"] == 2
+    restored.step(restored.completed_steps)
+    assert restored.completed_steps == 2
     other = copy.deepcopy(cfg)
     other["model"]["critic"]["plane_groups"] = (
         GROUPS[1] if len(groups) != 2 else GROUPS[0]
     )
     with pytest.raises(ValueError, match="plane_groups cannot change"):
-        build_sr_trainer(other, bank, torch.device("cpu")).resume(
-            torch.load(path, weights_only=True)
+        resume_sr_training(
+            build_sr_trainer(other, bank, torch.device("cpu")),
+            torch.load(path, weights_only=True),
         )
 
 
@@ -175,10 +183,13 @@ def test_sr_groups_are_per_domain_and_use_only_observed_members(tmp_path):
     bank = {domain: torch.full((2, 2, 8, 8, 8), 0.5) for domain in (0, 1)}
     trainer = build_sr_trainer(cfg, bank, torch.device("cpu"))
     assert set(trainer.critics) == {"0_xy_xz_yz", "1_xy_xz_yz"}
-    assert trainer.critic_groups == {0: {"0_xy_xz_yz": (0, 1)}, 1: {"1_xy_xz_yz": (2,)}}
-    metrics = trainer.train_step()
+    assert trainer.critic_groups_by_domain == {
+        0: {"0_xy_xz_yz": (0, 1)},
+        1: {"1_xy_xz_yz": (2,)},
+    }
+    metrics = trainer.step(0)
     for name, optimizer in trainer.critic_optims.items():
-        assert bool(optimizer.state) == name.startswith(f"{metrics['domain']}_")
+        assert bool(optimizer.state) == name.startswith(f"{metrics.domain}_")
 
 
 @pytest.mark.parametrize(

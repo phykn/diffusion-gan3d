@@ -23,7 +23,7 @@ def fingerprint_data(streams: dict) -> dict:
 
 def save_training(path: str | Path, trainer) -> None:
     payload = {
-        "format": "diffusion-gan3d.lr.train.v4",
+        "format": "diffusion-gan3d.lr.train",
         "config": trainer.cfg,
         "step": trainer.completed_steps,
         "model": trainer.denoiser.state_dict(),
@@ -49,7 +49,7 @@ def save_training(path: str | Path, trainer) -> None:
 
 
 def resume_training(trainer, payload: dict) -> None:
-    if payload.get("format") != "diffusion-gan3d.lr.train.v4":
+    if payload.get("format") != "diffusion-gan3d.lr.train":
         raise ValueError(
             "resume requires an LR training checkpoint, not inference weights."
         )

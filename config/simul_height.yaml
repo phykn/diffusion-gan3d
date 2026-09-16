@@ -1,0 +1,15 @@
+# 3D 정답 TIFF와 세 방향 단면을 함께 만드는 높이 조건 시험 데이터.
+output:
+  data_dir: run/simul_height
+  count: 4
+
+geometry:
+  size: 128
+  radius_gradient: [0.6, 1.4]  # z=0 → z=127, 두 입자 반경에 선형으로 적용
+
+  big_elongation: 3.0
+  big_radius: 8
+  big_vf: 0.25
+
+  small_radius: 4
+  small_vf: 0.10

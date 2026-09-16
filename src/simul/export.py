@@ -3,10 +3,11 @@ from pathlib import Path
 
 import numpy as np
 import tifffile
+import yaml
 from PIL import Image
 
 from src.plane import AXES
-from src.simul.geometry import pack
+from src.simul.geometry import check_geometry, pack
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253
 
@@ -19,23 +20,26 @@ class Export:
 
 def generate(cfg: dict) -> Export:
     output = cfg["output"]
-    geometry = cfg["geometry"]
+    geometry = {"big_elongation": 1.0, "radius_gradient": [1.0, 1.0], **cfg["geometry"]}
+    check_geometry(**geometry)
     count = output["count"]
     if count < 1:
         raise ValueError("output count must be a positive integer.")
     root = Path(output["data_dir"])
     vol_dir, slice_dirs = make_dirs(root)
+    (root / "simulation.yaml").write_text(
+        yaml.safe_dump(
+            {"geometry": geometry, "thickness_axis": "z", "count": count},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     volumes: list[Path] = []
     slices: dict[int, list[Path]] = {axis: [] for axis in AXES}
 
     for idx in range(count):
         vol = pack(
-            size=geometry["size"],
-            big_radius=geometry["big_radius"],
-            small_radius=geometry["small_radius"],
-            big_vf=geometry["big_vf"],
-            small_vf=geometry["small_vf"],
-            big_elongation=geometry.get("big_elongation", 1.0),
+            **geometry,
         )
         stem = f"volume_{idx:03d}"
         path = vol_dir / f"{stem}.tiff"

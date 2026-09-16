@@ -36,6 +36,19 @@ class Fusion:
     weight_sum: torch.Tensor
     pred_sum: torch.Tensor
 
+    def regions(self, region: tuple[slice, slice, slice]):
+        """Map a global z interval into the bounded, circular accumulation slab."""
+        depth = self.pred_sum.shape[2]
+        start, stop = region[0].start, region[0].stop
+        while start < stop:
+            offset = start % depth
+            end = min(stop, start + depth - offset)
+            yield (
+                (slice(start, end), *region[1:]),
+                (slice(offset, offset + end - start), *region[1:]),
+            )
+            start = end
+
 
 class VolumeState:
     def __init__(
@@ -243,30 +256,18 @@ def make_fusion(
     device: torch.device,
     tile_device: torch.device,
 ) -> Fusion:
+    # Tiles are traversed in z/y/x order. Once the next z layer starts, no
+    # future prediction can affect earlier voxels, so a single tile-depth
+    # circular slab suffices for both weighted sums.
     axis_windows: dict[tuple[int, int, int], torch.Tensor] = {}
+    shape = (min(plan.tile_size, plan.shape[0]), *plan.shape[1:])
     weight_sum = torch.zeros(
-        (1, 1, *plan.shape),
+        (1, 1, *shape),
         device=device,
         dtype=torch.float32,
     )
-    for tile in tiles:
-        global_region = (slice(None), slice(None), *tile.source)
-        axes = get_axis_windows(
-            tile,
-            plan.overlap,
-            tile_device,
-            axis_windows,
-        )
-        window = (
-            axes[0].view(1, 1, -1, 1, 1)
-            * axes[1].view(1, 1, 1, -1, 1)
-            * axes[2].view(1, 1, 1, 1, -1)
-        )
-        weight_sum[global_region].add_(window.to(device))
-    if not bool((weight_sum > 0).all().item()):
-        raise RuntimeError("blend weights must cover the complete output volume.")
     pred_sum = torch.zeros(
-        (1, num_phases, *plan.shape),
+        (1, num_phases, *shape),
         device=device,
         dtype=torch.float32,
     )
@@ -329,7 +330,6 @@ def add_prediction(
     tile_buffer: TileBuffer,
     overlap: int,
 ) -> None:
-    global_region = (slice(None), slice(None), *tile.source)
     weighted = pred.float().clone()
     axes = get_axis_windows(
         tile,
@@ -342,18 +342,17 @@ def add_prediction(
         shape[spatial_axis] = axis.numel()
         weighted.mul_(axis.view(shape))
     staged = tile_buffer.stage(weighted, fusion.pred_sum.device)
-    fusion.pred_sum[global_region].add_(staged)
-
-
-def write_labels(
-    labels: torch.Tensor,
-    tiles: tuple[Tile, ...],
-    fusion: Fusion,
-) -> None:
-    for tile in tiles:
-        region = (slice(None), slice(None), *tile.target)
-        clean = fusion.pred_sum[region] / fusion.weight_sum[region]
-        write_output(labels, tile.target, clean)
+    window = (
+        axes[0].view(1, 1, -1, 1, 1)
+        * axes[1].view(1, 1, 1, -1, 1)
+        * axes[2].view(1, 1, 1, 1, -1)
+    ).to(fusion.weight_sum.device)
+    for global_region, local_region in fusion.regions(tile.source):
+        start = global_region[0].start - tile.source[0].start
+        stop = global_region[0].stop - tile.source[0].start
+        target = (slice(None), slice(None), *local_region)
+        fusion.pred_sum[target].add_(staged[:, :, start:stop])
+        fusion.weight_sum[target].add_(window[:, :, start:stop])
 
 
 def write_output(

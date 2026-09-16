@@ -17,6 +17,7 @@ from src.predict.sr import SuperResolutionAPI
 from src.predict.tiled import TiledGenerator
 from src.prepare.resize import resize_crop
 from src.train.loss.anchor import SoftAnchorLoss
+from src.train.sr import export_sr
 from src.train.state import resume_training, save_training
 
 
@@ -173,8 +174,13 @@ def configuration(tmp_path, stage="low_res", height=False):
             adversarial_weight=0.1, normal_transition_weight=0.1, ramp_steps=0
         )
     else:
-        cfg["model"]["generator"].update(channels=4, blocks=1, scale_factor=2)
-        cfg["train"].update(slices_per_plane=2, critic_updates_per_step=1)
+        cfg["model"]["generator"].update(
+            channels=[4, 8], embedding_channels=8, latent_channels=4
+        )
+        cfg["model"]["diffusion"]["num_steps"] = 2
+        cfg["model"]["gradient_checkpointing"] = False
+        cfg["data"]["hi_res_size"] = 16
+        cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2)
     return cfg
 
 
@@ -239,22 +245,20 @@ def test_height_conditioned_sr_uses_fractional_bank_and_zero_level_at_inference(
     trainer = build_sr_trainer(
         cfg, bank, torch.device("cpu"), {0: torch.tensor([2.0, 8.0])}
     )
-    low_height = trainer.volume_height(bank[0][:1], torch.tensor([2.0]), 0)
-    _, high_height = trainer.slices_with_height(
-        torch.zeros(1, 2, 16, 16, 16), low_height, 1, 1, 0
-    )
-    assert high_height[0, 0, 0, 0] == pytest.approx(2 * 2.25 / 24 - 1)
-    metrics = trainer.train_step()
-    assert np.isfinite(metrics["generator"])
-    assert trainer.model.height_input.weight.grad.abs().sum() > 0
-    trainer.export(tmp_path / "model.pt")
+    high_height = trainer.volume_height(torch.tensor([2.0]), 0)
+    assert high_height[0, 0, 0, 0, 0] == pytest.approx(2 * 2.25 / 24 - 1)
+    metrics = trainer.step(0)
+    assert np.isfinite(metrics.generator_total)
+    assert trainer.denoiser.height_input.weight.grad.abs().sum() > 0
+    export_sr(trainer, tmp_path / "model.pt")
     api = SuperResolutionAPI(tmp_path / "model.pt")
     with patch.object(api.model, "forward", wraps=api.model.forward) as forward:
-        result = api.predict_probs(bank[0][0], height_origin=2)
+        result = api.predict_probs(bank[0][0], height_origin=2, margin=0)
     assert result.shape == (2, 16, 16, 16)
-    assert forward.call_args.args[3].eq(0).all()
+    assert forward.call_args.kwargs["corruption_level"].eq(0).all()
+    assert forward.call_count == 2
     assert forward.call_args.kwargs["height"][0, 0, 0, 0, 0] == pytest.approx(
-        2 * 2.5 / 24 - 1
+        2 * 2.25 / 24 - 1
     )
 
 

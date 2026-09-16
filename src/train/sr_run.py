@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from src.config import (
     validate_sr_source,
 )
 from src.data.bank import load_bank
+from src.train.sr import export_sr, resume_sr_training, save_sr_training
 
 
 def run_sr_train(
@@ -46,7 +48,7 @@ def run_sr_train(
         if bank_size is not None:
             raise ValueError("--bank-size cannot change on resume.")
         payload = torch.load(resume, map_location="cpu", weights_only=True)
-        if payload.get("format") != "diffusion-gan3d.sr.train.v6":
+        if payload.get("format") != "diffusion-gan3d.sr.train":
             raise ValueError("resume requires an SR training checkpoint.")
         cfg = normalize_train_config(payload["config"], "sr")
         bank_path = Path(cfg["source"]["bank"])
@@ -119,7 +121,7 @@ def run_sr_train(
         if device.type == "cuda":
             torch.cuda.empty_cache()
         bank_payload = {
-            "format": "diffusion-gan3d.lr-bank.v2",
+            "format": "diffusion-gan3d.lr-bank",
             "volumes": bank,
             "height_origins": origins
             if cfg["conditioning"]["height_enabled"]
@@ -134,24 +136,27 @@ def run_sr_train(
         cfg, bank_payload["volumes"], device, bank_payload.get("height_origins")
     )
     if payload:
-        trainer.resume(payload)
+        resume_sr_training(trainer, payload)
     save_yaml(run_dir / "config.yaml", cfg)
     crop, low, high = get_sr_sizes(cfg)
     print(f"SR: source crop {crop}, LR {low}³ -> HR {high}³; run {run_dir}", flush=True)
     with (run_dir / "metrics.jsonl").open("w", encoding="utf-8") as log:
-        for _ in trange(trainer.step, cfg["train"]["total_steps"], desc="SR train"):
+        for step in trange(
+            trainer.completed_steps, cfg["train"]["total_steps"], desc="SR train"
+        ):
             interval = cfg["lr_bank"]["refresh_every_steps"]
-            if interval and trainer.step and trainer.step % interval == 0:
+            if interval and step and step % interval == 0:
                 refresh_bank(trainer, run_dir)
-            metrics = trainer.train_step()
+            metrics = asdict(trainer.step(step))
+            metrics["step"] = trainer.completed_steps
             log.write(json.dumps(metrics) + "\n")
             log.flush()
             if (
-                trainer.step % cfg["train"]["checkpoint_every_steps"] == 0
-                or trainer.step == cfg["train"]["total_steps"]
+                trainer.completed_steps % cfg["train"]["checkpoint_every_steps"] == 0
+                or trainer.completed_steps == cfg["train"]["total_steps"]
             ):
-                trainer.save(run_dir / "checkpoints/last.pt")
-                trainer.export(run_dir / "weights/model.pt")
+                save_sr_training(trainer, run_dir / "checkpoints/last.pt")
+                export_sr(trainer, run_dir / "weights/model.pt")
 
     return run_dir
 
@@ -172,7 +177,7 @@ def refresh_bank(trainer, run_dir: Path) -> None:
     generator = load_generator(source, trainer.device)
     interval = cfg["lr_bank"]["refresh_every_steps"]
     for domain, volumes in trainer.bank.items():
-        index = (trainer.step // interval - 1) % len(volumes)
+        index = (trainer.completed_steps // interval - 1) % len(volumes)
         conditions = {}
         if cfg.get("conditioning", {}).get("height_enabled", False):
             origin = sample_origins(cfg, domain, 1)[0]
@@ -184,10 +189,10 @@ def refresh_bank(trainer, run_dir: Path) -> None:
     del generator
     if trainer.device.type == "cuda":
         torch.cuda.empty_cache()
-    path = run_dir / f"lr_bank_step_{trainer.step:08d}.pt"
+    path = run_dir / f"lr_bank_step_{trainer.completed_steps:08d}.pt"
     torch.save(
         {
-            "format": "diffusion-gan3d.lr-bank.v2",
+            "format": "diffusion-gan3d.lr-bank",
             "volumes": trainer.bank,
             "height_origins": getattr(trainer, "bank_origins", None),
             "data": cfg["data"],

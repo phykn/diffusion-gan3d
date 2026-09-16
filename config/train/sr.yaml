@@ -3,14 +3,15 @@ data: config/data/default.yaml
 
 model:
   generator:
-    scale_factor: 2  # HR/LR 격자 크기 비율. crop_size와 독립적이다.
-    channels: 16
-    blocks: 3
+    channels: [16, 32, 64, 64]
 
   critic:
     # 1개: [[xy, xz, yz]], 2개: [[xy], [xz, yz]], 3개: 아래 설정
     plane_groups: [[xy], [xz], [yz]]
     channels: [32, 64, 128]
+
+  diffusion:
+    num_steps: 10
 
 # 단면의 행/열: xy=(y,x), xz=(z,x), yz=(z,y). 그룹 공유와 별도로 설정한다.
 augmentation:
@@ -30,7 +31,7 @@ augmentation:
       rotate_90: false
 
 loss:
-  gradient_penalty_weight: 10.0
+  r1_weight: 0.2
 
   downsample_consistency_weight: 10.0
 
@@ -46,7 +47,7 @@ train:
   total_steps: 20000
 
   volume_batch_size: 1
-  slices_per_plane: 8
-  critic_updates_per_step: 3  # 생성기 1회 갱신당 critic 갱신 횟수
+  real_batch_size: 8
+  slice_pairs_per_plane: 8
 
   checkpoint_every_steps: 100

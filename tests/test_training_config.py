@@ -72,7 +72,7 @@ def test_resolved_snapshot_survives_default_and_learning_rate_changes(
     key = (
         "model.generator.embedding_channels"
         if stage == "low_res"
-        else "model.generator.noise_channels"
+        else "model.generator.latent_channels"
     )
     monkeypatch.setitem(config_module.STAGE_DEFAULTS[stage], key, 32)
     assert load_train_config(snapshot, stage) == cfg

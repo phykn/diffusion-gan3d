@@ -19,6 +19,7 @@ from src.model.diffusion import Diffusion
 from src.model.layers import NULL_DOMAIN
 from src.plane import AXES, PLANE_AXES
 from src.prepare.height import height_field
+from src.prepare.resize import resize_phases
 from src.train.anchor_bank import AnchorBank
 from src.train.ema import update_ema
 from src.train.loss.anchor import SoftAnchorLoss
@@ -29,7 +30,9 @@ from src.train.loss.gan import (
     get_critic_r1,
     get_generator_loss,
 )
+from src.train.loss.sr import consistency_loss
 from src.train.loss.volume_fraction import compute_vf_loss
+from src.train.sr import corrupt_coarse
 from src.train.step import check_loss, materialize_metrics, step_optimizer
 
 
@@ -103,6 +106,7 @@ class DenoiserBatch:
     vf_present: torch.Tensor
     connectivity_ramp: float = 1.0
     fake_heights: dict = field(default_factory=dict)
+    coarse_target: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,7 @@ class StepPreparation:
     model_conditions: dict[str, torch.Tensor]
     anchor_ramp: float
     connectivity_ramp: float = 1.0
+    coarse_target: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -141,15 +146,18 @@ class TrainerComponents:
     denoiser: Denoiser3D
     ema_denoiser: Denoiser3D
     critics: nn.ModuleDict
-    connectivity_critic: nn.Module
+    connectivity_critic: nn.Module | None
     streams: dict[int, dict[int, BatchStream]]
     diffusion: Diffusion
     denoiser_optim: torch.optim.Optimizer
     critic_optims: dict[str, torch.optim.Optimizer]
-    connectivity_optim: torch.optim.Optimizer
+    connectivity_optim: torch.optim.Optimizer | None
     scaler: torch.amp.GradScaler
     device: torch.device
     critic_augment: CriticAugment | None = None
+    coarse_bank: dict | None = None
+    bank_origins: dict | None = None
+    critic_groups_by_domain: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +190,10 @@ class TrainerSettings:
     anchor_bank_capacity: int = 4
     anchor_plane_spacing: int = 16
     structure_every_steps: int = 100
+    consistency_weight: float = 0.0
+    consistency_tolerance: float = 0.0
+    coarse_corruption_probability: float = 0.0
+    coarse_corruption_strength: float = 0.0
 
 
 class Trainer:
@@ -195,10 +207,17 @@ class Trainer:
         self.critics = components.critics
         self.connectivity_critic = components.connectivity_critic
         self.streams = components.streams
-        self.critic_groups = {
-            group: tuple(PLANE_AXES[plane] for plane in group.split("_"))
-            for group in self.critics
-        }
+        self.bank = components.coarse_bank
+        self.bank_origins = components.bank_origins
+        self.critic_groups_by_domain = components.critic_groups_by_domain
+        self.critic_groups = (
+            {
+                group: tuple(PLANE_AXES[plane] for plane in group.split("_"))
+                for group in self.critics
+            }
+            if self.critic_groups_by_domain is None
+            else self.critic_groups_by_domain[0]
+        )
         self.axis_critics = {
             axis: group for group, axes in self.critic_groups.items() for axis in axes
         }
@@ -242,12 +261,20 @@ class Trainer:
             max_gap=settings.connectivity_max_gap,
             windows_per_plane=settings.connectivity_windows_per_plane,
         )
-        self.anchor_bank = AnchorBank(
-            settings.anchor_bank_capacity, settings.anchor_plane_spacing
+        self.anchor_bank = (
+            None
+            if self.bank is not None
+            else AnchorBank(
+                settings.anchor_bank_capacity, settings.anchor_plane_spacing
+            )
         )
         self.structure_every_steps = settings.structure_every_steps
         self.use_multi_anchor_next = False
         self.vf_loss_weight = settings.vf_loss_weight
+        self.consistency_weight = settings.consistency_weight
+        self.consistency_tolerance = settings.consistency_tolerance
+        self.coarse_corruption_probability = settings.coarse_corruption_probability
+        self.coarse_corruption_strength = settings.coarse_corruption_strength
         self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
         self.domain_dropout = float(settings.domain_dropout)
         self.latent_channels = settings.latent_channels
@@ -463,6 +490,7 @@ class Trainer:
             target_vf=prepared.target_vf,
             vf_present=prepared.presence.vf,
             fake_heights=self.fake_heights,
+            coarse_target=prepared.coarse_target,
         )
 
     def prepare_step(
@@ -472,10 +500,19 @@ class Trainer:
     ) -> StepPreparation:
         self.denoiser.train()
         self.critics.train()
-        self.connectivity_critic.train()
+        if self.connectivity_critic is not None:
+            self.connectivity_critic.train()
 
         domain = self.sample_target_domain()
         self.sampled_domain = domain
+        if self.critic_groups_by_domain is not None:
+            self.critic_groups = self.critic_groups_by_domain[domain]
+            self.axis_critics = {
+                axis: group
+                for group, axes in self.critic_groups.items()
+                for axis in axes
+            }
+            self.active_axes = tuple(sorted(self.axis_critics))
         model_domain = self.sample_domain_condition(domain)
         batch_domains = self.select_batch_domains(domain)
         batches = self.get_batches(domain, batch_domains)
@@ -485,6 +522,39 @@ class Trainer:
             model_domain,
             batch_domains,
         )
+        if self.bank is not None:
+            indices = torch.randint(len(self.bank[domain]), (self.volume_batch_size,))
+            low = self.bank[domain][indices].to(self.device)
+            coarse, level = corrupt_coarse(
+                low, self.coarse_corruption_probability, self.coarse_corruption_strength
+            )
+            conditions = {
+                "domain": self.make_domain(model_domain, self.volume_batch_size),
+                "coarse": resize_phases(coarse, (self.patch_size,) * 3),
+                "corruption_level": level,
+            }
+            if self.height_data is not None:
+                conditions["height"] = self.volume_height(
+                    self.bank_origins[domain][indices], domain
+                )
+            self.diagnostics["coarse_corruption_mse"] = (coarse - low).square().mean()
+            self.diagnostics["coarse_corruption_level"] = level.mean()
+            absent = torch.zeros(self.volume_batch_size, dtype=torch.bool)
+            return StepPreparation(
+                transition=self.sample_transition(False)
+                if transition is None
+                else transition,
+                domain=domain,
+                critic_domains=critic_domains,
+                real=batches,
+                selection=None,
+                target_vf=low.new_zeros((self.volume_batch_size, self.num_phases)),
+                presence=ConditionPresence(absent, absent),
+                model_conditions=conditions,
+                anchor_ramp=0.0,
+                connectivity_ramp=0.0,
+                coarse_target=low,
+            )
         target_vf = compute_vf(own_batches, self.num_phases)
         target_vf = target_vf.unsqueeze(0).expand(self.volume_batch_size, -1)
         ramp = self.get_anchor_ramp(step)
@@ -1154,7 +1224,8 @@ class Trainer:
         self.denoiser_optim.zero_grad(set_to_none=True)
         for critic in self.critics.values():
             critic.requires_grad_(False)
-        self.connectivity_critic.requires_grad_(False)
+        if self.connectivity_critic is not None:
+            self.connectivity_critic.requires_grad_(False)
         try:
             heads = []
             local_weight = self.critic_local_weight
@@ -1245,6 +1316,15 @@ class Trainer:
                     )
                     + self.vf_loss_weight * vf_loss
                 )
+                if batch.coarse_target is not None:
+                    consistency, error = consistency_loss(
+                        batch.clean_probs,
+                        batch.coarse_target,
+                        self.consistency_tolerance,
+                    )
+                    total = total + self.consistency_weight * consistency
+                    self.diagnostics["consistency"] = consistency.detach()
+                    self.diagnostics["lr_mse"] = error.detach()
             check_loss(total, "generator")
             self.scaler.scale(total).backward()
             self.generator_updated = step_optimizer(
@@ -1255,7 +1335,8 @@ class Trainer:
         finally:
             for critic in self.critics.values():
                 critic.requires_grad_(True)
-            self.connectivity_critic.requires_grad_(True)
+            if self.connectivity_critic is not None:
+                self.connectivity_critic.requires_grad_(True)
         return DenoiserUpdate(
             adversarial=adversarial_loss.detach(),
             total=total.detach(),

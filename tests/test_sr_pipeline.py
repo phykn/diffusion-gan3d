@@ -58,11 +58,16 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(tmp_path, scale):
     sr_cfg["data"]["domains"] = {
         0: {plane: [str(sr_images)] for plane in ("xy", "xz", "yz")}
     }
-    sr_cfg["model"]["generator"].update(channels=4, blocks=1, scale_factor=scale)
+    sr_cfg["model"]["generator"].update(
+        channels=[4, 8], embedding_channels=8, latent_channels=4
+    )
+    sr_cfg["model"]["diffusion"]["num_steps"] = 2
+    sr_cfg["model"]["gradient_checkpointing"] = False
+    sr_cfg["data"]["hi_res_size"] = int(8 * scale)
     sr_cfg["model"]["critic"]["channels"] = [4, 8]
     sr_cfg["train"].update(
-        slices_per_plane=2,
-        critic_updates_per_step=1,
+        real_batch_size=2,
+        slice_pairs_per_plane=2,
         mixed_precision=False,
         total_steps=1,
         checkpoint_every_steps=1,
@@ -90,7 +95,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(tmp_path, scale):
     expected_data = sr_cfg["data"]
     assert stored["data"]["domains"] == expected_data["domains"]
     assert "scale_factor" not in stored["data"]
-    assert stored["model"]["generator"]["scale_factor"] == scale
+    assert stored["data"]["hi_res_size"] == int(8 * scale)
     assert stored["data"]["crop_size"] == 16
     assert stored["data"]["lo_res_size"] == 8
     first = torch.load(sr_dir / "checkpoints/last.pt", weights_only=True)
@@ -174,7 +179,7 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
     }
     trainer = SimpleNamespace(
         cfg=cfg,
-        step=2,
+        completed_steps=2,
         device=torch.device("cpu"),
         bank={0: torch.full((2, 2, 8, 8, 8), 0.5)},
     )

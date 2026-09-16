@@ -4,6 +4,7 @@ output:
 
 geometry:
   size: 128
+  radius_gradient: [1.0, 1.0]  # z=0, z=size-1에서 두 입자 반경에 곱하는 값
 
   big_elongation: 3.0
   big_radius: 14

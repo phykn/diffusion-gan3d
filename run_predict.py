@@ -38,8 +38,11 @@ def main(argv: list[str] | None = None) -> None:
         default=0.0,
         help="Crop origin along thickness, in source-image pixels.",
     )
-    parser.add_argument("--tile-size", type=int)
-    parser.add_argument("--overlap", type=int, default=8)
+    parser.add_argument("--tile-size", type=int, help="SR tile edge in HR voxels.")
+    parser.add_argument(
+        "--overlap", type=int, default=8, help="SR overlap in HR voxels."
+    )
+    parser.add_argument("--margin", type=int, help="SR context margin in HR voxels.")
     args = parser.parse_args(argv)
     if args.input and not args.sr_weights:
         raise ValueError("--input requires --sr-weights.")
@@ -72,6 +75,7 @@ def main(argv: list[str] | None = None) -> None:
             args.tile_size,
             args.overlap,
             args.height_origin,
+            args.margin,
         )
     )
     save_volume(output, args.output)
@@ -97,6 +101,7 @@ def main(argv: list[str] | None = None) -> None:
         metadata.update(
             crop_size=sr.crop_size,
             lo_res_size=sr.lo_res_size,
+            hi_res_size=sr.hi_res_size,
             scale_factor=sr.scale_factor,
             source_pixels_per_hr_voxel=sr.crop_size / sr.hi_res_size,
         )

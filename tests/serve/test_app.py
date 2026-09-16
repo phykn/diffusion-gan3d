@@ -1,5 +1,6 @@
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import tifffile
@@ -7,6 +8,7 @@ import torch
 from fastapi.testclient import TestClient
 
 from src.evaluate.volume import VolumeMetrics
+from src.predict.memory import estimate_memory, select_storage
 from src.serve import app as server_module
 from src.serve.app import create_app
 
@@ -19,6 +21,27 @@ class FakeInference:
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
+
+    def estimate_memory(self, *, blocks=None, shape=None, size=None, overlap=None):
+        if blocks is not None and shape is not None:
+            raise ValueError("blocks and shape cannot be provided together.")
+        if blocks is not None:
+            counts = (blocks,) * 3 if isinstance(blocks, int) else blocks
+            stride = self.input_size - 2 * (8 if overlap is None else overlap)
+            shape = tuple(self.input_size + (count - 1) * stride for count in counts)
+        return estimate_memory(
+            shape or size or self.input_size,
+            self.num_phases,
+            tile_size=self.input_size,
+            overlap=8 if overlap is None else overlap,
+        )
+
+    def check_memory(self, estimate, **kwargs):
+        return select_storage(
+            kwargs["storage"],
+            estimate,
+            SimpleNamespace(device=self.device, model=None, num_phases=self.num_phases),
+        )
 
     def generate(self, **kwargs) -> torch.Tensor:
         self.calls.append(kwargs)
@@ -191,3 +214,63 @@ def test_create_app_requires_one_inference_source(service: FakeInference) -> Non
         create_app()
     with pytest.raises(ValueError, match="cannot be provided together"):
         create_app("generator.pt", inference=service)
+
+
+@pytest.mark.parametrize("exception", [MemoryError, torch.OutOfMemoryError])
+def test_cpu_and_cuda_oom_return_413(client, service, monkeypatch, exception):
+    def fail(**kwargs):
+        raise exception("allocation failed")
+
+    monkeypatch.setattr(service, "generate", fail)
+    assert client.post("/generate", json={}).status_code == 413
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"shape": [100000, 100000, 100000]},
+        {"shape": 1024},
+        {"size": 1025},
+        {"blocks": 65},
+        {"blocks": [64, 64, 64]},
+        {"shape": [-1, 32, 32]},
+        {"shape": True},
+        {"anchors": [{"image": [[0]], "axis": 0, "index": 0}] * 33},
+        {"anchors": [{"image": [[0] * 1025], "axis": 0, "index": 0}]},
+    ],
+)
+def test_request_limits_reject_before_inference(client, service, payload):
+    assert client.post("/generate", json=payload).status_code == 422
+    assert not service.calls
+
+
+def test_resolved_blocks_are_bounded_before_inference(client, service):
+    assert client.post("/generate", json={"blocks": [10, 1, 1]}).status_code == 422
+    assert not service.calls
+
+
+def test_extreme_overlap_cannot_expand_a_small_request_into_millions_of_tiles(
+    client, service
+):
+    response = client.post("/generate", json={"shape": 512, "overlap": 63})
+    assert response.status_code == 422
+    assert "tile count" in response.json()["detail"]
+    assert not service.calls
+
+
+def test_memory_preflight_rejects_before_inference(client, service, monkeypatch):
+    def reject(*args, **kwargs):
+        raise MemoryError("preflight budget exceeded")
+
+    monkeypatch.setattr(service, "check_memory", reject)
+    response = client.post("/generate", json={})
+    assert response.status_code == 413
+    assert "preflight" in response.json()["detail"]
+    assert not service.calls
+
+
+def test_oversized_body_is_rejected_before_json_decoding(service, monkeypatch):
+    monkeypatch.setattr(server_module, "MAX_REQUEST_BYTES", 32)
+    client = TestClient(create_app(inference=service))
+    assert client.post("/generate", content=b" " * 33).status_code == 413
+    assert not service.calls

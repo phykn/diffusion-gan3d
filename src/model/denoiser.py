@@ -8,6 +8,7 @@ from torch.utils.checkpoint import checkpoint
 from src.model.layers import (
     INV_SQRT_THREE,
     INV_SQRT_TWO,
+    NULL_DOMAIN,
     AdaptiveNorm,
     SinusoidalEmbedding,
     embed_domain,
@@ -103,6 +104,7 @@ class Denoiser3D(nn.Module):
         anchor_multiscale: bool = False,
         time_scale: float = 1.0,
         height_enabled: bool = False,
+        coarse_enabled: bool = False,
     ) -> None:
         super().__init__()
         if not isinstance(anchor_multiscale, bool):
@@ -114,6 +116,7 @@ class Denoiser3D(nn.Module):
         self.downsample_factor = 2 ** (levels - 1)
         self.gradient_checkpointing = gradient_checkpointing
         self.anchor_multiscale = anchor_multiscale
+        self.coarse_enabled = coarse_enabled
 
         self.time_emb = SinusoidalEmbedding(embedding_channels)
         self.time_scale = time_scale
@@ -135,15 +138,20 @@ class Denoiser3D(nn.Module):
             if height_enabled
             else None
         )
-        self.anchor_input = nn.Conv3d(
-            num_phases + 1,
-            channels[0],
-            3,
-            padding=1,
-            bias=False,
+        self.anchor_input = (
+            None
+            if coarse_enabled
+            else nn.Conv3d(
+                num_phases + 1,
+                channels[0],
+                3,
+                padding=1,
+                bias=False,
+            )
         )
         # Zero initialization preserves unconditioned behavior at training start.
-        nn.init.zeros_(self.anchor_input.weight)
+        if self.anchor_input is not None:
+            nn.init.zeros_(self.anchor_input.weight)
 
         self.encoder = nn.ModuleList()
         self.downsample = nn.ModuleList()
@@ -189,14 +197,14 @@ class Denoiser3D(nn.Module):
         self.output_norm = ChannelNorm3D(channels[0])
         self.output = nn.Conv3d(channels[0], num_phases, 3, padding=1)
 
-        vf_out = nn.Linear(embedding_channels, embedding_channels)
-        self.vf_mlp = nn.Sequential(
-            nn.Linear(num_phases, embedding_channels),
-            nn.SiLU(),
-            vf_out,
-        )
-        nn.init.zeros_(vf_out.weight)
-        nn.init.zeros_(vf_out.bias)
+        self.vf_mlp = None
+        if not coarse_enabled:
+            vf_out = nn.Linear(embedding_channels, embedding_channels)
+            self.vf_mlp = nn.Sequential(
+                nn.Linear(num_phases, embedding_channels), nn.SiLU(), vf_out
+            )
+            nn.init.zeros_(vf_out.weight)
+            nn.init.zeros_(vf_out.bias)
 
         # Build optional weights last so the shared backbone keeps identical RNG init.
         self.anchor_pyramid = nn.ModuleList()
@@ -210,6 +218,20 @@ class Denoiser3D(nn.Module):
                 )
                 nn.init.zeros_(projection.weight)
                 self.anchor_pyramid.append(projection)
+        self.coarse_input = (
+            nn.Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
+            if coarse_enabled
+            else None
+        )
+        self.corruption_embedding = (
+            nn.Sequential(
+                nn.Linear(1, embedding_channels),
+                nn.SiLU(),
+                nn.Linear(embedding_channels, embedding_channels),
+            )
+            if coarse_enabled
+            else None
+        )
 
     def forward(
         self,
@@ -222,6 +244,8 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
         height: torch.Tensor | None = None,
+        coarse: torch.Tensor | None = None,
+        corruption_level: torch.Tensor | None = None,
     ) -> torch.Tensor:
         logits = self.compute_logits(
             x_current,
@@ -233,6 +257,8 @@ class Denoiser3D(nn.Module):
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
             height=height,
+            coarse=coarse,
+            corruption_level=corruption_level,
         )
         return self.decode(logits)
 
@@ -247,9 +273,32 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
         height: torch.Tensor | None = None,
+        coarse: torch.Tensor | None = None,
+        corruption_level: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.coarse_enabled:
+            if any(
+                value is not None
+                for value in (vf, vf_present, anchor_image, anchor_mask)
+            ):
+                raise ValueError(
+                    "SR denoisers do not accept anchors or volume fractions."
+                )
+            if coarse is None or coarse.shape != x_current.shape:
+                raise ValueError(
+                    "SR requires coarse phase fractions on the output grid."
+                )
+        elif coarse is not None or corruption_level is not None:
+            raise ValueError("coarse conditioning requires an SR denoiser.")
         emb = self.embed(x_current, time, latent, domain, vf, vf_present)
         x = self.input(x_current)
+        if self.coarse_enabled:
+            if corruption_level is None:
+                corruption_level = x_current.new_zeros(x_current.shape[0])
+            emb = emb + self.corruption_embedding(
+                corruption_level.to(x_current).reshape(-1, 1)
+            )
+            x = x + self.coarse_input(coarse.to(x_current).mul(2).sub(1))
         if self.height_input is not None:
             if height is None:
                 raise ValueError("height-conditioned denoiser requires a height field.")
@@ -305,7 +354,41 @@ class Denoiser3D(nn.Module):
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
         height: torch.Tensor | None = None,
+        coarse: torch.Tensor | None = None,
+        corruption_level: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.coarse_enabled:
+            # CFG drops the domain, never the material being refined or its height.
+            conditions = dict(
+                height=height,
+                coarse=coarse,
+                corruption_level=corruption_level,
+                vf=vf,
+                vf_present=vf_present,
+                anchor_image=anchor_image,
+                anchor_mask=anchor_mask,
+            )
+            if guidance == 1.0:
+                return self.compute_logits(
+                    x_current, time, latent, domain, **conditions
+                )
+            unconditional = self.compute_logits(
+                x_current,
+                time,
+                latent,
+                torch.full_like(domain, NULL_DOMAIN),
+                **conditions,
+            )
+            if guidance == 0.0:
+                return unconditional
+            conditional = self.compute_logits(
+                x_current, time, latent, domain, **conditions
+            )
+            return unconditional.float() + guidance * (
+                conditional.float() - unconditional.float()
+            )
+        if coarse is not None or corruption_level is not None:
+            raise ValueError("coarse conditioning requires an SR denoiser.")
         if guidance == 0.0 or (
             vf is None and anchor_image is None and anchor_mask is None
         ):

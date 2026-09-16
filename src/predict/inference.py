@@ -12,6 +12,8 @@ from src.config import (
     load_generation_settings,
     load_train_config,
 )
+from src.predict.memory import estimate_memory, select_storage
+from src.predict.tile import parse_shape
 from src.predict.tiled import TiledGenerator
 from src.prepare.resize import resize_crop
 
@@ -49,6 +51,36 @@ class InferenceAPI:
                 f"image must be a {self.crop_size} x {self.crop_size} original crop."
             )
         return resize_crop(image, get_sizes(self.data)[1], self.num_phases)
+
+    def estimate_memory(
+        self, *, blocks=None, shape=None, size=None, overlap=None, probabilities=False
+    ):
+        """Resolve requested geometry without allocating a volume."""
+        if sum(value is not None for value in (blocks, shape, size)) > 1:
+            raise ValueError("blocks and shape and size cannot be provided together.")
+        tiled = blocks is not None or shape is not None
+        overlap = self.settings.overlap if overlap is None else overlap
+        if blocks is not None:
+            shape = self.scaled.shape_from_blocks(blocks, overlap)
+        elif shape is None:
+            shape = self.input_size if size is None else size
+        shape = parse_shape(shape)
+        if tiled:
+            self.scaled.plan(shape, overlap)
+        return estimate_memory(
+            shape,
+            self.num_phases,
+            tile_size=self.input_size if tiled else None,
+            margin=self.generator.default_margin,
+            overlap=overlap if tiled else 0,
+            probabilities=probabilities,
+        )
+
+    def check_memory(self, estimate, *, storage="auto", tiled=True):
+        # A direct reverse chain holds its entire state on the model device.
+        if not tiled:
+            storage = self.device.type
+        return select_storage(storage, estimate, self.generator)
 
     def generate(
         self,
@@ -124,10 +156,31 @@ class InferenceAPI:
         guidance=None,
         anchor_strength=None,
         height_origin=0.0,
+        *,
+        shape=None,
+        blocks=None,
+        overlap=None,
+        storage="auto",
+        progress=False,
     ):
         """Keep fractional occupancy for downstream SR; same sampling as generate."""
+        if shape is not None and blocks is not None:
+            raise ValueError("blocks and shape cannot be provided together.")
+        tiled = blocks is not None or shape is not None
+        if not tiled and (storage != "auto" or overlap is not None):
+            raise ValueError("storage and overlap apply only to scale-up.")
+        options = {}
+        sampler = self.generator
+        if tiled:
+            overlap = self.settings.overlap if overlap is None else overlap
+            if blocks is not None:
+                shape = self.scaled.shape_from_blocks(blocks, overlap)
+            sampler = self.scaled
+            options = dict(
+                shape=shape, overlap=overlap, storage=storage, progress=progress
+            )
         with _seeded_rng(seed, self.device):
-            return self.generator.generate_probs(
+            return sampler.generate_probs(
                 anchors=_validate_anchors(anchors),
                 vf=vf,
                 domain=domain,
@@ -136,6 +189,7 @@ class InferenceAPI:
                 if anchor_strength is None
                 else anchor_strength,
                 height_origin=height_origin,
+                **options,
             )
 
 

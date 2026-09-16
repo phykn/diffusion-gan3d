@@ -1,3 +1,4 @@
+import math
 from io import BytesIO
 from pathlib import Path
 from threading import Lock
@@ -6,22 +7,84 @@ from typing import Annotated, Literal
 import tifffile
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.anchor import PlaneAnchor
 from src.evaluate.volume import measure_volume
 from src.predict.inference import InferenceAPI
 
 FRONT_DIR = Path(__file__).resolve().parents[2] / "front" / "dist"
+MAX_SIZE = 1024
+MAX_VOXELS = 512**3
+MAX_BLOCKS = 64
+MAX_TOTAL_BLOCKS = 4096
+MAX_ANCHORS = 32
+MAX_PHASES = 256
+MAX_REQUEST_BYTES = 16 * 1024**2
+Dimension = Annotated[int, Field(ge=1, le=MAX_SIZE, strict=True)]
+BlockCount = Annotated[int, Field(ge=1, le=MAX_BLOCKS, strict=True)]
+PhaseID = Annotated[int, Field(ge=0, le=255, strict=True)]
+Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+LabelRow = Annotated[list[PhaseID], Field(min_length=1, max_length=MAX_SIZE)]
+LabelImage = Annotated[list[LabelRow], Field(min_length=1, max_length=MAX_SIZE)]
+ProbabilityRow = Annotated[list[Probability], Field(min_length=1, max_length=MAX_SIZE)]
+ProbabilityPlane = Annotated[
+    list[ProbabilityRow], Field(min_length=1, max_length=MAX_SIZE)
+]
+ProbabilityImage = Annotated[
+    list[ProbabilityPlane], Field(min_length=1, max_length=MAX_PHASES)
+]
+
+
+class RequestSizeLimit:
+    """Bound JSON bodies before parsing, including chunked uploads."""
+
+    def __init__(self, app, limit: int):
+        self.app, self.limit = app, limit
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] != "POST":
+            return await self.app(scope, receive, send)
+        chunks, size = [], 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            size += len(message.get("body", b""))
+            if size > self.limit:
+                response = JSONResponse(
+                    status_code=413, content={"detail": "request body is too large"}
+                )
+                return await response(scope, receive, send)
+            chunks.append(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
+        body = b"".join(chunks)
+        del chunks
+
+        async def bounded_receive():
+            nonlocal body
+            if body is not None:
+                result, body = body, None
+                return {"type": "http.request", "body": result, "more_body": False}
+            return await receive()
+
+        await self.app(scope, bounded_receive, send)
 
 
 class AnchorRequest(BaseModel):
-    image: list[list[int]] | list[list[list[float]]]
+    image: LabelImage | ProbabilityImage
     axis: Annotated[int, Field(ge=0, le=2)]
-    index: Annotated[int, Field(ge=0)]
-    position: tuple[int, int] | None = None
+    index: Annotated[int, Field(ge=0, lt=MAX_SIZE)]
+    position: (
+        tuple[
+            Annotated[int, Field(ge=0, lt=MAX_SIZE)],
+            Annotated[int, Field(ge=0, lt=MAX_SIZE)],
+        ]
+        | None
+    ) = None
 
     @field_validator("image")
     @classmethod
@@ -47,24 +110,37 @@ class AnchorRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    anchors: list[AnchorRequest] = Field(default_factory=list)
-    blocks: int | tuple[int, int, int] | None = None
-    shape: int | tuple[int, int, int] | None = None
-    size: int | None = Field(default=None, ge=1)
-    vf: list[float] | None = None
-    domain: int | None = None
+    anchors: list[AnchorRequest] = Field(default_factory=list, max_length=MAX_ANCHORS)
+    blocks: BlockCount | tuple[BlockCount, BlockCount, BlockCount] | None = None
+    shape: Dimension | tuple[Dimension, Dimension, Dimension] | None = None
+    size: Dimension | None = None
+    vf: list[Probability] | None = Field(default=None, max_length=MAX_PHASES)
+    domain: int | None = Field(default=None, ge=0)
     seed: int | None = Field(default=None, ge=0)
-    guidance: float | None = None
-    anchor_strength: float | None = None
+    guidance: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    anchor_strength: Probability | None = None
     height_origin: float = Field(default=0.0, ge=0, allow_inf_nan=False)
-    overlap: int | None = Field(default=None, ge=0)
+    overlap: int | None = Field(default=None, ge=0, le=MAX_SIZE // 2)
     storage: Literal["auto", "cpu", "cuda"] = "auto"
     progress: bool = False
     format: Literal["tiff", "raw"] = "tiff"
 
+    @model_validator(mode="after")
+    def validate_volume(self):
+        for value, maximum, label in (
+            (self.shape, MAX_VOXELS, "shape voxels"),
+            (self.size, MAX_VOXELS, "size voxels"),
+            (self.blocks, MAX_TOTAL_BLOCKS, "block count"),
+        ):
+            if value is not None:
+                count = value**3 if isinstance(value, int) else math.prod(value)
+                if count > maximum:
+                    raise ValueError(f"{label} must not exceed {maximum}")
+        return self
+
 
 class PrepareRequest(BaseModel):
-    image: list[list[int]]
+    image: LabelImage
 
 
 def create_app(
@@ -81,8 +157,8 @@ def create_app(
 
     app = FastAPI(
         title="Diffusion-GAN 3D inference",
-        version="2",
     )
+    app.add_middleware(RequestSizeLimit, limit=MAX_REQUEST_BYTES)
     app.state.inference = inference
     app.state.generate_lock = Lock()
 
@@ -110,6 +186,28 @@ def create_app(
     def generate(request: GenerateRequest) -> StreamingResponse:
         try:
             with app.state.generate_lock:
+                estimate = app.state.inference.estimate_memory(
+                    blocks=request.blocks,
+                    shape=request.shape,
+                    size=request.size,
+                    overlap=request.overlap,
+                )
+                if (
+                    max(estimate.shape) > MAX_SIZE
+                    or math.prod(estimate.shape) > MAX_VOXELS
+                ):
+                    raise ValueError(
+                        "resolved output shape exceeds the server size limit"
+                    )
+                if estimate.tile_count > MAX_TOTAL_BLOCKS:
+                    raise ValueError(
+                        "resolved tile count exceeds the server block limit"
+                    )
+                app.state.inference.check_memory(
+                    estimate,
+                    storage=request.storage,
+                    tiled=request.blocks is not None or request.shape is not None,
+                )
                 volume = app.state.inference.generate(
                     anchors=tuple(anchor.to_anchor() for anchor in request.anchors),
                     blocks=request.blocks,
@@ -129,7 +227,7 @@ def create_app(
                     volume,
                     device=app.state.inference.device,
                 )
-        except MemoryError as exc:
+        except (MemoryError, torch.OutOfMemoryError) as exc:
             raise HTTPException(
                 status_code=413,
                 detail=f"generation exceeds available memory: {exc}",

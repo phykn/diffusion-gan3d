@@ -145,6 +145,21 @@ def test_seed_is_reproducible_without_changing_caller_rng(api: InferenceAPI) -> 
     assert torch.equal(after, expected[1])
 
 
+def test_probability_api_forwards_tiled_storage_and_geometry(api, monkeypatch):
+    calls = []
+
+    def sample(**kwargs):
+        calls.append(kwargs)
+        return torch.ones(2, 12, 12, 12) / 2
+
+    monkeypatch.setattr(api.scaled, "generate_probs", sample, raising=False)
+    probs = api.generate_probs(shape=(12, 12, 12), overlap=2, storage="cpu", seed=3)
+    assert calls[0]["storage"] == "cpu"
+    assert calls[0]["shape"] == (12, 12, 12)
+    assert calls[0]["overlap"] == 2
+    assert probs.shape == (2, 12, 12, 12)
+
+
 def test_cpu_seed_never_queries_the_cuda_device(
     api: InferenceAPI,
     monkeypatch: pytest.MonkeyPatch,

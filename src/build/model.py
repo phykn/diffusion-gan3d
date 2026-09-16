@@ -11,7 +11,6 @@ from src.config import (
 from src.model.critic import ConnectivityCritic2D, PairCritic2D
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
-from src.model.sr import SuperResolution
 
 
 def get_time_scale(cfg: dict) -> float:
@@ -52,7 +51,7 @@ def build_denoiser(
     cfg: dict,
     checkpointing: bool | None = None,
 ) -> Denoiser3D:
-    cfg = normalize_train_config(cfg)
+    cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
     data = cfg["data"]
     model = cfg["model"]
     generator = model["generator"]
@@ -69,16 +68,17 @@ def build_denoiser(
         latent_channels=generator["latent_channels"],
         num_domains=num_domains,
         gradient_checkpointing=checkpointing,
-        anchor_multiscale=generator["anchor_multiscale_input"],
+        anchor_multiscale=generator.get("anchor_multiscale_input", False),
         time_scale=get_time_scale(cfg),
         height_enabled=cfg["conditioning"]["height_enabled"],
+        coarse_enabled=cfg["stage"] == "sr",
     )
 
 
 def build_models(
     cfg: dict,
-) -> tuple[Denoiser3D, nn.ModuleDict, ConnectivityCritic2D]:
-    cfg = normalize_train_config(cfg)
+) -> tuple[Denoiser3D, nn.ModuleDict, ConnectivityCritic2D | None]:
+    cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
     data = cfg["data"]
     model = cfg["model"]
     generator = model["generator"]
@@ -86,6 +86,14 @@ def build_models(
     domains = get_domains(data)
     num_domains = len(domains)
     denoiser = build_denoiser(cfg)
+    groups = get_plane_groups(cfg)
+    if cfg["stage"] == "sr":
+        groups = {
+            f"{domain}_{group}": axes
+            for domain, planes in domains.items()
+            for group, axes in groups.items()
+            if set(axes).intersection(planes)
+        }
     critics = nn.ModuleDict(
         {
             group: PairCritic2D(
@@ -96,16 +104,20 @@ def build_models(
                 gradient_checkpointing=model["gradient_checkpointing"],
                 time_scale=get_time_scale(cfg),
             )
-            for group in get_plane_groups(cfg)
+            for group in groups
         }
     )
-    connectivity_critic = ConnectivityCritic2D(
-        num_phases=data["num_phases"],
-        channels=critic["channels"],
-        embedding_channels=generator["embedding_channels"],
-        num_domains=num_domains,
-        gradient_checkpointing=model["gradient_checkpointing"],
-        directed_axis={"z": 0, "y": 1, "x": 2}.get(data.get("thickness_axis")),
+    connectivity_critic = (
+        None
+        if cfg["stage"] == "sr"
+        else ConnectivityCritic2D(
+            num_phases=data["num_phases"],
+            channels=critic["channels"],
+            embedding_channels=generator["embedding_channels"],
+            num_domains=num_domains,
+            gradient_checkpointing=model["gradient_checkpointing"],
+            directed_axis={"z": 0, "y": 1, "x": 2}.get(data.get("thickness_axis")),
+        )
     )
     if cfg["conditioning"]["height_enabled"]:
         for network in critics.values():
@@ -113,12 +125,13 @@ def build_models(
                 1, critic["channels"][0], 3, padding=1, bias=False
             )
     for network in (*critics.values(), connectivity_critic):
-        network.pyramid_min_size = critic["pyramid_min_size"]
+        if network is not None:
+            network.pyramid_min_size = critic["pyramid_min_size"]
     return denoiser, critics, connectivity_critic
 
 
 def build_diffusion(cfg: dict) -> Diffusion:
-    cfg = normalize_train_config(cfg)
+    cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
     diffusion = cfg["model"]["diffusion"]
     return Diffusion(
         diffusion["num_steps"],
@@ -127,12 +140,7 @@ def build_diffusion(cfg: dict) -> Diffusion:
     )
 
 
-def build_sr_model(cfg: dict) -> SuperResolution:
+def build_sr_model(cfg: dict) -> Denoiser3D:
     cfg = normalize_train_config(cfg, "sr")
     get_sr_sizes(cfg)
-    return SuperResolution(
-        num_phases=cfg["data"]["num_phases"],
-        num_domains=len(get_domains(cfg["data"])),
-        height_enabled=cfg["conditioning"]["height_enabled"],
-        **cfg["model"]["generator"],
-    )
+    return build_denoiser(cfg, checkpointing=False)

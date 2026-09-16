@@ -32,7 +32,13 @@ from provenance import (
 
 from src.build.predict import load_generator
 from src.config import load_generation_settings
-from src.evaluate import compute_fid, percolating_fractions, phase_fraction, tortuosity
+from src.evaluate import (
+    compute_fid,
+    compute_kid,
+    percolating_fractions,
+    phase_fraction,
+    tortuosity,
+)
 from src.predict.tiled import TiledGenerator
 from src.storage import save_volume
 
@@ -41,6 +47,8 @@ REAL_REFERENCE_SEED = 10_000
 REAL_EVALUATION_SEEDS = (20_000, 20_001, 20_002, 20_003)
 REAL_CROP_COUNT = 64
 FID_FEATURE_DIMENSIONS = 192
+KID_SUBSET_SIZE = 50
+KID_SUBSETS = 100
 PORE_PHASE = 0
 TAUFACTOR_CONVERGENCE = 1e-3
 SCALE_BLOCKS = (3, 3, 3)
@@ -135,6 +143,12 @@ def main() -> None:
                     "fid": (
                         "Inception-v3 192-dimensional FID on 64 axis-0 sections/crops"
                     ),
+                    "kid": (
+                        "Unbiased polynomial MMD squared on the same 192-dimensional "
+                        "features; 100 subsets of 50 images. Subset standard deviation "
+                        "is not an independent-volume confidence interval. Adjacent "
+                        "sections and overlapping crops can be correlated."
+                    ),
                     "phase_0_fraction": "fraction of labels equal to phase 0",
                     "interface_density": (
                         "mean unlike-neighbor fraction over available axes"
@@ -220,6 +234,15 @@ def evaluate(
                     device,
                     FID_FEATURE_DIMENSIONS,
                 ),
+                kid=compute_kid(
+                    real_reference,
+                    crops,
+                    device,
+                    FID_FEATURE_DIMENSIONS,
+                    subset_size=KID_SUBSET_SIZE,
+                    subsets=KID_SUBSETS,
+                    seed=seed,
+                ),
                 phase_0_fraction=phase_fraction(crops, PORE_PHASE),
                 interface_density_value=interface_density(crops, spatial_dimensions=2),
             )
@@ -243,6 +266,15 @@ def evaluate(
                     sections,
                     device,
                     FID_FEATURE_DIMENSIONS,
+                ),
+                kid=compute_kid(
+                    real_reference,
+                    sections,
+                    device,
+                    FID_FEATURE_DIMENSIONS,
+                    subset_size=KID_SUBSET_SIZE,
+                    subsets=KID_SUBSETS,
+                    seed=seed,
                 ),
                 phase_0_fraction=phase_fraction(volume, PORE_PHASE),
                 interface_density_value=interface_density(volume, spatial_dimensions=3),
@@ -330,6 +362,7 @@ def make_row(
     *,
     guidance: float | None = None,
     fid: float | None = None,
+    kid=None,
     phase_0_fraction: float | None = None,
     interface_density_value: float | None = None,
     tortuosity_axis0: float | None = None,
@@ -341,6 +374,10 @@ def make_row(
         "seed": seed,
         "guidance": guidance,
         "fid": fid,
+        "kid": kid.mean if kid is not None else None,
+        "kid_subset_std": kid.std if kid is not None else None,
+        "kid_subset_size": kid.subset_size if kid is not None else None,
+        "kid_subsets": kid.subsets if kid is not None else None,
         "phase_0_fraction": phase_0_fraction,
         "interface_density": interface_density_value,
         "tortuosity_axis0": tortuosity_axis0,
@@ -359,6 +396,7 @@ def summarize(rows: list[dict[str, object]]) -> list[dict[str, object]]:
         }
         for metric in (
             "fid",
+            "kid",
             "phase_0_fraction",
             "interface_density",
             "tortuosity_axis0",
@@ -406,6 +444,7 @@ def print_result(row: dict[str, object]) -> None:
     print(
         f"{row['condition']}, seed={row['seed']}: "
         f"FID={row['fid']:.3f}, phase0={row['phase_0_fraction']:.4f}, "
+        f"KID={row['kid']:.6f} (subset std={row['kid_subset_std']:.6f}), "
         f"interface={row['interface_density']:.4f}, "
         f"tau={row['tortuosity_axis0']:.4f}, "
         f"percolation={row['percolation']:.4%}"

@@ -14,6 +14,7 @@ from src.evaluate.connectivity import (
     transition_tv,
 )
 from src.evaluate.fid import compute_fid, prepare_fid_images
+from src.evaluate.kid import KIDScore, compute_kid
 from src.evaluate.label import phase_fraction, phase_fractions, voxel_accuracy
 from src.evaluate.seam import SeamQuality, measure_seams
 from src.evaluate.tortuosity import tortuosity

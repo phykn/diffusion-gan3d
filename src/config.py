@@ -6,7 +6,6 @@ from pathlib import Path
 import yaml
 
 from src.plane import PLANES, get_axis
-from src.prepare.resize import scaled_size
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,37 +16,35 @@ TRAIN_DEFAULTS = {
     "train.structure_every_steps": 100,
     "model.critic.pyramid_min_size": 16,
     "conditioning.height_enabled": False,
+    "model.gradient_checkpointing": True,
+    "model.generator.embedding_channels": 128,
+    "model.generator.latent_channels": 64,
+    "model.diffusion.beta_min": 0.1,
+    "model.diffusion.beta_max": 20.0,
+    "model.diffusion.time_embedding": "index",
+    "conditioning.domain_keep_probability": 0.8,
+    "loss.critic_local_weight": 0.5,
+    "loss.r1_every_steps": 16,
+    "loss.r2_weight": 0.0,
+    "optim.adam_betas": [0.5, 0.9],
+    "train.num_workers": 0,
 }
 STAGE_DEFAULTS = {
     "low_res": {
-        "model.gradient_checkpointing": True,
-        "model.generator.embedding_channels": 128,
-        "model.generator.latent_channels": 64,
         "model.generator.anchor_multiscale_input": True,
-        "model.diffusion.beta_min": 0.1,
-        "model.diffusion.beta_max": 20.0,
-        "model.diffusion.time_embedding": "index",
-        "conditioning.domain_keep_probability": 0.8,
         "conditioning.dropout_probability_per_case": 0.05,
         "conditioning.anchor.start_step": 0,
         "conditioning.anchor.ramp_steps": 500,
         "conditioning.anchor.borrowed_plane_probability": 0.2,
         "conditioning.anchor.bank_capacity": 4,
         "conditioning.anchor.plane_spacing": 16,
-        "loss.critic_local_weight": 0.5,
-        "loss.r1_every_steps": 16,
-        "loss.r2_weight": 0.0,
         "loss.connectivity.start_step": 0,
         "loss.connectivity.ramp_steps": 20000,
         "loss.connectivity.windows_per_plane": 4,
-        "optim.adam_betas": [0.5, 0.9],
         "train.initial_weights": None,
-        "train.num_workers": 0,
     },
     "sr": {
-        "model.generator.noise_channels": 1,
         "loss.downsample_mse_tolerance": 0.005,
-        "optim.adam_betas": [0.0, 0.9],
         "lr_bank.refresh_every_steps": 1000,
         "conditioning.coarse_corruption_probability": 0.5,
         "conditioning.coarse_corruption_strength": 0.2,
@@ -65,6 +62,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> None:
                 "num_phases",
                 "crop_size",
                 "lo_res_size",
+                "hi_res_size",
                 "thickness_axis",
                 "height_extents",
             )
@@ -153,11 +151,15 @@ def validate_config_keys(cfg: Mapping, stage: str) -> None:
     else:
         schema = common | {
             "model": {
+                "gradient_checkpointing": None,
                 "generator": dict.fromkeys(
-                    ("channels", "blocks", "noise_channels", "scale_factor")
+                    ("channels", "embedding_channels", "latent_channels")
                 ),
                 "critic": dict.fromkeys(
                     ("channels", "plane_groups", "pyramid_min_size")
+                ),
+                "diffusion": dict.fromkeys(
+                    ("num_steps", "beta_min", "beta_max", "time_embedding")
                 ),
             },
             "conditioning": dict.fromkeys(
@@ -165,11 +167,15 @@ def validate_config_keys(cfg: Mapping, stage: str) -> None:
                     "coarse_corruption_probability",
                     "coarse_corruption_strength",
                     "height_enabled",
+                    "domain_keep_probability",
                 )
             ),
             "loss": dict.fromkeys(
                 (
-                    "gradient_penalty_weight",
+                    "critic_local_weight",
+                    "r1_weight",
+                    "r1_every_steps",
+                    "r2_weight",
                     "downsample_consistency_weight",
                     "downsample_mse_tolerance",
                 )
@@ -185,8 +191,9 @@ def validate_config_keys(cfg: Mapping, stage: str) -> None:
                     "total_steps",
                     "mixed_precision",
                     "volume_batch_size",
-                    "slices_per_plane",
-                    "critic_updates_per_step",
+                    "real_batch_size",
+                    "slice_pairs_per_plane",
+                    "num_workers",
                     "checkpoint_every_steps",
                     "structure_every_steps",
                 )
@@ -293,8 +300,8 @@ def validate_sr_config(cfg: dict) -> None:
     for name in (
         "total_steps",
         "volume_batch_size",
-        "slices_per_plane",
-        "critic_updates_per_step",
+        "real_batch_size",
+        "slice_pairs_per_plane",
         "checkpoint_every_steps",
     ):
         value = cfg["train"][name]
@@ -322,7 +329,9 @@ def validate_sr_config(cfg: dict) -> None:
     ):
         raise ValueError("lr_bank.guidance must be finite.")
     for name in (
-        "gradient_penalty_weight",
+        "critic_local_weight",
+        "r1_weight",
+        "r2_weight",
         "downsample_consistency_weight",
         "downsample_mse_tolerance",
     ):
@@ -336,6 +345,9 @@ def validate_sr_config(cfg: dict) -> None:
             raise ValueError(f"loss.{name} must be non-negative and finite.")
     if not 0 <= cfg["optim"]["ema_decay"] < 1:
         raise ValueError("optim.ema_decay must be in [0, 1).")
+    keep = cfg["conditioning"]["domain_keep_probability"]
+    if type(keep) not in (int, float) or not 0 <= keep <= 1:
+        raise ValueError("conditioning.domain_keep_probability must be in [0, 1].")
 
 
 def validate_sr_source(data: Mapping, base_data: Mapping) -> None:
@@ -358,37 +370,35 @@ def validate_sr_source(data: Mapping, base_data: Mapping) -> None:
         raise ValueError("SR height coordinates must match the stage-1 model.")
 
 
-def get_sizes(
-    data: Mapping[str, object], scale_factor: float | None = None
-) -> tuple[int, int, int]:
+def get_sizes(data: Mapping[str, object]) -> tuple[int, int, int]:
     """Return original crop, LR grid and the independently selected target size."""
     if any(
         key in data
         for key in (
             "input_size",
             "scale_factor",
-            "hi_res_size",
             "allow_part",
             "allow_partial_crops",
         )
     ):
         raise ValueError(
-            "use crop_size and lo_res_size; SR scale_factor belongs to model.generator."
+            "use crop_size, lo_res_size and hi_res_size; scale_factor is derived."
         )
     crop, low = data["crop_size"], data["lo_res_size"]
     for name, size in (("crop_size", crop), ("lo_res_size", low)):
         if isinstance(size, bool) or not isinstance(size, int) or size < 1:
             raise ValueError(f"{name} must be a positive integer.")
-    high = scaled_size(low, 1 if scale_factor is None else scale_factor)
+    high = data.get("hi_res_size", low)
+    if type(high) is not int or high < low:
+        raise ValueError("hi_res_size must be an integer at least lo_res_size.")
     return crop, low, high
 
 
 def get_sr_sizes(cfg: Mapping) -> tuple[int, int, int]:
     cfg = normalize_train_config(cfg, "sr")
-    generator = cfg.get("model", {}).get("generator", {})
-    if generator.get("scale_factor") is None:
-        raise ValueError("SR requires model.generator.scale_factor.")
-    return get_sizes(cfg["data"], generator["scale_factor"])
+    if "hi_res_size" not in cfg["data"]:
+        raise ValueError("SR requires data.hi_res_size.")
+    return get_sizes(cfg["data"])
 
 
 def get_plane_groups(cfg: Mapping) -> dict[str, tuple[int, ...]]:

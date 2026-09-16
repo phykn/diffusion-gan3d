@@ -20,6 +20,7 @@ from src.predict.tile import (
     TileBuffer,
     VolumeState,
     crop_output,
+    get_axis_windows,
     make_fusion,
     make_tiles,
 )
@@ -578,24 +579,17 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
     assert stats is not None
     assert stats.tile_count == 2
     assert diffusion.sample_calls == 0
-    assert [call.transition for call in diffusion.calls] == [2, 2, 1, 1]
-    assert [call.current_shape for call in diffusion.calls] == [
-        (1, 3, 3, 4, 4),
-        (1, 3, 3, 4, 4),
-    ] * 2
+    for transition in (2, 1):
+        calls = [call for call in diffusion.calls if call.transition == transition]
+        assert sum(math.prod(call.current_shape[-3:]) for call in calls) == 6 * 4 * 4
+        assert all(max(call.current_shape[-3:]) <= 4 for call in calls)
     assert all(call.current_dtype == torch.float32 for call in diffusion.calls)
-    assert events == [
-        ("model", 2),
-        ("model", 2),
-        ("posterior", 2),
-        ("posterior", 2),
-        ("model", 1),
-        ("model", 1),
-        ("posterior", 1),
-        ("posterior", 1),
-        ("model", 0),
-        ("model", 0),
-    ]
+    assert [transition for _, transition in events] == sorted(
+        (transition for _, transition in events), reverse=True
+    )
+    # Streaming can finalize a slab before the next model call, but never
+    # advances diffusion time before all tiles of the current time complete.
+    assert events[0] == ("model", 2)
 
     assert len(model.calls) == 6
     assert all(call.vf is None for call in model.calls)
@@ -1128,6 +1122,73 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
     assert torch.equal(next_state.values.float(), expected)
 
 
+@pytest.mark.parametrize(
+    "shape,overlap", [((17, 7, 6), 1), ((15, 9, 7), 0), ((4, 4, 4), 1)]
+)
+def test_circular_slab_matches_full_weighted_fusion(shape, overlap):
+    scaled = TiledGenerator(_generator(_LocalModel(), Diffusion(1)))
+    plan = scaled.plan(shape, overlap=overlap)
+    tiles = make_tiles(plan)
+    current = VolumeState(3, shape, torch.device("cpu"))
+    current.values.copy_(torch.randn_like(current.values))
+    next_state = VolumeState(3, shape, torch.device("cpu"))
+    fusion = make_fusion(plan, tiles, 3, torch.device("cpu"), torch.device("cpu"))
+    assert fusion.pred_sum.shape == (1, 3, min(shape[0], 4), *shape[1:])
+    expected = torch.zeros_like(current.values, dtype=torch.float32)
+    weights = torch.zeros((1, 1, *shape))
+    for tile in tiles:
+        pred = F.avg_pool3d(current.read(tile.source).float(), 3, stride=1, padding=1)
+        axes = get_axis_windows(tile, overlap, torch.device("cpu"), {})
+        window = (
+            axes[0][None, None, :, None, None]
+            * axes[1][None, None, None, :, None]
+            * axes[2][None, None, None, None, :]
+        )
+        region = (slice(None), slice(None), *tile.source)
+        expected[region] += pred * window
+        weights[region] += window
+    expected.div_(weights)
+    for _ in range(2):
+        scaled.step(
+            current,
+            next_state,
+            tiles,
+            torch.zeros(1, dtype=torch.long),
+            torch.zeros(1, 4),
+            None,
+            torch.zeros(1, dtype=torch.long),
+            0,
+            plan,
+            None,
+            fusion,
+        )
+        torch.testing.assert_close(next_state.values, expected.half())
+        assert not torch.count_nonzero(fusion.weight_sum)
+
+
+def test_tiled_probabilities_allow_explicit_cpu_storage():
+    scaled = TiledGenerator(_generator(_ControlledModel(), Diffusion(1)))
+    probs = scaled.generate_probs((6, 5, 7), overlap=1, storage="cpu", progress=False)
+    assert probs.device.type == "cpu"
+    torch.testing.assert_close(probs.sum(dim=0), torch.ones(6, 5, 7))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("storage", ["cpu", "cuda", "auto"])
+def test_cuda_denoiser_streams_slabs_with_each_storage_mode(storage):
+    device = torch.device("cuda")
+    model = Denoiser3D(3, 4, [1, 2], 8, 4, 1).to(device).eval()
+    generator = Generator(model, Diffusion(2).to(device), device, 8, 3, 4, True)
+    scaled = TiledGenerator(generator)
+    probs = scaled.generate_probs(
+        (13, 10, 10), overlap=2, storage=storage, progress=False
+    )
+    assert probs.device.type == "cpu"
+    assert torch.isfinite(probs).all()
+    assert (probs >= 0).all() and (probs <= 1).all()
+    torch.testing.assert_close(probs.sum(0), torch.ones(13, 10, 10))
+
+
 def test_boundary_tile_reads_only_bounded_context() -> None:
     model = _OverlapTraceModel()
     scaled = TiledGenerator(_generator(model, Diffusion(1)))
@@ -1357,7 +1418,9 @@ def test_scaled_base_keeps_constant_prediction_in_every_core() -> None:
     )
 
     assert model.call_count == 3 * 8
-    assert len(diffusion.calls) == 2 * 8
+    assert (
+        sum(math.prod(call.current_shape[-3:]) for call in diffusion.calls) == 2 * 6**3
+    )
     for call in diffusion.calls:
         assert torch.all(call.clean[:, 0] == 1.0)
         assert torch.all(call.clean[:, 1:] == -1.0)

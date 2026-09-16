@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from src.anchor import PlaneAnchor, encode_anchors
 from src.predict.generator import Generator
+from src.predict.memory import MemoryEstimate, estimate_memory, select_storage
 from src.predict.tile import (
     Fusion,
     Tile,
@@ -22,7 +23,7 @@ from src.predict.tile import (
     make_tiles,
     output_plan,
     parse_shape,
-    write_labels,
+    write_output,
 )
 
 
@@ -90,6 +91,7 @@ class TiledGenerator:
         anchors: Sequence[PlaneAnchor] = (),
         anchor_strength: float = 1.0,
         height_origin: float = 0.0,
+        storage: str = "auto",
     ) -> torch.Tensor:
         self.stats = None
         margin = self.generator.default_margin if margin is None else margin
@@ -100,7 +102,17 @@ class TiledGenerator:
             margin,
         )
         self.generator.validate_height(output_shape, domain, height_origin)
-        storage = self.select_storage("auto")
+        storage = self.select_storage(
+            storage,
+            estimate_memory(
+                output_shape,
+                self.generator.num_phases,
+                tile_size=plan.tile_size,
+                margin=margin,
+                overlap=overlap,
+                probabilities=True,
+            ),
+        )
         tiles = make_tiles(plan)
         tile_anchors = self.prepare_anchors(anchors, tiles, plan, anchor_strength)
         vf = self.generator.prepare_vf(vf)
@@ -125,11 +137,28 @@ class TiledGenerator:
             height_origin=height_origin,
             height_domain=height_domain,
         )
-        probs = ((current.values.float() + 1.0) * 0.5).clamp(0.0, 1.0)
-        probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(
-            torch.finfo(probs.dtype).eps,
+        # Convert bounded chunks directly into the cropped CPU result. Never
+        # materialize a full-volume fp32 probability tensor on the GPU.
+        probs = torch.empty(
+            (self.generator.num_phases, *output_shape), dtype=torch.float32
         )
-        probs = crop_output(probs.squeeze(0).cpu(), output_shape, margin)
+        for tile in tiles:
+            source = tuple(
+                slice(max(part.start, margin), min(part.stop, margin + size))
+                for part, size in zip(tile.target, output_shape)
+            )
+            if any(part.start >= part.stop for part in source):
+                continue
+            target = tuple(
+                slice(part.start - margin, part.stop - margin) for part in source
+            )
+            values = current.read(source).float().add_(1).mul_(0.5).clamp_(0, 1)
+            values.div_(
+                values.sum(dim=1, keepdim=True).clamp_min_(
+                    torch.finfo(values.dtype).eps
+                )
+            )
+            probs[(slice(None), *target)].copy_(values.squeeze(0))
         self.stats = output_plan(plan, output_shape)
         return probs
 
@@ -163,7 +192,16 @@ class TiledGenerator:
             output_shape = self.shape_from_blocks(blocks, overlap)
         plan = self._generation_plan(output_shape, overlap, margin)
         self.generator.validate_height(output_shape, domain, height_origin)
-        selected = self.select_storage(storage)
+        selected = self.select_storage(
+            storage,
+            estimate_memory(
+                output_shape,
+                self.generator.num_phases,
+                tile_size=plan.tile_size,
+                margin=margin,
+                overlap=overlap,
+            ),
+        )
         tiles = make_tiles(plan)
         tile_anchors = self.prepare_anchors(anchors, tiles, plan, anchor_strength)
         vf = self.generator.prepare_vf(vf)
@@ -392,15 +430,9 @@ class TiledGenerator:
     def select_storage(
         self,
         storage: str,
+        estimate: MemoryEstimate,
     ) -> str:
-        if storage not in {"auto", "cuda", "cpu"}:
-            raise ValueError("storage must be 'auto', 'cuda', or 'cpu'.")
-        device = self.generator.device
-        if storage == "cuda" and device.type != "cuda":
-            raise ValueError("storage='cuda' requires a CUDA generator.")
-        if storage == "auto":
-            return "cuda" if device.type == "cuda" else "cpu"
-        return storage
+        return select_storage(storage, estimate, self.generator)
 
     def make_states(
         self,
@@ -534,6 +566,8 @@ class TiledGenerator:
                 current.values.device.type == "cpu" and generator.device.type == "cuda",
             )
         fusion.pred_sum.zero_()
+        fusion.weight_sum.zero_()
+        layer_start = 0
         for index, tile in enumerate(tiles):
             values = tile_buffer.read(
                 current,
@@ -582,31 +616,54 @@ class TiledGenerator:
             if pred.shape != expected:
                 raise ValueError(f"model prediction must have shape {expected}.")
             add_prediction(fusion, tile, pred, tile_buffer, plan.overlap)
+            next_z = (
+                tiles[index + 1].source[0].start
+                if index + 1 < len(tiles)
+                else plan.shape[0]
+            )
+            if next_z != tile.source[0].start:
+                self.flush_slab(
+                    current,
+                    next_state,
+                    tiles[layer_start : index + 1],
+                    fusion,
+                    transition,
+                    labels,
+                    next_z,
+                )
+                layer_start = index + 1
 
-        if labels is None:
-            self.update_state(current, next_state, tiles, fusion, transition)
-        else:
-            write_labels(labels, tiles, fusion)
-
-    def update_state(
+    def flush_slab(
         self,
         current: VolumeState,
         next_state: VolumeState,
         tiles: tuple[Tile, ...],
         fusion: Fusion,
         transition: int,
+        labels: torch.Tensor | None,
+        stop: int,
     ) -> None:
         generator = self.generator
         for tile in tiles:
-            region = (slice(None), slice(None), *tile.target)
-            clean = fusion.pred_sum[region] / fusion.weight_sum[region]
-            previous = current.read(tile.target).float()
-            updated = generator.diffusion.sample_posterior(
-                previous,
-                clean,
-                transition,
-            )
-            next_state.write(tile.target, updated)
+            target = (slice(tile.source[0].start, stop), *tile.target[1:])
+            for global_region, local_region in fusion.regions(target):
+                region = (slice(None), slice(None), *local_region)
+                weights = fusion.weight_sum[region]
+                if not bool((weights > 0).all()):
+                    raise RuntimeError("blend weights must cover the output slab.")
+                clean = fusion.pred_sum[region] / weights
+                if labels is None:
+                    previous = current.read(global_region).float()
+                    updated = generator.diffusion.sample_posterior(
+                        previous,
+                        clean,
+                        transition,
+                    )
+                    next_state.write(global_region, updated)
+                else:
+                    write_output(labels, global_region, clean)
+                fusion.pred_sum[region].zero_()
+                weights.zero_()
 
     @staticmethod
     def condition_base(

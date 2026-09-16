@@ -16,6 +16,7 @@ def pack(
     big_vf: float,
     small_vf: float,
     big_elongation: float,
+    radius_gradient: tuple[float, float] = (1.0, 1.0),
 ) -> np.ndarray:
     check_geometry(
         size,
@@ -24,8 +25,14 @@ def pack(
         big_vf,
         small_vf,
         big_elongation,
+        radius_gradient,
     )
-    work_size = size * 3 // 2
+    largest_radius = max(
+        small_radius,
+        big_radius * max(big_elongation ** (2 / 3), big_elongation ** (-1 / 3)),
+    )
+    padding = max(size // 4, int(np.ceil(largest_radius * max(radius_gradient))))
+    work_size = size + 2 * padding
     volume = np.zeros((work_size,) * 3, dtype=np.uint8)
     occupied = np.zeros_like(volume, dtype=bool)
     particles: list[Particle] = []
@@ -44,6 +51,7 @@ def pack(
             big_radius=float(big_radius),
             small_radius=float(small_radius),
             elongation=big_elongation,
+            radius_scales=radius_profile(size, padding, radius_gradient),
         )
 
     low = (volume.shape[0] - size) // 2
@@ -58,6 +66,7 @@ def check_geometry(
     big_vf: float,
     small_vf: float,
     big_elongation: float,
+    radius_gradient: tuple[float, float] = (1.0, 1.0),
 ) -> None:
     if size < 1:
         raise ValueError("size must be a positive integer.")
@@ -67,8 +76,25 @@ def check_geometry(
         raise ValueError("volume fractions must be between zero and one.")
     if big_vf + small_vf > 1.0:
         raise ValueError("big_vf and small_vf must sum to at most one.")
-    if big_elongation <= 0.0:
+    if not np.isfinite(big_elongation) or big_elongation <= 0.0:
         raise ValueError("big_elongation must be positive.")
+    gradient = np.asarray(radius_gradient, dtype=float)
+    if (
+        gradient.shape != (2,)
+        or not np.isfinite(gradient).all()
+        or (gradient <= 0).any()
+    ):
+        raise ValueError("radius_gradient must contain two finite positive scales.")
+
+
+def radius_profile(size: int, padding: int, gradient) -> np.ndarray:
+    """Radius multipliers at z=0 and z=size-1 of the exported volume.
+
+    Simulation context extends endpoint radii; it must not move the gradient
+    endpoints away from the final cropped volume's physical heights.
+    """
+    height = np.clip((np.arange(size + 2 * padding) - padding) / max(size - 1, 1), 0, 1)
+    return gradient[0] + (gradient[1] - gradient[0]) * height
 
 
 def place(
@@ -80,30 +106,36 @@ def place(
     big_radius: float,
     small_radius: float,
     elongation: float,
+    radius_scales: np.ndarray,
 ) -> None:
-    axes, offsets = make_particle_shape(
-        label=label,
-        big_radius=big_radius,
-        small_radius=small_radius,
-        elongation=elongation,
-    )
-    particle_count = round(target_voxels / len(offsets))
-    if particle_count <= 0:
+    if target_voxels <= 0:
         return
-
-    valid_centers = find_valid_centers(volume.shape[0], offsets)
+    shapes = {
+        scale: make_particle_shape(
+            label, big_radius * scale, small_radius * scale, elongation
+        )
+        for scale in np.unique(radius_scales)
+    }
+    minimum_axes = shapes[min(shapes)][0]
+    # Each candidate's bounds use its local radius, including the z extent.
+    valid_centers = np.zeros(volume.shape, dtype=bool)
+    for z, scale in enumerate(radius_scales):
+        offsets = shapes[scale][1]
+        low, high = -offsets.min(axis=0), np.asarray(volume.shape) - offsets.max(axis=0)
+        if low[0] <= z < high[0]:
+            valid_centers[z, low[1] : high[1], low[2] : high[2]] = True
     for particle in particles:
         invalidate_centers(
             valid_centers,
             np.asarray(particle.center),
-            axes,
+            minimum_axes,
             np.asarray(particle.axes),
         )
 
     order = np.random.permutation(np.flatnonzero(valid_centers))
     placed = 0
     for flat in order:
-        if placed >= particle_count:
+        if placed >= target_voxels:
             break
         if not valid_centers.flat[flat]:
             continue
@@ -111,6 +143,7 @@ def place(
             np.unravel_index(flat, valid_centers.shape),
             dtype=np.int32,
         )
+        axes, offsets = shapes[radius_scales[center[0]]]
         positions = offsets + center
         indices = tuple(positions.T)
         if np.any(occupied[indices]):
@@ -125,8 +158,10 @@ def place(
                 axes=tuple(float(value) for value in axes),
             )
         )
-        placed += 1
-        invalidate_centers(valid_centers, center, axes, axes)
+        placed += len(offsets)
+        # Conservative candidate pruning; exact voxel overlap is still checked
+        # above because subsequent particles can have different radii.
+        invalidate_centers(valid_centers, center, minimum_axes, axes)
 
 
 def make_particle_shape(
@@ -156,20 +191,6 @@ def make_offsets(axes: np.ndarray) -> np.ndarray:
     offsets = np.column_stack((z.ravel(), y.ravel(), x.ravel()))
     keep = np.sum((offsets / axes) ** 2, axis=1) <= 1.0 + 1e-12
     return offsets[keep]
-
-
-def find_valid_centers(size: int, offsets: np.ndarray) -> np.ndarray:
-    valid_centers = np.zeros((size,) * 3, dtype=bool)
-    low = -offsets.min(axis=0)
-    high = size - 1 - offsets.max(axis=0)
-    if np.any(low > high):
-        return valid_centers
-    valid_centers[
-        low[0] : high[0] + 1,
-        low[1] : high[1] + 1,
-        low[2] : high[2] + 1,
-    ] = True
-    return valid_centers
 
 
 def invalidate_centers(

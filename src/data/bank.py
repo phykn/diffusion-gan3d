@@ -31,6 +31,6 @@ def validate_bank(
 
 def load_bank(path: str | Path) -> dict:
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if payload.get("format") != "diffusion-gan3d.lr-bank.v2":
+    if payload.get("format") != "diffusion-gan3d.lr-bank":
         raise ValueError("unsupported LR bank format.")
     return payload

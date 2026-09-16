@@ -65,3 +65,31 @@ def resize_crop(
 def downsample(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
     """Area-average phase occupancy, matching the fractional coarse contract."""
     return resize_phases(probs.float(), shape)
+
+
+def coarse_region(
+    probs: torch.Tensor,
+    start: tuple[int, int, int],
+    shape: tuple[int, int, int],
+    scale: int,
+) -> torch.Tensor:
+    """Upsample an aligned HR region, retaining one LR voxel of interpolation halo."""
+    if (
+        type(scale) is not int
+        or scale < 1
+        or any(
+            s % scale or n < 1 or n % scale for s, n in zip(start, shape, strict=True)
+        )
+    ):
+        raise ValueError("coarse regions must align with the integer LR/HR lattice.")
+    source, padding = [], []
+    for s, n, total in zip(start, shape, probs.shape[-3:], strict=True):
+        left, right = s // scale - 1, (s + n) // scale + 1
+        source.append(slice(max(0, left), min(total, right)))
+        padding.append((max(0, -left), max(0, right - total)))
+    low = probs[(slice(None), slice(None), *source)]
+    low = F.pad(
+        low, tuple(v for pair in reversed(padding) for v in pair), mode="replicate"
+    )
+    high = F.interpolate(low, scale_factor=scale, mode="trilinear", align_corners=False)
+    return high[(slice(None), slice(None), *(slice(scale, scale + n) for n in shape))]

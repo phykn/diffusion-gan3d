@@ -13,3 +13,4 @@ thickness_axis: z
 # 원본에서 관찰할 범위와 모델 격자 크기는 독립적이다.
 crop_size: 128
 lo_res_size: 64
+hi_res_size: 128  # 2단계 출력 격자. 배율은 hi_res_size / lo_res_size로 계산한다.

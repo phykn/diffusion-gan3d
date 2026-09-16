@@ -6,6 +6,7 @@ import torch
 from src.anchor import PlaneAnchor, encode_anchors
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
+from src.predict.memory import estimate_memory, select_storage
 from src.prepare.height import height_field
 
 
@@ -27,6 +28,8 @@ class GuidedDenoiser:
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
         height: torch.Tensor | None = None,
+        coarse: torch.Tensor | None = None,
+        corruption_level: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.generator.predict(
             current,
@@ -39,6 +42,11 @@ class GuidedDenoiser:
             anchor_image=anchor_image,
             anchor_mask=anchor_mask,
             **({"height": height} if height is not None else {}),
+            **(
+                {"coarse": coarse, "corruption_level": corruption_level}
+                if coarse is not None
+                else {}
+            ),
         )
 
 
@@ -84,13 +92,15 @@ class Generator:
         anchor_mask: torch.Tensor | None = None,
         height: torch.Tensor | None = None,
         anchor_strength: float = 1.0,
+        coarse: torch.Tensor | None = None,
+        corruption_level: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if anchor_strength == 0:
             anchor_image = anchor_mask = None
         elif anchor_mask is not None:
             anchor_mask = anchor_mask.float() * anchor_strength
         conditions = self.prepare_conditions(
-            domain, vf, anchor_image, anchor_mask, height
+            domain, vf, anchor_image, anchor_mask, height, coarse, corruption_level
         )
         if guidance == 1.0:
             return self.model(current, time, latent, **conditions)
@@ -110,9 +120,11 @@ class Generator:
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
         height: torch.Tensor | None = None,
+        coarse: torch.Tensor | None = None,
+        corruption_level: torch.Tensor | None = None,
     ) -> torch.Tensor:
         conditions = self.prepare_conditions(
-            domain, vf, anchor_image, anchor_mask, height
+            domain, vf, anchor_image, anchor_mask, height, coarse, corruption_level
         )
         if guidance == 1.0:
             return self.model.compute_logits(current, time, latent, **conditions)
@@ -131,8 +143,14 @@ class Generator:
         anchor_image: torch.Tensor | None = None,
         anchor_mask: torch.Tensor | None = None,
         height: torch.Tensor | None = None,
+        coarse: torch.Tensor | None = None,
+        corruption_level: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         conditions = {"domain": domain}
+        if coarse is not None:
+            conditions["coarse"] = coarse
+        if corruption_level is not None:
+            conditions["corruption_level"] = corruption_level
         if height is not None:
             conditions["height"] = height
         if vf is not None:
@@ -204,6 +222,11 @@ class Generator:
             raise ValueError("margin must be a non-negative integer.")
         self.validate_anchor_strength(anchor_strength)
         self.validate_height((size,) * 3, domain, height_origin)
+        select_storage(
+            self.device.type,
+            estimate_memory(size, self.num_phases, margin=margin, probabilities=True),
+            self,
+        )
         vf = self.prepare_vf(vf)
         generation_size = size + 2 * margin
         initial_noise = torch.randn(
