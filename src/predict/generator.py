@@ -213,6 +213,7 @@ class Generator:
         domain: int | None = None,
         margin: int | None = None,
         height_origin: float = 0.0,
+        probabilities: bool = False,
     ) -> torch.Tensor:
         size = self.patch_size if size is None else size
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
@@ -224,7 +225,9 @@ class Generator:
         self.validate_height((size,) * 3, domain, height_origin)
         select_storage(
             self.device.type,
-            estimate_memory(size, self.num_phases, margin=margin, probabilities=True),
+            estimate_memory(
+                size, self.num_phases, margin=margin, probabilities=probabilities
+            ),
             self,
         )
         vf = self.prepare_vf(vf)
@@ -391,6 +394,7 @@ class Generator:
             domain=domain,
             margin=margin,
             height_origin=height_origin,
+            probabilities=True,
         )
         probs = ((clean.float() + 1.0) * 0.5).clamp(0.0, 1.0)
         probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(
@@ -409,17 +413,15 @@ class Generator:
         margin: int | None = None,
         height_origin: float = 0.0,
     ) -> torch.Tensor:
-        return (
-            self.generate_probs(
-                anchors=anchors,
-                vf=vf,
-                size=size,
-                anchor_strength=anchor_strength,
-                guidance=guidance,
-                domain=domain,
-                margin=margin,
-                height_origin=height_origin,
-            )
-            .argmax(dim=0)
-            .to(torch.uint8)
+        clean = self._sample_clean(
+            anchors=anchors,
+            vf=vf,
+            size=size,
+            anchor_strength=anchor_strength,
+            guidance=guidance,
+            domain=domain,
+            margin=margin,
+            height_origin=height_origin,
+            probabilities=False,
         )
+        return clean.argmax(dim=1).squeeze(0).to(device="cpu", dtype=torch.uint8)

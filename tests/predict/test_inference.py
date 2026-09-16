@@ -1,5 +1,6 @@
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -204,3 +205,71 @@ def test_public_inference_import_does_not_load_training():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("fail_inside", [False, True])
+def test_seed_scope_only_changes_selected_gpu_and_restores_on_error(
+    monkeypatch, fail_inside
+):
+    states = {
+        index: torch.Generator().manual_seed(index + 100).get_state()
+        for index in (0, 1)
+    }
+    original = {index: state.clone() for index, state in states.items()}
+    cpu_state = torch.get_rng_state().clone()
+    active = [0]
+
+    @contextmanager
+    def device(index):
+        previous, active[0] = active[0], index
+        try:
+            yield
+        finally:
+            active[0] = previous
+
+    def seed_selected(seed):
+        states[active[0]] = torch.Generator().manual_seed(seed).get_state()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("seeding unrelated devices")
+
+    monkeypatch.setattr(torch, "manual_seed", forbidden)
+    monkeypatch.setattr(torch.cuda, "manual_seed_all", forbidden)
+    monkeypatch.setattr(
+        torch.cuda, "get_rng_state", lambda index: states[index].clone()
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_rng_state",
+        lambda state, index: states.__setitem__(index, state),
+    )
+    monkeypatch.setattr(torch.cuda, "device", device)
+    monkeypatch.setattr(torch.cuda, "manual_seed", seed_selected)
+    try:
+        with inference_module._seeded_rng(7, torch.device("cuda:1")):
+            assert torch.equal(states[0], original[0])
+            assert torch.equal(states[1], torch.Generator().manual_seed(7).get_state())
+            assert torch.equal(
+                torch.rand(3), torch.rand(3, generator=torch.Generator().manual_seed(7))
+            )
+            if fail_inside:
+                raise ValueError("inference failed")
+    except ValueError:
+        assert fail_inside
+    assert torch.equal(cpu_state, torch.get_rng_state())
+    assert all(torch.equal(states[index], original[index]) for index in states)
+    assert active[0] == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_seeded_cuda_sampling_restores_cpu_and_device_rng():
+    torch.cuda.init()
+    cpu = torch.get_rng_state().clone()
+    gpu = torch.cuda.get_rng_state(0).clone()
+    samples = []
+    for _ in range(2):
+        with inference_module._seeded_rng(17, torch.device("cuda:0")):
+            samples.append(torch.randn(16, device="cuda:0").cpu())
+    torch.testing.assert_close(*samples, rtol=0, atol=0)
+    assert torch.equal(cpu, torch.get_rng_state())
+    assert torch.equal(gpu, torch.cuda.get_rng_state(0))

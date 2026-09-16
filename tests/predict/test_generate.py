@@ -1232,6 +1232,58 @@ def test_boundary_tile_reads_only_bounded_context() -> None:
     assert torch.equal(observed, expected)
 
 
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA unavailable"
+            ),
+        ),
+    ],
+)
+def test_labels_are_selected_before_cpu_transfer(monkeypatch, device):
+    generator = _generator(_ControlledModel(), Diffusion(1))
+    clean = torch.randn(1, 3, 4, 5, 6, device=device).softmax(1).mul(2).sub(1)
+    expected = clean.argmax(1).squeeze(0).cpu().to(torch.uint8)
+    monkeypatch.setattr(generator, "_sample_clean", lambda **kwargs: clean)
+    monkeypatch.setattr(
+        generator,
+        "generate_probs",
+        lambda **kwargs: pytest.fail("labels used probability path"),
+    )
+    transfers = []
+    original = torch.Tensor.to
+
+    def track(tensor, *args, **kwargs):
+        transfers.append((tensor.shape, tensor.dtype, tensor.device.type))
+        return original(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", track)
+    labels = generator.generate()
+    assert transfers == [(torch.Size((4, 5, 6)), torch.int64, device)]
+    torch.testing.assert_close(labels, expected)
+
+
+def test_direct_memory_budget_matches_returned_representation(monkeypatch):
+    import src.predict.generator as module
+
+    choices = []
+    original = module.estimate_memory
+
+    def record(*args, **kwargs):
+        choices.append(kwargs["probabilities"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "estimate_memory", record)
+    generator = _generator(_ControlledModel(), Diffusion(1))
+    generator.generate()
+    generator.generate_probs()
+    assert choices == [False, True]
+
+
 def test_bounded_tile_reads_reuse_the_workspace() -> None:
     state = VolumeState(3, (6, 7, 5), torch.device("cpu"))
     values = torch.arange(state.values.numel(), dtype=torch.float32)

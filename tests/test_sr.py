@@ -320,6 +320,60 @@ def test_multidomain_and_invalid_inference_contract(tmp_path):
         api.super_resolve(low, domain=0, tile_size=5, overlap=1)
 
 
+@pytest.mark.parametrize("fractions", [False, True])
+def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
+    tmp_path, monkeypatch, fractions
+):
+    from types import SimpleNamespace
+
+    import src.predict.sr as sr_module
+    from src.predict import sr_memory
+
+    cfg = sr_config(tmp_path, scale=2)
+    path = tmp_path / "model.pt"
+    export_model(path, cfg)
+    api = SuperResolutionAPI(path)
+    low = torch.zeros(8, 8, 8, dtype=torch.uint8)
+    if fractions:
+        low = torch.ones(3, 8, 8, 8) / 3
+    monkeypatch.setattr(
+        sr_memory.psutil, "virtual_memory", lambda: SimpleNamespace(available=1)
+    )
+
+    def fail(*args, **kwargs):
+        pytest.fail("allocated before SR preflight")
+
+    monkeypatch.setattr(sr_module, "phase_channels", fail)
+    monkeypatch.setattr(sr_module, "resize_phases", fail)
+    monkeypatch.setattr(api, "_predict", fail)
+    with pytest.raises(MemoryError, match="SR RAM"):
+        api.predict_probs(low)
+
+
+def test_sr_tiled_normalization_reuses_its_accumulation(tmp_path, monkeypatch):
+    cfg = sr_config(tmp_path, scale=2)
+    path = tmp_path / "model.pt"
+    export_model(path, cfg)
+    api = SuperResolutionAPI(path)
+    low = torch.zeros(8, 8, 8, dtype=torch.uint8)
+    buffers = []
+    original = torch.zeros
+
+    def record(*shape, **kwargs):
+        result = original(*shape, **kwargs)
+        if shape == (3, 16, 16, 16):
+            buffers.append(result)
+        return result
+
+    monkeypatch.setattr(torch, "zeros", record)
+    monkeypatch.setattr(
+        api, "_predict", lambda coarse, *args: torch.ones(3, *coarse.shape[-3:]) / 3
+    )
+    result = api.predict_probs(low, tile_size=8, overlap=2, margin=2)
+    assert len(buffers) == 1 and result.data_ptr() == buffers[0].data_ptr()
+    torch.testing.assert_close(result, torch.full_like(result, 1 / 3))
+
+
 def test_sr_corruption_does_not_modify_clean_coarse_target():
     low = torch.zeros(8, 3, 8, 8, 8)
     low[:, 0] = 1

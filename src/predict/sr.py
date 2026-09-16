@@ -9,6 +9,7 @@ from src.build.model import build_diffusion, build_sr_model
 from src.config import get_sr_sizes, normalize_train_config
 from src.predict.generator import Generator, GuidedDenoiser
 from src.predict.inference import _seeded_rng
+from src.predict.sr_memory import check_sr_memory, estimate_sr_memory
 from src.predict.tile import axis_starts
 from src.prepare.height import height_field
 from src.prepare.resize import coarse_region, phase_channels, resize_phases, scaled_size
@@ -61,21 +62,6 @@ class SuperResolutionAPI:
         domain = int(domain_ids.item())
         low_shape = low.shape[-3:]
         shape = tuple(scaled_size(int(n), self.scale_factor) for n in low_shape)
-        if low.ndim == 3:
-            probs = phase_channels(low.cpu().unsqueeze(0), self.num_phases)
-        else:
-            if (
-                not low.dtype.is_floating_point
-                or low.shape[0] != self.num_phases
-                or not torch.isfinite(low).all()
-                or (low < 0).any()
-                or (low > 1).any()
-                or not torch.allclose(low.sum(0), torch.ones_like(low[0]), atol=1e-5)
-            ):
-                raise ValueError(
-                    "LR phase fractions must be finite, non-negative and sum to one."
-                )
-            probs = low.float().cpu().unsqueeze(0)
         if not math.isfinite(guidance):
             raise ValueError("guidance must be finite.")
         if margin is None:
@@ -109,6 +95,35 @@ class SuperResolutionAPI:
                     "HR shape, tile_size, stride and margin must be multiples of the LR/HR scale."
                 )
         self._validate_height(low_shape, domain, height_origin)
+        check_sr_memory(
+            estimate_sr_memory(
+                low_shape,
+                shape,
+                self.num_phases,
+                tile_size=tile_size,
+                margin=margin,
+                label_input=low.ndim == 3,
+                input_element_size=low.element_size(),
+                input_on_cuda=low.device.type == "cuda",
+            ),
+            self.generator,
+            input_device=low.device,
+        )
+        if low.ndim == 3:
+            probs = phase_channels(low.cpu().unsqueeze(0), self.num_phases)
+        else:
+            if (
+                not low.dtype.is_floating_point
+                or low.shape[0] != self.num_phases
+                or not torch.isfinite(low).all()
+                or (low < 0).any()
+                or (low > 1).any()
+                or not torch.allclose(low.sum(0), torch.ones_like(low[0]), atol=1e-5)
+            ):
+                raise ValueError(
+                    "LR phase fractions must be finite, non-negative and sum to one."
+                )
+            probs = low.to(device="cpu", dtype=torch.float32).unsqueeze(0)
         with _seeded_rng(seed, self.device):
             if not tiled:
                 coarse = resize_phases(probs, shape)
@@ -124,8 +139,8 @@ class SuperResolutionAPI:
                 axis_starts(n, length, tile_size - 2 * overlap)
                 for n, length in zip(shape, lengths)
             ]
-            result = torch.zeros(self.num_phases, *shape)
-            weights = torch.zeros(shape)
+            result = torch.zeros(self.num_phases, *shape, dtype=torch.float32)
+            weights = torch.zeros(shape, dtype=torch.float32)
             windows = [
                 torch.hann_window(n, periodic=False).clamp_min(0.01)
                 if n > 1
@@ -148,7 +163,7 @@ class SuperResolutionAPI:
                 target = tuple(slice(s, s + n) for s, n in zip(start, lengths))
                 result[(slice(None), *target)] += predicted * window
                 weights[target] += window
-            return result / weights.unsqueeze(0)
+            return result.div_(weights.unsqueeze(0))
 
     def _validate_height(self, shape, domain, origin):
         if not self.config["conditioning"]["height_enabled"]:

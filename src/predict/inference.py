@@ -232,7 +232,8 @@ def _seeded_rng(seed: int | None, device: torch.device):
         index = device.index
         devices = [torch.cuda.current_device() if index is None else index]
     with torch.random.fork_rng(devices=devices):
-        torch.manual_seed(seed)
-        if device.type == "cuda":
-            torch.cuda.manual_seed_all(seed)
+        torch.set_rng_state(torch.Generator(device="cpu").manual_seed(seed).get_state())
+        if devices:
+            with torch.cuda.device(devices[0]):
+                torch.cuda.manual_seed(seed)
         yield

@@ -34,7 +34,12 @@ def phase_channels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:
         torch._assert_async(valid, "phase labels are outside num_phases.")
     elif not bool(valid):
         raise ValueError(f"phase labels must be in [0, {num_phases - 1}].")
-    return F.one_hot(labels.long(), num_phases).movedim(-1, 1).float()
+    channels = torch.zeros(
+        (labels.shape[0], num_phases, *labels.shape[1:]),
+        device=labels.device,
+        dtype=torch.float32,
+    )
+    return channels.scatter_(1, labels.long().unsqueeze(1), 1.0)
 
 
 def resize_phases(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:

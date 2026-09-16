@@ -81,14 +81,31 @@ def estimate_memory(
     )
 
 
-def workspace_bytes(generator, tile_size: int) -> int:
+def workspace_bytes(generator, tile_size: int | tuple[int, int, int]) -> int:
     """Reserve activations and convolution scratch separately from storage."""
     channels = getattr(
         getattr(generator.model, "input", None), "out_channels", generator.num_phases
     )
     # FP32 normalization, skip activations and convolution scratch coexist,
     # including when convolutions themselves run under autocast.
-    return max(256 * 1024**2, 12 * 4 * channels * tile_size**3)
+    voxels = tile_size**3 if isinstance(tile_size, int) else math.prod(tile_size)
+    return max(256 * 1024**2, 12 * 4 * channels * voxels)
+
+
+def cuda_memory_budget(device) -> int:
+    free, _total = torch.cuda.mem_get_info(device)
+    reusable = max(
+        0, torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+    )
+    return int((free + reusable) * 0.8)
+
+
+def require_memory(required: int, available: int, name: str) -> None:
+    if required > available:
+        raise MemoryError(
+            f"estimated {name} allocation {required / 1024**3:.2f} GiB "
+            f"exceeds the available budget {available / 1024**3:.2f} GiB"
+        )
 
 
 def select_storage(storage: str, estimate: MemoryEstimate, generator) -> str:
@@ -100,14 +117,10 @@ def select_storage(storage: str, estimate: MemoryEstimate, generator) -> str:
     reserve = workspace_bytes(generator, estimate.tile_size)
     gpu_budget = 0
     if device.type == "cuda":
-        free, _total = torch.cuda.mem_get_info(device)
         # The driver reports allocator-cached blocks as used even though this
         # process can reuse them for the next request without another malloc.
-        reusable = max(
-            0, torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
-        )
         # Keep headroom for the allocator and concurrent allocations.
-        gpu_budget = int((free + reusable) * 0.8)
+        gpu_budget = cuda_memory_budget(device)
     working = estimate.buffer_bytes + reserve
     if storage == "auto":
         storage = (
@@ -116,20 +129,13 @@ def select_storage(storage: str, estimate: MemoryEstimate, generator) -> str:
             else "cpu"
         )
     gpu_required = working + (estimate.storage_bytes if storage == "cuda" else 0)
-    if device.type == "cuda" and gpu_required > gpu_budget:
-        raise MemoryError(
-            f"estimated CUDA allocation {gpu_required / 1024**3:.2f} GiB "
-            f"exceeds the available budget {gpu_budget / 1024**3:.2f} GiB"
-        )
+    if device.type == "cuda":
+        require_memory(gpu_required, gpu_budget, "CUDA")
     cpu_required = estimate.output_bytes + estimate.buffer_bytes
     if storage == "cpu":
         cpu_required += estimate.storage_bytes
     if device.type == "cpu":
         cpu_required += reserve
     cpu_budget = int(psutil.virtual_memory().available * 0.8)
-    if cpu_required > cpu_budget:
-        raise MemoryError(
-            f"estimated RAM allocation {cpu_required / 1024**3:.2f} GiB "
-            f"exceeds the available budget {cpu_budget / 1024**3:.2f} GiB"
-        )
+    require_memory(cpu_required, cpu_budget, "RAM")
     return storage

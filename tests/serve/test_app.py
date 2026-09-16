@@ -1,3 +1,4 @@
+import errno
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 from src.evaluate.volume import VolumeMetrics
 from src.predict.memory import estimate_memory, select_storage
 from src.serve import app as server_module
+from src.serve import response as response_module
 from src.serve.app import create_app
 
 
@@ -103,6 +105,7 @@ def test_vue_frontend_uses_fixed_boundary_anchor() -> None:
     app = Path("front/src/App.vue").read_text(encoding="utf-8")
 
     assert "anchors: [{ image, axis: 0, index: 0 }]" in app
+    assert "include_metrics: true" in app
     assert ":crop-size=" in app
     assert ":input-size=" in app
 
@@ -111,7 +114,9 @@ def test_generate_returns_tiff_volume(
     client: TestClient,
     service: FakeInference,
 ) -> None:
-    response = client.post("/generate", json={"domain": 0, "seed": 3})
+    response = client.post(
+        "/generate", json={"domain": 0, "seed": 3, "include_metrics": True}
+    )
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/tiff"
@@ -132,6 +137,85 @@ def test_generate_can_return_raw_labels(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/octet-stream"
     assert len(response.content) == 4 * 4 * 4
+
+
+def test_metrics_are_opt_in_and_remain_under_generation_lock(client, monkeypatch):
+    calls = []
+
+    def measure(volume, device):
+        assert client.app.state.generate_lock.locked()
+        calls.append(volume.shape)
+        return VolumeMetrics(porosity=0.25, tortuosity=None)
+
+    monkeypatch.setattr(server_module, "measure_volume", measure)
+    response = client.post("/generate", json={"format": "raw"})
+    assert response.status_code == 200 and not calls
+    assert "x-porosity" not in response.headers
+    response = client.post("/generate", json={"format": "raw", "include_metrics": True})
+    assert len(calls) == 1 and response.headers["x-tortuosity"] == "unavailable"
+    assert not client.app.state.generate_lock.locked()
+
+
+def test_busy_request_is_rejected_without_waiting_or_releasing_owner_lock(
+    client, service
+):
+    lock = client.app.state.generate_lock
+    lock.acquire()
+    try:
+        response = client.post("/generate", json={"format": "raw"})
+        assert response.status_code == 503
+        assert response.headers["retry-after"] == "1"
+        assert lock.locked()
+        assert not service.calls
+    finally:
+        lock.release()
+    assert client.post("/generate", json={"format": "raw"}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "failure,status",
+    [
+        (MemoryError("serialize allocation"), 413),
+        (OSError(errno.ENOSPC, "disk full"), 507),
+        (OSError(errno.EACCES, "cannot write"), 500),
+    ],
+)
+def test_response_preparation_errors_cleanup_file_and_release_lock(
+    client, monkeypatch, tmp_path, failure, status
+):
+    import tempfile
+
+    monkeypatch.setattr(
+        response_module,
+        "NamedTemporaryFile",
+        lambda **kwargs: tempfile.NamedTemporaryFile(dir=tmp_path, **kwargs),
+    )
+    original = response_module.tifffile.imwrite
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(response_module.tifffile, "imwrite", fail)
+    response = client.post("/generate", json={})
+    assert response.status_code == status
+    assert not list(tmp_path.glob("*.tiff"))
+    assert not client.app.state.generate_lock.locked()
+    monkeypatch.setattr(response_module.tifffile, "imwrite", original)
+    assert client.post("/generate", json={}).status_code == 200
+
+
+def test_tiff_response_removes_tempfile_after_success(client, monkeypatch, tmp_path):
+    import tempfile
+
+    monkeypatch.setattr(
+        response_module,
+        "NamedTemporaryFile",
+        lambda **kwargs: tempfile.NamedTemporaryFile(dir=tmp_path, **kwargs),
+    )
+    response = client.post("/generate", json={})
+    assert response.status_code == 200
+    assert tifffile.imread(BytesIO(response.content)).shape == (4, 4, 4)
+    assert not list(tmp_path.glob("*.tiff"))
 
 
 def test_generate_decodes_anchor_and_scale_request(

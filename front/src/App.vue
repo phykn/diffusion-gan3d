@@ -79,6 +79,7 @@ async function generate() {
         seed: requestSeed,
         ...(requestBlocks.some(value => value > 1) ? { blocks: requestBlocks } : {}),
         format: 'raw',
+        include_metrics: true,
       }),
     })
     if (!response.ok) {

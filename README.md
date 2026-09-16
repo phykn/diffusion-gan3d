@@ -644,6 +644,17 @@ are conservative approximations, not an OOM guarantee. Both states and the
 returned output still scale with volume size in RAM; disk-backed states are
 not implemented.
 
+Single-volume label generation selects `argmax` on the model device and transfers
+only uint8 labels. Probability requests retain the normalized fractional output
+and have a separate output-memory budget. Phase-channel conversion writes directly
+into float32 storage without an expanded int64 one-hot intermediate.
+
+SR checks its own RAM/VRAM budget before coarse conversion or HR allocation:
+`src.predict.sr_memory.estimate_sr_memory` includes LR phase conversion, full
+CPU accumulation and weights, interpolation halo, and margin-expanded model tiles.
+Its final normalization reuses the accumulation buffer in place. Full SR output
+still scales with HR volume size; the estimate is not a guarantee against OOM.
+
 The server bounds axes to 1024, total output voxels to 512³, block counts to
 64 per axis / 4096 total, and anchors to 32. The actual tile count, including
 overlap and margins, also cannot exceed 4096. Resolved block dimensions are
@@ -651,6 +662,18 @@ checked against the same volume limits before allocation. JSON request bodies
 are limited to 16 MiB, including chunked uploads. Available CPU/GPU memory is
 checked before generation; memory-budget failures and PyTorch CUDA OOM return
 HTTP 413. Invalid dimensions or counts return HTTP 422.
+
+Concurrent generation requests return HTTP 503 immediately with `Retry-After: 1`.
+`include_metrics` defaults to `false`; set it to `true` to calculate porosity and
+tortuosity and include their response headers. The GUI explicitly requests these
+metrics. GPU metrics run under the same generation lock to avoid resource races.
+Raw labels are streamed as bounded 64 KiB views; TIFF responses use a temporary
+file, closed and deleted after completion or cancellation. File-writing failures
+are handled before response headers: disk-full errors return HTTP 507, other I/O
+errors return HTTP 500, and memory failures return HTTP 413.
+
+Seeded inference changes and restores only the CPU and selected CUDA device RNG;
+unrelated GPU RNG states are left untouched, including when inference raises.
 
 ## Citation
 

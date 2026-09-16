@@ -1,19 +1,19 @@
+import errno
 import math
-from io import BytesIO
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
 
-import tifffile
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.anchor import PlaneAnchor
 from src.evaluate.volume import measure_volume
 from src.predict.inference import InferenceAPI
+from src.serve.response import volume_response
 
 FRONT_DIR = Path(__file__).resolve().parents[2] / "front" / "dist"
 MAX_SIZE = 1024
@@ -124,6 +124,7 @@ class GenerateRequest(BaseModel):
     storage: Literal["auto", "cpu", "cuda"] = "auto"
     progress: bool = False
     format: Literal["tiff", "raw"] = "tiff"
+    include_metrics: bool = False
 
     @model_validator(mode="after")
     def validate_volume(self):
@@ -183,50 +184,61 @@ def create_app(
         return {"image": image.tolist()}
 
     @app.post("/generate", response_class=StreamingResponse)
-    def generate(request: GenerateRequest) -> StreamingResponse:
+    def generate(request: GenerateRequest) -> Response:
+        if not app.state.generate_lock.acquire(blocking=False):
+            raise HTTPException(
+                status_code=503,
+                detail="generation is busy; retry later",
+                headers={"Retry-After": "1"},
+            )
         try:
-            with app.state.generate_lock:
-                estimate = app.state.inference.estimate_memory(
-                    blocks=request.blocks,
-                    shape=request.shape,
-                    size=request.size,
-                    overlap=request.overlap,
+            estimate = app.state.inference.estimate_memory(
+                blocks=request.blocks,
+                shape=request.shape,
+                size=request.size,
+                overlap=request.overlap,
+            )
+            if max(estimate.shape) > MAX_SIZE or math.prod(estimate.shape) > MAX_VOXELS:
+                raise ValueError("resolved output shape exceeds the server size limit")
+            if estimate.tile_count > MAX_TOTAL_BLOCKS:
+                raise ValueError("resolved tile count exceeds the server block limit")
+            app.state.inference.check_memory(
+                estimate,
+                storage=request.storage,
+                tiled=request.blocks is not None or request.shape is not None,
+            )
+            volume = app.state.inference.generate(
+                anchors=tuple(anchor.to_anchor() for anchor in request.anchors),
+                blocks=request.blocks,
+                shape=request.shape,
+                size=request.size,
+                vf=request.vf,
+                domain=request.domain,
+                seed=request.seed,
+                guidance=request.guidance,
+                anchor_strength=request.anchor_strength,
+                height_origin=request.height_origin,
+                overlap=request.overlap,
+                storage=request.storage,
+                progress=request.progress,
+            )
+            headers = {
+                "X-Volume-Shape": ",".join(str(value) for value in volume.shape),
+                "X-Volume-Dtype": "uint8",
+            }
+            if request.include_metrics:
+                metrics = measure_volume(volume, device=app.state.inference.device)
+                headers.update(
+                    {
+                        "X-Porosity": f"{metrics.porosity:.8g}",
+                        "X-Tortuosity": "unavailable"
+                        if metrics.tortuosity is None
+                        else f"{metrics.tortuosity:.8g}",
+                        "X-Pore-Phase": "0",
+                        "X-Tortuosity-Axis": "1",
+                    }
                 )
-                if (
-                    max(estimate.shape) > MAX_SIZE
-                    or math.prod(estimate.shape) > MAX_VOXELS
-                ):
-                    raise ValueError(
-                        "resolved output shape exceeds the server size limit"
-                    )
-                if estimate.tile_count > MAX_TOTAL_BLOCKS:
-                    raise ValueError(
-                        "resolved tile count exceeds the server block limit"
-                    )
-                app.state.inference.check_memory(
-                    estimate,
-                    storage=request.storage,
-                    tiled=request.blocks is not None or request.shape is not None,
-                )
-                volume = app.state.inference.generate(
-                    anchors=tuple(anchor.to_anchor() for anchor in request.anchors),
-                    blocks=request.blocks,
-                    shape=request.shape,
-                    size=request.size,
-                    vf=request.vf,
-                    domain=request.domain,
-                    seed=request.seed,
-                    guidance=request.guidance,
-                    anchor_strength=request.anchor_strength,
-                    height_origin=request.height_origin,
-                    overlap=request.overlap,
-                    storage=request.storage,
-                    progress=request.progress,
-                )
-                metrics = measure_volume(
-                    volume,
-                    device=app.state.inference.device,
-                )
+            return volume_response(volume, request.format, headers)
         except (MemoryError, torch.OutOfMemoryError) as exc:
             raise HTTPException(
                 status_code=413,
@@ -234,32 +246,13 @@ def create_app(
             ) from exc
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        tortuosity = (
-            "unavailable" if metrics.tortuosity is None else f"{metrics.tortuosity:.8g}"
-        )
-        headers = {
-            "X-Volume-Shape": ",".join(str(value) for value in volume.shape),
-            "X-Volume-Dtype": "uint8",
-            "X-Porosity": f"{metrics.porosity:.8g}",
-            "X-Tortuosity": tortuosity,
-            "X-Pore-Phase": "0",
-            "X-Tortuosity-Axis": "1",
-        }
-        if request.format == "raw":
-            output = BytesIO(volume.numpy().tobytes(order="C"))
-            media_type = "application/octet-stream"
-        else:
-            output = BytesIO()
-            tifffile.imwrite(output, volume.numpy())
-            output.seek(0)
-            media_type = "image/tiff"
-            headers["Content-Disposition"] = 'attachment; filename="volume.tiff"'
-        return StreamingResponse(
-            output,
-            media_type=media_type,
-            headers=headers,
-        )
+        except OSError as exc:
+            raise HTTPException(
+                status_code=507 if exc.errno == errno.ENOSPC else 500,
+                detail=f"could not prepare volume response: {exc}",
+            ) from exc
+        finally:
+            app.state.generate_lock.release()
 
     if FRONT_DIR.is_dir():
         app.mount("/", StaticFiles(directory=FRONT_DIR, html=True), name="front")
