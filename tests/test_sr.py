@@ -713,6 +713,20 @@ def test_sr_cuda_amp_checkpointing_and_cfg_inference(tmp_path):
         metrics = trainer.step(step, transition=transition)
         assert np.isfinite(metrics.generator_total)
         assert np.isfinite(metrics.diagnostics["gradient/generator"])
+        sensitivities = {
+            key: value
+            for key, value in metrics.diagnostics.items()
+            if key.startswith("generator_input_gradient/")
+        }
+        assert sensitivities and all(
+            np.isfinite(value) for value in sensitivities.values()
+        )
+        assert all(f"/t{transition}/" in key for key in sensitivities)
+        assert any(
+            value > 0
+            for key, value in sensitivities.items()
+            if key.endswith("/previous")
+        )
     assert trainer.updates["generator"] == 2
     assert all(trainer.updates[group] == 2 for group in trainer.critics)
     path = tmp_path / "sr.pt"

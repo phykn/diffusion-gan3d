@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -1393,3 +1394,36 @@ def test_replay_continuity_reference_excludes_pasted_measurement_jump():
     pasted = torch.where(target.mask, target.image, reference)
     real, fake = sampler.sample(pasted, reference, target)
     assert compute_transition_loss(real, fake) > 0
+
+
+def test_generator_input_diagnostics_preserve_training_updates_and_rng():
+    trainer, _, _ = _conditioning_trainer(anchored=False, axes=(0,))
+    trainer.r1_interval = 1
+    control = copy.deepcopy(trainer)
+    control.r1_interval = 3  # R1/R2 weights are zero; only diagnostics differ.
+    with torch.random.fork_rng(devices=[]):
+        rng = torch.get_rng_state()
+        actual = trainer.step(0, transition=0)
+        after = torch.get_rng_state()
+        torch.set_rng_state(rng)
+        expected = control.step(0, transition=0)
+        assert torch.equal(after, torch.get_rng_state())
+    prefix = "generator_input_gradient/xy/0/t0/"
+    assert actual.diagnostics[prefix + "previous"] > 0
+    assert actual.diagnostics[prefix + "current"] > 0
+    assert actual.generator_total == expected.generator_total
+    assert not any(
+        key.startswith("generator_input_gradient/") for key in expected.diagnostics
+    )
+    for model, baseline in (
+        (trainer.denoiser, control.denoiser),
+        (trainer.critics, control.critics),
+    ):
+        torch.testing.assert_close(
+            model.state_dict(), baseline.state_dict(), rtol=0, atol=0
+        )
+    trainer.r1_interval = 3
+    metrics = trainer.step(1, transition=1)
+    assert not any(
+        key.startswith("generator_input_gradient/") for key in metrics.diagnostics
+    )

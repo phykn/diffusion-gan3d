@@ -305,6 +305,26 @@ censored at crop edges on both sides. These finite-volume diagnostics require no
 Scalar logging values are transferred together at the end of a step. Finite-loss
 and finite-gradient checks remain synchronous before optimizer updates.
 
+Real pair-critic `current` inputs come from measured-image forward diffusion;
+fake `current` inputs come from the detached generated reverse chain. These
+conditional distributions can differ, allowing a critic to distinguish their
+source without using `previous`. Source code alone does not establish that this
+shortcut dominates training, and extending R1 would not equalize the distributions.
+On every `loss.r1_every_steps` successful-generator-update cadence, both stages
+record `generator_input_gradient/<group>/<axis>/t<transition>/{previous,current}`.
+These are mean per-example L2 norms of each plane's generator adversarial
+objective input gradients, including local-head weighting and pyramid averaging,
+before plane-group averaging and with the batch-mean factor removed.
+This uses the generator-update critic after its update;
+the diagnostic `current` leaf remains detached from the preceding reverse chain.
+Zero `previous` sensitivity with nonzero `current` sensitivity identifies no local
+restoration signal from that critic on the sampled inputs. It does not by itself
+prove a distribution shortcut or measure the full denoiser parameter gradient.
+Missing values mean no diagnostic was emitted (off cadence or no eligible fake
+slices). Losses, R1/R2 targets and
+training-pair construction are unchanged. Diagnostics require an extra critic
+backward traversal on scheduled updates, but no extra sampling chain or fixed seed.
+
 Two optional advanced settings support controlled comparisons:
 
 ```yaml

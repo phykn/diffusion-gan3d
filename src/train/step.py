@@ -4,6 +4,25 @@ from dataclasses import fields, is_dataclass
 import torch
 
 
+def input_gradient_norms(loss: torch.Tensor, inputs: tuple[torch.Tensor, ...]):
+    """Detached per-example L2 sensitivities without accumulating parameter grads."""
+    active = tuple(value for value in inputs if value.requires_grad)
+    grads = iter(
+        torch.autograd.grad(loss, active, retain_graph=True, allow_unused=True)
+        if active and loss.requires_grad
+        else (None,) * len(active)
+    )
+    norms = []
+    for value in inputs:
+        grad = next(grads) if value.requires_grad else None
+        norms.append(
+            loss.new_zeros(())
+            if grad is None
+            else grad.detach().float().flatten(1).norm(dim=1).mean()
+        )
+    return tuple(norms)
+
+
 def materialize_metrics(value):
     """Transfer scalar diagnostics together after the optimizer work is complete."""
     tensors = []

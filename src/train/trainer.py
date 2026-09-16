@@ -33,7 +33,12 @@ from src.train.loss.gan import (
 from src.train.loss.sr import consistency_loss
 from src.train.loss.volume_fraction import compute_vf_loss
 from src.train.sr import corrupt_coarse
-from src.train.step import check_loss, materialize_metrics, step_optimizer
+from src.train.step import (
+    check_loss,
+    input_gradient_norms,
+    materialize_metrics,
+    step_optimizer,
+)
 
 
 @dataclass(frozen=True)
@@ -1230,11 +1235,16 @@ class Trainer:
             heads = []
             local_weight = self.critic_local_weight
             groups = self.active_groups(batch.fake)
+            diagnose = (self.updates["generator"] + 1) % self.r1_interval == 0
             with self.autocast():
                 for axis in self.active_axes:
                     fake_prev, fake_curr = batch.fake[axis]
                     if not len(fake_prev):
                         continue
+                    if diagnose:
+                        # A separate leaf measures conditional sensitivity without
+                        # reconnecting the preceding reverse chain to the generator.
+                        fake_curr = fake_curr.detach().requires_grad_(True)
                     time = self.make_time(batch.transition, fake_prev.shape[0])
                     domains = self.make_domain(
                         batch.critic_domains[axis],
@@ -1252,6 +1262,19 @@ class Trainer:
                         ),
                     )
                     head = get_generator_loss(scores)
+                    if diagnose:
+                        # Undo only the batch mean, retaining local-head weights
+                        # and pyramid averaging from the actual generator loss.
+                        norms = input_gradient_norms(
+                            head.combine(local_weight) * len(fake_prev),
+                            (fake_prev, fake_curr),
+                        )
+                        prefix = (
+                            f"generator_input_gradient/{self.axis_critics[axis]}"
+                            f"/{axis}/t{batch.transition}"
+                        )
+                        for name, norm in zip(("previous", "current"), norms):
+                            self.diagnostics[f"{prefix}/{name}"] = norm
                     count = len(groups[self.axis_critics[axis]]) * len(groups)
                     heads.append(
                         HeadLoss(head.global_loss / count, head.local_loss / count)
