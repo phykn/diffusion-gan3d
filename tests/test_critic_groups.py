@@ -30,7 +30,7 @@ def config(tmp_path, stage, groups):
         domains={0: {plane: [str(images)] for plane in PLANES}},
     )
     cfg["model"]["critic"].update(channels=[4, 8], plane_groups=groups)
-    cfg["augmentation"] = {"mode": False, "probability": 0.5}
+    cfg["augmentation"]["probability"] = 0
     cfg["train"].update(total_steps=1, mixed_precision=False, volume_batch_size=1)
     if stage == "low_res":
         cfg["model"]["generator"].update(
@@ -91,10 +91,8 @@ class ScalarCritic(nn.Module):
 
 
 @pytest.mark.parametrize("groups", GROUPS)
-@pytest.mark.parametrize("version", [1, 2])
-def test_lr_shared_update_averages_plane_gradients(tmp_path, groups, version):
+def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
     cfg = config(tmp_path, "low_res", groups)
-    cfg["train"]["stability_version"] = version
     trainer = build_trainer(cfg, torch.device("cpu"))
     trainer.r1_gamma = 0
     trainer.critics = nn.ModuleDict(
@@ -120,7 +118,7 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups, version):
             (1 + trainer.critic_local_weight)
             * sum(axis + 1 for axis in axes)
             / (2 * len(axes))
-            / (len(groups) if version == 2 else 1)
+            / len(groups)
         )
         assert trainer.critics[name].weight.item() == pytest.approx(expected)
 
@@ -194,8 +192,9 @@ def test_invalid_group_partitions_are_rejected(tmp_path, groups):
         get_plane_groups(config(tmp_path, "low_res", groups))
 
 
-def test_group_order_is_canonical_and_legacy_defaults_remain_independent(tmp_path):
+def test_group_order_is_canonical_and_missing_groups_are_rejected(tmp_path):
     cfg = config(tmp_path, "low_res", [["yz", "xz"], ["xy"]])
     assert get_plane_groups(cfg) == {"xy": (0,), "xz_yz": (1, 2)}
     del cfg["model"]["critic"]["plane_groups"]
-    assert get_plane_groups(cfg) == {"xy": (0,), "xz": (1,), "yz": (2,)}
+    with pytest.raises(ValueError, match="plane_groups"):
+        get_plane_groups(cfg)

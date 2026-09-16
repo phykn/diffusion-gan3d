@@ -3,6 +3,8 @@ from dataclasses import dataclass
 
 import torch
 
+from src.prepare.resize import phase_channels
+
 
 @dataclass(frozen=True)
 class PlaneAnchor:
@@ -31,83 +33,93 @@ def encode_anchors(
     anchors: Sequence[PlaneAnchor],
     batch_size: int,
     num_phases: int,
-    volume_size: int,
+    volume_size: int | tuple[int, int, int],
     device: torch.device,
     dtype: torch.dtype,
     reconcile: bool = False,
 ) -> AnchorCondition | None:
     if not anchors:
         return None
+    shape = (volume_size,) * 3 if isinstance(volume_size, int) else volume_size
 
     target = torch.zeros(
         batch_size,
-        volume_size,
-        volume_size,
-        volume_size,
+        *shape,
         dtype=torch.long,
         device=device,
     )
     mask = torch.zeros(
         batch_size,
         1,
-        volume_size,
-        volume_size,
-        volume_size,
+        *shape,
         dtype=torch.bool,
         device=device,
     )
     axis_masks = torch.zeros(
         batch_size,
         3,
-        volume_size,
-        volume_size,
-        volume_size,
+        *shape,
         dtype=torch.bool,
         device=device,
     )
     conflicts = 0
     source_voxels = 0
+    condition_image = torch.zeros(
+        (batch_size, num_phases, *shape), dtype=dtype, device=device
+    )
 
     for anchor in anchors:
         if anchor.axis not in (0, 1, 2):
             raise ValueError("anchor.axis must be one of 0, 1, or 2.")
-        if not 0 <= anchor.index < volume_size:
+        if not 0 <= anchor.index < shape[anchor.axis]:
             raise ValueError("anchor.index is outside the generated volume.")
 
         image = anchor.image
-        if image.ndim == 2:
-            image = image.unsqueeze(0).expand(batch_size, -1, -1)
-        if image.ndim != 3 or image.shape[0] != batch_size:
-            raise ValueError("anchor.image must have shape [H, W] or [B, H, W].")
-        if image.dtype not in {
-            torch.uint8,
-            torch.int8,
-            torch.int16,
-            torch.int32,
-            torch.int64,
-        }:
-            raise TypeError("anchor.image must use an integer dtype.")
+        if image.numel() == 0:
+            raise ValueError("anchor.image must not be empty.")
+        if image.dtype.is_floating_point:
+            if image.ndim == 3:
+                image = image.unsqueeze(0).expand(batch_size, -1, -1, -1)
+            if image.ndim != 4 or image.shape[:2] != (batch_size, num_phases):
+                raise ValueError(
+                    "anchor phase fractions must have shape [C,H,W] or [B,C,H,W]."
+                )
+            valid = (
+                torch.isfinite(image).all() & (image >= 0).all() & (image <= 1).all()
+            )
+            valid = valid & ((image.sum(1) - 1).abs() < 1e-5).all()
+            if not bool(valid):
+                raise ValueError(
+                    "anchor phase fractions must be finite, non-negative and sum to one."
+                )
+            probs = image.to(device=device, dtype=dtype)
+        else:
+            if image.ndim == 2:
+                image = image.unsqueeze(0).expand(batch_size, -1, -1)
+            if image.ndim != 3 or image.shape[0] != batch_size:
+                raise ValueError("anchor.image must have shape [H, W] or [B, H, W].")
+            probs = phase_channels(image, num_phases).to(device=device, dtype=dtype)
 
         height, width = image.shape[-2:]
-        if height > volume_size or width > volume_size:
+        plane_shape = tuple(
+            size for axis, size in enumerate(shape) if axis != anchor.axis
+        )
+        if height > plane_shape[0] or width > plane_shape[1]:
             raise ValueError("anchor.image must fit inside the generated plane.")
 
         row, col = anchor.position or (
-            (volume_size - height) // 2,
-            (volume_size - width) // 2,
+            (plane_shape[0] - height) // 2,
+            (plane_shape[1] - width) // 2,
         )
         if (
             row < 0
             or col < 0
-            or row + height > volume_size
-            or col + width > volume_size
+            or row + height > plane_shape[0]
+            or col + width > plane_shape[1]
         ):
             raise ValueError("anchor.position places the image outside the plane.")
 
-        image = image.to(device=device, dtype=torch.long)
-        lower, upper = torch.aminmax(image)
-        if int(lower) < 0 or int(upper) >= num_phases:
-            raise ValueError("anchor.image contains a phase outside num_phases.")
+        image = probs.argmax(1)
 
         target_plane = target.select(anchor.axis + 1, anchor.index)
         mask_plane = mask.select(anchor.axis + 2, anchor.index).squeeze(1)
@@ -115,24 +127,22 @@ def encode_anchors(
         target_patch = target_plane[:, row : row + height, col : col + width]
         mask_patch = mask_plane[:, row : row + height, col : col + width]
         axis_patch = axis_plane[:, row : row + height, col : col + width]
+        value_patch = condition_image.select(anchor.axis + 2, anchor.index)[
+            :, :, row : row + height, col : col + width
+        ]
+        encoded = probs.mul(2).sub(1)
 
-        conflict = mask_patch & (target_patch != image)
-        if bool(conflict.any()) and not reconcile:
+        conflict = mask_patch & ((value_patch - encoded).abs().amax(1) > 1e-5)
+        conflict_count = int(conflict.sum())
+        if conflict_count and not reconcile:
             raise ValueError("anchor planes contain conflicting intersections.")
-        conflicts += int(conflict.sum())
+        conflicts += conflict_count
         source_voxels += image.numel()
         target_patch.copy_(torch.where(mask_patch, target_patch, image))
+        value_patch.copy_(torch.where(mask_patch.unsqueeze(1), value_patch, encoded))
         mask_patch.fill_(True)
         axis_patch.fill_(True)
 
-    condition_image = torch.full(
-        (batch_size, num_phases, volume_size, volume_size, volume_size),
-        -1.0,
-        dtype=dtype,
-        device=device,
-    )
-    condition_image.scatter_(1, target.unsqueeze(1), 1.0)
-    condition_image = condition_image * mask
     return AnchorCondition(
         image=condition_image,
         mask=mask,

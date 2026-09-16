@@ -53,6 +53,7 @@ def evaluate(api, crops, out, seeds):
         )
         save_volume(vol, out / f"anchor_{seed}.tiff")
         section = vol[:, api.input_size // 2, :]
+        anchor = anchor.argmax(0)
         stats.append(
             {
                 "seed": seed,

@@ -163,7 +163,7 @@ def test_anchor_image_must_fit_generation_size_and_phase_count() -> None:
             dtype=torch.float32,
         )
 
-    with pytest.raises(ValueError, match="outside num_phases"):
+    with pytest.raises(ValueError, match="phase labels"):
         encode_anchors(
             (
                 PlaneAnchor(
@@ -181,7 +181,7 @@ def test_anchor_image_must_fit_generation_size_and_phase_count() -> None:
 
 
 def test_anchor_image_rejects_fractional_phase_labels() -> None:
-    with pytest.raises(TypeError, match="integer dtype"):
+    with pytest.raises(ValueError, match="phase fractions must have shape"):
         encode_anchors(
             (
                 PlaneAnchor(

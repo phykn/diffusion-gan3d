@@ -10,7 +10,6 @@ from src.config import (
     get_sizes,
     normalize_train_config,
 )
-from src.plane import PLANE_AXES
 from src.storage import load_model
 from src.train.ema import build_ema
 from src.train.state import fingerprint_data
@@ -66,6 +65,9 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         anchor,
         "conditioning.anchor",
     )
+    connectivity_start, connectivity_ramp = get_schedule_steps(
+        connectivity, "loss.connectivity"
+    )
     if (
         anchor["probability"] > 0.0
         and anchor_start_step < train["total_steps"]
@@ -88,8 +90,6 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
         load_model(root / "generator.pt", ema)
         for plane, critic_model in critics.items():
             path = root / f"critic_{plane}.pt"
-            if not path.is_file() and plane in PLANE_AXES:
-                path = root / f"critic_{PLANE_AXES[plane]}.pt"
             load_model(path, critic_model)
         load_model(root / "critic_c.pt", connectivity_critic)
     denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
@@ -145,12 +145,14 @@ def build_trainer(cfg: dict, device: torch.device) -> Trainer:
             connectivity_weight=connectivity["adversarial_weight"],
             normal_transition_weight=connectivity["normal_transition_weight"],
             connectivity_max_gap=connectivity.get("max_slice_gap", 1),
+            connectivity_start_step=connectivity_start,
+            connectivity_ramp_steps=connectivity_ramp,
+            connectivity_windows_per_plane=connectivity["windows_per_plane"],
             vf_loss_weight=loss["volume_fraction_weight"],
             domain_dropout=1.0 - conditioning["domain_keep_probability"],
             cfg_drop_each_probability=conditioning["dropout_probability_per_case"],
             latent_channels=generator["latent_channels"],
             amp_enabled=use_amp,
-            stability_version=train["stability_version"],
             r2_gamma=loss["r2_weight"],
         ),
     )

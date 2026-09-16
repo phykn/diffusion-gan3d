@@ -44,8 +44,7 @@ def small_config(tmp_path):
     return cfg
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_lr_checkpoint_restores_training_state_without_rng(tmp_path, legacy):
+def test_lr_checkpoint_restores_training_state_without_rng(tmp_path):
     torch.set_num_threads(1)
     cfg = small_config(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
@@ -53,16 +52,11 @@ def test_lr_checkpoint_restores_training_state_without_rng(tmp_path, legacy):
     path = tmp_path / "last.pt"
     save_training(path, trainer)
     payload = torch.load(path, weights_only=True)
-    assert payload["format"] == "diffusion-gan3d.lr.train.v2"
+    assert payload["format"] == "diffusion-gan3d.lr.train.v3"
     assert (
         not {"streams", "torch_rng", "cuda_rng", "numpy_rng", "python_rng"}
         & payload.keys()
     )
-    if legacy:
-        payload.update(
-            format="diffusion-gan3d.lr.train.v1", torch_rng=None, streams=None
-        )
-        payload["config"]["train"]["seed"] = 123
     weights = copy.deepcopy(trainer.denoiser.state_dict())
     critic_weights = copy.deepcopy(trainer.critics.state_dict())
     restored = build_trainer(cfg, torch.device("cpu"))
@@ -117,7 +111,6 @@ def test_lr_resume_rejects_changed_images_or_training_contract(tmp_path):
 def test_lr_cli_resumes_progress_without_training_seed(tmp_path):
     cfg = small_config(tmp_path)
     cfg["train"]["weights_every_steps"] = 1
-    cfg["train"]["seed"] = 123  # Legacy setting is ignored and removed.
     preset = tmp_path / "recipe.yaml"
     save_yaml(preset, cfg)
 
@@ -145,7 +138,7 @@ def test_lr_cli_resumes_progress_without_training_seed(tmp_path):
     assert resumed["updates"]["generator"] == 4
 
 
-def test_connectivity_preserves_thickness_order_and_legacy_state_dict():
+def test_connectivity_preserves_thickness_order():
     torch.manual_seed(3)
     old = ConnectivityCritic2D(2, [4, 8], 8, 1)
     directed = ConnectivityCritic2D(2, [4, 8], 8, 1, directed_axis=0)
@@ -170,9 +163,9 @@ def test_time_scaling_is_shared_without_changing_weight_shapes(tmp_path):
     assert all(critic.time_scale == 500 for critic in critics.values())
     assert connectivity.directed_axis == 0
     cfg["model"]["diffusion"]["time_embedding"] = "index"
-    legacy, _, _ = build_models(cfg)
-    legacy.load_state_dict(generator.state_dict(), strict=True)
-    assert legacy.time_scale == 1
+    unscaled, _, _ = build_models(cfg)
+    unscaled.load_state_dict(generator.state_dict(), strict=True)
+    assert unscaled.time_scale == 1
 
 
 def test_nonfinite_gradient_does_not_update_fp32_parameters():

@@ -21,6 +21,7 @@ from src.train.loss.anchor import SoftAnchorLoss
 from src.train.loss.connect import (
     AnchorTripletSampler,
     TripletBatch,
+    anchor_boundary_metrics,
     compute_transition_loss,
 )
 from src.train.loss.gan import (
@@ -29,7 +30,7 @@ from src.train.loss.gan import (
     get_critic_r1,
     get_generator_loss,
 )
-from src.train.step import check_loss, step_optimizer
+from src.train.step import check_loss, materialize_metrics, step_optimizer
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,9 @@ class Metrics:
     anchor_coarse_loss: float = 0.0
     anchor_pixel_loss: float = 0.0
     anchor_shared: bool = False
+    connectivity_ramp: float = 0.0
+    anchor_neighbor_agreement: float | None = None
+    anchor_neighbor_excess_jump: float | None = None
     diagnostics: dict = field(default_factory=dict)
 
 
@@ -97,6 +101,7 @@ class DenoiserBatch:
     anchor_ramp: float
     target_vf: torch.Tensor
     vf_present: torch.Tensor
+    connectivity_ramp: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -110,6 +115,7 @@ class StepPreparation:
     presence: "ConditionPresence"
     model_conditions: dict[str, torch.Tensor]
     anchor_ramp: float
+    connectivity_ramp: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -165,8 +171,10 @@ class TrainerSettings:
     anchor_pixel_loss_weight: float
     anchor_shared_axis_probability: float
     connectivity_max_gap: int = 1
-    stability_version: int = 1
     r2_gamma: float = 0.0
+    connectivity_start_step: int = 0
+    connectivity_ramp_steps: int = 20000
+    connectivity_windows_per_plane: int = 4
 
 
 class Trainer:
@@ -221,8 +229,11 @@ class Trainer:
         )
         self.connectivity_weight = settings.connectivity_weight
         self.normal_transition_weight = settings.normal_transition_weight
+        self.connectivity_start_step = settings.connectivity_start_step
+        self.connectivity_ramp_steps = settings.connectivity_ramp_steps
         self.anchor_triplets = AnchorTripletSampler(
             max_gap=settings.connectivity_max_gap,
+            windows_per_plane=settings.connectivity_windows_per_plane,
         )
         self.use_multi_anchor_next = False
         self.vf_loss_weight = settings.vf_loss_weight
@@ -230,10 +241,6 @@ class Trainer:
         self.domain_dropout = float(settings.domain_dropout)
         self.latent_channels = settings.latent_channels
         self.amp_enabled = settings.amp_enabled
-        if type(
-            settings.stability_version
-        ) is not int or settings.stability_version not in (1, 2):
-            raise ValueError("train.stability_version must be 1 or 2.")
         if (
             type(self.r1_interval) is not int
             or self.r1_interval < 1
@@ -245,9 +252,8 @@ class Trainer:
             raise ValueError(
                 "regularization interval must be positive and R2 weight finite/non-negative."
             )
-        self.stability_version = settings.stability_version
         self.r2_gamma = settings.r2_gamma
-        self.group_divisor = len(self.critics) if self.stability_version >= 2 else 1
+        self.group_divisor = len(self.critics)
         self.updates = {
             name: 0 for name in (*self.critics, "connectivity", "generator")
         }
@@ -277,12 +283,15 @@ class Trainer:
             selection.source == "multi"
             or (
                 selection.source in ("real", "shared")
+                and transition == 0
+                and prepared.connectivity_ramp > 0
                 and (
                     self.connectivity_weight > 0.0
                     or self.normal_transition_weight > 0.0
                 )
             )
         )
+        self.diagnostics["sampling/reference_passes"] = int(needs_reference)
         reference = None
         if needs_reference:
             # Couple reference/anchored noise within this step, not across runs.
@@ -452,6 +461,7 @@ class Trainer:
             ),
             anchor_present=prepared.presence.anchor,
             anchor_ramp=prepared.anchor_ramp,
+            connectivity_ramp=prepared.connectivity_ramp,
             target_vf=prepared.target_vf,
             vf_present=prepared.presence.vf,
         )
@@ -507,6 +517,9 @@ class Trainer:
             presence=presence,
             model_conditions=model_conditions,
             anchor_ramp=ramp,
+            connectivity_ramp=self.schedule_ramp(
+                step, self.connectivity_start_step, self.connectivity_ramp_steps
+            ),
         )
 
     def finish_step(
@@ -525,43 +538,60 @@ class Trainer:
         selection = prepared.selection
         anchor = None if selection is None else selection.condition
         presence = prepared.presence
-        return Metrics(
-            generator=denoiser_update.adversarial,
-            generator_total=denoiser_update.total,
-            critic=sum(critic_vals),
-            r1=r1,
-            transition=prepared.transition,
-            volume_size=self.patch_size,
-            domain=prepared.domain,
-            critic_axes=tuple(critic_vals),
-            anchor_planes=0 if anchor is None else anchor.planes,
-            anchor_conflict_rate=0.0 if anchor is None else anchor.conflict_rate,
-            anchor_loss=denoiser_update.anchor,
-            anchor_accuracy=denoiser_update.anchor_accuracy,
-            generator_connectivity=denoiser_update.connectivity,
-            critic_connectivity=critic_connectivity,
-            connectivity_r1=connectivity_r1,
-            anchor_ramp=prepared.anchor_ramp,
-            generator_global=denoiser_update.global_loss,
-            generator_local=denoiser_update.local_loss,
-            critic_global=critic_global,
-            critic_local=critic_local,
-            vf_loss=denoiser_update.vf,
-            vf_active=bool(presence.vf.any()),
-            anchor_input_active_fraction=float(
-                presence.anchor.to(torch.float32).mean()
-            ),
-            vf_active_fraction=float(presence.vf.to(torch.float32).mean()),
-            normal_transition_loss=denoiser_update.normal_transition,
-            anchor_coarse_loss=denoiser_update.anchor_coarse,
-            anchor_pixel_loss=denoiser_update.anchor_pixel,
-            anchor_shared=(
-                prepared.selection is not None
-                and prepared.selection.source == "shared"
-                and bool(presence.anchor.any())
-            ),
-            diagnostics=dict(self.diagnostics),
+        metrics = materialize_metrics(
+            Metrics(
+                generator=denoiser_update.adversarial,
+                generator_total=denoiser_update.total,
+                critic=sum(critic_vals),
+                r1=r1,
+                transition=prepared.transition,
+                volume_size=self.patch_size,
+                domain=prepared.domain,
+                critic_axes=tuple(critic_vals),
+                anchor_planes=0 if anchor is None else anchor.planes,
+                anchor_conflict_rate=0.0 if anchor is None else anchor.conflict_rate,
+                anchor_loss=denoiser_update.anchor,
+                anchor_accuracy=denoiser_update.anchor_accuracy,
+                generator_connectivity=denoiser_update.connectivity,
+                critic_connectivity=critic_connectivity,
+                connectivity_r1=connectivity_r1,
+                anchor_ramp=prepared.anchor_ramp,
+                connectivity_ramp=prepared.connectivity_ramp,
+                anchor_neighbor_agreement=self.diagnostics.get(
+                    "anchor/neighbor_agreement"
+                ),
+                anchor_neighbor_excess_jump=self.diagnostics.get(
+                    "anchor/neighbor_excess_jump"
+                ),
+                generator_global=denoiser_update.global_loss,
+                generator_local=denoiser_update.local_loss,
+                critic_global=critic_global,
+                critic_local=critic_local,
+                vf_loss=denoiser_update.vf,
+                vf_active=presence.vf.any(),
+                anchor_input_active_fraction=presence.anchor.to(torch.float32).mean(),
+                vf_active_fraction=presence.vf.to(torch.float32).mean(),
+                normal_transition_loss=denoiser_update.normal_transition,
+                anchor_coarse_loss=denoiser_update.anchor_coarse,
+                anchor_pixel_loss=denoiser_update.anchor_pixel,
+                anchor_shared=(
+                    prepared.selection is not None
+                    and prepared.selection.source == "shared"
+                    and presence.anchor.any()
+                ),
+                diagnostics=dict(self.diagnostics),
+            )
         )
+        if metrics.diagnostics.get("anchor/boundary_pairs", 0) == 0:
+            for key in ("anchor/neighbor_agreement", "anchor/neighbor_excess_jump"):
+                if key in metrics.diagnostics:
+                    metrics.diagnostics[key] = None
+            metrics = replace(
+                metrics,
+                anchor_neighbor_agreement=None,
+                anchor_neighbor_excess_jump=None,
+            )
+        return metrics
 
     def make_connectivity_triplets(
         self,
@@ -590,8 +620,9 @@ class Trainer:
         ):
             return empty, empty
         anchor = self.visible_anchor(anchor, visible)
-        if not bool(anchor.mask.any()):
-            return empty, empty
+        self.diagnostics.update(
+            anchor_boundary_metrics(prediction, reference_prediction, anchor)
+        )
 
         real, fake = self.anchor_triplets.sample(
             prediction,
@@ -623,10 +654,10 @@ class Trainer:
         triplets: TripletBatch,
     ) -> torch.Tensor:
         return torch.tensor(
-            [critic_domains.get(axis, NULL_DOMAIN) for axis in triplets.axes.tolist()],
+            [critic_domains.get(axis, NULL_DOMAIN) for axis in AXES],
             device=triplets.values.device,
             dtype=torch.long,
-        )
+        )[triplets.axes]
 
     @staticmethod
     def visible_anchor(
@@ -804,14 +835,15 @@ class Trainer:
         return conditions
 
     def get_anchor_ramp(self, step: int) -> float:
-        if step < self.anchor_start_step:
+        return self.schedule_ramp(step, self.anchor_start_step, self.anchor_ramp_steps)
+
+    @staticmethod
+    def schedule_ramp(step: int, start: int, ramp: int) -> float:
+        if step < start:
             return 0.0
-        if self.anchor_ramp_steps == 0:
+        if ramp == 0:
             return 1.0
-        return min(
-            (step - self.anchor_start_step + 1) / self.anchor_ramp_steps,
-            1.0,
-        )
+        return min((step - start + 1) / ramp, 1.0)
 
     def sample_anchor(
         self,
@@ -890,21 +922,21 @@ class Trainer:
         )
 
     def sample_multi_anchor(self, prediction: torch.Tensor) -> AnchorSelection:
-        labels = prediction.detach().argmax(dim=1)
+        probs = (prediction.detach().float() + 1) * 0.5
+        probs = probs / probs.sum(1, keepdim=True).clamp_min(1e-8)
         count = int(torch.randint(2, len(AXES) + 1, ()).item())
-        axes = torch.randperm(len(AXES), device=prediction.device)[:count].tolist()
+        axes = torch.randperm(len(AXES))[:count].tolist()
         planes = []
         for axis in axes:
             index = int(
                 torch.randint(
                     prediction.shape[axis + 2],
                     (),
-                    device=prediction.device,
                 ).item()
             )
             planes.append(
                 PlaneAnchor(
-                    image=labels.select(axis + 1, index),
+                    image=probs.select(axis + 2, index),
                     axis=axis,
                     index=index,
                 )
@@ -1039,7 +1071,7 @@ class Trainer:
         local_sum = 0.0
         local_weight = self.critic_local_weight
         for group, axes in self.critic_groups.items():
-            count = self.updates[group] if self.stability_version >= 2 else step
+            count = self.updates[group]
             regularize = (count + 1) % self.r1_interval == 0
             apply_r1 = self.r1_gamma > 0.0 and regularize
             apply_r2 = self.r2_gamma > 0.0 and regularize
@@ -1051,11 +1083,15 @@ class Trainer:
                 if real_pairs is None:
                     images = batches[axis]
                     real = (
-                        F.one_hot(images, num_classes=self.num_phases)
-                        .movedim(-1, 1)
-                        .to(torch.float32)
-                        .mul_(2.0)
-                        .sub_(1.0)
+                        (
+                            images
+                            if images.ndim == 4
+                            else F.one_hot(images, num_classes=self.num_phases)
+                            .movedim(-1, 1)
+                            .to(torch.float32)
+                        )
+                        .mul(2.0)
+                        .sub(1.0)
                     )
                     real_time = self.make_time(transition, real.shape[0])
                     real_prev, real_curr = self.diffusion.sample_pair(
@@ -1084,12 +1120,12 @@ class Trainer:
                     fake_score = critic(fake_prev, fake_curr, fake_time, fake_domain)
                     losses = get_critic_loss(real_score, fake_score)
                     loss = losses.combine(local_weight)
-                global_sum += float(losses.global_loss.detach()) * weight
-                local_sum += float(losses.local_loss.detach()) * weight
-                self.diagnostics[f"score/{group}/{axis}/real"] = float(
+                global_sum += losses.global_loss.detach() * weight
+                local_sum += losses.local_loss.detach() * weight
+                self.diagnostics[f"score/{group}/{axis}/real"] = (
                     real_score.logits_global.detach().mean()
                 )
-                self.diagnostics[f"score/{group}/{axis}/fake"] = float(
+                self.diagnostics[f"score/{group}/{axis}/fake"] = (
                     fake_score.logits_global.detach().mean()
                 )
                 if regularize:
@@ -1103,7 +1139,7 @@ class Trainer:
                         self.diagnostics[f"input_gradient/{group}/{axis}/{name}"] = (
                             0.0
                             if grad is None
-                            else float(grad.detach().flatten(1).norm(dim=1).mean())
+                            else grad.detach().flatten(1).norm(dim=1).mean()
                         )
                 if apply_r1:
                     r1 = get_critic_r1(
@@ -1111,17 +1147,17 @@ class Trainer:
                         (real_prev,),
                     )
                     penalty = r1.combine(local_weight)
-                    r1_sum += float(penalty.detach()) * weight
+                    r1_sum += penalty.detach() * weight
                     loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
                 if apply_r2:
                     penalty = get_critic_r1(fake_score, (fake_prev,)).combine(
                         local_weight
                     )
-                    self.diagnostics[f"r2/{group}/{axis}"] = float(penalty.detach())
+                    self.diagnostics[f"r2/{group}/{axis}"] = penalty.detach()
                     loss = loss + 0.5 * self.r2_gamma * self.r1_interval * penalty
                 check_loss(loss, f"critic {group}/{axis}")
                 self.scaler.scale(loss * weight).backward()
-                critic_losses[axis] = float(loss.detach()) * weight
+                critic_losses[axis] = loss.detach() * weight
             if step_optimizer(optimizer, self.scaler, self.diagnostics, group):
                 self.updates[group] += 1
         return critic_losses, r1_sum, global_sum, local_sum
@@ -1136,7 +1172,7 @@ class Trainer:
         if not len(fake):
             return 0.0, 0.0
 
-        count = self.updates["connectivity"] if self.stability_version >= 2 else step
+        count = self.updates["connectivity"]
         regularize = (count + 1) % self.r1_interval == 0
         apply_r1 = self.r1_gamma > 0.0 and regularize
         apply_r2 = self.r2_gamma > 0.0 and regularize
@@ -1162,18 +1198,18 @@ class Trainer:
                 fake_score,
             )
             loss = losses.combine(self.critic_local_weight)
-        adversarial = float(loss.detach())
+        adversarial = loss.detach()
         r1_value = 0.0
         if apply_r1:
             r1 = get_critic_r1(real_score, (real,))
             penalty = r1.combine(self.critic_local_weight)
-            r1_value = float(penalty.detach())
+            r1_value = penalty.detach()
             loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
         if apply_r2:
             penalty = get_critic_r1(fake_score, (fake_values,)).combine(
                 self.critic_local_weight
             )
-            self.diagnostics["r2/connectivity"] = float(penalty.detach())
+            self.diagnostics["r2/connectivity"] = penalty.detach()
             loss = loss + 0.5 * self.r2_gamma * self.r1_interval * penalty
         self.diagnostics["regularization/connectivity"] = int(regularize)
         check_loss(loss, "connectivity")
@@ -1261,11 +1297,11 @@ class Trainer:
                 )
                 total = (
                     adversarial_loss
-                    + batch.anchor_ramp
+                    + batch.anchor_ramp * anchor_loss
+                    + batch.connectivity_ramp
                     * (
                         self.connectivity_weight * connectivity_loss
                         + self.normal_transition_weight * normal_loss
-                        + anchor_loss
                     )
                     + self.vf_loss_weight * vf_loss
                 )
@@ -1281,17 +1317,17 @@ class Trainer:
                 critic.requires_grad_(True)
             self.connectivity_critic.requires_grad_(True)
         return DenoiserUpdate(
-            adversarial=float(adversarial_loss.detach()),
-            total=float(total.detach()),
-            global_loss=float(global_loss.detach()),
-            local_loss=float(local_loss.detach()),
-            connectivity=float(connectivity_loss.detach()),
-            normal_transition=float(normal_loss.detach()),
-            anchor=float(anchor_loss.detach()),
-            anchor_coarse=float(anchor_coarse.detach()),
-            anchor_pixel=float(anchor_pixel.detach()),
-            anchor_accuracy=float(anchor_accuracy.detach()),
-            vf=float(vf_loss.detach()),
+            adversarial=adversarial_loss.detach(),
+            total=total.detach(),
+            global_loss=global_loss.detach(),
+            local_loss=local_loss.detach(),
+            connectivity=connectivity_loss.detach(),
+            normal_transition=normal_loss.detach(),
+            anchor=anchor_loss.detach(),
+            anchor_coarse=anchor_coarse.detach(),
+            anchor_pixel=anchor_pixel.detach(),
+            anchor_accuracy=anchor_accuracy.detach(),
+            vf=vf_loss.detach(),
         )
 
     def make_time(self, transition: int, batch: int) -> torch.Tensor:

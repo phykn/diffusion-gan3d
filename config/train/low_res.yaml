@@ -54,7 +54,6 @@ optim:
   critic_lr: 0.0001
 
 train:
-  stability_version: 2  # 갱신 횟수 기준 정규화와 그룹 평균 loss
   total_steps: 20000
 
   real_batch_size: 8  # 단면별 실제 2D 이미지 수

@@ -14,7 +14,7 @@ class AnchorLoss:
     coarse: torch.Tensor
     pixel: torch.Tensor
     accuracy: torch.Tensor
-    visible_voxels: int
+    visible_voxels: torch.Tensor
 
 
 class SoftAnchorLoss(nn.Module):
@@ -40,12 +40,11 @@ class SoftAnchorLoss(nn.Module):
         observed_mask = observed_mask & visibility
         pixel, accuracy, visible_voxels = self.compute_pixel_loss(
             logits,
-            condition.target,
+            (condition.image.float() + 1.0) * 0.5,
             observed_mask,
         )
 
-        target = torch.zeros_like(probs)
-        target.scatter_(1, condition.target.unsqueeze(1), 1.0)
+        target = (condition.image.float() + 1.0) * 0.5
         groups = (
             observed_axis_masks,
             condition.axis_masks & ~observed_axis_masks,
@@ -59,9 +58,11 @@ class SoftAnchorLoss(nn.Module):
             )
             for axis_masks in groups
         ]
-        coarse_losses = [loss for loss in coarse_losses if loss is not None]
-        zero = logits.sum().mul(0.0)
-        coarse = zero if not coarse_losses else torch.stack(coarse_losses).mean()
+        sums, coverage = (torch.stack(values) for values in zip(*coarse_losses))
+        valid = coverage > 0
+        coarse = (
+            (sums / coverage.clamp_min(1e-8)) * valid
+        ).sum() / valid.sum().clamp_min(1)
         total = coarse + self.pixel_weight * pixel
         return AnchorLoss(total, coarse, pixel, accuracy, visible_voxels)
 
@@ -70,16 +71,16 @@ class SoftAnchorLoss(nn.Module):
         logits: torch.Tensor,
         target: torch.Tensor,
         mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         selected = mask[:, 0]
-        visible_voxels = int(selected.sum().item())
-        zero = logits.sum().mul(0.0)
-        if not visible_voxels:
-            return zero, zero.detach(), 0
-        pixel_logits = logits.movedim(1, -1)[selected]
-        pixel_target = target[selected]
-        pixel = F.cross_entropy(pixel_logits, pixel_target)
-        accuracy = (pixel_logits.argmax(dim=1) == pixel_target).to(torch.float32).mean()
+        visible_voxels = selected.sum()
+        denominator = visible_voxels.clamp_min(1)
+        pixel = (
+            -(target * logits.float().log_softmax(1)).sum(1) * selected
+        ).sum() / denominator
+        accuracy = (
+            (logits.argmax(1) == target.argmax(1)) * selected
+        ).sum() / denominator
         return pixel, accuracy, visible_voxels
 
     def compute_coarse_loss(
@@ -88,14 +89,12 @@ class SoftAnchorLoss(nn.Module):
         target: torch.Tensor,
         axis_masks: torch.Tensor,
         visibility: torch.Tensor,
-    ) -> torch.Tensor | None:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         zero = probs.sum().mul(0.0)
         coarse_sum = zero
         coarse_coverage = zero
         for axis in AXES:
             axis_mask = axis_masks[:, axis].unsqueeze(1) & visibility
-            if not bool(axis_mask.any()):
-                continue
             kernel = [self.pool_size, self.pool_size, self.pool_size]
             kernel[axis] = 1
             kernel = tuple(
@@ -109,9 +108,6 @@ class SoftAnchorLoss(nn.Module):
                 count_include_pad=False,
             )
             coverage = denominator[:, 0]
-            valid = coverage > 0.0
-            if not bool(valid.any()):
-                continue
             pooled_target = self.pool_with_mask(
                 target,
                 axis_mask,
@@ -128,12 +124,10 @@ class SoftAnchorLoss(nn.Module):
                 pooled_target
                 * pooled_probs.clamp_min(torch.finfo(pooled_probs.dtype).eps).log()
             ).sum(dim=1)
-            coarse_sum = coarse_sum + (cross_entropy[valid] * coverage[valid]).sum()
-            coarse_coverage = coarse_coverage + coverage[valid].sum()
+            coarse_sum = coarse_sum + (cross_entropy * coverage).sum()
+            coarse_coverage = coarse_coverage + coverage.sum()
 
-        if not bool(coarse_coverage > 0.0):
-            return None
-        return coarse_sum / coarse_coverage
+        return coarse_sum, coarse_coverage
 
     def pool_with_mask(
         self,

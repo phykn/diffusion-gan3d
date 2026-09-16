@@ -39,7 +39,7 @@ def main() -> None:
         for col in range(SAMPLES):
             group = ds.path_groups[np.random.randint(len(ds.path_groups))]
             path = group[np.random.randint(len(group))]
-            img = ds[path].numpy()
+            img = ds[path].argmax(0).numpy()
             panels[row, col].imshow(
                 img,
                 cmap="gray",
@@ -49,7 +49,7 @@ def main() -> None:
             )
             panels[row, col].set_title(f"axis {axis}")
             panels[row, col].axis("off")
-    fig.suptitle("Random training crops")
+    fig.suptitle("Random training crops (dominant phase; training retains fractions)")
     fig.tight_layout()
     plt.show()
 

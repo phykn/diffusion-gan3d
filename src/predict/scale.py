@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from src.anchor import PlaneAnchor, encode_anchors
 from src.predict.generator import Generator
 
 
@@ -205,6 +206,8 @@ class ScaledGenerator:
         domain: int | None = None,
         margin: int | None = None,
         base_offset: Sequence[int | None] | None = None,
+        anchors: Sequence[PlaneAnchor] = (),
+        anchor_strength: float = 1.0,
     ) -> torch.Tensor:
         self.stats = None
         margin = self.generator.default_margin if margin is None else margin
@@ -216,6 +219,7 @@ class ScaledGenerator:
         )
         storage = self.select_storage("auto")
         tiles = self.make_tiles(plan)
+        tile_anchors = self.prepare_anchors(anchors, tiles, plan, anchor_strength)
         vf = self.generator.prepare_vf(vf)
         domain = self.generator.prepare_domain(domain)
         base = self.prepare_base(base, plan, offset=base_offset)
@@ -232,6 +236,8 @@ class ScaledGenerator:
             labels=None,
             progress=progress,
             guidance=guidance,
+            tile_anchors=tile_anchors,
+            anchor_strength=anchor_strength,
         )
         probs = ((current.values.float() + 1.0) * 0.5).clamp(0.0, 1.0)
         probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(
@@ -255,6 +261,8 @@ class ScaledGenerator:
         domain: int | None = None,
         margin: int | None = None,
         base_offset: Sequence[int | None] | None = None,
+        anchors: Sequence[PlaneAnchor] = (),
+        anchor_strength: float = 1.0,
     ) -> torch.Tensor:
         self.stats = None
         margin = self.generator.default_margin if margin is None else margin
@@ -269,6 +277,7 @@ class ScaledGenerator:
         plan = self._generation_plan(output_shape, overlap, margin)
         selected = self.select_storage(storage)
         tiles = self.make_tiles(plan)
+        tile_anchors = self.prepare_anchors(anchors, tiles, plan, anchor_strength)
         vf = self.generator.prepare_vf(vf)
         domain = self.generator.prepare_domain(domain)
         base = self.prepare_base(base, plan, offset=base_offset)
@@ -286,10 +295,63 @@ class ScaledGenerator:
             labels=labels,
             progress=progress,
             guidance=guidance,
+            tile_anchors=tile_anchors,
+            anchor_strength=anchor_strength,
         )
         labels = self.crop_output(labels, output_shape, margin)
         self.stats = self._output_plan(plan, output_shape)
         return labels
+
+    def prepare_anchors(self, anchors, tiles, plan, strength):
+        self.generator.validate_anchor_strength(strength)
+        shape = tuple(size - 2 * plan.margin for size in plan.shape)
+        placed = []
+        for anchor in anchors:
+            if (
+                anchor.axis not in (0, 1, 2)
+                or not 0 <= anchor.index < shape[anchor.axis]
+            ):
+                raise ValueError("anchor.index is outside the generated volume.")
+            height, width = anchor.image.shape[-2:]
+            axes = tuple(axis for axis in range(3) if axis != anchor.axis)
+            row, col = anchor.position or tuple(
+                (shape[axis] - length) // 2
+                for axis, length in zip(axes, (height, width))
+            )
+            if (
+                row < 0
+                or col < 0
+                or row + height > shape[axes[0]]
+                or col + width > shape[axes[1]]
+            ):
+                raise ValueError("anchor.position places the image outside the plane.")
+            placed.append((anchor, axes, row + plan.margin, col + plan.margin))
+        result = []
+        for tile in tiles:
+            local = []
+            for anchor, axes, row, col in placed:
+                index = anchor.index + plan.margin
+                normal = tile.source[anchor.axis]
+                if not normal.start <= index < normal.stop:
+                    continue
+                rows, cols = (tile.source[axis] for axis in axes)
+                top, left = max(row, rows.start), max(col, cols.start)
+                bottom = min(row + anchor.image.shape[-2], rows.stop)
+                right = min(col + anchor.image.shape[-1], cols.stop)
+                if top >= bottom or left >= right:
+                    continue
+                local.append(
+                    PlaneAnchor(
+                        anchor.image[
+                            ..., top - row : bottom - row, left - col : right - col
+                        ],
+                        anchor.axis,
+                        index - normal.start,
+                        (top - rows.start, left - cols.start),
+                    )
+                )
+            result.append(tuple(local))
+        return tuple(result)
 
     def shape_from_blocks(
         self,
@@ -662,6 +724,8 @@ class ScaledGenerator:
         labels: torch.Tensor | None,
         progress: bool,
         guidance: float = 1.0,
+        tile_anchors: tuple = (),
+        anchor_strength: float = 1.0,
     ) -> VolumeState:
         generator = self.generator
         tile_buffer = TileBuffer(
@@ -710,6 +774,8 @@ class ScaledGenerator:
                     fusion,
                     tile_buffer,
                     guidance=guidance,
+                    tile_anchors=tile_anchors,
+                    anchor_strength=anchor_strength,
                 )
                 if final_labels is None:
                     current, next_state = next_state, current
@@ -731,6 +797,8 @@ class ScaledGenerator:
         fusion: Fusion,
         tile_buffer: TileBuffer | None = None,
         guidance: float = 1.0,
+        tile_anchors: tuple = (),
+        anchor_strength: float = 1.0,
     ) -> None:
         generator = self.generator
         if tile_buffer is None:
@@ -740,12 +808,27 @@ class ScaledGenerator:
                 current.values.device.type == "cpu" and generator.device.type == "cuda",
             )
         fusion.pred_sum.zero_()
-        for tile in tiles:
+        for index, tile in enumerate(tiles):
             values = tile_buffer.read(
                 current,
                 tile.source,
                 generator.device,
             )
+            conditions = {}
+            if tile_anchors and tile_anchors[index] and anchor_strength > 0:
+                anchor = encode_anchors(
+                    tile_anchors[index],
+                    1,
+                    generator.num_phases,
+                    tuple(values.shape[-3:]),
+                    generator.device,
+                    values.dtype,
+                )
+                conditions = {
+                    "anchor_image": anchor.image,
+                    "anchor_mask": anchor.mask,
+                    "anchor_strength": anchor_strength,
+                }
             with torch.autocast(
                 device_type=generator.device.type,
                 dtype=torch.float16,
@@ -758,6 +841,7 @@ class ScaledGenerator:
                     guidance=guidance,
                     domain=domain,
                     vf=vf,
+                    **conditions,
                 )
             expected = (1, generator.num_phases, *values.shape[-3:])
             if pred.shape != expected:

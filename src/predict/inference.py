@@ -13,7 +13,7 @@ from src.config import (
     load_train_config,
 )
 from src.predict.scale import ScaledGenerator
-from src.prepare.resize import phase_channels, resize_crop
+from src.prepare.resize import resize_crop
 
 
 class InferenceAPI:
@@ -48,16 +48,7 @@ class InferenceAPI:
             raise ValueError(
                 f"image must be a {self.crop_size} x {self.crop_size} original crop."
             )
-        phase_channels(image.unsqueeze(0), self.num_phases)
-        if "lo_res_size" in self.data:
-            _, low, high = get_sizes(self.data)
-            intermediate = high if "scale_factor" in self.data else None
-            return resize_crop(image, low, self.num_phases, intermediate)
-        return torch.nn.functional.interpolate(
-            image[None, None].float(),
-            size=(self.input_size, self.input_size),
-            mode="nearest-exact",
-        )[0, 0].long()
+        return resize_crop(image, get_sizes(self.data)[1], self.num_phases)
 
     def generate(
         self,
@@ -107,21 +98,13 @@ class InferenceAPI:
                     domain=domain,
                 )
 
-            if anchors:
-                base = self.generator.generate(
-                    anchors=anchors,
-                    vf=vf,
-                    anchor_strength=anchor_strength,
-                    guidance=guidance,
-                    domain=domain,
-                )
-            base_offset = _anchor_base_offset(anchors) if anchors else None
             return self.scaled.generate(
                 blocks=blocks,
                 shape=shape,
                 overlap=overlap,
                 base=base,
-                base_offset=base_offset,
+                anchors=anchors,
+                anchor_strength=anchor_strength,
                 vf=vf,
                 storage=storage,
                 progress=progress,
@@ -157,16 +140,6 @@ def _validate_anchors(anchors: Sequence[PlaneAnchor]) -> tuple[PlaneAnchor, ...]
     if any(not isinstance(anchor, PlaneAnchor) for anchor in values):
         raise TypeError("anchors must contain only PlaneAnchor values.")
     return values
-
-
-def _anchor_base_offset(
-    anchors: Sequence[PlaneAnchor],
-) -> tuple[int | None, int | None, int | None]:
-    fixed_axes = {anchor.axis for anchor in anchors}
-    for anchor in anchors:
-        if anchor.position is not None:
-            fixed_axes.update(axis for axis in range(3) if axis != anchor.axis)
-    return tuple(0 if axis in fixed_axes else None for axis in range(3))
 
 
 @contextmanager

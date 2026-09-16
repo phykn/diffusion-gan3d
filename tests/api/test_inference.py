@@ -49,7 +49,7 @@ def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> InferenceAPI:
     monkeypatch.setattr(
         inference_module,
         "load_train_config",
-        lambda _path: {"data": {"crop_size": 6, "input_size": 8}},
+        lambda _path: {"data": {"crop_size": 6, "lo_res_size": 8}},
     )
     monkeypatch.setattr(inference_module, "ScaledGenerator", FakeScaledGenerator)
     return InferenceAPI(weights, device="cpu")
@@ -100,17 +100,17 @@ def test_generate_with_shape_uses_scaled_generator(api: InferenceAPI) -> None:
     assert api.scaled.calls[0]["progress"] is True
 
 
-def test_generate_with_anchor_and_blocks_builds_conditioned_base(
+def test_generate_with_anchor_and_blocks_passes_global_anchor_to_tiler(
     api: InferenceAPI,
 ) -> None:
     anchor = PlaneAnchor(torch.zeros(8, 8, dtype=torch.uint8), axis=0, index=0)
 
     api.generate(anchors=(anchor,), blocks=2)
 
-    assert api.generator.calls[0]["anchors"] == (anchor,)
+    assert api.generator.calls == []
     assert api.scaled.calls[0]["blocks"] == 2
-    assert torch.equal(api.scaled.calls[0]["base"], torch.zeros(8, 8, 8)) is False
-    assert api.scaled.calls[0]["base_offset"] == (0, None, None)
+    assert api.scaled.calls[0]["anchors"] == (anchor,)
+    assert api.scaled.calls[0]["base"] is None
     assert api.scaled.calls[0]["shape"] is None
 
 
@@ -126,7 +126,7 @@ def test_explicit_partial_anchor_position_preserves_all_global_axes(
 
     api.generate(anchors=(anchor,), blocks=2)
 
-    assert api.scaled.calls[0]["base_offset"] == (0, 0, 0)
+    assert api.scaled.calls[0]["anchors"] == (anchor,)
 
 
 def test_seed_is_reproducible_without_changing_caller_rng(api: InferenceAPI) -> None:

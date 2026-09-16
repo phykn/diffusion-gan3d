@@ -53,12 +53,11 @@ def test_generation_settings_use_gen_yaml(
         lambda path: {
             "guidance": 1.5,
             "anchor_strength": 0.7,
-            "anchor_spread": 0.3,
             "overlap": 12,
         },
     )
 
-    assert load_generation_settings() == GenerationSettings(1.5, 0.7, 12, 0.3)
+    assert load_generation_settings() == GenerationSettings(1.5, 0.7, 12)
 
 
 def test_generation_settings_support_missing_values(
@@ -70,7 +69,7 @@ def test_generation_settings_support_missing_values(
 
 
 def test_repository_generation_config_has_expected_defaults() -> None:
-    assert load_generation_settings() == GenerationSettings(1.0, 1.0, 8, 0.1)
+    assert load_generation_settings() == GenerationSettings(0.9, 0.8, 8)
 
 
 def test_repository_training_config_uses_soft_anchor_and_connectivity() -> None:

@@ -17,7 +17,6 @@ def build_augmentation(cfg: dict) -> CriticAugment:
     settings = cfg.get("augmentation", {})
     planes = settings.get("planes")
     augment = CriticAugment(
-        settings.get("mode", False),
         prob=settings.get("probability", 0.5),
         planes=planes,
         thickness_axis=cfg["data"].get("thickness_axis"),
@@ -33,10 +32,8 @@ def build_datasets(cfg: dict, high: bool = False) -> dict[int, dict[int, RealDat
     data = cfg["data"]
     if high:
         crop, low, high_size = get_sr_sizes(cfg)
-        intermediate = None
     else:
         crop, low, high_size = get_sizes(data)
-        intermediate = high_size if "scale_factor" in data else None
     datasets = {}
     for domain_id, folders in get_domains(data).items():
         grouped = {}
@@ -72,14 +69,6 @@ def build_datasets(cfg: dict, high: bool = False) -> dict[int, dict[int, RealDat
                 crop,
                 high_size if high else low,
                 data["num_phases"],
-                intermediate_size=intermediate,
-            )
-            if "lo_res_size" in data
-            else RealDataset(
-                path_groups,
-                crop_size=data["crop_size"],
-                patch_size=low,
-                allow_part=data["allow_partial_crops"],
             )
             for axis, path_groups in grouped.items()
         }

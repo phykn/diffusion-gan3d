@@ -21,15 +21,46 @@ class TripletBatch:
 class LocatedTriplets:
     triplets: TripletBatch
     locations: tuple[tuple[int, int, int], ...]
+    regions: tuple[tuple[int, int, int, int], ...] = ()
+    relations: tuple[tuple[int, int, int], ...] = ()
+
+
+@torch.no_grad()
+def anchor_boundary_metrics(
+    prediction, reference, condition
+) -> dict[str, torch.Tensor]:
+    """One-voxel phase agreement across the observed/unobserved boundary; not percolation."""
+    total = prediction.new_zeros(())
+    excess = prediction.new_zeros(())
+    count = prediction.new_zeros(())
+    for axis in AXES:
+        left = [slice(None)] * 5
+        right = [slice(None)] * 5
+        left[axis + 2], right[axis + 2] = slice(None, -1), slice(1, None)
+        left, right = tuple(left), tuple(right)
+        boundary = (condition.mask[left] ^ condition.mask[right]).squeeze(1)
+        jump = (prediction[left] - prediction[right]).abs().sum(1) * 0.25
+        ref_jump = (reference[left] - reference[right]).abs().sum(1) * 0.25
+        total += ((1 - jump) * boundary).sum()
+        excess += ((jump - ref_jump) * boundary).sum()
+        count += boundary.sum()
+    return {
+        "anchor/boundary_pairs": count,
+        "anchor/neighbor_agreement": total / count.clamp_min(1),
+        "anchor/neighbor_excess_jump": excess / count.clamp_min(1),
+    }
 
 
 def compute_transition_loss(real: TripletBatch, fake: TripletBatch) -> torch.Tensor:
     if real.values.shape != fake.values.shape:
         raise ValueError("real and fake triplets must have the same shape.")
     if not (
-        torch.equal(real.axes, fake.axes)
-        and torch.equal(real.gaps, fake.gaps)
-        and torch.equal(real.center_slots, fake.center_slots)
+        (real.axes is fake.axes or torch.equal(real.axes, fake.axes))
+        and (real.gaps is fake.gaps or torch.equal(real.gaps, fake.gaps))
+        and (
+            real.center_slots is fake.center_slots
+            or torch.equal(real.center_slots, fake.center_slots)
+        )
     ):
         raise ValueError("real and fake triplets must use matching metadata.")
     if len(fake) == 0:
@@ -56,18 +87,20 @@ def compute_transition_loss(real: TripletBatch, fake: TripletBatch) -> torch.Ten
     valid_count = valid_neighbors.sum(dim=1)
     per_triplet = (transition_error * valid_neighbors).sum(dim=1) / valid_count
     middle = center_slots == 1
-    if bool(middle.any()):
-        bend = changes[:, :, 1] - changes[:, :, 0]
-        bend_error = 0.5 * (bend[0] - bend[1]).abs().mean(dim=(1, 2, 3))
-        per_triplet[middle] = 0.5 * (per_triplet[middle] + bend_error[middle])
+    bend = changes[:, :, 1] - changes[:, :, 0]
+    bend_error = 0.5 * (bend[0] - bend[1]).abs().mean(dim=(1, 2, 3))
+    per_triplet = torch.where(middle, 0.5 * (per_triplet + bend_error), per_triplet)
     return per_triplet.mean()
 
 
 class AnchorTripletSampler:
-    def __init__(self, max_gap: int = 1) -> None:
+    def __init__(self, max_gap: int = 1, windows_per_plane: int = 1) -> None:
         if not isinstance(max_gap, int) or isinstance(max_gap, bool) or max_gap < 1:
             raise ValueError("max_gap must be a positive integer.")
         self.max_gap = max_gap
+        if type(windows_per_plane) is not int or windows_per_plane < 1:
+            raise ValueError("windows_per_plane must be a positive integer.")
+        self.windows_per_plane = windows_per_plane
 
     def sample(
         self,
@@ -98,18 +131,19 @@ class AnchorTripletSampler:
         if not len(located.triplets):
             return self._empty_triplets(volume)
         values = []
-        for (batch, axis, index), gap in zip(
+        for (batch, axis, _), slice_indices, region in zip(
             located.locations,
-            located.triplets.gaps.tolist(),
+            located.relations,
+            located.regions,
             strict=True,
         ):
             moved = volume[batch].movedim(axis + 1, 1)
-            slice_indices = _relation_indices(index, moved.shape[1], gap)
-            if slice_indices is None:
-                raise RuntimeError(
-                    "located triplet relation no longer fits the volume."
-                )
-            values.append(moved[:, list(slice_indices)].movedim(0, 1))
+            row, col, height, width = region
+            values.append(
+                moved[
+                    :, list(slice_indices), row : row + height, col : col + width
+                ].movedim(0, 1)
+            )
         return TripletBatch(
             values=torch.stack(values),
             axes=located.triplets.axes,
@@ -131,39 +165,72 @@ class AnchorTripletSampler:
         if condition.mask.shape != expected_mask_shape:
             raise ValueError("anchor mask must match the generated volume.")
 
-        triplets = []
-        axes = []
-        gaps = []
-        center_slots = []
-        locations = []
+        triplets, axes, gaps, center_slots, locations, regions = [], [], [], [], [], []
+        relations = []
+        # One mask transfer replaces scalar GPU reads inside the sampling loops.
+        masks = torch.cat((condition.axis_masks, condition.mask), dim=1).detach().cpu()
         for batch in range(volume.shape[0]):
             for axis in AXES:
                 moved = volume[batch].movedim(axis + 1, 1)
-                axis_mask = condition.axis_masks[batch, axis]
-                if not bool(axis_mask.any()):
-                    axis_mask = condition.mask[batch, 0]
-                moved_axis_mask = axis_mask.movedim(axis, 0)
-                moved_full_mask = condition.mask[batch].movedim(axis + 1, 1)
-                depth = moved.shape[1]
-                indices = moved_axis_mask.flatten(1).any(dim=1).nonzero().flatten()
-                if not len(indices):
+                own_mask = masks[batch, axis].movedim(axis, 0)
+                full_mask = masks[batch, 3].movedim(axis, 0)
+                depth, height, width = moved.shape[1:]
+                if depth < 3:
                     continue
-                index_value = int(
-                    indices[self._random_index(len(indices), generator)].item()
+                own_indices = (
+                    own_mask.flatten(1).any(dim=1).nonzero().flatten().tolist()
                 )
-                gap = self._sample_gap(index_value, depth, generator)
-                slice_indices = _relation_indices(index_value, depth, gap)
-                if slice_indices is None:
-                    raise RuntimeError("sampled gap does not fit the volume.")
-                values = moved[:, list(slice_indices)].movedim(0, 1)
-                mask = moved_full_mask[:, list(slice_indices)].movedim(0, 1)
-                if bool(mask.all().item()):
+                candidates = (
+                    own_indices
+                    or full_mask.flatten(1).any(dim=1).nonzero().flatten().tolist()
+                )
+                if not candidates:
                     continue
-                triplets.append(values)
-                axes.append(axis)
-                gaps.append(gap)
-                center_slots.append(slice_indices.index(index_value))
-                locations.append((batch, axis, index_value))
+                plane_indices = own_indices or [
+                    candidates[self._random_index(len(candidates), generator)]
+                ]
+                for index_value in plane_indices:
+                    points = full_mask[index_value].nonzero()
+                    for window in range(self.windows_per_plane):
+                        gap = (
+                            1
+                            if window == 0
+                            else self._sample_gap(index_value, depth, generator)
+                        )
+                        slice_indices = _relation_indices(index_value, depth, gap)
+                        if slice_indices is None:
+                            continue
+                        crop_h = (
+                            height
+                            if self.windows_per_plane == 1
+                            else max(1, height // 2)
+                        )
+                        crop_w = (
+                            width if self.windows_per_plane == 1 else max(1, width // 2)
+                        )
+                        point = points[
+                            self._random_index(len(points), generator)
+                        ].tolist()
+                        row = min(max(point[0] - crop_h // 2, 0), height - crop_h)
+                        col = min(max(point[1] - crop_w // 2, 0), width - crop_w)
+                        mask = full_mask[
+                            list(slice_indices), row : row + crop_h, col : col + crop_w
+                        ]
+                        if bool(mask.all()):
+                            continue
+                        values = moved[
+                            :,
+                            list(slice_indices),
+                            row : row + crop_h,
+                            col : col + crop_w,
+                        ].movedim(0, 1)
+                        triplets.append(values)
+                        axes.append(axis)
+                        gaps.append(gap)
+                        center_slots.append(slice_indices.index(index_value))
+                        locations.append((batch, axis, index_value))
+                        regions.append((row, col, crop_h, crop_w))
+                        relations.append(slice_indices)
 
         if not triplets:
             return LocatedTriplets(
@@ -182,6 +249,8 @@ class AnchorTripletSampler:
                 ),
             ),
             tuple(locations),
+            tuple(regions),
+            tuple(relations),
         )
 
     def _check_volume(self, volume: torch.Tensor) -> None:

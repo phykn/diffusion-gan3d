@@ -40,7 +40,7 @@ loss:
 optim:
   generator_lr: 0.0001  # critic_lr를 생략하면 같은 학습률 사용
 
-# 고정된 1단계 모델로 생성하여 SR 학습 내내 재사용하는 LR 볼륨
+# 고정된 1단계 모델에서 생성하는 LR 볼륨. 기본 1000스텝마다 도메인당 하나 교체.
 lr_bank:
   samples_per_domain: 8
   guidance: 0.9  # bank 생성 시 도메인 조건 강도. gen.yaml과 독립적이다.

@@ -97,7 +97,9 @@ class Diffusion(nn.Module):
             self.timesteps - 1,
             "transition",
         )
-        if not bool(transitions.any()):
+        if isinstance(transition, int) and transition == 0:
+            return pred
+        if transitions.device.type == "cpu" and not bool(transitions.any()):
             return pred
         mean, variance = self.get_posterior(
             current,
@@ -213,6 +215,12 @@ class Diffusion(nn.Module):
         limit: int,
         name: str,
     ) -> torch.Tensor:
+        if isinstance(value, int):
+            if not 0 <= value <= limit:
+                raise ValueError(f"{name} must be between 0 and {limit}.")
+            return torch.full(
+                (ref.shape[0],), value, device=ref.device, dtype=torch.long
+            )
         time = torch.as_tensor(value, device=ref.device, dtype=torch.long)
         if time.ndim == 0:
             time = time.expand(ref.shape[0])

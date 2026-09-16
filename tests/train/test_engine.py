@@ -96,6 +96,7 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
     trainer.device = torch.device("cpu")
     trainer.connectivity_weight = 1.0
     trainer.normal_transition_weight = 1.0
+    trainer.diagnostics = {}
     real_centers = torch.tensor((1, 1))
     fake_centers = torch.tensor((0, 2))
     axes = torch.tensor((0, 0))
@@ -508,7 +509,7 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     assert metrics.critic_connectivity == 0.0
     assert len(r1_values) == 3
     assert trainer.critic_augment.apply_together.call_count == 6
-    assert math.isclose(metrics.r1, sum(r1_values), rel_tol=1e-6)
+    assert math.isclose(metrics.r1, sum(r1_values) / len(r1_values), rel_tol=1e-6)
     assert math.isclose(
         metrics.generator,
         metrics.generator_global + optim.local_loss_weight * metrics.generator_local,
@@ -1185,7 +1186,7 @@ def _make_trainer(
     connectivity_optim,
     device,
 ) -> Trainer:
-    use_amp = cfg.train.amp and device.type == "cuda"
+    use_amp = cfg.train.mixed_precision and device.type == "cuda"
     return Trainer(
         components=TrainerComponents(
             denoiser=denoiser,
@@ -1202,25 +1203,27 @@ def _make_trainer(
         ),
         settings=TrainerSettings(
             volume_batch_size=cfg.train.volume_batch_size,
-            num_phases=cfg.data.num_phase,
-            patch_size=cfg.data.input_size,
-            slice_pairs_per_axis=cfg.train.pairs_per_axis,
+            num_phases=cfg.data.num_phases,
+            patch_size=cfg.data.lo_res_size,
+            slice_pairs_per_axis=cfg.train.slice_pairs_per_plane,
             ema_decay=cfg.optim.ema_decay,
-            r1_gamma=cfg.model.critic.r1_weight,
-            r1_interval=cfg.model.critic.r1_interval,
-            critic_local_weight=cfg.model.critic.local_loss_weight,
-            anchor_training_probability=cfg.anchor.train_prob,
-            anchor_start_step=cfg.anchor.start_step,
-            anchor_ramp_steps=cfg.anchor.ramp_steps,
-            anchor_shared_axis_probability=cfg.anchor.cross_domain_prob,
-            anchor_pixel_loss_weight=cfg.anchor.pixel_weight,
-            connectivity_weight=cfg.anchor.connectivity.weight,
-            normal_transition_weight=(cfg.anchor.connectivity.phase_transition_weight),
-            vf_loss_weight=cfg.vf.weight,
-            domain_dropout=1.0 - cfg.data.domain_prob,
-            cfg_drop_each_probability=cfg.condition_dropout.joint_each_prob,
+            r1_gamma=cfg.loss.r1_weight,
+            r1_interval=cfg.loss.r1_every_steps,
+            critic_local_weight=cfg.loss.critic_local_weight,
+            anchor_training_probability=cfg.conditioning.anchor.probability,
+            anchor_start_step=cfg.conditioning.anchor.start_step,
+            anchor_ramp_steps=cfg.conditioning.anchor.ramp_steps,
+            anchor_shared_axis_probability=cfg.conditioning.anchor.borrowed_plane_probability,
+            anchor_pixel_loss_weight=cfg.loss.anchor_pixel_weight,
+            connectivity_weight=cfg.loss.connectivity.adversarial_weight,
+            normal_transition_weight=(cfg.loss.connectivity.normal_transition_weight),
+            vf_loss_weight=cfg.loss.volume_fraction_weight,
+            domain_dropout=1.0 - cfg.conditioning.domain_keep_probability,
+            cfg_drop_each_probability=cfg.conditioning.dropout_probability_per_case,
             latent_channels=cfg.model.generator.latent_channels,
             amp_enabled=use_amp,
+            connectivity_ramp_steps=0,
+            connectivity_windows_per_plane=1,
         ),
     )
 
@@ -1239,46 +1242,61 @@ def _config(
     anchor["connectivity"] = (
         ConnectivityConfig() if connectivity is None else connectivity
     )
+    conditioning = ConditioningConfig() if conditioning is None else conditioning
+    connectivity = anchor["connectivity"]
+    vf = VfConfig(weight=1.0) if vf is None else vf
     return TrainConfig(
         data=DataConfig(
-            domains=data.domains,
-            num_phase=data.num_phases,
-            allow_part=data.get("allow_part", False),
+            domains={
+                domain: {PLANES[axis]: paths for axis, paths in planes.items()}
+                for domain, planes in data.domains.items()
+            },
+            num_phases=data.num_phases,
             crop_size=data.crop_size,
-            input_size=data.input_size,
-            augment=data.get("augment", False),
-            augment_prob=data.get("augment_prob", 0.0),
-            domain_prob=1.0 - data.get("domain_dropout", 0.0),
-            batch_size=data.batch_size,
-            num_workers=data.get("num_workers", 0),
+            lo_res_size=data.input_size,
         ),
         model=ModelConfig(
-            grad_checkpoint=model.gradient_checkpointing,
+            gradient_checkpointing=model.gradient_checkpointing,
             generator=Config(
                 channels=[
                     model.base_channels * multiplier
                     for multiplier in model.channel_multipliers
                 ],
-                condition_channels=model.embedding_channels,
+                embedding_channels=model.embedding_channels,
                 latent_channels=model.latent_channels,
+                anchor_multiscale_input=anchor.multiscale_input,
             ),
             critic=Config(
                 channels=model.critic_channels,
-                local_loss_weight=optim.local_loss_weight,
-                r1_weight=optim.r1_gamma,
-                r1_interval=optim.r1_interval,
+                plane_groups=[
+                    [plane]
+                    for axis, plane in enumerate(PLANES)
+                    if any(axis in planes for planes in data.domains.values())
+                ],
+            ),
+            diffusion=Config(num_steps=2, beta_min=0.1, beta_max=2.0),
+        ),
+        conditioning=Config(
+            anchor=Config(
+                probability=anchor.train_prob,
+                start_step=anchor.start_step,
+                ramp_steps=anchor.ramp_steps,
+                borrowed_plane_probability=anchor.cross_domain_prob,
+            ),
+            domain_keep_probability=1.0 - data.get("domain_dropout", 0),
+            dropout_probability_per_case=conditioning.joint_each_prob,
+        ),
+        loss=Config(
+            critic_local_weight=optim.local_loss_weight,
+            r1_weight=optim.r1_gamma,
+            r1_every_steps=optim.r1_interval,
+            anchor_pixel_weight=anchor.pixel_weight,
+            volume_fraction_weight=vf.weight,
+            connectivity=Config(
+                adversarial_weight=connectivity.weight,
+                normal_transition_weight=connectivity.phase_transition_weight,
             ),
         ),
-        diffusion=DiffusionConfig(
-            steps=2,
-            beta_min=0.1,
-            beta_max=2.0,
-        ),
-        anchor=anchor,
-        condition_dropout=(
-            ConditioningConfig() if conditioning is None else conditioning
-        ),
-        vf=(VfConfig(weight=1.0) if vf is None else vf),
         optim=OptimConfig(
             generator_lr=optim.denoiser_lr,
             critic_lr=optim.critic_lr,
@@ -1286,12 +1304,14 @@ def _config(
             ema_decay=0.9,
         ),
         train=LoopConfig(
-            init_weights=None,
-            steps=1,
+            initial_weights=None,
+            total_steps=1,
             volume_batch_size=1,
-            pairs_per_axis=2,
-            amp=False,
-            update_weights_every=1,
-            archive_every=1,
+            slice_pairs_per_plane=2,
+            mixed_precision=False,
+            weights_every_steps=1,
+            archive_every_steps=1,
+            real_batch_size=data.batch_size,
+            num_workers=0,
         ),
     )

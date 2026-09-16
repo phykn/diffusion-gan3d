@@ -1,11 +1,8 @@
-import copy
-
 import numpy as np
 import pytest
 import torch
 from PIL import Image
 
-from src.build.data import build_datasets
 from src.build.trainer import build_trainer
 from src.config import get_domains, load_train_config
 from src.plane import PLANES, get_axis
@@ -13,39 +10,19 @@ from src.storage import save_model
 from src.train.sr_loss import sample_slices
 
 
-def test_named_domains_preserve_legacy_axes_and_crop_results(tmp_path):
-    Image.fromarray((np.indices((12, 12)).sum(0) % 2).astype(np.uint8)).save(
-        tmp_path / "sample.png"
-    )
-    cfg = load_train_config("config/train/low_res.yaml")
-    cfg["data"].update(
-        domains={
-            0: {"xy": [str(tmp_path)], "xz": [str(tmp_path)], "yz": [str(tmp_path)]}
-        },
-        crop_size=8,
-        lo_res_size=4,
-        scale_factor=2,
-    )
-    legacy = copy.deepcopy(cfg)
-    legacy["data"]["domains"] = {0: {axis: [str(tmp_path)] for axis in range(3)}}
-    assert get_domains(cfg["data"]) == get_domains(legacy["data"])
-    named = build_datasets(cfg)[0]
-    old = build_datasets(legacy)[0]
-    for axis in range(3):
-        np.random.seed(42)
-        actual = named[axis][tmp_path / "sample.png"]
-        np.random.seed(42)
-        assert torch.equal(actual, old[axis][tmp_path / "sample.png"])
+def test_numeric_config_planes_are_rejected():
+    with pytest.raises(ValueError, match="plane names"):
+        get_domains({"domains": {0: {0: ["data"]}}})
 
 
 @pytest.mark.parametrize("plane", ["yx", "depth", "0", 3, -1, True, 1.0])
 def test_invalid_plane_names_are_rejected(plane):
-    with pytest.raises(ValueError, match="invalid plane"):
+    with pytest.raises(ValueError, match="plane names"):
         get_domains({"domains": {0: {plane: ["data"]}}})
 
 
 def test_numeric_and_named_aliases_cannot_duplicate_a_plane():
-    with pytest.raises(ValueError, match="duplicate plane"):
+    with pytest.raises(ValueError, match="plane names"):
         get_domains({"domains": {0: {"xy": ["one"], 0: ["two"]}}})
 
 
@@ -58,8 +35,7 @@ def test_named_slices_have_the_correct_normal_and_in_plane_directions(plane, axi
         assert any(torch.equal(image, section) for section in expected)
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_initial_weights_load_by_plane_or_legacy_axis(tmp_path, legacy):
+def test_initial_weights_load_by_plane(tmp_path):
     torch.set_num_threads(1)
     images = tmp_path / "images"
     images.mkdir()
@@ -69,7 +45,6 @@ def test_initial_weights_load_by_plane_or_legacy_axis(tmp_path, legacy):
         domains={0: {plane: [str(images)] for plane in PLANES}},
         crop_size=8,
         lo_res_size=8,
-        scale_factor=1,
     )
     cfg["model"]["generator"].update(
         channels=[4, 8], embedding_channels=8, latent_channels=4
@@ -86,7 +61,7 @@ def test_initial_weights_load_by_plane_or_legacy_axis(tmp_path, legacy):
     for axis, plane in enumerate(PLANES):
         with torch.no_grad():
             source.critics[plane].input.bias.fill_(axis + 1)
-        name = axis if legacy else plane
+        name = plane
         save_model(weights / f"critic_{name}.pt", source.critics[plane])
     cfg["train"]["initial_weights"] = str(weights)
     restored = build_trainer(cfg, torch.device("cpu"))

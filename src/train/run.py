@@ -94,6 +94,7 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "conditioning/anchor_fraction": metrics.anchor_input_active_fraction,
         "conditioning/vf_fraction": metrics.vf_active_fraction,
         "conditioning/anchor_ramp": metrics.anchor_ramp,
+        "conditioning/connectivity_ramp": metrics.connectivity_ramp,
         "sampling/transition": metrics.transition,
         f"timestep/{metrics.transition}/generator": metrics.generator,
         f"timestep/{metrics.transition}/critic": metrics.critic,

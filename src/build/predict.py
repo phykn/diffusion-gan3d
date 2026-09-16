@@ -6,7 +6,6 @@ from src.build.model import build_denoiser, build_diffusion
 from src.config import (
     find_train_config,
     get_sizes,
-    load_generation_settings,
     load_train_config,
 )
 from src.predict.generator import Generator
@@ -31,7 +30,6 @@ def load_generator(
     data = cfg["data"]
     model = cfg["model"]
     train = cfg["train"]
-    generation = load_generation_settings()
     use_amp = train["mixed_precision"] and device.type == "cuda"
     return Generator(
         denoiser,
@@ -41,5 +39,4 @@ def load_generator(
         num_phases=data["num_phases"],
         latent_channels=model["generator"]["latent_channels"],
         use_amp=use_amp,
-        anchor_spread=generation.anchor_spread,
     )

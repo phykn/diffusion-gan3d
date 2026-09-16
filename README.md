@@ -44,8 +44,8 @@ The data YAML contains the data fields directly, without an outer `data:` key.
 Training presets show the settings normally adjusted for a dataset or experiment.
 Advanced options may be omitted: `TRAIN_DEFAULTS` and `STAGE_DEFAULTS` in
 [`src/config.py`](src/config.py) define their configuration defaults in one place.
-Loading resolves these defaults after migrating legacy keys, without overwriting
-explicit values. Each run saves the resolved settings, including omitted options;
+Loading rejects unknown and obsolete keys with their full configuration path,
+then resolves defaults without overwriting explicit values. Each run saves the resolved settings, including omitted options;
 reloading that snapshot retains its values even if the code defaults later change.
 
 | Treatment | Settings |
@@ -82,10 +82,10 @@ from critic sharing or thickness direction.
 |---|---|
 | `model` | Generator, critic and diffusion architecture |
 | `augmentation` | Training transformations and their probability |
-| `conditioning` | Domain, anchor and volume-fraction condition selection (stage 1) |
+| `conditioning` | Domain, anchor and volume-fraction selection (LR); coarse corruption (SR) |
 | `loss` | Training objectives and regularization weights |
 | `optim` | Learning rates, Adam betas and EMA decay |
-| `lr_bank` | Frozen LR sample count and generation guidance (SR) |
+| `lr_bank` | LR sample count, generation guidance and refresh interval (SR) |
 | `train` | Batch sizes, update counts, precision and saving intervals |
 
 Lists use `[a, b]`; blank lines separate related groups. Probabilities are in
@@ -133,19 +133,18 @@ Both stages describe the same original field of view. New stage-1 training and
 anchor preparation use **original crop → LR phase map** directly. SR uses
 **original crop → HR phase map** for its real 2D sections. Changing the SR scale
 does not change stage-1 preprocessing or require retraining the LR model.
-Phase-channel area averaging is used for reduction, with phase selection after
-resizing. Label IDs
-are never numerically averaged. Larger target grids use interpolated phase
+Phase-channel area averaging is used for reduction, retaining fractional occupancy
+in real sections, anchor conditions and volume-fraction targets. Label IDs are never
+numerically averaged. Final exported volumes use integer phase IDs. Retaining
+fractions does not guarantee that a subvoxel connection survives final discretization. Larger target grids use interpolated phase
 channels; enlarging the original data does not supply additional measured detail.
 Fractional scale factors are supported when the resulting grid size is integral.
-Partial crops are rejected for this new path rather than silently changing the
-field of view. Legacy run configs using `input_size` retain their original
-nearest-neighbor preprocessing and remain loadable. Saved LR configs containing
-`data.scale_factor` retain their previous **crop → HR → LR** preprocessing in
-both training and anchor preparation. These two resizing steps can produce
-different phase boundaries from direct resizing; retain the saved run config
-when using old weights. Old SR configs/exports with `data.scale_factor` are
-migrated to `model.generator.scale_factor` on loading.
+Partial crops are rejected to keep the physical field of view consistent.
+Only the current configuration schema is accepted. Old `input_size`,
+`data.scale_factor`, numeric configuration planes, global `augmentation.mode`,
+`train.seed` and `train.stability_version` are rejected; no migration runs.
+Existing checkpoints and old configuration files are unsupported. Retrain using
+the current presets.
 
 ### Stage 1: low-resolution 3D
 
@@ -173,9 +172,8 @@ Volumes retain their D,H,W array order, interpreted as z,y,x. `xy` is normal
 to axis 0 (z), `xz` to axis 1 (y), and `yz` to axis 2 (x). Raw slice row/column
 order is y/x, z/x, and z/y respectively. This naming does not rotate or flip
 existing images; acquisition orientation must match the corresponding plane.
-Numeric plane keys in saved configurations remain readable, while duplicate
-numeric/named aliases for the same plane are rejected. The numeric `PlaneAnchor`
-axis interface remains available.
+Configuration planes must use these names. The numeric `PlaneAnchor` axis
+interface remains available.
 
 Set `model.critic.plane_groups` independently in each training preset. Each inner
 list creates one critic and one optimizer; its planes share the model weights.
@@ -192,28 +190,15 @@ Sharing is an explicit modeling assumption, never inferred from matching image
 paths. A shared group does not authorize rotations or supply missing plane data.
 The separate connectivity critic is not included in these counts.
 
-Losses are averaged over the available planes within each group. New stage-1
-runs (`train.stability_version: 2`) and SR also average over groups, so changing
-the number of critics does not directly multiply the adversarial objective.
-Older LR configurations without this version retain their sum over groups.
-Switching a three-group legacy recipe to version 2 divides its adversarial
-objective by three relative to the auxiliary losses; it is an explicit recipe
-change, not a continuation of that experiment. In stage 1, critics remain domain
-conditioned. In SR, each domain has its own critics for the groups it observes:
-two domains with all planes and two groups create four SR critics, not two.
+Losses are averaged over member planes and then critic groups in both stages.
+Stage-1 critics remain domain conditioned; SR keeps groups separate per domain.
+Group names use canonical plane order: `critic_xy.pt`, `critic_xz_yz.pt` and the
+separate `critic_c.pt`. SR names include the domain, such as `0_xz_yz`.
+`plane_groups` must be explicit and cannot change on resume.
 
-Group names use canonical plane order. For the two-critic example, stage 1 saves
-`critic_xy.pt` and `critic_xz_yz.pt`; the connectivity critic remains
-`critic_c.pt`. SR keys include the domain, such as `0_xz_yz`. Missing
-`plane_groups` in legacy configurations means independent critics. Legacy
-`critic_0.pt`, `critic_1.pt`, and `critic_2.pt` initial weights remain readable for
-singleton groups; a shared group requires its matching weight file. Independent
-weights are not automatically merged into a shared model.
-
-New SR training checkpoints use `diffusion-gan3d.sr.train.v4` with one optimizer
-state per critic and no RNG state. Resume also accepts v1/v2/v3 checkpoints, including numeric critic
-names and the previous combined optimizer state. Group membership cannot change
-on resume. Generator and SR inference weights retain their existing formats.
+Current training formats are `diffusion-gan3d.lr.train.v3` and
+`diffusion-gan3d.sr.train.v5`, with one optimizer per critic and no RNG state.
+Earlier checkpoint formats and numeric critic filenames are rejected.
 
 ### Plane orientation and augmentation
 
@@ -254,9 +239,11 @@ planes containing it. Set it to `null` only when no thickness direction needs
 protection. This setting guards augmentation; **absolute crop depth and
 depth-conditioned generation are not implemented yet**. Preserving orientation
 alone does not teach the model where a crop lies within the full thickness.
-In version-2 LR training, it also disables reversal averaging in the connectivity
-critic along the thickness normal. Other normals retain reversal symmetry.
-Legacy recipes retain their original connectivity behavior and weight shapes.
+It also disables reversal averaging in the connectivity critic along the
+thickness normal. Other normals retain reversal symmetry. Height conditioning
+requires per-image physical height, crop origin, full specimen thickness and a
+matching inference coordinate contract; the current folder datasets provide none
+of these. Do not infer absolute height from crop pixel rows.
 
 For explicit policies, `probability` is the probability of selecting an allowed
 non-identity transform. Quarter turns include their compositions; rectangular
@@ -265,8 +252,7 @@ pair and all channels supplied together receive the same transform, including
 connectivity triplets. SR also couples the transforms of its real/fake slice
 pairs; stage 1 samples real and fake pair transforms independently under the same
 policy. Generator adversarial updates use the same plane policies.
-Legacy global `augmentation.mode` remains supported without `thickness_axis`;
-use explicit `planes` instead of combining the two configuration styles.
+Only explicit per-plane augmentation policies are accepted in configuration.
 
 ### Training diagnostics and continuation
 
@@ -279,12 +265,32 @@ conditioning gradient is a diagnostic signal, not proof of a shortcut; generated
 and real conditioning distributions still differ in this 2D-supervised method.
 SR records adversarial/consistency terms, per-plane scores and GP separately.
 
-Version-2 LR regularization uses each critic's successful update count, including
+LR regularization uses each critic's successful update count, including
 the intermittent connectivity critic. A shared AMP scaler updates once per LR
 iteration. Non-finite losses fail before the corresponding optimizer step;
 non-finite FP32 gradients fail, while AMP gradient skips are recorded. EMA only
 advances after a successful generator update. No gradient clipping or adaptive
 augmentation schedule is enabled without evidence that it is needed.
+
+Anchor supervision and continuity have independent schedules:
+`conditioning.anchor.start_step/ramp_steps` default to 0/500, while
+`loss.connectivity.start_step/ramp_steps` default to 0/20000. Both resolve into
+saved run settings. Connectivity compares a generated reference only at the final
+diffusion transition; other real-anchor transitions avoid that extra reverse pass.
+Multi-anchor pseudo-targets still require a reference realization.
+
+`loss.connectivity.windows_per_plane` defaults to 4 local windows per anchor
+plane and orientation. The first uses adjacent slices (gap 1); others sample up
+to `max_slice_gap`. All parallel anchor planes are sampled. Their matched real
+and fake windows retain the same positions and transformations.
+`anchor_neighbor_agreement` measures adjacent phase agreement across the
+observed/unobserved boundary, and `anchor_neighbor_excess_jump` compares that
+jump with the unconditioned reference. These are boundary diagnostics, not
+percolation or tortuosity measurements. They are recorded when a visible real
+anchor has a final-transition reference.
+
+Scalar logging values are transferred together at the end of a step. Finite-loss
+and finite-gradient checks remain synchronous before optimizer updates.
 
 Two optional advanced settings support controlled comparisons:
 
@@ -319,8 +325,8 @@ python run_train.py --resume run/<lr-run>/checkpoints/last.pt --steps 30000 --de
 `--steps` is the total target. Resume creates a new run and uses saved settings;
 `--config` and `--data` cannot override them. LR and SR training do not set a
 fixed seed or save/restore RNG state and data order. Resuming retains learned
-weights and optimizer progress while drawing fresh random samples. Old checkpoint
-RNG fields and `train.seed` settings are ignored. Reproducibility via `seed` is
+weights and optimizer progress while drawing fresh random samples.
+`train.seed` is rejected. Reproducibility via `seed` is
 provided for LR and SR prediction only. The same-step sharing of noise between
 anchored and unanchored reference paths is retained for aligned training pairs;
 it does not fix randomness across runs.
@@ -328,9 +334,8 @@ it does not fix randomness across runs.
 restore training state. After an interruption inside a step, resume from the last
 completed checkpoint; partially updated models are not saved as resumable state.
 
-This now learns 64³ volumes with the default settings. Train a new stage-1 model
-for this resolution contract; previously trained 128³ weights are still usable
-through the legacy inference API, but are not automatically treated as an LR model.
+The default configuration learns 64³ volumes. Train new weights for the current
+fractional-occupancy preprocessing and conditioning contract.
 
 ### Stage 2: super-resolution
 
@@ -343,11 +348,9 @@ it selects; `--config` and `--data` can select alternatives. It checks the chose
 crop/LR sizes, phase count and domain IDs against the stage-1 run's saved
 `train.yaml` before generating any LR bank. Image folders may differ; their domain
 and phase meanings must agree. SR settings are not overwritten by stage-1 data or
-augmentation. HR size is derived only from the SR model's scale factor; it does
-not need to match a legacy LR model's intermediate resize size.
+augmentation. HR size is derived only from the SR model's scale factor.
 `lr_bank.guidance` is independent of `config/gen.yaml`.
-For each domain it caches a fixed bank of LR volumes from the
-frozen stage-1 model, then trains a separate stochastic 3D CNN using real HR 2D
+For each domain it caches LR volumes from the frozen stage-1 model, then trains a separate stochastic 3D CNN using real HR 2D
 sections. Its 2D critics follow the selected plane groups within each domain. No measured HR 3D
 target is required. Choose axis-specific folders and suitable augmentation for
 anisotropic data; do not reuse an isotropic assumption for every dataset.
@@ -365,34 +368,42 @@ SR run artifacts:
 ```text
 run/<sr-run>/
   config.yaml          # effective settings and LR source provenance
-  lr_bank.pt           # fixed generated LR conditions; retain for resume
+  lr_bank.pt           # initial generated LR conditions
+  lr_bank_step_*.pt    # immutable refreshed banks; retain the checkpoint's bank
   metrics.jsonl        # losses, coarse agreement and phase fractions
-  checkpoints/last.pt  # model, EMA, critics, optimizers, scaler and RNG states
+  checkpoints/last.pt  # model, EMA, critics, optimizers and scaler
   weights/model.pt     # self-contained EMA inference weights and configuration
 ```
 
-`--bank-size` controls the number of LR samples per domain on a new run. The bank
-does not refresh during training. Increase its diversity for serious experiments
-and validate on LR seeds outside the bank. These samples are generated conditions,
-not experimental ground truth. Source weights and bank hashes are recorded.
+`--bank-size` controls samples per domain. `lr_bank.refresh_every_steps` defaults
+to 1000; each refresh replaces one sample per domain using fresh noise from the
+same frozen LR weights. Set it to 0 to disable refresh. Source weight and
+configuration hashes are checked before refresh. Each refreshed bank has a
+separate filename, so an earlier
+checkpoint still references its original bank.
+
+SR applies spatially correlated phase replacement to the conditioning input with
+`conditioning.coarse_corruption_probability: 0.5` and maximum patch selection
+probability `coarse_corruption_strength: 0.2`. The consistency target remains the
+uncorrupted generated LR volume. Setting either value to 0 disables corruption.
+This supplies corrupted/clean coarse pairs, not measured 3D truth; it cannot
+establish correction of systematic LR bias without held-out experiments.
+`coarse_corruption_mse` records the actual input perturbation. Validate on LR
+seeds outside every training bank.
 
 ```bash
 python run_sr_train.py --resume run/<sr-run>/checkpoints/last.pt --steps 30000 --device cuda
 ```
 
-Resume uses saved settings and the original verified LR bank, writes a new run,
+Resume uses saved settings and the bank referenced by the checkpoint, writes a new run,
 and treats `--steps` as the total target. Keep the source images unchanged too.
-Exact continuation is tested on CPU with the same environment; bitwise identity
-across CUDA environments is not promised.
+Optimizer progress is restored while data and noise are sampled anew.
 
 Each run saves its resolved data fields and training settings, rather than a
 reference to an editable data preset: stage 1 retains `train.yaml` beside its
 weights; SR uses `config.yaml` and embeds settings in its checkpoints. Resume
 rejects `--config`, `--data` and `--bank-size`; only `--steps` changes the target.
-Legacy saved key names, stage-1 weights and SR exports/checkpoints remain readable.
-Legacy SR YAMLs with no data section retain their historical stage-1 inheritance,
-including the old scale when present. For a new LR run that has no scale, select
-an SR preset with an explicit model scale. New presets always select data explicitly.
+Both stages require explicit data selection and current configuration keys.
 
 ## Generate
 
@@ -400,12 +411,26 @@ an SR preset with an explicit model scale. New presets always select data explic
 from src.api import InferenceAPI, PlaneAnchor
 
 api = InferenceAPI("run/my-experiment/generator.pt", device="cuda")
-anchor = PlaneAnchor(image, axis=0, index=0)
+anchor = PlaneAnchor(api.prepare_image(original_crop), axis=0, index=0)
 
 direct = api.generate(seed=0)
 anchored = api.generate(anchors=(anchor,), seed=0)
 scaled = api.generate(anchors=(anchor,), blocks=(3, 3, 3), seed=0)
 ```
+
+`PlaneAnchor.image` accepts integer H,W labels or floating C,H,W phase fractions.
+`prepare_image` returns C,H,W fractions at LR spacing. With `blocks` or `shape`,
+anchor indices and positions refer to the complete output volume, not one block.
+Large planes are clipped into every intersecting tile; `position=None` centers
+the image within the full output plane. No preliminary anchored base block is
+created. This changes the old implicit base-placement behavior.
+
+Anchored inference uses the same conditional denoiser and one evolving diffusion
+state as training. At `guidance=1` and `anchor_strength=1` there is one denoiser
+call per transition. Intermediate strength blends conditioned/unconditioned
+logits on that same state. Anchors are learned conditions, not overwritten output
+labels. Gaussian spread, temporal correction and coupled-state sampler options
+have been removed.
 
 The existing `generate` and `scale-up` paths return LR labels at the model's
 trained voxel spacing. Scale-up extends the field of view. Super-resolution
@@ -470,7 +495,7 @@ TensorBoard records and periodic weights. `train/sr.py` owns SR updates, trainin
 validation and resumable state. `train/sr_run.py` owns frozen LR bank preparation,
 resume checks, the SR loop and run artifacts; `run_sr_train.py` parses CLI arguments.
 Stage-1 step counts and save intervals must be positive integers; omit
-`archive_every` to disable archival checkpoints.
+`archive_every_steps` (or set it to null) to disable archival checkpoints.
 
 Internal paths formerly under `src.dataset`, `src.engine`, `src.loss`,
 `src.model.generator`, `src.scale` and `src.utils` now live with their owners above.
@@ -533,8 +558,8 @@ PNG label sections are decoded from their raw values: indexed PNG palette
 indices, grayscale PNG samples, or RGB PNGs whose three channels are identical.
 No luminance conversion or palette-color mapping is applied. The selected original
 crop is prepared by the server using the model's saved preprocessing contract:
-phase-channel original-crop→LR resizing for new runs, nearest-neighbor for legacy
-`input_size` runs, and original-crop→HR→LR for saved LR configs with `data.scale_factor`.
+phase-channel original-crop→LR resizing with fractional occupancy retained.
+`/prepare` returns a C,H,W array accepted directly by `/generate`.
 The web endpoint continues to generate stage-1 volumes; use the SR Python API or
 CLI above for the separate super-resolution pass.
 

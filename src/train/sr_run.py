@@ -1,4 +1,3 @@
-import copy
 import hashlib
 import json
 from datetime import datetime
@@ -14,7 +13,6 @@ from src.config import (
     find_train_config,
     get_domains,
     get_sr_sizes,
-    load_generation_settings,
     load_train_config,
     normalize_train_config,
     save_yaml,
@@ -48,12 +46,7 @@ def run_sr_train(
         if bank_size is not None:
             raise ValueError("--bank-size cannot change on resume.")
         payload = torch.load(resume, map_location="cpu", weights_only=True)
-        if payload.get("format") not in (
-            "diffusion-gan3d.sr.train.v1",
-            "diffusion-gan3d.sr.train.v2",
-            "diffusion-gan3d.sr.train.v3",
-            "diffusion-gan3d.sr.train.v4",
-        ):
+        if payload.get("format") != "diffusion-gan3d.sr.train.v5":
             raise ValueError("resume requires an SR training checkpoint.")
         cfg = normalize_train_config(payload["config"], "sr")
         bank_path = Path(cfg["source"]["bank"])
@@ -70,22 +63,13 @@ def run_sr_train(
         if base_path.is_dir():
             base_path = base_path / "generator.pt"
         base_cfg = load_train_config(find_train_config(base_path))
-        if "data" not in cfg:
-            # Legacy SR YAMLs implicitly selected the stage-1 data and augmentation.
-            cfg["data"] = copy.deepcopy(base_cfg["data"])
-            cfg.setdefault(
-                "augmentation", copy.deepcopy(base_cfg.get("augmentation", {}))
-            )
-            cfg = normalize_train_config(cfg, "sr")
         validate_sr_source(cfg["data"], base_cfg["data"])
         if bank_size is not None:
             cfg["lr_bank"]["samples_per_domain"] = bank_size
-        if "guidance" not in cfg["lr_bank"]:
-            cfg["lr_bank"]["guidance"] = load_generation_settings().guidance
         cfg["source"] = {
             "weights": str(base_path),
             "weights_sha256": file_hash(base_path),
-            "guidance": cfg["lr_bank"]["guidance"],
+            "config_sha256": file_hash(find_train_config(base_path)),
         }
     if steps is not None:
         cfg["train"]["total_steps"] = steps
@@ -107,7 +91,7 @@ def run_sr_train(
             bank[domain] = torch.stack(
                 [
                     generator.generate(
-                        domain=domain, guidance=cfg["source"]["guidance"]
+                        domain=domain, guidance=cfg["lr_bank"]["guidance"]
                     )
                     for _ in trange(
                         cfg["lr_bank"]["samples_per_domain"],
@@ -135,6 +119,9 @@ def run_sr_train(
     print(f"SR: source crop {crop}, LR {low}³ -> HR {high}³; run {run_dir}", flush=True)
     with (run_dir / "metrics.jsonl").open("w", encoding="utf-8") as log:
         for _ in trange(trainer.step, cfg["train"]["total_steps"], desc="SR train"):
+            interval = cfg["lr_bank"]["refresh_every_steps"]
+            if interval and trainer.step and trainer.step % interval == 0:
+                refresh_bank(trainer, run_dir)
             metrics = trainer.train_step()
             log.write(json.dumps(metrics) + "\n")
             log.flush()
@@ -151,3 +138,35 @@ def run_sr_train(
 def file_hash(path: Path) -> str:
     with path.open("rb") as file:
         return hashlib.file_digest(file, "sha256").hexdigest()
+
+
+def refresh_bank(trainer, run_dir: Path) -> None:
+    """Replace one sample per domain without invalidating banks used by checkpoints."""
+    cfg = trainer.cfg
+    source = Path(cfg["source"]["weights"])
+    if file_hash(source) != cfg["source"]["weights_sha256"]:
+        raise ValueError("frozen LR source weights changed before bank refresh.")
+    if file_hash(find_train_config(source)) != cfg["source"]["config_sha256"]:
+        raise ValueError("frozen LR source configuration changed before bank refresh.")
+    generator = load_generator(source, trainer.device)
+    interval = cfg["lr_bank"]["refresh_every_steps"]
+    for domain, volumes in trainer.bank.items():
+        index = (trainer.step // interval - 1) % len(volumes)
+        volumes[index] = generator.generate(
+            domain=domain, guidance=cfg["lr_bank"]["guidance"]
+        )
+    del generator
+    if trainer.device.type == "cuda":
+        torch.cuda.empty_cache()
+    path = run_dir / f"lr_bank_step_{trainer.step:08d}.pt"
+    torch.save(
+        {
+            "format": "diffusion-gan3d.lr-bank.v1",
+            "volumes": trainer.bank,
+            "data": cfg["data"],
+            "source": dict(cfg["source"]),
+        },
+        path,
+    )
+    cfg["source"].update(bank=str(path), bank_sha256=file_hash(path))
+    save_yaml(run_dir / "config.yaml", cfg)

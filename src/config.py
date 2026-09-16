@@ -32,18 +32,163 @@ STAGE_DEFAULTS = {
         "loss.critic_local_weight": 0.5,
         "loss.r1_every_steps": 16,
         "loss.r2_weight": 0.0,
+        "loss.connectivity.start_step": 0,
+        "loss.connectivity.ramp_steps": 20000,
+        "loss.connectivity.windows_per_plane": 4,
         "optim.adam_betas": [0.5, 0.9],
         "train.initial_weights": None,
         "train.num_workers": 0,
-        "train.stability_version": 1,
     },
     "sr": {
         "model.generator.noise_channels": 1,
         "loss.downsample_mse_tolerance": 0.005,
         "loss.downsample_temperature": 0.05,
         "optim.adam_betas": [0.0, 0.9],
+        "lr_bank.refresh_every_steps": 1000,
+        "conditioning.coarse_corruption_probability": 0.5,
+        "conditioning.coarse_corruption_strength": 0.2,
     },
 }
+
+
+def validate_config_keys(cfg: Mapping, stage: str) -> None:
+    """Reject misspellings at input boundaries, including obsolete configuration keys."""
+    common = {
+        "stage": None,
+        "data": dict.fromkeys(
+            ("domains", "num_phases", "crop_size", "lo_res_size", "thickness_axis")
+        ),
+        "augmentation": {
+            "probability": None,
+            "planes": {
+                plane: dict.fromkeys(("flip_axes", "rotate_90")) for plane in PLANES
+            },
+        },
+        "optim": dict.fromkeys(
+            ("generator_lr", "critic_lr", "adam_betas", "ema_decay")
+        ),
+    }
+    if stage == "low_res":
+        schema = common | {
+            "model": {
+                "gradient_checkpointing": None,
+                "generator": dict.fromkeys(
+                    (
+                        "channels",
+                        "embedding_channels",
+                        "latent_channels",
+                        "anchor_multiscale_input",
+                    )
+                ),
+                "critic": dict.fromkeys(("channels", "plane_groups")),
+                "diffusion": dict.fromkeys(
+                    ("num_steps", "beta_min", "beta_max", "time_embedding")
+                ),
+            },
+            "conditioning": {
+                "domain_keep_probability": None,
+                "dropout_probability_per_case": None,
+                "anchor": dict.fromkeys(
+                    (
+                        "probability",
+                        "start_step",
+                        "ramp_steps",
+                        "borrowed_plane_probability",
+                    )
+                ),
+            },
+            "loss": dict.fromkeys(
+                (
+                    "critic_local_weight",
+                    "r1_weight",
+                    "r1_every_steps",
+                    "r2_weight",
+                    "anchor_pixel_weight",
+                    "volume_fraction_weight",
+                )
+            )
+            | {
+                "connectivity": dict.fromkeys(
+                    (
+                        "max_slice_gap",
+                        "adversarial_weight",
+                        "normal_transition_weight",
+                        "start_step",
+                        "ramp_steps",
+                        "windows_per_plane",
+                    )
+                ),
+            },
+            "train": dict.fromkeys(
+                (
+                    "total_steps",
+                    "mixed_precision",
+                    "initial_weights",
+                    "num_workers",
+                    "real_batch_size",
+                    "volume_batch_size",
+                    "slice_pairs_per_plane",
+                    "weights_every_steps",
+                    "archive_every_steps",
+                )
+            ),
+        }
+    else:
+        schema = common | {
+            "model": {
+                "generator": dict.fromkeys(
+                    ("channels", "blocks", "noise_channels", "scale_factor")
+                ),
+                "critic": dict.fromkeys(("channels", "plane_groups")),
+            },
+            "conditioning": dict.fromkeys(
+                ("coarse_corruption_probability", "coarse_corruption_strength")
+            ),
+            "loss": dict.fromkeys(
+                (
+                    "gradient_penalty_weight",
+                    "downsample_consistency_weight",
+                    "downsample_mse_tolerance",
+                    "downsample_temperature",
+                )
+            ),
+            "lr_bank": dict.fromkeys(
+                ("samples_per_domain", "guidance", "refresh_every_steps")
+            ),
+            "source": dict.fromkeys(
+                ("weights", "weights_sha256", "config_sha256", "bank", "bank_sha256")
+            ),
+            "train": dict.fromkeys(
+                (
+                    "total_steps",
+                    "mixed_precision",
+                    "volume_batch_size",
+                    "slices_per_plane",
+                    "critic_updates_per_step",
+                    "checkpoint_every_steps",
+                )
+            ),
+        }
+
+    def check(values, allowed, path=""):
+        if not isinstance(values, Mapping):
+            raise TypeError(f"{path or 'config'} must be a mapping.")
+        for key, value in values.items():
+            name = f"{path}.{key}" if path else str(key)
+            if key not in allowed:
+                raise ValueError(f"unknown training setting: {name}")
+            if allowed[key] is not None:
+                check(value, allowed[key], name)
+
+    check(cfg, schema)
+    domains = cfg.get("data", {}).get("domains", {})
+    if not isinstance(domains, Mapping):
+        raise TypeError("data.domains must be a mapping.")
+    for planes in domains.values():
+        if not isinstance(planes, Mapping):
+            raise TypeError("data.domains must map domains to plane folders.")
+        if any(plane not in PLANES for plane in planes):
+            raise ValueError("data.domains must use plane names xy, xz or yz.")
 
 
 def load_train_config(
@@ -53,15 +198,11 @@ def load_train_config(
     cfg = load_yaml(path)
     if data is not None:
         cfg["data"] = str(data)
-    if cfg.get("stage") == stage and "data" not in cfg:
+    if "data" not in cfg:
         raise ValueError(
             "training config must select a data file or embed data settings."
         )
-    if (
-        stage == "sr"
-        and cfg.get("stage") == "sr"
-        and "guidance" not in cfg.get("lr_bank", {})
-    ):
+    if stage == "sr" and "guidance" not in cfg.get("lr_bank", {}):
         raise ValueError("SR config must set lr_bank.guidance explicitly.")
     external_data = isinstance(cfg.get("data"), str)
     if external_data:
@@ -89,98 +230,12 @@ def load_train_config(
 
 
 def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
-    """Migrate old names and resolve omitted options without changing explicit values."""
+    """Validate the current schema and resolve omitted options without mutating input."""
     if stage not in ("low_res", "sr") or cfg.get("stage", stage) != stage:
         raise ValueError(f"expected stage: {stage}.")
+    validate_config_keys(cfg, stage)
     cfg = prepare_yaml(cfg)
-    # Old training seeds no longer control initialization or batch sampling.
-    cfg.get("train", {}).pop("seed", None)
     cfg["stage"] = stage
-    moves = {
-        "data.num_phase": "data.num_phases",
-        "data.allow_part": "data.allow_partial_crops",
-        "data.augment": "augmentation.mode",
-        "data.augment_prob": "augmentation.probability",
-        "train.steps": "train.total_steps",
-        "train.amp": "train.mixed_precision",
-    }
-    if stage == "low_res":
-        moves.update(
-            {
-                "data.batch_size": "train.real_batch_size",
-                "data.num_workers": "train.num_workers",
-                "data.domain_prob": "conditioning.domain_keep_probability",
-                "model.grad_checkpoint": "model.gradient_checkpointing",
-                "model.generator.condition_channels": "model.generator.embedding_channels",
-                "anchor.multiscale_input": "model.generator.anchor_multiscale_input",
-                "diffusion.steps": "model.diffusion.num_steps",
-                "diffusion.beta_min": "model.diffusion.beta_min",
-                "diffusion.beta_max": "model.diffusion.beta_max",
-                "anchor.train_prob": "conditioning.anchor.probability",
-                "anchor.start_step": "conditioning.anchor.start_step",
-                "anchor.ramp_steps": "conditioning.anchor.ramp_steps",
-                "anchor.cross_domain_prob": "conditioning.anchor.borrowed_plane_probability",
-                "condition_dropout.joint_each_prob": "conditioning.dropout_probability_per_case",
-                "anchor.pixel_weight": "loss.anchor_pixel_weight",
-                "anchor.connectivity.max_gap": "loss.connectivity.max_slice_gap",
-                "anchor.connectivity.weight": "loss.connectivity.adversarial_weight",
-                "anchor.connectivity.phase_transition_weight": "loss.connectivity.normal_transition_weight",
-                "vf.weight": "loss.volume_fraction_weight",
-                "model.critic.local_loss_weight": "loss.critic_local_weight",
-                "model.critic.r1_weight": "loss.r1_weight",
-                "model.critic.r1_interval": "loss.r1_every_steps",
-                "train.init_weights": "train.initial_weights",
-                "train.pairs_per_axis": "train.slice_pairs_per_plane",
-                "train.update_weights_every": "train.weights_every_steps",
-                "train.archive_every": "train.archive_every_steps",
-            }
-        )
-    else:
-        moves.update(
-            {
-                "model.channels": "model.generator.channels",
-                "model.blocks": "model.generator.blocks",
-                "model.noise_channels": "model.generator.noise_channels",
-                "data.scale_factor": "model.generator.scale_factor",
-                "critic.channels": "model.critic.channels",
-                "optim.betas": "optim.adam_betas",
-                "train.batch_size": "train.volume_batch_size",
-                "train.bank_size": "lr_bank.samples_per_domain",
-                "train.slices_per_axis": "train.slices_per_plane",
-                "train.critic_steps": "train.critic_updates_per_step",
-                "train.save_every": "train.checkpoint_every_steps",
-                "train.gradient_penalty": "loss.gradient_penalty_weight",
-                "train.lr_weight": "loss.downsample_consistency_weight",
-                "train.lr_tolerance": "loss.downsample_mse_tolerance",
-                "train.temperature": "loss.downsample_temperature",
-            }
-        )
-    for old, new in moves.items():
-        source = cfg
-        parents = []
-        *sections, key = old.split(".")
-        for section in sections:
-            if not isinstance(source, Mapping) or section not in source:
-                break
-            parents.append((source, section))
-            source = source[section]
-        else:
-            if not isinstance(source, Mapping) or key not in source:
-                continue
-            target = cfg
-            *sections, new_key = new.split(".")
-            for section in sections:
-                target = target.setdefault(section, {})
-            if new_key in target:
-                raise ValueError(f"use {new}, not both {old} and {new}.")
-            target[new_key] = source.pop(key)
-            for parent, section in reversed(parents):
-                if not parent[section]:
-                    del parent[section]
-    if stage == "sr":
-        # These inherited stage-1 fields were never used by SR.
-        for key in ("batch_size", "num_workers", "domain_prob"):
-            cfg.get("data", {}).pop(key, None)
     for path, value in (TRAIN_DEFAULTS | STAGE_DEFAULTS[stage]).items():
         target = cfg
         *sections, key = path.split(".")
@@ -212,26 +267,25 @@ def validate_sr_source(data: Mapping, base_data: Mapping) -> None:
 def get_sizes(
     data: Mapping[str, object], scale_factor: float | None = None
 ) -> tuple[int, int, int]:
-    """Return crop, LR and target size; legacy data.scale_factor retains its HR step."""
-    crop = data["crop_size"]
-    if "lo_res_size" in data:
-        if "input_size" in data:
-            raise ValueError("use lo_res_size instead of input_size, not both.")
-        low = data["lo_res_size"]
-        scale = data.get("scale_factor", 1) if scale_factor is None else scale_factor
-        high = scaled_size(low, scale)
-        if data.get("allow_partial_crops", data.get("allow_part", False)):
-            raise ValueError("partial crops are not supported with lo_res_size.")
-    else:
-        if "scale_factor" in data or scale_factor is not None:
-            raise ValueError("scale_factor requires lo_res_size.")
-        low = data["input_size"]
-        high = low
+    """Return original crop, LR grid and the independently selected target size."""
+    if any(
+        key in data
+        for key in (
+            "input_size",
+            "scale_factor",
+            "hi_res_size",
+            "allow_part",
+            "allow_partial_crops",
+        )
+    ):
+        raise ValueError(
+            "use crop_size and lo_res_size; SR scale_factor belongs to model.generator."
+        )
+    crop, low = data["crop_size"], data["lo_res_size"]
     for name, size in (("crop_size", crop), ("lo_res_size", low)):
         if isinstance(size, bool) or not isinstance(size, int) or size < 1:
             raise ValueError(f"{name} must be a positive integer.")
-    if "hi_res_size" in data and data["hi_res_size"] != high:
-        raise ValueError("hi_res_size is derived from lo_res_size * scale_factor.")
+    high = scaled_size(low, 1 if scale_factor is None else scale_factor)
     return crop, low, high
 
 
@@ -247,8 +301,6 @@ def get_plane_groups(cfg: Mapping) -> dict[str, tuple[int, ...]]:
     """Resolve disjoint critic groups over the union of observed planes."""
     active = {axis for axes in get_domains(cfg["data"]).values() for axis in axes}
     groups = cfg["model"]["critic"].get("plane_groups")
-    if "plane_groups" not in cfg["model"]["critic"]:
-        return {PLANES[axis]: (axis,) for axis in sorted(active)}
     if not isinstance(groups, (list, tuple)) or not groups:
         raise ValueError("model.critic.plane_groups must be a non-empty list of lists.")
     result = {}
@@ -286,6 +338,8 @@ def get_domains(
             raise ValueError(f"domain {domain} must contain at least one axis.")
         axes = {}
         for plane, paths in folders.items():
+            if plane not in PLANES:
+                raise ValueError("data.domains must use plane names xy, xz or yz.")
             axis = get_axis(plane)
             if axis in axes:
                 raise ValueError(f"domain {domain} contains duplicate plane {plane!r}.")
@@ -299,7 +353,6 @@ class GenerationSettings:
     guidance: float = 1.0
     anchor_strength: float = 1.0
     overlap: int = 8
-    anchor_spread: float = 0.1
 
 
 def load_generation_settings() -> GenerationSettings:
@@ -307,7 +360,6 @@ def load_generation_settings() -> GenerationSettings:
     unknown = set(section) - {
         "guidance",
         "anchor_strength",
-        "anchor_spread",
         "overlap",
     }
     if unknown:
@@ -323,14 +375,6 @@ def load_generation_settings() -> GenerationSettings:
         or not 0.0 <= anchor_strength <= 1.0
     ):
         raise ValueError("anchor_strength must be between zero and one.")
-    anchor_spread = section.get("anchor_spread", 0.1)
-    if (
-        not isinstance(anchor_spread, (int, float))
-        or isinstance(anchor_spread, bool)
-        or not math.isfinite(anchor_spread)
-        or anchor_spread <= 0.0
-    ):
-        raise ValueError("anchor_spread must be positive and finite.")
     overlap = section.get("overlap", 8)
     if not isinstance(overlap, int) or isinstance(overlap, bool) or overlap < 0:
         raise ValueError("overlap must be a non-negative integer.")
@@ -338,7 +382,6 @@ def load_generation_settings() -> GenerationSettings:
         guidance=guidance,
         anchor_strength=float(anchor_strength),
         overlap=overlap,
-        anchor_spread=float(anchor_spread),
     )
 
 

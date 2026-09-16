@@ -38,53 +38,15 @@ def test_data_selection_and_snapshot_are_independent_of_cwd(tmp_path, monkeypatc
     assert load_yaml(preset)["data"] == "missing.yaml"
 
 
-def test_legacy_keys_migrate_without_mutating_input_or_changing_values():
-    old = {
-        "data": {
-            "num_phase": 3,
-            "batch_size": 7,
-            "augment": False,
-            "augment_prob": 0.2,
-            "domain_prob": 0.8,
-        },
-        "model": {"grad_checkpoint": True, "critic": {"r1_weight": 0.2}},
-        "anchor": {"cross_domain_prob": 0.3, "pixel_weight": 0.4},
-        "vf": {"weight": 0.7},
-        "condition_dropout": {"joint_each_prob": 0.05},
-        "train": {"steps": 50, "pairs_per_axis": 9, "amp": True},
-    }
+@pytest.mark.parametrize(
+    "old",
+    [{"anchor": {}}, {"data": {"num_phase": 3}}, {"model": {"grad_checkpoint": True}}],
+)
+def test_old_keys_are_rejected_without_mutating_input(old):
     before = copy.deepcopy(old)
-    cfg = normalize_train_config(old)
+    with pytest.raises(ValueError, match="unknown training setting"):
+        normalize_train_config(old)
     assert old == before
-    assert cfg["data"] == {"num_phases": 3}
-    assert cfg["augmentation"] == {"mode": False, "probability": 0.2}
-    assert cfg["conditioning"] == {
-        "domain_keep_probability": 0.8,
-        "anchor": {
-            "borrowed_plane_probability": 0.3,
-            "start_step": 0,
-            "ramp_steps": 500,
-        },
-        "dropout_probability_per_case": 0.05,
-    }
-    assert cfg["loss"] == {
-        "r1_weight": 0.2,
-        "anchor_pixel_weight": 0.4,
-        "volume_fraction_weight": 0.7,
-        "critic_local_weight": 0.5,
-        "r1_every_steps": 16,
-        "r2_weight": 0.0,
-    }
-    assert cfg["train"] == {
-        "total_steps": 50,
-        "slice_pairs_per_plane": 9,
-        "mixed_precision": True,
-        "real_batch_size": 7,
-        "initial_weights": None,
-        "num_workers": 0,
-        "stability_version": 1,
-    }
-    assert normalize_train_config(cfg) == cfg
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
@@ -140,7 +102,7 @@ def test_explicit_disabled_options_and_defaults_are_not_shared():
 
 
 def test_conflicting_old_and_new_keys_fail_instead_of_overriding():
-    with pytest.raises(ValueError, match="not both"):
+    with pytest.raises(ValueError, match="unknown training setting"):
         normalize_train_config(
             {"data": {"batch_size": 8}, "train": {"real_batch_size": 4}}
         )
@@ -151,7 +113,7 @@ def test_conflicting_old_and_new_keys_fail_instead_of_overriding():
     [
         ({"crop_size": 256}, "resolution"),
         ({"lo_res_size": 32}, "resolution"),
-        ({"scale_factor": 1.5}, "not both"),
+        ({"scale_factor": 1.5}, "unknown training setting"),
         ({"num_phases": 3}, "num_phases"),
         ({"domains": {0: {"xy": ["data"]}, 1: {"xy": ["data"]}}}, "domain IDs"),
     ],

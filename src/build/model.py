@@ -104,11 +104,7 @@ def build_models(
         embedding_channels=generator["embedding_channels"],
         num_domains=num_domains,
         gradient_checkpointing=model["gradient_checkpointing"],
-        directed_axis=(
-            {"z": 0, "y": 1, "x": 2}.get(data.get("thickness_axis"))
-            if cfg["train"]["stability_version"] >= 2
-            else None
-        ),
+        directed_axis={"z": 0, "y": 1, "x": 2}.get(data.get("thickness_axis")),
     )
     return denoiser, critics, connectivity_critic
 

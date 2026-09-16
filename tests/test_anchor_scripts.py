@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 
 from src.build.model import build_models
-from src.config import GenerationSettings, save_yaml
+from src.config import GenerationSettings, load_generation_settings, save_yaml
 from src.evaluate import (
     BoundaryQuality,
     SliceSmoothness,
@@ -71,7 +71,7 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     save_yaml(run_dir / "train.yaml", cfg)
     model, _, _ = build_models(cfg)
     weights = save_model(run_dir / "generator.pt", model)
-    source = np.indices((18, 20)).sum(axis=0) % cfg["data"]["num_phase"]
+    source = np.indices((18, 20)).sum(axis=0) % cfg["data"]["num_phases"]
     anchor_path = tmp_path / "anchor.png"
     Image.fromarray(source.astype(np.uint8)).save(anchor_path)
     output_path = tmp_path / "continuation.tiff"
@@ -229,7 +229,7 @@ def test_anchor_check_script_runs_with_generated_reference(
         assert "strength 1.00" not in output
     else:
         assert "Anchor effect" in output
-        assert "strength 1.00" in output
+        assert f"strength {load_generation_settings().anchor_strength:.2f}" in output
     assert "Indices" not in output
     assert "Center slice" not in output
 
@@ -545,59 +545,85 @@ def _load_script(filename: str):
 def _config(root: Path) -> dict:
     return {
         "data": {
-            "domains": {0: {axis: (root / str(axis),) for axis in (0, 1, 2)}},
-            "num_phase": 3,
-            "allow_part": False,
+            "domains": {
+                0: {("xy", "xz", "yz")[axis]: (root / str(axis),) for axis in (0, 1, 2)}
+            },
             "crop_size": 16,
-            "input_size": 8,
-            "augment": False,
-            "augment_prob": 1.0,
-            "domain_prob": 1.0,
-            "batch_size": 2,
-            "num_workers": 0,
+            "num_phases": 3,
+            "lo_res_size": 8,
         },
         "model": {
-            "grad_checkpoint": False,
             "generator": {
                 "channels": [4, 8],
-                "condition_channels": 8,
                 "latent_channels": 4,
+                "embedding_channels": 8,
+                "anchor_multiscale_input": False,
             },
             "critic": {
                 "channels": [4, 8],
-                "local_loss_weight": 0.5,
-                "r1_weight": 0.0,
-                "r1_interval": 2,
+                "plane_groups": [
+                    [plane]
+                    for plane in ("xy", "xz", "yz")
+                    if any(
+                        (
+                            plane in planes
+                            for planes in {
+                                0: {
+                                    ("xy", "xz", "yz")[axis]: (root / str(axis),)
+                                    for axis in (0, 1, 2)
+                                }
+                            }.values()
+                        )
+                    )
+                ],
             },
+            "gradient_checkpointing": False,
+            "diffusion": {"num_steps": 1, "beta_min": 0.1, "beta_max": 2.0},
         },
-        "diffusion": {"steps": 1, "beta_min": 0.1, "beta_max": 2.0},
-        "anchor": {
-            "multiscale_input": False,
-            "start_step": 0,
-            "ramp_steps": 0,
-            "train_prob": 1.0,
-            "cross_domain_prob": 0.0,
-            "pixel_weight": 0.05,
-            "connectivity": {
-                "weight": 0.0,
-                "phase_transition_weight": 0.0,
-            },
-        },
-        "vf": {"weight": 1.0},
-        "condition_dropout": {"joint_each_prob": 0.05},
         "optim": {
-            "generator_lr": 1e-3,
-            "critic_lr": 1e-3,
+            "generator_lr": 0.001,
+            "critic_lr": 0.001,
             "adam_betas": [0.0, 0.9],
             "ema_decay": 0.9,
         },
         "train": {
-            "init_weights": None,
-            "steps": 1,
             "volume_batch_size": 1,
-            "pairs_per_axis": 2,
-            "amp": False,
-            "update_weights_every": 1,
-            "archive_every": 1,
+            "real_batch_size": 2,
+            "num_workers": 0,
+            "total_steps": 1,
+            "mixed_precision": False,
+            "slice_pairs_per_plane": 2,
+            "initial_weights": None,
+            "weights_every_steps": 1,
+            "archive_every_steps": 1,
+        },
+        "conditioning": {
+            "domain_keep_probability": 1.0,
+            "anchor": {
+                "probability": 1.0,
+                "start_step": 0,
+                "ramp_steps": 0,
+                "borrowed_plane_probability": 0.0,
+            },
+            "dropout_probability_per_case": 0.05,
+        },
+        "augmentation": {
+            "probability": 1.0,
+            "planes": {
+                "xy": {"flip_axes": [], "rotate_90": False},
+                "xz": {"flip_axes": [], "rotate_90": False},
+                "yz": {"flip_axes": [], "rotate_90": False},
+            },
+        },
+        "loss": {
+            "anchor_pixel_weight": 0.05,
+            "connectivity": {
+                "adversarial_weight": 0.0,
+                "normal_transition_weight": 0.0,
+            },
+            "volume_fraction_weight": 1.0,
+            "critic_local_weight": 0.5,
+            "r1_weight": 0.0,
+            "r1_every_steps": 2,
         },
     }

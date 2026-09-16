@@ -204,8 +204,8 @@ class DomainDataTest(unittest.TestCase):
         domains = get_domains(
             {
                 "domains": {
-                    0: {0: ["axis_0"]},
-                    1: {1: ["axis_1"], 2: ["axis_2"]},
+                    0: {"xy": ["axis_0"]},
+                    1: {"xz": ["axis_1"], "yz": ["axis_2"]},
                 }
             }
         )
@@ -214,7 +214,7 @@ class DomainDataTest(unittest.TestCase):
         self.assertEqual(set(domains[1]), {1, 2})
 
     def test_domains_may_collectively_provide_only_one_axis(self):
-        domains = get_domains({"domains": {0: {0: ["axis_0"]}}})
+        domains = get_domains({"domains": {0: {"xy": ["axis_0"]}}})
 
         self.assertEqual(set(domains[0]), {0})
 
@@ -225,11 +225,10 @@ class DomainDataTest(unittest.TestCase):
             _save_image(folder / "sample.png", np.zeros((4, 4), dtype=np.uint8))
             cfg = {
                 "data": {
-                    "domains": {0: {0: [folder]}},
-                    "num_phase": 2,
-                    "allow_part": False,
+                    "domains": {0: {"xy": [folder]}},
                     "crop_size": 4,
-                    "input_size": 4,
+                    "num_phases": 2,
+                    "lo_res_size": 4,
                 }
             }
 
@@ -251,15 +250,14 @@ class DomainDataTest(unittest.TestCase):
                         folder / "sample.png",
                         np.full((4, 4), value, dtype=np.uint8),
                     )
-                    axes[axis] = [folder]
+                    axes[("xy", "xz", "yz")[axis]] = [folder]
                 domains[domain] = axes
             cfg = {
                 "data": {
                     "domains": domains,
-                    "num_phase": 2,
-                    "allow_part": False,
                     "crop_size": 4,
-                    "input_size": 4,
+                    "num_phases": 6,
+                    "lo_res_size": 4,
                 }
             }
 
@@ -276,13 +274,15 @@ class DomainDataTest(unittest.TestCase):
         for domain in range(2):
             for axis in range(3):
                 expected = 3 * domain + axis
-                self.assertTrue(bool((samples[domain, axis] == expected).all()))
+                self.assertTrue(
+                    bool((samples[domain, axis].argmax(0) == expected).all())
+                )
 
     def test_domain_ids_are_contiguous_and_start_at_zero(self):
         with self.assertRaisesRegex(ValueError, "contiguous"):
             get_domains({"domains": {1: {}}})
 
-    def test_build_datasets_passes_partial_crop_setting(self):
+    def test_training_rejects_crops_larger_than_the_source(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             folders = {}
@@ -290,25 +290,22 @@ class DomainDataTest(unittest.TestCase):
                 folder = root / str(axis)
                 folder.mkdir()
                 _save_image(folder / "sample.png", np.zeros((2, 4), dtype=np.uint8))
-                folders[axis] = [folder]
+                folders[("xy", "xz", "yz")[axis]] = [folder]
             cfg = {
                 "data": {
                     "domains": {0: folders},
-                    "num_phase": 2,
-                    "allow_part": True,
                     "crop_size": 4,
-                    "input_size": 4,
+                    "num_phases": 2,
+                    "lo_res_size": 4,
                 }
             }
 
             datasets = build_datasets(cfg)
             dataset = datasets[0][0]
-            sample = dataset[dataset.path_groups[0][0]]
+            with self.assertRaisesRegex(ValueError, "crop size must fit"):
+                dataset[dataset.path_groups[0][0]]
 
-        self.assertTrue(dataset.allow_part)
-        self.assertEqual(sample.shape, torch.Size([2, 4]))
-
-    def test_partial_crop_stream_builds_each_batch_from_one_folder(self):
+    def test_resolution_stream_builds_each_batch_from_one_folder(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             folders = {}
@@ -320,21 +317,20 @@ class DomainDataTest(unittest.TestCase):
                 for index in range(2):
                     _save_image(
                         thin / f"thin_{index}.png",
-                        np.full((2, 4), 1, dtype=np.uint8),
+                        np.full((4, 4), 1, dtype=np.uint8),
                     )
                 for index in range(4):
                     _save_image(
                         square / f"square_{index}.png",
                         np.full((4, 4), 2, dtype=np.uint8),
                     )
-                folders[axis] = [thin, square]
+                folders[("xy", "xz", "yz")[axis]] = [thin, square]
             cfg = {
                 "data": {
                     "domains": {0: folders},
-                    "num_phase": 2,
-                    "allow_part": True,
                     "crop_size": 4,
-                    "input_size": 4,
+                    "num_phases": 3,
+                    "lo_res_size": 4,
                 }
             }
 
@@ -358,7 +354,7 @@ class DomainDataTest(unittest.TestCase):
         self.assertEqual(paths, list(dataset.path_groups[1][:3]))
         self.assertIn(
             batch.shape,
-            (torch.Size([3, 2, 4]), torch.Size([3, 4, 4])),
+            (torch.Size([3, 3, 4, 4]),),
         )
 
 

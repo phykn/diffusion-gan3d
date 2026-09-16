@@ -23,42 +23,36 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
     device = torch.device("cuda")
     cfg = {
         "data": {
-            "domains": {0: {0: ".", 1: ".", 2: "."}},
-            "num_phase": 3,
-            "allow_part": False,
+            "domains": {0: {"xy": ".", "xz": ".", "yz": "."}},
             "crop_size": 64,
-            "input_size": 64,
-            "domain_prob": 1.0,
-            "batch_size": 8,
+            "num_phases": 3,
+            "lo_res_size": 64,
         },
         "model": {
-            "grad_checkpoint": True,
             "generator": {
                 "channels": (16, 32, 64, 64),
-                "condition_channels": 128,
                 "latent_channels": 64,
+                "embedding_channels": 128,
+                "anchor_multiscale_input": False,
             },
             "critic": {
                 "channels": (32, 64, 128, 256),
-                "local_loss_weight": 0.5,
-                "r1_weight": 0.05,
-                "r1_interval": 16,
+                "plane_groups": [
+                    [plane]
+                    for plane in ("xy", "xz", "yz")
+                    if any(
+                        (
+                            plane in planes
+                            for planes in {
+                                0: {"xy": ".", "xz": ".", "yz": "."}
+                            }.values()
+                        )
+                    )
+                ],
             },
+            "gradient_checkpointing": True,
+            "diffusion": {"num_steps": 11, "beta_min": 0.1, "beta_max": 20.0},
         },
-        "diffusion": {"steps": 11, "beta_min": 0.1, "beta_max": 20.0},
-        "anchor": {
-            "multiscale_input": False,
-            "train_prob": 1.0,
-            "start_step": 0,
-            "ramp_steps": 0,
-            "cross_domain_prob": 0.0,
-            "pixel_weight": 0.05,
-            "connectivity": {
-                "weight": 0.0,
-                "phase_transition_weight": 0.0,
-            },
-        },
-        "vf": {"weight": 1.0},
         "optim": {
             "generator_lr": 0.00016,
             "critic_lr": 0.0001,
@@ -66,11 +60,32 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             "ema_decay": 0.999,
         },
         "train": {
-            "steps": 1,
             "volume_batch_size": 1,
-            "pairs_per_axis": 8,
-            "amp": True,
-            "update_weights_every": 1,
+            "real_batch_size": 8,
+            "total_steps": 1,
+            "mixed_precision": True,
+            "slice_pairs_per_plane": 8,
+            "weights_every_steps": 1,
+        },
+        "conditioning": {
+            "domain_keep_probability": 1.0,
+            "anchor": {
+                "probability": 1.0,
+                "start_step": 0,
+                "ramp_steps": 0,
+                "borrowed_plane_probability": 0.0,
+            },
+        },
+        "loss": {
+            "anchor_pixel_weight": 0.05,
+            "connectivity": {
+                "adversarial_weight": 0.0,
+                "normal_transition_weight": 0.0,
+            },
+            "volume_fraction_weight": 1.0,
+            "critic_local_weight": 0.5,
+            "r1_weight": 0.05,
+            "r1_every_steps": 16,
         },
     }
     data = cfg["data"]
@@ -90,8 +105,8 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
     )
     images = torch.randint(
         0,
-        data["num_phase"],
-        (data["batch_size"], 64, 64),
+        data["num_phases"],
+        (train["real_batch_size"], 64, 64),
     )
     trainer = Trainer(
         components=TrainerComponents(
@@ -109,24 +124,26 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
         ),
         settings=TrainerSettings(
             volume_batch_size=train["volume_batch_size"],
-            num_phases=data["num_phase"],
-            patch_size=data["input_size"],
-            slice_pairs_per_axis=train["pairs_per_axis"],
+            num_phases=data["num_phases"],
+            patch_size=data["lo_res_size"],
+            slice_pairs_per_axis=train["slice_pairs_per_plane"],
             ema_decay=optim["ema_decay"],
-            r1_gamma=model["critic"]["r1_weight"],
-            r1_interval=model["critic"]["r1_interval"],
-            critic_local_weight=model["critic"]["local_loss_weight"],
-            anchor_training_probability=cfg["anchor"]["train_prob"],
-            anchor_start_step=cfg["anchor"]["start_step"],
-            anchor_ramp_steps=cfg["anchor"]["ramp_steps"],
-            anchor_pixel_loss_weight=cfg["anchor"]["pixel_weight"],
-            anchor_shared_axis_probability=cfg["anchor"]["cross_domain_prob"],
-            connectivity_weight=cfg["anchor"]["connectivity"]["weight"],
-            normal_transition_weight=cfg["anchor"]["connectivity"][
-                "phase_transition_weight"
+            r1_gamma=cfg["loss"]["r1_weight"],
+            r1_interval=cfg["loss"]["r1_every_steps"],
+            critic_local_weight=cfg["loss"]["critic_local_weight"],
+            anchor_training_probability=cfg["conditioning"]["anchor"]["probability"],
+            anchor_start_step=cfg["conditioning"]["anchor"]["start_step"],
+            anchor_ramp_steps=cfg["conditioning"]["anchor"]["ramp_steps"],
+            anchor_pixel_loss_weight=cfg["loss"]["anchor_pixel_weight"],
+            anchor_shared_axis_probability=cfg["conditioning"]["anchor"][
+                "borrowed_plane_probability"
             ],
-            vf_loss_weight=cfg["vf"]["weight"],
-            domain_dropout=1.0 - data["domain_prob"],
+            connectivity_weight=cfg["loss"]["connectivity"]["adversarial_weight"],
+            normal_transition_weight=cfg["loss"]["connectivity"][
+                "normal_transition_weight"
+            ],
+            vf_loss_weight=cfg["loss"]["volume_fraction_weight"],
+            domain_dropout=1.0 - cfg["conditioning"]["domain_keep_probability"],
             cfg_drop_each_probability=0.0,
             latent_channels=model["generator"]["latent_channels"],
             amp_enabled=True,

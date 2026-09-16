@@ -18,24 +18,28 @@ FRONT_DIR = Path(__file__).resolve().parents[2] / "front" / "dist"
 
 
 class AnchorRequest(BaseModel):
-    image: list[list[int]]
+    image: list[list[int]] | list[list[list[float]]]
     axis: Annotated[int, Field(ge=0, le=2)]
     index: Annotated[int, Field(ge=0)]
     position: tuple[int, int] | None = None
 
     @field_validator("image")
     @classmethod
-    def validate_image(cls, image: list[list[int]]) -> list[list[int]]:
+    def validate_image(cls, image):
         if not image or not image[0]:
             raise ValueError("anchor image must not be empty")
-        width = len(image[0])
-        if any(len(row) != width for row in image):
+        planes = image if isinstance(image[0][0], list) else [image]
+        height, width = len(planes[0]), len(planes[0][0])
+        if width == 0 or any(
+            len(plane) != height or any(len(row) != width for row in plane)
+            for plane in planes
+        ):
             raise ValueError("anchor image rows must have equal length")
         return image
 
     def to_anchor(self) -> PlaneAnchor:
         return PlaneAnchor(
-            image=torch.tensor(self.image, dtype=torch.uint8),
+            image=torch.tensor(self.image),
             axis=self.axis,
             index=self.index,
             position=self.position,

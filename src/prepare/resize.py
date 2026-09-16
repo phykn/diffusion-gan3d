@@ -51,12 +51,10 @@ def resize_crop(
     labels: torch.Tensor,
     size: int,
     num_phases: int,
-    intermediate_size: int | None = None,
 ) -> torch.Tensor:
-    """Resize a crop directly, retaining the intermediate HR step for legacy runs."""
-    if intermediate_size is not None:
-        labels = resize_labels(labels, intermediate_size, num_phases)
-    return resize_labels(labels, size, num_phases)
+    """Return C,H,W phase fractions without discarding subpixel phase occupancy."""
+    probs = phase_channels(labels.unsqueeze(0), num_phases)
+    return resize_phases(probs, (size,) * labels.ndim).squeeze(0)
 
 
 def downsample(
