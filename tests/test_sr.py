@@ -551,6 +551,7 @@ def test_coarse_halo_matches_global_trilinear_including_edges(start):
 def test_tiled_coarse_and_height_share_global_coordinates_with_margin(tmp_path):
     cfg = sr_config(tmp_path, scale=2)
     cfg["conditioning"]["height_enabled"] = True
+    cfg["data"]["thickness_axis"] = "z"
     cfg["data"]["height_extents"] = {0: 40}
     path = tmp_path / "sr.pt"
     export_model(path, cfg)

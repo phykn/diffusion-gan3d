@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from run_train import make_run_dir
+from run_train_1st import make_run_dir
 from src.config import save_yaml
 from src.plane import PLANES
 from src.train.run import run_train, write_metrics
@@ -43,7 +43,7 @@ def test_invalid_schedule_fails_before_training_or_creating_logs(
 def test_run_directory_uses_minute_name_and_numeric_collision_suffix(
     tmp_path: Path,
 ) -> None:
-    with patch("run_train.datetime") as current:
+    with patch("run_train_1st.datetime") as current:
         current.now.return_value.astimezone.return_value.strftime.return_value = (
             "08052314"
         )
@@ -217,9 +217,9 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     runner = (
         "import sys; "
         "from pathlib import Path; "
-        "import run_train; "
-        "run_train.RUN_ROOT = Path(sys.argv.pop(1)); "
-        "run_train.main()"
+        "import run_train_1st; "
+        "run_train_1st.RUN_ROOT = Path(sys.argv.pop(1)); "
+        "run_train_1st.main()"
     )
     result = subprocess.run(
         [

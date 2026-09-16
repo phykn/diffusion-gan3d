@@ -116,7 +116,14 @@ def test_lr_cli_resumes_progress_without_training_seed(tmp_path):
 
     def run(*args):
         subprocess.run(
-            [sys.executable, "-B", "run_train.py", "--device", "cpu", *map(str, args)],
+            [
+                sys.executable,
+                "-B",
+                "run_train_1st.py",
+                "--device",
+                "cpu",
+                *map(str, args),
+            ],
             check=True,
             capture_output=True,
             text=True,
@@ -158,6 +165,7 @@ def test_connectivity_preserves_thickness_order():
 
 def test_time_scaling_is_shared_without_changing_weight_shapes(tmp_path):
     cfg = small_config(tmp_path)
+    cfg["data"]["thickness_axis"] = "z"
     generator, critics, connectivity = build_models(cfg)
     assert generator.time_scale == 500
     assert all(critic.time_scale == 500 for critic in critics.values())

@@ -1,3 +1,5 @@
+"""Stage-2 coarse-conditioned diffusion refinement training entry point."""
+
 import argparse
 from pathlib import Path
 

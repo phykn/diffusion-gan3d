@@ -50,6 +50,7 @@ def test_initial_weights_load_by_plane(tmp_path):
         channels=[4, 8], embedding_channels=8, latent_channels=4
     )
     cfg["model"]["critic"]["channels"] = [4, 8]
+    cfg["model"]["critic"]["plane_groups"] = [[plane] for plane in PLANES]
     cfg["model"]["gradient_checkpointing"] = False
     cfg["train"].update(mixed_precision=False, real_batch_size=1, num_workers=0)
     source = build_trainer(cfg, torch.device("cpu"))

@@ -149,6 +149,13 @@ def configuration(tmp_path, stage="low_res", height=False):
         domains={0: {"xy": [str(folder)], "xz": [str(folder)], "yz": [str(folder)]}},
     )
     cfg["conditioning"]["height_enabled"] = height
+    if height:
+        cfg["data"]["thickness_axis"] = "z"
+        for plane, flips in (("xz", ["x"]), ("yz", ["y"])):
+            cfg["augmentation"]["planes"][plane] = {
+                "flip_axes": flips,
+                "rotate_90": False,
+            }
     cfg["model"]["critic"].update(
         channels=[4, 8], plane_groups=[["xy"], ["xz", "yz"]], pyramid_min_size=4
     )

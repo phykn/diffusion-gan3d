@@ -20,6 +20,8 @@ htmlcov/
 /front/dist/
 
 *.bat
+!run_train_1st.bat
+!run_train_2nd.bat
 
 .DS_Store
 Thumbs.db

@@ -145,10 +145,22 @@ Set the 2D label-image folders in
 [`config/train/low_res.yaml`](config/train/low_res.yaml), then run:
 
 ```bash
-python run_train.py --device cuda
+python run_train_1st.py --device cuda
 # Another dataset, with the same training recipe:
-python run_train.py --data config/data/battery.yaml --device cuda
+python run_train_1st.py --data config/data/battery.yaml --device cuda
 ```
+
+The default presets use `data/sample.png` as an isotropic two-phase sample for
+all three planes, with one shared slice critic in each stage. They use 128-pixel
+crops, a 64³ first-stage grid and 128³ second-stage diffusion refinement.
+Height conditioning is disabled; flips and quarter-turn rotations are enabled
+in all planes. Data paths select folders nonrecursively, so additional images
+placed directly in `data/` will also enter training.
+
+On Windows, launch `run_train_1st.bat` using the project `.venv`. After stage 1
+has saved weights, launch `run_train_2nd.bat` and enter that run folder or its
+`generator.pt` path. Both batch files also forward CLI arguments, including
+`--resume`; with arguments, the second-stage launcher skips the path prompt.
 
 Name the training planes `xy`, `xz`, and `yz`:
 
@@ -172,9 +184,9 @@ list creates one critic and one optimizer; its planes share the model weights.
 
 | Slice critics | Configuration | Assumption |
 |---|---|---|
-| 1 | `plane_groups: [[xy, xz, yz]]` | All three plane distributions can share a critic |
+| 1 (default) | `plane_groups: [[xy, xz, yz]]` | All three plane distributions can share a critic |
 | 2 | `plane_groups: [[xy], [xz, yz]]` | The two thickness sections can share a critic |
-| 3 (default) | `plane_groups: [[xy], [xz], [yz]]` | Each plane is modeled separately |
+| 3 | `plane_groups: [[xy], [xz], [yz]]` | Each plane is modeled separately |
 
 These examples assume all three planes are present in `data.domains`. List every
 observed plane exactly once across groups; omit planes with no observations.
@@ -352,7 +364,7 @@ The checkpoint records source
 image hashes and rejects changed images on resume:
 
 ```bash
-python run_train.py --resume run/<lr-run>/checkpoints/last.pt --steps 30000 --device cuda
+python run_train_1st.py --resume run/<lr-run>/checkpoints/last.pt --steps 30000 --device cuda
 ```
 
 `--steps` is the total target. Resume creates a new run and uses saved settings;
@@ -373,7 +385,7 @@ fractional-occupancy preprocessing and conditioning contract.
 ### Stage 2: super-resolution
 
 ```bash
-python run_sr_train.py --base-weights run/<lr-run>/generator.pt --device cuda
+python run_train_2nd.py --base-weights run/<lr-run>/generator.pt --device cuda
 ```
 
 The command reads [`config/train/sr.yaml`](config/train/sr.yaml) and the data preset
@@ -431,7 +443,7 @@ always uses level zero. Validate on LR
 seeds outside every training bank.
 
 ```bash
-python run_sr_train.py --resume run/<sr-run>/checkpoints/last.pt --steps 30000 --device cuda
+python run_train_2nd.py --resume run/<sr-run>/checkpoints/last.pt --steps 30000 --device cuda
 ```
 
 Resume uses saved settings and the bank referenced by the checkpoint, writes a new run,
@@ -549,7 +561,7 @@ re-export them, so importing the public inference API does not load training.
 the stage-1 loop, TensorBoard records and periodic weights. `train/sr.py` owns
 coarse corruption, SR training state and inference exports; `config.py` owns configuration validation.
 `train/sr_run.py` owns frozen LR bank preparation, resume checks, the SR loop and
-run artifacts; `run_sr_train.py` parses CLI arguments.
+run artifacts; `run_train_2nd.py` parses CLI arguments.
 Stage-1 step counts and save intervals must be positive integers; omit
 `archive_every_steps` (or set it to null) to disable archival checkpoints.
 
@@ -576,9 +588,13 @@ The synthetic-data command moved from `gen_data.py` to `scripts/prepare_data.py`
 
 For a known 3D reference with a thickness-dependent particle-size distribution:
 
+First adapt the training preset to the z-thickness constraints described above:
+disable quarter-turn rotations in `xz`/`yz`, allow only x flips in `xz` and y
+flips in `yz`, and choose critic groups appropriate to the anisotropic data.
+
 ```bash
 python scripts/prepare_data.py --config config/simul_height.yaml
-python run_train.py --data config/data/simul_height.yaml --device cuda
+python run_train_1st.py --data config/data/simul_height.yaml --device cuda
 ```
 
 Enable `conditioning.height_enabled: true` in the chosen training preset for
@@ -606,7 +622,7 @@ are unchanged and contain no retroactively inferred KID scores.
 ```bash
 python -m pytest tests/test_sr.py tests/test_sr_pipeline.py -q
 python -m pytest tests -q
-python -m ruff check src scripts tests run_train.py run_sr_train.py run_predict.py run_api.py
+python -m ruff check src scripts tests run_train_1st.py run_train_2nd.py run_predict.py run_api.py
 ```
 
 A bounded GPU check compares index/R1, scaled-time/R1 and index/R1+R2, verifies

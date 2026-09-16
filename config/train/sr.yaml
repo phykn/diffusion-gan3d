@@ -6,8 +6,8 @@ model:
     channels: [16, 32, 64, 64]
 
   critic:
-    # 1개: [[xy, xz, yz]], 2개: [[xy], [xz, yz]], 3개: 아래 설정
-    plane_groups: [[xy], [xz], [yz]]
+    # 등방 구조: 세 평면이 하나의 critic을 공유한다.
+    plane_groups: [[xy, xz, yz]]
     channels: [32, 64, 128]
 
   diffusion:
@@ -23,12 +23,12 @@ augmentation:
       rotate_90: true
 
     xz:
-      flip_axes: [x]
-      rotate_90: false
+      flip_axes: [x, z]
+      rotate_90: true
 
     yz:
-      flip_axes: [y]
-      rotate_90: false
+      flip_axes: [y, z]
+      rotate_90: true
 
 loss:
   r1_weight: 0.2

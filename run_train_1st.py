@@ -1,3 +1,5 @@
+"""Stage-1 diffusion training entry point."""
+
 import argparse
 import copy
 from datetime import datetime

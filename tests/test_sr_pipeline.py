@@ -9,7 +9,7 @@ import torch
 from PIL import Image
 
 import run_predict
-import run_sr_train
+import run_train_2nd
 from src.build.trainer import build_trainer
 from src.config import load_train_config, load_yaml, save_yaml
 from src.storage import load_volume
@@ -79,7 +79,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(tmp_path, scale):
     save_yaml(data_file, sr_cfg["data"])
     save_yaml(sr_config, {**sr_cfg, "data": str(data_file)})
     sr_dir = tmp_path / "sr"
-    run_sr_train.main(
+    run_train_2nd.main(
         [
             "--config",
             str(sr_config),
@@ -101,7 +101,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(tmp_path, scale):
     first = torch.load(sr_dir / "checkpoints/last.pt", weights_only=True)
     assert first["step"] == 1
     resumed = tmp_path / "resumed"
-    run_sr_train.main(
+    run_train_2nd.main(
         [
             "--resume",
             str(sr_dir / "checkpoints/last.pt"),
