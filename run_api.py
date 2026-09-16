@@ -22,12 +22,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--max-inflight-downloads", type=int, default=2)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    app = create_app(args.weight, device=args.device)
+    app = create_app(
+        args.weight,
+        device=args.device,
+        max_inflight_downloads=args.max_inflight_downloads,
+    )
     uvicorn.run(app, host=args.host, port=args.port)
 
 

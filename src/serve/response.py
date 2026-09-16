@@ -6,9 +6,74 @@ from tempfile import NamedTemporaryFile
 import anyio
 import tifffile
 import torch
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 CHUNK_BYTES = 64 * 1024
+
+
+async def _send_until_disconnect(stream, receive):
+    async with anyio.create_task_group() as group:
+
+        async def send_body():
+            try:
+                await stream()
+            finally:
+                group.cancel_scope.cancel()
+
+        group.start_soon(send_body)
+        while (await receive())["type"] != "http.disconnect":
+            pass
+        group.cancel_scope.cancel()
+
+
+class DownloadResponse(Response):
+    """Hold a reserved result slot until its response has released its resources."""
+
+    def __init__(self, response: Response, release):
+        super().__init__(status_code=response.status_code)
+        self.raw_headers = response.raw_headers
+        self.response = response
+        self.release = release
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await self.response(scope, receive, send)
+        finally:
+            self.release()
+
+
+class RawVolumeResponse(StreamingResponse):
+    def __init__(self, volume, headers):
+        self.chunks = raw_chunks(volume)
+        super().__init__(
+            self.chunks,
+            media_type="application/octet-stream",
+            headers={**headers, "Content-Length": str(volume.numel())},
+        )
+
+    async def __call__(self, scope, receive, send):
+        async def send_chunk(message):
+            try:
+                await send(message)
+            finally:
+                body = message.get("body")
+                if isinstance(body, memoryview):
+                    # An error traceback may retain this message after the slot
+                    # is returned. Detach its view from the full volume now.
+                    body.release()
+
+        try:
+            await _send_until_disconnect(
+                lambda: self.stream_response(send_chunk), receive
+            )
+        finally:
+            # The worker has finished before closing its generator. Release the
+            # retained volume even if the response object survives cancellation.
+            try:
+                with anyio.CancelScope(shield=True):
+                    await self.body_iterator.aclose()
+            finally:
+                self.chunks.close()
 
 
 def raw_chunks(volume: torch.Tensor):
@@ -70,31 +135,19 @@ class TemporaryFileResponse(FileResponse):
             ],
         }
         try:
-            async with anyio.create_task_group() as group:
-
-                async def stream():
-                    try:
-                        await super(TemporaryFileResponse, self).__call__(
-                            scope, receive, send
-                        )
-                    finally:
-                        group.cancel_scope.cancel()
-
-                group.start_soon(stream)
-                while (await receive())["type"] != "http.disconnect":
-                    pass
-                group.cancel_scope.cancel()
+            await _send_until_disconnect(
+                lambda: super(TemporaryFileResponse, self).__call__(
+                    scope, receive, send
+                ),
+                receive,
+            )
         finally:
             Path(self.path).unlink(missing_ok=True)
 
 
 def volume_response(volume: torch.Tensor, format: str, headers: dict):
     if format == "raw":
-        return StreamingResponse(
-            raw_chunks(volume),
-            media_type="application/octet-stream",
-            headers={**headers, "Content-Length": str(volume.numel())},
-        )
+        return RawVolumeResponse(volume, headers)
     path = None
     try:
         with NamedTemporaryFile(suffix=".tiff", delete=False) as file:

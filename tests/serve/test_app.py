@@ -3,16 +3,18 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import anyio
 import pytest
 import tifffile
 import torch
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from src.evaluate.volume import VolumeMetrics
 from src.predict.memory import estimate_memory, select_storage
 from src.serve import app as server_module
 from src.serve import response as response_module
-from src.serve.app import create_app
+from src.serve.app import GenerateRequest, create_app
 
 
 class FakeInference:
@@ -358,3 +360,81 @@ def test_oversized_body_is_rejected_before_json_decoding(service, monkeypatch):
     client = TestClient(create_app(inference=service))
     assert client.post("/generate", content=b" " * 33).status_code == 413
     assert not service.calls
+
+
+@pytest.mark.parametrize("format", ["raw", "tiff"])
+def test_slow_downloads_bound_retained_results_without_holding_generation(
+    service, format
+):
+    app = create_app(inference=service, max_inflight_downloads=2)
+    generate = next(route.endpoint for route in app.routes if route.path == "/generate")
+    scope = {"type": "http", "method": "POST", "headers": []}
+
+    async def exercise():
+        first_body = anyio.Event()
+        finish_first = anyio.Event()
+        first_done = anyio.Event()
+
+        async def receive():
+            await anyio.sleep_forever()
+
+        async def slow_send(message):
+            if message["type"] == "http.response.body":
+                first_body.set()
+                await finish_first.wait()
+
+        async def send(message):
+            pass
+
+        first = generate(GenerateRequest(format=format))
+
+        async def download_first():
+            await first(scope, receive, slow_send)
+            first_done.set()
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(download_first)
+            with anyio.fail_after(5):
+                await first_body.wait()
+                assert not app.state.generate_lock.locked()
+                second = generate(GenerateRequest(format=format))
+                assert len(service.calls) == 2
+                with pytest.raises(HTTPException) as error:
+                    generate(GenerateRequest(format=format))
+                assert error.value.status_code == 503
+                assert error.value.headers["Retry-After"] == "1"
+                assert len(service.calls) == 2
+                finish_first.set()
+                await first_done.wait()
+                third = generate(GenerateRequest(format=format))
+                await second(scope, receive, send)
+                await third(scope, receive, send)
+        assert not app.state.generate_lock.locked()
+        assert app.state.download_slots.acquire(blocking=False)
+        assert app.state.download_slots.acquire(blocking=False)
+        assert not app.state.download_slots.acquire(blocking=False)
+
+    anyio.run(exercise)
+
+
+@pytest.mark.parametrize(
+    "failure", [MemoryError("oom"), ValueError("bad input"), OSError("disk")]
+)
+def test_failed_generation_returns_download_slot(service, monkeypatch, failure):
+    app = create_app(inference=service, max_inflight_downloads=1)
+    client = TestClient(app)
+
+    def fail(**kwargs):
+        raise failure
+
+    monkeypatch.setattr(service, "generate", fail)
+    for _ in range(3):
+        assert client.post("/generate", json={}).status_code in (413, 422, 500)
+    assert app.state.download_slots.acquire(blocking=False)
+    assert not app.state.download_slots.acquire(blocking=False)
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_download_capacity_must_be_positive_integer(service, limit):
+    with pytest.raises(ValueError, match="max_inflight_downloads"):
+        create_app(inference=service, max_inflight_downloads=limit)

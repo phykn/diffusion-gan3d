@@ -6,6 +6,7 @@ import torch
 from src.anchor import PlaneAnchor, encode_anchors
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
+from src.predict.convert import owned_clean_to_probs_
 from src.predict.memory import estimate_memory, select_storage
 from src.prepare.height import height_field
 
@@ -396,10 +397,7 @@ class Generator:
             height_origin=height_origin,
             probabilities=True,
         )
-        probs = ((clean.float() + 1.0) * 0.5).clamp(0.0, 1.0)
-        probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(
-            torch.finfo(probs.dtype).eps,
-        )
+        probs = owned_clean_to_probs_(clean)
         return probs.squeeze(0).cpu()
 
     def generate(

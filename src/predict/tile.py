@@ -83,13 +83,15 @@ class TileBuffer:
     def __init__(
         self,
         num_phases: int,
-        tile_size: int,
+        tile_size: int | tuple[int, int, int],
         enabled: bool,
     ) -> None:
         self.upload: torch.Tensor | None = None
         self.download: torch.Tensor | None = None
         self.workspace: torch.Tensor | None = None
-        self.capacity = num_phases * tile_size**3
+        self.capacity = num_phases * (
+            tile_size**3 if isinstance(tile_size, int) else math.prod(tile_size)
+        )
         if enabled:
             try:
                 self.upload = torch.empty(
@@ -210,8 +212,10 @@ def parse_shape(value: int | Sequence[int]) -> tuple[int, int, int]:
 def make_tiles(
     plan: TilePlan,
 ) -> tuple[Tile, ...]:
+    lengths = tuple(min(size, plan.tile_size) for size in plan.shape)
     starts = tuple(
-        axis_starts(size, plan.tile_size, plan.stride) for size in plan.shape
+        axis_starts(size, length, plan.stride)
+        for size, length in zip(plan.shape, lengths)
     )
     tiles = []
     for idx in product(
@@ -224,7 +228,7 @@ def make_tiles(
         margins = []
         for axis, tile_idx in enumerate(idx):
             source_start = starts[axis][tile_idx]
-            source_stop = source_start + plan.tile_size
+            source_stop = source_start + lengths[axis]
             target_start = 0 if tile_idx == 0 else plan.seams[axis][tile_idx - 1]
             target_stop = (
                 plan.shape[axis]

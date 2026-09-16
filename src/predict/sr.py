@@ -1,5 +1,4 @@
 import math
-from itertools import product
 from pathlib import Path
 
 import torch
@@ -7,12 +6,13 @@ import torch.nn.functional as F
 
 from src.build.model import build_diffusion, build_sr_model
 from src.config import get_sr_sizes, normalize_train_config
+from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 from src.predict.generator import Generator, GuidedDenoiser
 from src.predict.inference import _seeded_rng
 from src.predict.sr_memory import check_sr_memory, estimate_sr_memory
-from src.predict.tile import axis_starts
+from src.predict.sr_tiled import refine_tiled
 from src.prepare.height import height_field
-from src.prepare.resize import coarse_region, phase_channels, resize_phases, scaled_size
+from src.prepare.resize import phase_channels, resize_phases, scaled_size
 
 
 class SuperResolutionAPI:
@@ -41,7 +41,6 @@ class SuperResolutionAPI:
             self.config["train"]["mixed_precision"] and self.device.type == "cuda",
         )
 
-    @torch.inference_mode()
     def predict_probs(
         self,
         low: torch.Tensor,
@@ -54,6 +53,32 @@ class SuperResolutionAPI:
         guidance: float = 1.0,
     ) -> torch.Tensor:
         """Refine a global LR volume. Tile size, overlap and margin use HR voxels."""
+        return self._resolve(
+            low,
+            domain,
+            seed,
+            tile_size,
+            overlap,
+            height_origin,
+            margin,
+            guidance,
+            output_kind="probabilities",
+        )
+
+    @torch.inference_mode()
+    def _resolve(
+        self,
+        low,
+        domain,
+        seed,
+        tile_size,
+        overlap,
+        height_origin,
+        margin,
+        guidance,
+        *,
+        output_kind,
+    ):
         if low.ndim not in (3, 4):
             raise ValueError(
                 "LR input must be D,H,W labels or K,D,H,W phase fractions."
@@ -105,6 +130,7 @@ class SuperResolutionAPI:
                 label_input=low.ndim == 3,
                 input_element_size=low.element_size(),
                 input_on_cuda=low.device.type == "cuda",
+                output_kind=output_kind,
             ),
             self.generator,
             input_device=low.device,
@@ -131,39 +157,24 @@ class SuperResolutionAPI:
                 height = self._height(
                     coarse.shape[-3:], (-margin,) * 3, domain, height_origin
                 )
-                predicted = self._predict(coarse, domain_ids, height, guidance)
                 region = (slice(None), *(slice(margin, margin + n) for n in shape))
+                if output_kind == "labels":
+                    clean = self._sample_clean(coarse, domain_ids, height, guidance)
+                    return labels_from_channels(clean.squeeze(0)[region])
+                predicted = self._predict(coarse, domain_ids, height, guidance)
                 return predicted[region].contiguous()
-            lengths = tuple(min(tile_size, n) for n in shape)
-            starts = [
-                axis_starts(n, length, tile_size - 2 * overlap)
-                for n, length in zip(shape, lengths)
-            ]
-            result = torch.zeros(self.num_phases, *shape, dtype=torch.float32)
-            weights = torch.zeros(shape, dtype=torch.float32)
-            windows = [
-                torch.hann_window(n, periodic=False).clamp_min(0.01)
-                if n > 1
-                else torch.ones(1)
-                for n in lengths
-            ]
-            window = (
-                windows[0][:, None, None]
-                * windows[1][None, :, None]
-                * windows[2][None, None, :]
+            return refine_tiled(
+                self,
+                probs,
+                shape,
+                tile_size,
+                overlap,
+                margin,
+                domain_ids,
+                height_origin,
+                guidance,
+                output_kind,
             )
-            expanded = tuple(n + 2 * margin for n in lengths)
-            crop = (slice(None), *(slice(margin, margin + n) for n in lengths))
-            for start in product(*starts):
-                origin = tuple(s - margin for s in start)
-                # Interpolation halo is separate from the denoiser's context margin.
-                coarse = coarse_region(probs, origin, expanded, scale)
-                height = self._height(expanded, origin, domain, height_origin)
-                predicted = self._predict(coarse, domain_ids, height, guidance)[crop]
-                target = tuple(slice(s, s + n) for s, n in zip(start, lengths))
-                result[(slice(None), *target)] += predicted * window
-                weights[target] += window
-            return result.div_(weights.unsqueeze(0))
 
     def _validate_height(self, shape, domain, origin):
         if not self.config["conditioning"]["height_enabled"]:
@@ -194,7 +205,7 @@ class SuperResolutionAPI:
             self.device,
         )
 
-    def _predict(self, coarse, domain, height, guidance):
+    def _sample_clean(self, coarse, domain, height, guidance):
         coarse = coarse.to(self.device)
         conditions = {
             "domain": domain,
@@ -212,10 +223,11 @@ class SuperResolutionAPI:
                 self.generator.latent_channels,
                 conditions,
             )
-        probs = ((clean.float() + 1) * 0.5).clamp(0, 1)
-        probs = probs / probs.sum(1, keepdim=True).clamp_min(
-            torch.finfo(probs.dtype).eps
-        )
+        return clean
+
+    def _predict(self, coarse, domain, height, guidance):
+        clean = self._sample_clean(coarse, domain, height, guidance)
+        probs = owned_clean_to_probs_(clean)
         return probs.squeeze(0).cpu()
 
     def super_resolve(
@@ -229,10 +241,14 @@ class SuperResolutionAPI:
         margin: int | None = None,
         guidance: float = 1.0,
     ) -> torch.Tensor:
-        return (
-            self.predict_probs(
-                low, domain, seed, tile_size, overlap, height_origin, margin, guidance
-            )
-            .argmax(0)
-            .to(torch.uint8)
+        return self._resolve(
+            low,
+            domain,
+            seed,
+            tile_size,
+            overlap,
+            height_origin,
+            margin,
+            guidance,
+            output_kind="labels",
         )

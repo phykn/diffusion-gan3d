@@ -31,3 +31,15 @@ def test_phase_channels_avoids_expanded_int64_one_hot(shape, dtype):
 def test_phase_channel_validation_is_preserved(labels):
     with pytest.raises(ValueError):
         phase_channels(labels, 3)
+
+
+@pytest.mark.parametrize(
+    "dtype,count", [(torch.uint8, 256), (torch.int8, 128), (torch.int16, 32768)]
+)
+def test_phase_channels_validates_without_small_integer_overflow(dtype, count):
+    labels = torch.tensor([[[0, count - 1]]], dtype=dtype)
+    result = phase_channels(labels, count)
+    torch.testing.assert_close(result.argmax(1), labels.long())
+    assert torch.equal(result.sum(1), torch.ones_like(labels, dtype=torch.float32))
+    with pytest.raises(ValueError):
+        phase_channels(labels, count - 1)

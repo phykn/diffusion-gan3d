@@ -350,28 +350,64 @@ def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
         api.predict_probs(low)
 
 
-def test_sr_tiled_normalization_reuses_its_accumulation(tmp_path, monkeypatch):
+def test_sr_tiled_refinement_uses_bounded_shared_fusion(tmp_path, monkeypatch):
+    import src.predict.tiled as tiled_module
+
     cfg = sr_config(tmp_path, scale=2)
     path = tmp_path / "model.pt"
     export_model(path, cfg)
     api = SuperResolutionAPI(path)
     low = torch.zeros(8, 8, 8, dtype=torch.uint8)
     buffers = []
-    original = torch.zeros
+    original = tiled_module.make_fusion
 
-    def record(*shape, **kwargs):
-        result = original(*shape, **kwargs)
-        if shape == (3, 16, 16, 16):
-            buffers.append(result)
+    def record(*args, **kwargs):
+        result = original(*args, **kwargs)
+        buffers.append(result)
         return result
 
-    monkeypatch.setattr(torch, "zeros", record)
+    monkeypatch.setattr(tiled_module, "make_fusion", record)
     monkeypatch.setattr(
-        api, "_predict", lambda coarse, *args: torch.ones(3, *coarse.shape[-3:]) / 3
+        api.generator,
+        "predict",
+        lambda values, *args, **kwargs: torch.full_like(values, -1 / 3),
     )
     result = api.predict_probs(low, tile_size=8, overlap=2, margin=2)
-    assert len(buffers) == 1 and result.data_ptr() == buffers[0].data_ptr()
+    assert len(buffers) == 1 and buffers[0].pred_sum.shape == (1, 3, 12, 20, 20)
     torch.testing.assert_close(result, torch.full_like(result, 1 / 3))
+
+
+@pytest.mark.parametrize("tiled", [False, True])
+def test_sr_labels_match_probabilities_and_use_correct_budget(
+    tmp_path, monkeypatch, tiled
+):
+    import src.predict.sr as sr_module
+
+    cfg = sr_config(tmp_path, scale=2)
+    path = tmp_path / "model.pt"
+    export_model(path, cfg)
+    api = SuperResolutionAPI(path)
+    low = torch.randint(3, (6, 6, 6))
+    options = dict(seed=13, margin=2, tile_size=8 if tiled else None, overlap=2)
+    expected = api.predict_probs(low, **options).argmax(0).to(torch.uint8)
+    original = sr_module.estimate_sr_memory
+    modes = []
+
+    def record(*args, **kwargs):
+        modes.append(kwargs["output_kind"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sr_module, "estimate_sr_memory", record)
+    if not tiled:
+
+        def fail(*args, **kwargs):
+            pytest.fail("single-block labels materialized CPU probabilities")
+
+        monkeypatch.setattr(api, "_predict", fail)
+        monkeypatch.setattr(api, "predict_probs", fail)
+    actual = api.super_resolve(low, **options)
+    assert modes == ["labels"]
+    torch.testing.assert_close(actual, expected)
 
 
 def test_sr_corruption_does_not_modify_clean_coarse_target():
@@ -522,21 +558,86 @@ def test_tiled_coarse_and_height_share_global_coordinates_with_margin(tmp_path):
     low = torch.rand(3, 12, 8, 8).softmax(0)
     heights = []
 
-    def identity(coarse, domain, height, guidance):
-        heights.append(height.clone())
-        return coarse.squeeze(0)
+    def identity(values, time, latent, **conditions):
+        heights.append(conditions["height"].clone())
+        return 2 * conditions["coarse"] - 1
 
-    with patch.object(api, "_predict", side_effect=identity):
+    with patch.object(api.generator, "predict", side_effect=identity):
         actual = api.predict_probs(
             low, tile_size=16, overlap=4, margin=2, height_origin=3
         )
     expected = torch.nn.functional.interpolate(
         low[None], scale_factor=2, mode="trilinear", align_corners=False
     )[0]
-    torch.testing.assert_close(actual, expected)
-    assert len(heights) == 2
+    torch.testing.assert_close(actual, expected, atol=3e-4, rtol=0)
+    assert len(heights) == 2 * api.generator.diffusion.timesteps
     torch.testing.assert_close(heights[0][:, :, 8:], heights[1][:, :, :12])
     assert heights[0][0, 0, 0, 0, 0] == pytest.approx(2 * (3 - 2 + 0.5) / 40 - 1)
+
+
+@pytest.mark.parametrize("guidance", [1.0, 1.7])
+def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
+    tmp_path, monkeypatch, guidance
+):
+    from src.predict.tile import VolumeState
+    from src.predict.tiled import TiledGenerator
+
+    cfg = sr_config(tmp_path, scale=2)
+    cfg["model"]["diffusion"]["num_steps"] = 3
+    path = tmp_path / "sr.pt"
+    export_model(path, cfg)
+    api = SuperResolutionAPI(path)
+    calls, writes = [], {}
+    active = None
+    original_step, original_write = TiledGenerator.step, VolumeState.write
+
+    def step(sampler, *args, **kwargs):
+        nonlocal active
+        active = int(args[3].item())
+        writes[active] = torch.zeros(16, 12, 12, dtype=torch.int32)
+        original_step(sampler, *args, **kwargs)
+        active = None
+
+    def write(state, region, values):
+        if active is not None:
+            writes[active][region] += 1
+        original_write(state, region, values)
+
+    def predict(values, time, latent, **conditions):
+        assert conditions.get("vf") is None
+        assert conditions.get("anchor_image") is None
+        assert conditions["corruption_level"].eq(0).all()
+        assert conditions["guidance"] == guidance
+        calls.append(
+            (
+                int(time.item()),
+                values.clone(),
+                latent.clone(),
+                conditions["coarse"].clone(),
+            )
+        )
+        return 2 * (values + conditions["coarse"]).softmax(1) - 1
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("an independent tile reverse chain was started")
+
+    monkeypatch.setattr(TiledGenerator, "step", step)
+    monkeypatch.setattr(VolumeState, "write", write)
+    monkeypatch.setattr(api.generator, "predict", predict)
+    monkeypatch.setattr(api.generator.diffusion, "sample", forbidden)
+    low = torch.rand(3, 6, 4, 4).softmax(0)
+    output = api.predict_probs(low, tile_size=8, overlap=2, margin=2, guidance=guidance)
+    assert [call[0] for call in calls] == [2, 2, 1, 1, 0, 0]
+    for first, second in zip(calls[::2], calls[1::2]):
+        torch.testing.assert_close(
+            first[1][:, :, 4:], second[1][:, :, :8], atol=0, rtol=0
+        )
+        torch.testing.assert_close(first[2], second[2], atol=0, rtol=0)
+        torch.testing.assert_close(first[3][:, :, 4:], second[3][:, :, :8])
+    assert all(
+        torch.equal(counts, torch.ones_like(counts)) for counts in writes.values()
+    )
+    torch.testing.assert_close(output.sum(0), torch.ones(12, 8, 8))
 
 
 @pytest.mark.parametrize("tile,overlap,margin", [(10, 2, 4), (12, 1, 4), (16, 4, 1)])
@@ -623,3 +724,8 @@ def test_sr_cuda_amp_checkpointing_and_cfg_inference(tmp_path):
         torch.testing.assert_close(
             probs.sum(0), torch.ones(16, 16, 16), atol=2e-6, rtol=0
         )
+    tiled = api.predict_probs(
+        trainer.bank[0][0], guidance=1.7, tile_size=12, overlap=2, margin=2
+    )
+    assert torch.isfinite(tiled).all()
+    torch.testing.assert_close(tiled.sum(0), torch.ones(16, 16, 16), atol=2e-6, rtol=0)

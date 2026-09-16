@@ -6,7 +6,7 @@ import torch
 from src.predict import sr_memory
 
 
-def test_sr_budget_counts_full_accumulation_and_coarse_label_conversion():
+def test_sr_budget_counts_shared_states_slab_and_coarse_label_conversion():
     estimate = sr_memory.estimate_sr_memory(
         (16, 20, 24),
         (32, 40, 48),
@@ -17,9 +17,10 @@ def test_sr_budget_counts_full_accumulation_and_coarse_label_conversion():
         input_element_size=1,
     )
     assert estimate.expanded_shape == (24, 24, 24)
-    assert estimate.accumulation_bytes == 4 * 4 * 32 * 40 * 48
+    assert estimate.accumulation_bytes == 4 * 4 * 24 * 48 * 56
+    assert estimate.state_bytes == 4 * 3 * 40 * 48 * 56
     assert estimate.coarse_bytes == (1 + 8 + 4 * 3) * 16 * 20 * 24
-    assert estimate.output_bytes == 0  # Normalization reuses the accumulation.
+    assert estimate.output_bytes == 4 * 3 * 32 * 40 * 48
     # Interpolation requires the expanded coarse tile plus one voxel per side.
     assert estimate.cpu_tile_bytes >= 4 * 3 * (28**3 + 14**3 + 24**3)
     larger_margin = sr_memory.estimate_sr_memory(
@@ -67,3 +68,22 @@ def test_cuda_fraction_validation_is_budgeted_even_for_cpu_sr(monkeypatch):
         sr_memory.check_sr_memory(
             estimate, generator, input_device=torch.device("cuda")
         )
+
+
+@pytest.mark.parametrize("tile_size", [None, 64])
+def test_sr_labels_budget_final_bytes_and_bounded_conversion(tile_size):
+    labels = sr_memory.estimate_sr_memory(
+        (256,) * 3, (512,) * 3, 3, tile_size=tile_size, output_kind="labels"
+    )
+    probabilities = sr_memory.estimate_sr_memory(
+        (256,) * 3, (512,) * 3, 3, tile_size=tile_size, output_kind="probabilities"
+    )
+    assert labels.output_bytes == 512**3
+    assert labels.cpu_label_bytes + labels.model_label_bytes == 9 * 1024**2
+    assert probabilities.cpu_label_bytes == probabilities.model_label_bytes == 0
+    if tile_size:
+        assert labels.cpu_label_bytes > 0 and labels.model_label_bytes == 0
+        assert labels.accumulation_bytes == probabilities.accumulation_bytes
+    else:
+        assert labels.cpu_label_bytes == 0 and labels.model_label_bytes > 0
+        assert labels.cpu_tile_bytes < probabilities.cpu_tile_bytes

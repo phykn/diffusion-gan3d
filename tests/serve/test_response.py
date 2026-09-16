@@ -1,10 +1,17 @@
 import asyncio
+from threading import BoundedSemaphore
 
 import anyio
 import pytest
 import torch
 
-from src.serve.response import CHUNK_BYTES, TemporaryFileResponse, raw_chunks
+from src.serve.response import (
+    CHUNK_BYTES,
+    DownloadResponse,
+    RawVolumeResponse,
+    TemporaryFileResponse,
+    raw_chunks,
+)
 
 
 @pytest.mark.parametrize("strided", [False, True])
@@ -29,12 +36,21 @@ def test_raw_transfer_uses_bounded_views_in_c_order(strided):
 
 
 @pytest.mark.parametrize(
-    "failure", ["disconnect", "cancel", "send_error", "scope_cancel"]
+    "failure", ["complete", "disconnect", "cancel", "send_error", "scope_cancel"]
 )
-def test_temporary_file_is_removed_when_transfer_stops(tmp_path, failure):
+@pytest.mark.parametrize("format", ["raw", "tiff"])
+def test_resources_and_download_slot_are_released_when_transfer_stops(
+    tmp_path, failure, format
+):
     path = tmp_path / "volume.tiff"
-    path.write_bytes(b"x" * (CHUNK_BYTES * 3))
-    response = TemporaryFileResponse(path, stat_result=path.stat())
+    if format == "tiff":
+        path.write_bytes(b"x" * (CHUNK_BYTES * 3))
+        inner = TemporaryFileResponse(path, stat_result=path.stat())
+    else:
+        inner = RawVolumeResponse(torch.zeros(3, 256, 256, dtype=torch.uint8), {})
+    slots = BoundedSemaphore(1)
+    assert slots.acquire(blocking=False)
+    response = DownloadResponse(inner, slots.release)
     scope = {
         "type": "http",
         "method": "POST",
@@ -44,6 +60,7 @@ def test_temporary_file_is_removed_when_transfer_stops(tmp_path, failure):
 
     async def exercise():
         body_started = anyio.Event()
+        retained_views = []
 
         async def receive():
             await body_started.wait()
@@ -53,7 +70,12 @@ def test_temporary_file_is_removed_when_transfer_stops(tmp_path, failure):
 
         async def send(message):
             if message["type"] == "http.response.body":
+                assert not slots.acquire(blocking=False)
+                if isinstance(message.get("body"), memoryview):
+                    retained_views.append(message["body"])
                 body_started.set()
+                if failure == "complete":
+                    return
                 if failure == "cancel":
                     raise asyncio.CancelledError()
                 if failure == "send_error":
@@ -70,6 +92,14 @@ def test_temporary_file_is_removed_when_transfer_stops(tmp_path, failure):
                 assert failure == "send_error"
                 assert isinstance(exc.exceptions[0], OSError)
         assert not path.exists()
+        if format == "raw":
+            assert inner.chunks.gi_frame is None
+            assert inner.body_iterator.ag_frame is None
+            for view in retained_views:
+                with pytest.raises(ValueError, match="released memoryview"):
+                    view.tobytes()
+        assert slots.acquire(blocking=False)
+        assert not slots.acquire(blocking=False)
 
     anyio.run(exercise)
     assert not path.exists()

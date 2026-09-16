@@ -84,7 +84,7 @@ class AnchorBank:
             validate=False,
         )
         # Every replay includes the measurement; reconcile pseudo intersections to it.
-        reference = torch.where(measured.mask, measured.image, volume)
+        reconciled = torch.where(measured.mask, measured.image, volume)
         count = min(3 * size, max(2, math.ceil(size / self.plane_spacing)))
         occupied = {(p.axis, p.index) for p in measured_planes}
         candidates = [
@@ -100,7 +100,7 @@ class AnchorBank:
         for slot in order:
             axis, index = candidates[slot]
             planes.append(
-                PlaneAnchor((reference.select(axis + 2, index) + 1) * 0.5, axis, index)
+                PlaneAnchor((reconciled.select(axis + 2, index) + 1) * 0.5, axis, index)
             )
         condition = encode_anchors(
             planes,
@@ -115,4 +115,7 @@ class AnchorBank:
         height = entry["height"]
         if height is not None:
             height = height.to(device).expand(batch_size, -1, -1, -1, -1)
-        return condition, measured, reference, height
+        # Continuity targets describe the replay's changes, never artificial
+        # jumps introduced by pasting a measured plane. Anchor loss owns the
+        # measured values themselves; reconciliation is for conditions only.
+        return condition, measured, volume, height

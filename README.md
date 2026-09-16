@@ -281,6 +281,10 @@ controlled by `conditioning.anchor.plane_spacing` (default 16 grid cells).
 The measured plane retains pixel supervision; generated planes are coarse targets.
 No reference reverse pass is run. Connectivity uses detached replay volumes as
 pseudo references, never as measured 3D ground truth. The bank is checkpointed.
+Pseudo-anchor intersections are reconciled with the measured planes, but the
+connectivity critic and transition loss use the replay before that overwrite.
+This keeps pasted-plane jumps out of continuity targets; anchor loss separately
+supervises the measured values.
 
 `loss.connectivity.windows_per_plane` defaults to 4 local windows per plane and
 orientation. Sampling uses integer plane regions. The first window uses gap 1;
@@ -456,7 +460,7 @@ from src.api import SuperResolutionAPI
 
 sr = SuperResolutionAPI("run/<sr-run>/weights/model.pt", device="cuda")
 high = sr.super_resolve(direct, seed=0)
-# Tile size, overlap and margin are HR voxels; each tile runs reverse diffusion.
+# Tile size, overlap and margin are HR voxels; tiles share one diffusion chain.
 high = sr.super_resolve(scaled, seed=0, tile_size=128, overlap=16)
 ```
 
@@ -465,9 +469,12 @@ integral. Multiple tiles require an integer HR/LR ratio and HR shape, tile size,
 stride (`tile_size - 2 * overlap`) and margin aligned to coarse voxels. Each tile
 reads its coarse region plus one LR voxel of interpolation halo, upsamples it,
 then discards the halo. This matches global trilinear interpolation without
-allocating the entire enlarged condition on the GPU. Probabilities are blended
-before final phase selection. Independent reverse chains can still differ near
-tile boundaries; evaluate seam quality for each trained model.
+allocating the entire enlarged condition on the GPU. SR uses the same global
+diffusion sampler as LR: all tiles read one current state and share a latent
+per timestep. Clean predictions are blended in a circular slab, then each
+voxel's posterior is updated once. Tile context participates in tapered overlap;
+only the outer global margin is cropped from the result. This synchronizes the
+stochastic trajectory, but finite tile context still requires seam evaluation.
 
 `height_origin` is the source-pixel origin of the supplied global LR volume.
 Tile context starts at `(tile_start - margin) * crop_size / hi_res_size` relative
@@ -650,10 +657,15 @@ and have a separate output-memory budget. Phase-channel conversion writes direct
 into float32 storage without an expanded int64 one-hot intermediate.
 
 SR checks its own RAM/VRAM budget before coarse conversion or HR allocation:
-`src.predict.sr_memory.estimate_sr_memory` includes LR phase conversion, full
-CPU accumulation and weights, interpolation halo, and margin-expanded model tiles.
-Its final normalization reuses the accumulation buffer in place. Full SR output
-still scales with HR volume size; the estimate is not a guarantee against OOM.
+`src.predict.sr_memory.estimate_sr_memory` includes LR phase conversion, two global
+CPU fp16 states, a circular accumulation slab, interpolation halo, and
+margin-expanded model tiles. State and output storage still scale with HR volume
+size; the estimate is not a guarantee against OOM.
+`output_kind="labels"` also budgets the final uint8 buffer and bounded argmax
+workspace. Single-block SR selects labels on the model device; tiled SR first
+completes the shared diffusion chain, then selects labels in depth slabs (up to 1,048,576 voxels,
+or one plane when a plane is larger). LR/SR probability conversion reuses owned
+float32 model outputs.
 
 The server bounds axes to 1024, total output voxels to 512³, block counts to
 64 per axis / 4096 total, and anchors to 32. The actual tile count, including
@@ -664,6 +676,12 @@ checked before generation; memory-budget failures and PyTorch CUDA OOM return
 HTTP 413. Invalid dimensions or counts return HTTP 422.
 
 Concurrent generation requests return HTTP 503 immediately with `Retry-After: 1`.
+Separately, `create_app(max_inflight_downloads=2)` bounds retained results per
+server process, including generation and active transfers. Configure the limit
+with `run_api.py --max-inflight-downloads`; full capacity returns the same 503
+before generation. Slots are returned after completion, disconnect, cancellation,
+or preparation failure. Slow downloads retain their slots but release the GPU
+generation lock so another request can run when a result slot is available.
 `include_metrics` defaults to `false`; set it to `true` to calculate porosity and
 tortuosity and include their response headers. The GUI explicitly requests these
 metrics. GPU metrics run under the same generation lock to avoid resource races.

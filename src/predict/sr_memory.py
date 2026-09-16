@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import psutil
 import torch
 
+from src.predict.convert import label_chunk_depth
 from src.predict.memory import cuda_memory_budget, require_memory, workspace_bytes
 from src.predict.tile import parse_shape
 
@@ -15,18 +16,23 @@ class SRMemoryEstimate:
     expanded_shape: tuple[int, int, int]
     coarse_bytes: int
     accumulation_bytes: int
+    state_bytes: int
     cpu_tile_bytes: int
     model_tile_bytes: int
     output_bytes: int
     cuda_input_bytes: int
+    cpu_label_bytes: int
+    model_label_bytes: int
 
     @property
     def cpu_bytes(self) -> int:
         return (
             self.coarse_bytes
             + self.accumulation_bytes
+            + self.state_bytes
             + self.cpu_tile_bytes
             + self.output_bytes
+            + self.cpu_label_bytes
         )
 
 
@@ -40,13 +46,16 @@ def estimate_sr_memory(
     label_input=True,
     input_element_size=8,
     input_on_cuda=False,
+    output_kind="probabilities",
 ) -> SRMemoryEstimate:
     """Conservative additional allocations; caller-owned input is already resident.
 
-    SR keeps the complete HR accumulation on CPU. Its model holds just one
-    expanded tile, while interpolation also keeps a coarse-voxel halo on CPU.
+    Tiled SR keeps two global fp16 states and a circular accumulation slab on
+    CPU. Model and interpolation allocations are bounded by expanded tiles.
     """
     low_shape, shape = parse_shape(low_shape), parse_shape(shape)
+    if output_kind not in {"labels", "probabilities"}:
+        raise ValueError("output_kind must be labels or probabilities.")
     if (
         type(num_phases) is not int
         or num_phases < 1
@@ -61,6 +70,11 @@ def estimate_sr_memory(
     expanded = tuple(n + 2 * margin for n in lengths)
     tile_voxels = math.prod(expanded)
     low_voxels, high_voxels = math.prod(low_shape), math.prod(shape)
+    generation_shape = tuple(n + 2 * margin for n in shape)
+    labels = output_kind == "labels"
+    label_workspace = (
+        9 * label_chunk_depth(shape) * math.prod(shape[1:]) if labels else 0
+    )
     # Labels: CPU staging + one int64 index per voxel + fp32 phase channels.
     # Fractions: float32 staging plus validation masks and channel sums.
     validation = (num_phases + 6 * input_element_size + 8) * low_voxels
@@ -84,13 +98,27 @@ def estimate_sr_memory(
     return SRMemoryEstimate(
         expanded_shape=expanded,
         coarse_bytes=coarse,
-        accumulation_bytes=4 * (num_phases + 1) * high_voxels if tiled else 0,
-        # Interpolation, a returned tile, weighted tile and blend window.
-        cpu_tile_bytes=4 * num_phases * (interpolation + 2 * tile_voxels)
-        + 4 * math.prod(lengths),
+        state_bytes=4 * num_phases * math.prod(generation_shape) if tiled else 0,
+        accumulation_bytes=4
+        * (num_phases + 1)
+        * expanded[0]
+        * math.prod(generation_shape[1:])
+        if tiled
+        else 0,
+        # Interpolation, a returned probability tile and blend window.
+        # Single-block labels stay on the model device until converted to uint8.
+        cpu_tile_bytes=4
+        * num_phases
+        * (
+            interpolation
+            + (4 * tile_voxels if tiled else (tile_voxels if not labels else 0))
+        )
+        + 4 * (3 * num_phases + 2) * tile_voxels,
         model_tile_bytes=4 * (12 * num_phases + 4) * tile_voxels,
         # A full-block prediction is cropped into a separate contiguous output.
-        output_bytes=0 if tiled else 4 * num_phases * high_voxels,
+        output_bytes=high_voxels if labels else 4 * num_phases * high_voxels,
+        cpu_label_bytes=label_workspace if tiled else 0,
+        model_label_bytes=label_workspace if not tiled else 0,
         # Fraction validation runs on the original input device, before CPU
         # staging. Account for it even if the model uses a different device.
         cuda_input_bytes=validation if input_on_cuda and not label_input else 0,
@@ -98,8 +126,10 @@ def estimate_sr_memory(
 
 
 def check_sr_memory(estimate: SRMemoryEstimate, generator, input_device=None) -> None:
-    working = estimate.model_tile_bytes + workspace_bytes(
-        generator, estimate.expanded_shape
+    working = (
+        estimate.model_tile_bytes
+        + estimate.model_label_bytes
+        + workspace_bytes(generator, estimate.expanded_shape)
     )
     cpu_required = estimate.cpu_bytes
     shared_input_device = False

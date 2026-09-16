@@ -29,7 +29,8 @@ def phase_channels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:
         raise ValueError("phase labels must have an integer dtype.")
     if labels.numel() == 0:
         raise ValueError(f"phase labels must be in [0, {num_phases - 1}].")
-    valid = ((labels >= 0) & (labels < num_phases)).all()
+    indices = labels.to(torch.int64)
+    valid = ((indices >= 0) & (indices < num_phases)).all()
     if labels.device.type == "cuda":
         torch._assert_async(valid, "phase labels are outside num_phases.")
     elif not bool(valid):
@@ -39,7 +40,7 @@ def phase_channels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:
         device=labels.device,
         dtype=torch.float32,
     )
-    return channels.scatter_(1, labels.long().unsqueeze(1), 1.0)
+    return channels.scatter_(1, indices.unsqueeze(1), 1.0)
 
 
 def resize_phases(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:

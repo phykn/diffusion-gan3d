@@ -478,11 +478,12 @@ class TiledGenerator:
         anchor_strength: float = 1.0,
         height_origin: float = 0.0,
         height_domain: int | None = None,
+        tile_conditions=None,
     ) -> VolumeState:
         generator = self.generator
         tile_buffer = TileBuffer(
             generator.num_phases,
-            plan.tile_size,
+            tuple(min(plan.tile_size, size) for size in plan.shape),
             current.values.device.type == "cpu" and generator.device.type == "cuda",
         )
         fusion = make_fusion(
@@ -532,6 +533,7 @@ class TiledGenerator:
                     anchor_strength=anchor_strength,
                     height_origin=height_origin,
                     height_domain=height_domain,
+                    tile_conditions=tile_conditions,
                 )
                 if final_labels is None:
                     current, next_state = next_state, current
@@ -557,12 +559,13 @@ class TiledGenerator:
         anchor_strength: float = 1.0,
         height_origin: float = 0.0,
         height_domain: int | None = None,
+        tile_conditions=None,
     ) -> None:
         generator = self.generator
         if tile_buffer is None:
             tile_buffer = TileBuffer(
                 generator.num_phases,
-                plan.tile_size,
+                tuple(min(plan.tile_size, size) for size in plan.shape),
                 current.values.device.type == "cpu" and generator.device.type == "cuda",
             )
         fusion.pred_sum.zero_()
@@ -575,6 +578,8 @@ class TiledGenerator:
                 generator.device,
             )
             conditions = {}
+            if tile_conditions is not None:
+                conditions.update(tile_conditions(tile))
             if tile_anchors and tile_anchors[index] and anchor_strength > 0:
                 anchor = encode_anchors(
                     tile_anchors[index],

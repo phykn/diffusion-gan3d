@@ -1364,6 +1364,32 @@ def test_replay_keeps_measurement_and_plane_density(size, count):
     torch.testing.assert_close(
         condition.image[:, :, 2], measured.image[:, :, 2].expand(2, -1, -1, -1)
     )
-    torch.testing.assert_close(reference[:, :, 2], target.image[:, :, 2])
+    torch.testing.assert_close(reference, prediction.expand(2, -1, -1, -1, -1))
+    assert not torch.equal(reference[:, :, 2], target.image[:, :, 2])
     assert target.regions == measured.regions
     assert bank.sample(1, 1, torch.device("cpu")) is None
+
+
+def test_replay_continuity_reference_excludes_pasted_measurement_jump():
+    from src.data.slice import AnchorTripletSampler
+    from src.train.loss.connectivity import compute_transition_loss
+
+    size = 5
+    prediction = torch.empty(1, 2, size, size, size)
+    prediction[:, 0], prediction[:, 1] = -0.6, 0.6
+    image = torch.stack((torch.full((size, size), 0.8), torch.full((size, size), 0.2)))
+    measured = encode_anchors(
+        [PlaneAnchor(image, 0, 2)], 1, 2, size, torch.device("cpu"), torch.float32
+    )
+    bank = AnchorBank(capacity=1)
+    bank.add(0, prediction, measured, torch.tensor([True]))
+    condition, target, reference, _ = bank.sample(0, 1, torch.device("cpu"))
+    torch.testing.assert_close(reference, prediction)
+    torch.testing.assert_close(condition.image[:, :, 2], measured.image[:, :, 2])
+    sampler = AnchorTripletSampler(max_gap=1, windows_per_plane=1)
+    adapted = -prediction
+    real, fake = sampler.sample(adapted, reference, target)
+    assert compute_transition_loss(real, fake) == 0
+    pasted = torch.where(target.mask, target.image, reference)
+    real, fake = sampler.sample(pasted, reference, target)
+    assert compute_transition_loss(real, fake) > 0

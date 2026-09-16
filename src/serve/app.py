@@ -1,7 +1,7 @@
 import errno
 import math
 from pathlib import Path
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from typing import Annotated, Literal
 
 import torch
@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from src.anchor import PlaneAnchor
 from src.evaluate.volume import measure_volume
 from src.predict.inference import InferenceAPI
-from src.serve.response import volume_response
+from src.serve.response import DownloadResponse, volume_response
 
 FRONT_DIR = Path(__file__).resolve().parents[2] / "front" / "dist"
 MAX_SIZE = 1024
@@ -148,7 +148,11 @@ def create_app(
     weights: str | Path | None = None,
     device: str | torch.device | None = None,
     inference: InferenceAPI | None = None,
+    *,
+    max_inflight_downloads: int = 2,
 ) -> FastAPI:
+    if type(max_inflight_downloads) is not int or max_inflight_downloads < 1:
+        raise ValueError("max_inflight_downloads must be a positive integer.")
     if inference is None:
         if weights is None:
             raise ValueError("weights are required when inference is not provided.")
@@ -162,6 +166,7 @@ def create_app(
     app.add_middleware(RequestSizeLimit, limit=MAX_REQUEST_BYTES)
     app.state.inference = inference
     app.state.generate_lock = Lock()
+    app.state.download_slots = BoundedSemaphore(max_inflight_downloads)
 
     @app.get("/health")
     def health() -> dict[str, str | int]:
@@ -185,12 +190,20 @@ def create_app(
 
     @app.post("/generate", response_class=StreamingResponse)
     def generate(request: GenerateRequest) -> Response:
+        if not app.state.download_slots.acquire(blocking=False):
+            raise HTTPException(
+                status_code=503,
+                detail="download capacity is full; retry later",
+                headers={"Retry-After": "1"},
+            )
         if not app.state.generate_lock.acquire(blocking=False):
+            app.state.download_slots.release()
             raise HTTPException(
                 status_code=503,
                 detail="generation is busy; retry later",
                 headers={"Retry-After": "1"},
             )
+        response_owns_slot = False
         try:
             estimate = app.state.inference.estimate_memory(
                 blocks=request.blocks,
@@ -238,7 +251,12 @@ def create_app(
                         "X-Tortuosity-Axis": "1",
                     }
                 )
-            return volume_response(volume, request.format, headers)
+            response = DownloadResponse(
+                volume_response(volume, request.format, headers),
+                app.state.download_slots.release,
+            )
+            response_owns_slot = True
+            return response
         except (MemoryError, torch.OutOfMemoryError) as exc:
             raise HTTPException(
                 status_code=413,
@@ -253,6 +271,8 @@ def create_app(
             ) from exc
         finally:
             app.state.generate_lock.release()
+            if not response_owns_slot:
+                app.state.download_slots.release()
 
     if FRONT_DIR.is_dir():
         app.mount("/", StaticFiles(directory=FRONT_DIR, html=True), name="front")
