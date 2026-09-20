@@ -1,12 +1,10 @@
-"""Allocation estimates for generation; model workspaces remain approximate."""
-
 import math
 from dataclasses import dataclass
 
 import psutil
 import torch
 
-from src.predict.tile import parse_shape
+from src.predict.tiling.layout import parse_shape
 
 
 @dataclass(frozen=True)
@@ -19,6 +17,7 @@ class MemoryEstimate:
     fusion_bytes: int
     buffer_bytes: int
     output_bytes: int
+    base_bytes: int = 0
 
     @property
     def storage_bytes(self) -> int:
@@ -26,8 +25,9 @@ class MemoryEstimate:
 
     @property
     def total_bytes(self) -> int:
-        """Conservative tensor budget, excluding network activations/workspaces."""
-        return self.storage_bytes + self.buffer_bytes + self.output_bytes
+        return (
+            self.storage_bytes + self.buffer_bytes + self.output_bytes + self.base_bytes
+        )
 
 
 def estimate_memory(
@@ -38,12 +38,8 @@ def estimate_memory(
     margin: int = 0,
     overlap: int = 0,
     probabilities: bool = False,
+    base_shape=None,
 ) -> MemoryEstimate:
-    """Count two fp16 states, an fp32 slab, tile buffers and CPU output.
-
-    The result is a budget, not a guarantee: allocator fragmentation and
-    convolution workspaces also depend on the loaded network and device.
-    """
     shape = parse_shape(shape)
     if not isinstance(num_phases, int) or num_phases < 1:
         raise ValueError("num_phases must be a positive integer.")
@@ -78,18 +74,23 @@ def estimate_memory(
             if probabilities
             else voxels + math.prod(shape)
         ),
+        base_bytes=(12 * num_phases + 24) * math.prod(parse_shape(base_shape))
+        if base_shape is not None
+        else 0,
     )
 
 
 def workspace_bytes(generator, tile_size: int | tuple[int, int, int]) -> int:
-    """Reserve activations and convolution scratch separately from storage."""
     channels = getattr(
         getattr(generator.model, "input", None), "out_channels", generator.num_phases
     )
     # FP32 normalization, skip activations and convolution scratch coexist,
     # including when convolutions themselves run under autocast.
     voxels = tile_size**3 if isinstance(tile_size, int) else math.prod(tile_size)
-    return max(256 * 1024**2, 12 * 4 * channels * voxels)
+    profile_bytes = 0
+    if getattr(generator.model, "profile_input", None) is not None:
+        profile_bytes = 4 * (generator.num_phases + channels) * voxels
+    return max(256 * 1024**2, 12 * 4 * channels * voxels) + profile_bytes
 
 
 def cuda_memory_budget(device) -> int:
@@ -131,7 +132,7 @@ def select_storage(storage: str, estimate: MemoryEstimate, generator) -> str:
     gpu_required = working + (estimate.storage_bytes if storage == "cuda" else 0)
     if device.type == "cuda":
         require_memory(gpu_required, gpu_budget, "CUDA")
-    cpu_required = estimate.output_bytes + estimate.buffer_bytes
+    cpu_required = estimate.output_bytes + estimate.buffer_bytes + estimate.base_bytes
     if storage == "cpu":
         cpu_required += estimate.storage_bytes
     if device.type == "cpu":

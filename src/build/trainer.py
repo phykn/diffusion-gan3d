@@ -7,17 +7,11 @@ from src.build.data import (
     build_augmentation,
     build_datasets,
     build_stream,
-    resolve_height_metadata,
 )
 from src.build.model import build_diffusion, build_models
-from src.config import (
-    get_domains,
-    get_plane_groups,
-    get_schedule_steps,
-    get_sizes,
-    get_sr_sizes,
-    normalize_train_config,
-)
+from src.config.data import get_domains, get_plane_groups, get_sizes
+from src.config.train import get_schedule_steps, get_sr_sizes, normalize_train_config
+from src.data.source import infer_height_extents
 from src.storage import load_model
 from src.train.ema import build_ema
 from src.train.state import fingerprint_data
@@ -70,12 +64,13 @@ def build_trainer(
     if sr != (bank is not None):
         raise ValueError("only SR training requires a coarse bank.")
     train = cfg["train"]
-    resolve_height_metadata(cfg)
     data = cfg["data"]
     model = cfg["model"]
     generator = model["generator"]
     loss = cfg["loss"]
     conditioning = cfg["conditioning"]
+    if conditioning["height_enabled"]:
+        data["height_extents"] = infer_height_extents(data)
     anchor = conditioning.get("anchor", {})
     connectivity = loss.get("connectivity", {})
     optim = cfg["optim"]
@@ -98,6 +93,13 @@ def build_trainer(
         raise ValueError(
             "train.volume_batch_size must not exceed train.real_batch_size when "
             "anchor training is enabled."
+        )
+    if (
+        conditioning["height_enabled"]
+        and train["volume_batch_size"] > train["real_batch_size"]
+    ):
+        raise ValueError(
+            "height conditioning requires real_batch_size >= volume_batch_size."
         )
     critic_augment = build_augmentation(cfg)
     denoiser, critics, connectivity_critic = build_models(cfg)
@@ -210,6 +212,11 @@ def build_trainer(
             ),
         ),
     )
+    trainer.profile_settings = conditioning.get(
+        "spatial_profile", {"enabled": False, "num_bins": 16}
+    )
+    trainer.profile_weight = loss.get("spatial_profile_weight", 0.0)
+    trainer.profile_gradient_weight = loss.get("spatial_profile_gradient_weight", 0.0)
     trainer.cfg = cfg
     trainer.height_data = cfg["data"] if cfg["conditioning"]["height_enabled"] else None
     trainer.data_fingerprint = fingerprint_data(streams)

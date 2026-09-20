@@ -5,8 +5,8 @@ import pytest
 import tifffile
 import torch
 
-from src.config import GenerationSettings
-from src.predict.tile import TilePlan
+from src.config.generation import GenerationSettings
+from src.predict.tiling.layout import TilePlan
 
 
 def make_plan() -> TilePlan:
@@ -204,9 +204,9 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
 
     output = capsys.readouterr().out
     assert events == [
-        ("plan", 8),
+        ("plan", 1),
         ("base", 1.75, 2, 0),
-        ("scaled", 8, True, 1.75, 2),
+        ("scaled", 1, True, 1.75, 2),
     ]
     assert "Base    : generating unanchored volume..." in output
     assert "anchor planes" not in output

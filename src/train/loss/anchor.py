@@ -38,13 +38,13 @@ class SoftAnchorLoss(nn.Module):
             observed_axis_masks = condition.axis_masks
         assert observed_axis_masks is not None
         observed_mask = observed_mask & visibility
+        target = (condition.image.float() + 1.0) * 0.5
         pixel, accuracy, visible_voxels = self.compute_pixel_loss(
             logits,
-            (condition.image.float() + 1.0) * 0.5,
+            target,
             observed_mask,
         )
 
-        target = (condition.image.float() + 1.0) * 0.5
         groups = (
             observed_axis_masks,
             condition.axis_masks & ~observed_axis_masks,

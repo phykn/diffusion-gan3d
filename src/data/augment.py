@@ -9,16 +9,10 @@ from src.plane import PLANE_DIRECTIONS, PLANES, get_axis
 class CriticAugment:
     def __init__(
         self,
-        mode: bool | str = False,
-        prob: float = 1.0,
         planes: Mapping | None = None,
+        prob: float = 1.0,
         thickness_axis: str | None = None,
     ) -> None:
-        if mode is True:
-            raise ValueError("augment true is not supported; use isotropic.")
-        self.mode = None if mode is False else mode.strip().lower()
-        if self.mode not in (None, "isotropic", "anisotropic"):
-            raise ValueError("augment must be false, isotropic, or anisotropic.")
         self.prob = float(prob)
         if not math.isfinite(self.prob) or not 0 <= self.prob <= 1:
             raise ValueError("augmentation probability must be between zero and one.")
@@ -26,10 +20,6 @@ class CriticAugment:
             raise ValueError("data.thickness_axis must be x, y, z or null.")
         self.plane_transforms = None
         if planes is not None:
-            if mode is not False:
-                raise ValueError(
-                    "use augmentation.planes instead of augmentation.mode, not both."
-                )
             if not isinstance(planes, Mapping) or not planes:
                 raise ValueError("augmentation.planes must be a non-empty mapping.")
             self.plane_transforms = {}
@@ -69,10 +59,6 @@ class CriticAugment:
                 if rotate:
                     allowed = set(range(8)) if flips else set(range(4))
                 self.plane_transforms[get_axis(plane)] = tuple(sorted(allowed))
-        elif thickness_axis is not None and self.mode is not None:
-            raise ValueError(
-                "declare augmentation.planes when data.thickness_axis is set."
-            )
         self._index_cache: dict[tuple[torch.device, int, int], torch.Tensor] = {}
 
     def apply_together(
@@ -88,85 +74,61 @@ class CriticAugment:
             for tensor in tensors[1:]
         ):
             raise ValueError("augmentation inputs must have matching shapes.")
-        if (
-            (self.mode is None and self.plane_transforms is None)
-            or self.prob <= 0.0
-            or first.shape[0] == 0
-        ):
+        if self.plane_transforms is None or self.prob <= 0.0 or first.shape[0] == 0:
             return tensors
 
-        if self.plane_transforms is None:
-            transforms = self.sample_transforms(
-                first.shape[0],
-                device=first.device,
-                square=first.shape[-2] == first.shape[-1],
-            )
-        else:
-            if plane is None:
-                raise ValueError("plane is required for plane-specific augmentation.")
-            axes = (
-                plane.to(device=first.device)
-                if isinstance(plane, torch.Tensor)
-                else torch.full((first.shape[0],), get_axis(plane), device=first.device)
-            )
-            if axes.shape != (first.shape[0],) or axes.dtype not in (
-                torch.int32,
-                torch.int64,
-            ):
-                raise ValueError(
-                    "plane axes must be an integer vector matching the batch."
-                )
-            transforms = torch.zeros(
-                first.shape[0], device=first.device, dtype=torch.long
-            )
-            valid = torch.zeros_like(axes, dtype=torch.bool)
-            for axis in self.plane_transforms:
-                valid |= axes == axis
-            if axes.device.type == "cuda":
-                torch._assert_async(
-                    valid.all(), "missing augmentation policy for plane axis"
-                )
-            elif not bool(valid.all()):
-                raise ValueError("missing augmentation policy for plane axis")
-            for axis in self.plane_transforms:
-                allowed = self.plane_transforms[axis]
-                if first.shape[-2] != first.shape[-1]:
-                    allowed = tuple(index for index in allowed if index % 2 == 0)
-                mask = axes == axis
-                count = first.shape[0]
-                choices = torch.tensor(
-                    tuple(index for index in allowed if index != 0) or (0,),
-                    device=first.device,
-                )
-                selected = choices[
-                    torch.randint(len(choices), (count,), device=first.device)
-                ]
-                selected.masked_fill_(
-                    torch.rand(count, device=first.device) >= self.prob, 0
-                )
-                transforms = torch.where(mask, selected, transforms)
+        transforms = self.sample_transforms(
+            first.shape[0],
+            first.device,
+            plane,
+            square=first.shape[-2] == first.shape[-1],
+        )
         return tuple(self.apply_transforms(tensor, transforms) for tensor in tensors)
 
     def sample_transforms(
         self,
         batch: int,
         device: torch.device,
+        plane: str | int | torch.Tensor | None,
         square: bool = True,
     ) -> torch.Tensor:
-        if self.mode is None:
+        if self.plane_transforms is None:
             return torch.zeros(batch, device=device, dtype=torch.long)
-        if self.mode == "anisotropic":
-            selected = torch.randint(2, (batch,), device=device) * 4
-        elif not square:
-            selected = torch.randint(4, (batch,), device=device) * 2
-        else:
-            selected = torch.randint(8, (batch,), device=device)
-
-        selected.masked_fill_(
-            torch.rand(batch, device=device) >= self.prob,
-            0,
+        if plane is None:
+            raise ValueError("plane is required for plane-specific augmentation.")
+        axes = (
+            plane.to(device=device)
+            if isinstance(plane, torch.Tensor)
+            else torch.full((batch,), get_axis(plane), device=device)
         )
-        return selected
+        if axes.shape != (batch,) or axes.dtype not in (
+            torch.int32,
+            torch.int64,
+        ):
+            raise ValueError("plane axes must be an integer vector matching the batch.")
+        transforms = torch.zeros(batch, device=device, dtype=torch.long)
+        valid = torch.zeros_like(axes, dtype=torch.bool)
+        for axis in self.plane_transforms:
+            valid |= axes == axis
+        if axes.device.type == "cuda":
+            torch._assert_async(
+                valid.all(), "missing augmentation policy for plane axis"
+            )
+        elif not bool(valid.all()):
+            raise ValueError("missing augmentation policy for plane axis")
+        for axis in self.plane_transforms:
+            allowed = self.plane_transforms[axis]
+            if not square:
+                allowed = tuple(index for index in allowed if index % 2 == 0)
+            mask = axes == axis
+            choices = torch.tensor(
+                tuple(index for index in allowed if index != 0) or (0,),
+                device=device,
+            )
+            selected = choices[torch.randint(len(choices), (batch,), device=device)]
+            selected.masked_fill_(torch.rand(batch, device=device) >= self.prob, 0)
+            transforms = torch.where(mask, selected, transforms)
+        return transforms
 
     def apply_transforms(
         self,

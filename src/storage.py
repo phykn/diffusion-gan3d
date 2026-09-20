@@ -13,28 +13,50 @@ def load_volume(path: str | Path) -> torch.Tensor:
     return torch.from_numpy(np.array(values, copy=True)).to(torch.long)
 
 
-def save_volume(volume: torch.Tensor, path: str | Path) -> None:
+def save_volume(volume: torch.Tensor, path: str | Path) -> Path:
+    if (
+        volume.ndim != 3
+        or volume.numel() == 0
+        or volume.dtype.is_floating_point
+        or volume.dtype.is_complex
+    ):
+        raise ValueError("volume must contain 3D integer phase labels.")
+    if volume.dtype not in (torch.uint8, torch.bool):
+        for slab in volume:
+            labels = slab.to(torch.int64)
+            if labels.min().item() < 0 or labels.max().item() > 255:
+                raise ValueError(
+                    "phase labels must be in [0, 255] for uint8 TIFF output."
+                )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     values = volume.detach().to(device="cpu", dtype=torch.uint8)
     tifffile.imwrite(path, values.numpy())
+    return path
 
 
 def load_probabilities(path: str | Path) -> torch.Tensor:
     probs = torch.load(path, map_location="cpu", weights_only=True)
+    return validate_probabilities(probs)
+
+
+def validate_probabilities(probs: torch.Tensor) -> torch.Tensor:
     if (
         not isinstance(probs, torch.Tensor)
         or probs.ndim != 4
+        or probs.numel() == 0
         or not probs.dtype.is_floating_point
     ):
         raise ValueError("fractional volume must be a C,D,H,W floating tensor.")
     return probs
 
 
-def save_probabilities(probs: torch.Tensor, path: str | Path) -> None:
+def save_probabilities(probs: torch.Tensor, path: str | Path) -> Path:
+    probs = validate_probabilities(probs)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(probs.detach().float().cpu(), path)
+    return path
 
 
 def save_model(path: str | Path, model: nn.Module) -> Path:

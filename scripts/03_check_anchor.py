@@ -1,4 +1,3 @@
-import argparse
 import sys
 from pathlib import Path
 
@@ -10,7 +9,8 @@ from matplotlib.colors import ListedColormap
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.diagnostic import (
+from scripts.common.cli import check_parser, prepare_check, save_preview
+from scripts.common.diagnostic import (
     format_percent,
     format_ratio,
     parse_unit_interval,
@@ -20,23 +20,26 @@ from scripts.diagnostic import (
 )
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
-from src.config import load_generation_settings
-from src.evaluate import (
+from src.config.generation import load_generation_settings
+from src.evaluate.anchor import (
     SliceSmoothness,
     measure_distance_divergence,
     measure_slice_smoothness,
-    voxel_accuracy,
 )
+from src.evaluate.label import voxel_accuracy
+from src.predict.random import seeded_rng
 from src.storage import save_volume
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = check_parser(
+        __file__, "Inspect how generated planes constrain a second LR sample."
+    )
     parser.add_argument(
         "--weight",
         type=Path,
         required=True,
-        help="generator weight to load",
+        help="LR generator.pt or its run directory",
     )
     parser.add_argument(
         "--domain",
@@ -55,7 +58,7 @@ def main() -> None:
         type=int,
         choices=(0, 1, 2),
         default=0,
-        help="anchor plane axis (default: 0)",
+        help="anchor plane: 0=xy, 1=xz, 2=yz",
     )
     parser.add_argument(
         "--count",
@@ -76,7 +79,7 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=Path,
-        help="optional output path for the generated TIFF volume",
+        help="TIFF path; default: a new directory under run/checks",
     )
     parser.add_argument(
         "--napari",
@@ -88,7 +91,13 @@ def main() -> None:
         action="store_true",
         help="skip interactive visualization",
     )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        help="Default: CUDA when available, otherwise CPU.",
+    )
     args = parser.parse_args()
+    args = prepare_check(args, __file__)
     if args.count < 0:
         parser.error("--count must be non-negative.")
     settings = load_generation_settings()
@@ -99,63 +108,66 @@ def main() -> None:
     )
     anchor_count = args.count if anchor_strength > 0.0 else 0
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     weight = args.weight
     print(f"\nWeights : {Path(weight).resolve()}")
 
     generator = load_generator(weight, device=device)
     guidance = settings.guidance if args.guidance is None else args.guidance
+    args.guidance, args.anchor_strength = guidance, anchor_strength
     if anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
-    torch.manual_seed(args.seed)
-    print("Generating reference...", flush=True)
-    target = generator.generate(
-        anchors=(),
-        anchor_strength=0.0,
-        guidance=guidance,
-        domain=args.domain,
-        margin=generator.default_margin,
-    )
-    target_slices = get_slices(target, args.axis)
-    indices = select_indices(target_slices.shape[0], anchor_count)
-    anchors = tuple(
-        PlaneAnchor(image=target_slices[index], axis=args.axis, index=index)
-        for index in indices
-    )
-    print_selection(
-        shape=tuple(target.shape),
-        device=device,
-        axis=args.axis,
-        indices=indices,
-    )
-    if indices:
-        print(f"Guidance : strength {anchor_strength:.2f}")
-    print("Generating conditioned sample...", flush=True)
+    with seeded_rng(args.seed, device):
+        print("Generating reference...", flush=True)
+        target = generator.generate(
+            anchors=(),
+            anchor_strength=0.0,
+            guidance=guidance,
+            domain=args.domain,
+            margin=generator.default_margin,
+        )
+        target_slices = get_slices(target, args.axis)
+        indices = select_indices(target_slices.shape[0], anchor_count)
+        anchors = tuple(
+            PlaneAnchor(image=target_slices[index], axis=args.axis, index=index)
+            for index in indices
+        )
+        print_selection(
+            shape=tuple(target.shape),
+            device=device,
+            axis=args.axis,
+            indices=indices,
+        )
+        if indices:
+            print(f"Guidance : strength {anchor_strength:.2f}")
+        print("Generating conditioned sample...", flush=True)
 
-    cpu_rng = torch.random.get_rng_state()
-    cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
+        cpu_rng = torch.random.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
 
-    gen = generator.generate(
-        anchors=anchors,
-        anchor_strength=anchor_strength,
-        guidance=guidance,
-        domain=args.domain,
-        margin=generator.default_margin,
-    )
-    torch.random.set_rng_state(cpu_rng)
-    if cuda_rng is not None:
-        torch.cuda.set_rng_state_all(cuda_rng)
-    print("Generating same-RNG baseline...", flush=True)
-    baseline = generator.generate(
-        anchors=(),
-        anchor_strength=0.0,
-        guidance=guidance,
-        domain=args.domain,
-        margin=generator.default_margin,
-    )
-    if args.out is not None:
-        save_volume(gen, args.out)
-        print(f"Saved   : {args.out.resolve()}", flush=True)
+        gen = generator.generate(
+            anchors=anchors,
+            anchor_strength=anchor_strength,
+            guidance=guidance,
+            domain=args.domain,
+            margin=generator.default_margin,
+        )
+        torch.random.set_rng_state(cpu_rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
+        print("Generating same-RNG baseline...", flush=True)
+        baseline = generator.generate(
+            anchors=(),
+            anchor_strength=0.0,
+            guidance=guidance,
+            domain=args.domain,
+            margin=generator.default_margin,
+        )
+    save_volume(gen, args.out)
+    print(f"Saved   : {args.out.resolve()}", flush=True)
+    save_preview(gen, args, generator.num_phases)
     gen_slices = get_slices(gen, args.axis)
     if indices:
         selected = torch.tensor(indices, dtype=torch.long)

@@ -147,7 +147,6 @@ def _slice_reversal_rate(vol: torch.Tensor, axis: int) -> float:
 
 @torch.no_grad()
 def anchor_boundary_metrics(prediction, condition) -> dict[str, torch.Tensor]:
-    """Measured-plane neighbor agreement and excess over measured in-plane variation."""
     total = prediction.new_zeros(())
     excess = prediction.new_zeros(())
     count = prediction.new_zeros(())

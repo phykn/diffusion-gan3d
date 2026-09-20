@@ -21,6 +21,6 @@ def tortuosity(
         if device is not None
         else ("cuda" if torch.cuda.is_available() else "cpu")
     )
-    solver = tau.Solver(conductive, device=selected_device.type)
+    solver = tau.Solver(conductive, device=str(selected_device))
     value = solver.solve(verbose=False, conv_crit=convergence)
     return float(np.asarray(value).reshape(-1)[0])

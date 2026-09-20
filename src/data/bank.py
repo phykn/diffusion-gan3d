@@ -5,7 +5,7 @@ import torch
 
 def validate_bank(
     bank: dict[int, torch.Tensor], domains: dict, size: int, phases: int
-) -> None:
+) -> dict[int, torch.Tensor]:
     if set(bank) != set(domains):
         raise ValueError("LR bank domains must match the training domains.")
     for domain, volumes in bank.items():
@@ -27,6 +27,7 @@ def validate_bank(
             )
         ):
             raise ValueError("LR bank contains invalid phase fractions.")
+    return bank
 
 
 def load_bank(path: str | Path) -> dict:

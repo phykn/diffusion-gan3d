@@ -14,6 +14,10 @@ def embed_domain(
     domain: torch.Tensor,
     dtype: torch.dtype,
 ) -> torch.Tensor:
+    if domain.ndim != 1:
+        raise ValueError("domain must have shape [B].")
+    if domain.dtype == torch.bool or domain.is_floating_point() or domain.is_complex():
+        raise ValueError("domain must contain integer IDs.")
     domain = domain.to(device=embedding.weight.device, dtype=torch.long)
     valid = ((domain >= NULL_DOMAIN) & (domain < embedding.num_embeddings)).all()
     if domain.device.type == "cuda":

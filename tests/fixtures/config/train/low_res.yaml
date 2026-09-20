@@ -1,0 +1,67 @@
+stage: low_res
+
+nickname: ''
+
+data:
+  domains:
+    0:
+      xy: [data]
+      xz: [data]
+      yz: [data]
+  num_phases: 2
+  thickness_axis: null
+  crop_size: 128
+  lo_res_size: 64
+  hi_res_size: 128
+
+model:
+  generator:
+    channels: [16, 32, 64, 64]
+  critic:
+    plane_groups: [[xy, xz, yz]]
+    channels: [32, 64, 128, 256]
+  diffusion:
+    num_steps: 10
+
+augmentation:
+  probability: 0.5
+  planes:
+    xy:
+      flip_axes: [x, y]
+      rotate_90: true
+    xz:
+      flip_axes: [x, z]
+      rotate_90: true
+    yz:
+      flip_axes: [y, z]
+      rotate_90: true
+
+conditioning:
+  anchor:
+    probability: 0.8
+    ramp_steps: 500
+
+loss:
+  r1_weight: 0.5
+  r2_weight: 0.1
+  r1_every_steps: 8
+  anchor_pixel_weight: 0.05
+  volume_fraction_weight: 1.0
+  connectivity:
+    max_slice_gap: 8
+    adversarial_weight: 0.25
+    normal_transition_weight: 0.1
+    ramp_steps: 5000
+
+optim:
+  generator_lr: 0.0001
+  critic_lr: 5.0e-05
+
+train:
+  total_steps: 10000
+  real_batch_size: 8
+  volume_batch_size: 1
+  slice_pairs_per_plane: 16
+  weights_every_steps: 25
+  archive_every_steps: 1250
+  structure_every_steps: 25

@@ -427,6 +427,10 @@ class Denoiser3DTest(unittest.TestCase):
             anchor_image: torch.Tensor | None = None,
             anchor_mask: torch.Tensor | None = None,
             height: torch.Tensor | None = None,
+            profile: torch.Tensor | None = None,
+            profile_present: torch.Tensor | None = None,
+            coarse: torch.Tensor | None = None,
+            corruption_level: torch.Tensor | None = None,
         ) -> torch.Tensor:
             calls.append((x_current, timestep, style, domain, vf, vf_present))
             return original(
@@ -439,6 +443,10 @@ class Denoiser3DTest(unittest.TestCase):
                 anchor_image=anchor_image,
                 anchor_mask=anchor_mask,
                 height=height,
+                profile=profile,
+                profile_present=profile_present,
+                coarse=coarse,
+                corruption_level=corruption_level,
             )
 
         model.compute_logits = traced

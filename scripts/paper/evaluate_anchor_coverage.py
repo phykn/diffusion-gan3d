@@ -18,8 +18,8 @@ from provenance import build_provenance, file_record, validate_output_paths
 
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
-from src.config import load_generation_settings
-from src.evaluate import voxel_accuracy
+from src.config.generation import load_generation_settings
+from src.evaluate.label import voxel_accuracy
 
 COUNTS = (0, 1, 2, 4, 8, 16, 32, 64, 128)
 AXIS = 0

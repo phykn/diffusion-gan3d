@@ -1,0 +1,64 @@
+stage: sr
+
+nickname: ''
+
+data:
+  domains:
+    0:
+      xy: [data]
+      xz: [data]
+      yz: [data]
+  num_phases: 2
+  thickness_axis: null
+  crop_size: 128
+  lo_res_size: 64
+  hi_res_size: 128
+
+source:
+  weights: tests/fixtures/generator.pt
+
+model:
+  generator:
+    channels: [16, 32, 64, 64]
+  critic:
+    plane_groups: [[xy, xz, yz]]
+    channels: [32, 64, 128]
+  diffusion:
+    num_steps: 10
+
+augmentation:
+  probability: 0.5
+  planes:
+    xy:
+      flip_axes: [x, y]
+      rotate_90: true
+    xz:
+      flip_axes: [x, z]
+      rotate_90: true
+    yz:
+      flip_axes: [y, z]
+      rotate_90: true
+
+loss:
+  r1_weight: 0.5
+  r2_weight: 0.1
+  r1_every_steps: 8
+  downsample_consistency_weight: 10.0
+
+optim:
+  generator_lr: 0.0001
+  critic_lr: 5.0e-05
+
+lr_bank:
+  samples_per_domain: 8
+  guidance: 0.9
+  refresh_every_steps: 500
+
+train:
+  total_steps: 10000
+  volume_batch_size: 1
+  real_batch_size: 8
+  slice_pairs_per_plane: 8
+  weights_every_steps: 50
+  archive_every_steps: 1250
+  structure_every_steps: 50

@@ -1,5 +1,7 @@
 # Anchor-Conditioned Diffusion for Scalable 3D Microstructure Synthesis
 
+수동 확인은 [웨이트만 지정하는 실행표](docs/checks.md)를 참고하세요. `scripts/01~06`이 기본 진입점이며 결과는 `run/checks/`에 자동 저장됩니다.
+
 Generate natural 3D microstructures from 2D sections. The model supports:
 
 - unconditional and domain-conditioned generation
@@ -32,7 +34,6 @@ config/
   train/low_res.yaml    # stage-1 model and training
   train/sr.yaml         # SR model and training
   gen.yaml              # stage-1 inference defaults
-  simul.yaml            # synthetic data preparation
 ```
 
 Both training presets select `data: config/data/default.yaml`. To use another
@@ -43,7 +44,7 @@ The data YAML contains the data fields directly, without an outer `data:` key.
 
 Training presets show the settings normally adjusted for a dataset or experiment.
 Advanced options may be omitted: `TRAIN_DEFAULTS` and `STAGE_DEFAULTS` in
-[`src/config.py`](src/config.py) define their configuration defaults in one place.
+[`src/config/defaults.py`](src/config/defaults.py) define their configuration defaults in one place.
 Loading rejects unknown and obsolete keys with their full configuration path,
 then resolves defaults without overwriting explicit values. Each run saves the resolved settings, including omitted options;
 reloading that snapshot retains its values even if the code defaults later change.
@@ -158,9 +159,9 @@ in all planes. Data paths select folders nonrecursively, so additional images
 placed directly in `data/` will also enter training.
 
 On Windows, launch `run_train_1st.bat` using the project `.venv`. After stage 1
-has saved weights, launch `run_train_2nd.bat` and enter that run folder or its
-`generator.pt` path. Both batch files also forward CLI arguments, including
-`--resume`; with arguments, the second-stage launcher skips the path prompt.
+has saved weights, set `source.weights` in `config/train/sr.yaml` to that run
+folder or its `generator.pt` path, then launch `run_train_2nd.bat`. Both batch
+files also forward CLI arguments, including `--resume` and `--base-weights`.
 
 Name the training planes `xy`, `xz`, and `yz`:
 
@@ -245,8 +246,10 @@ planes containing it, and disables connectivity reversal along the thickness nor
 Set `conditioning.height_enabled: true` in both stages for nonuniform thickness.
 The loader retains crop origins and derives `data.height_extents` per domain from
 full-thickness side images (the row or column containing the thickness direction).
-Side images within a domain must have the same extent and pixel scale, and must
-already cover the full thickness. Resolved extents are saved with the model.
+Each side image supplies its own full height and crop origin; all images must share
+the same top-to-bottom interpretation. Heights may differ. The saved domain default
+is the unique source height, or null when it is ambiguous. In that case inference
+requires height_extent (--height-extent in CLI), in original image pixels.
 `height_origin` in Python/HTTP and `--height-origin` in the CLI specify the output
 origin in source-image pixels. LR, SR and tiles use the same cell-center coordinates.
 Side-plane critics receive aligned coordinate fields; sections normal to the
@@ -355,7 +358,7 @@ saved configuration. It does not change the diffusion schedule. R2 regularizes
 detached fake inputs during critic updates, with the same local/global weighting
 as R1. It also applies to the LR connectivity critic. SR uses these same
 timestep-pair losses and R1/R2 regularization. Short comparisons do not establish a better
-default; `index` and R1 alone remain the baseline.
+default. The current presets use `index` time embeddings and enable both R1 and R2; omitted R2 still defaults to zero.
 
 LR still exports `generator.pt` (EMA) and the existing critic weight files. It
 additionally saves an atomic `checkpoints/last.pt` containing the online model,
@@ -384,9 +387,22 @@ fractional-occupancy preprocessing and conditioning contract.
 
 ### Stage 2: super-resolution
 
-```bash
-python run_train_2nd.py --base-weights run/<lr-run>/generator.pt --device cuda
+Set the frozen stage-1 model in `config/train/sr.yaml`:
+
+```yaml
+source:
+  weights: run/<lr-run>/generator.pt  # the run folder is also accepted
 ```
+
+```bash
+python run_train_2nd.py --device cuda
+```
+
+Configured relative weight paths resolve from the project root, regardless of
+the working directory. `--base-weights` overrides `source.weights` for a new run;
+relative CLI paths resolve from the working directory. The selected absolute
+weight path and source hashes are saved with the run. A missing or empty source
+is rejected before creating a run. Resume uses the source saved in its checkpoint.
 
 The command reads [`config/train/sr.yaml`](config/train/sr.yaml) and the data preset
 it selects; `--config` and `--data` can select alternatives. It checks the chosen
@@ -412,21 +428,59 @@ Each block now runs a complete reverse diffusion chain. This costs more than the
 previous single-forward SR CNN. Train new SR weights for the diffusion architecture;
 legacy SR models are not retained or converted.
 
-SR run artifacts:
+Both stages use the same run layout, rooted at the project directory. The optional
+top-level `nickname` is appended after the stage:
 
-```text
-run/<sr-run>/
-  config.yaml          # effective settings and LR source provenance
-  lr_bank.pt           # initial generated LR conditions
-  lr_bank_step_*.pt    # immutable refreshed banks; retain the checkpoint's bank
-  metrics.jsonl        # diffusion losses, coarse agreement and diagnostics
-  checkpoints/last.pt  # model, EMA, critics, optimizers and scaler
-  weights/model.pt     # self-contained EMA inference weights and configuration
+```yaml
+stage: low_res  # sr for stage 2
+nickname: experiment_a
+data: config/data/default.yaml
 ```
 
+This produces `run/MMDDHHMM_low_res_experiment_a/` or
+`run/MMDDHHMM_sr_experiment_a/`. Omit `nickname`, leave it empty, or use `null` for
+`run/MMDDHHMM_low_res/` and `run/MMDDHHMM_sr/`. Surrounding whitespace is trimmed;
+path separators and Windows filename characters are rejected. Collisions add a
+sequence before the stage, such as `MMDDHHMM_02_sr_experiment_a`. An explicit
+`--run-dir` is used exactly as supplied and must not already exist. Existing runs
+are not renamed; resumed runs retain their saved nickname.
+
+```text
+run/<timestamp>_<stage>[_<nickname>]/
+  train.yaml                   # resolved data and training settings
+  data_manifest.json           # source images, geometry, hashes and holdouts
+  generator.pt                 # EMA inference weights
+  critic_<group>.pt             # one weight file per critic group (and SR domain)
+  metrics.jsonl                # per-step losses and diagnostics
+  tensorboard/                 # the same scalar tags in both stages
+  lr_bank/step_*.pt            # SR only: initial bank (step 0) and refreshes
+  checkpoints/last.pt          # resumable model, EMA, optimizers and scaler
+  checkpoints/step_*/          # archived generator and critic inference weights
+```
+
+`train.weights_every_steps` saves latest inference weights and `checkpoints/last.pt`;
+`train.archive_every_steps` stores numbered inference snapshots (`null` disables
+archives). Both stages save latest weights and resumable state on normal completion.
+On interruption they export current weights without replacing the last completed
+training checkpoint. Both checkpoint writers use atomic replacement.
+
+LR additionally exports `critic_c.pt`. SR stores immutable banks under `lr_bank/`,
+starting with `step_00000000.pt` and adding `step_XXXXXXXX.pt` at each refresh.
+Retain the bank referenced by each checkpoint, including references to prior runs
+when resuming. Existing run files are not moved.
+SR's `generator.pt` embeds its configuration and artifact-kind tag; LR's
+`generator.pt` uses the adjacent `train.yaml`. The two model formats remain distinct.
+Both inference APIs accept a run folder, an archived step folder, or a generator file.
+
+Both training CLIs delegate setup to `src/train/run/low_res.py` and
+`src/train/run/sr.py`. The shared loop in `src/train/run/loop.py` writes resolved settings,
+the data manifest, JSONL metrics and TensorBoard events, and manages save schedules
+and interruption. SR supplies its bank refresh before each scheduled training step.
+
 `--bank-size` controls samples per domain. `lr_bank.refresh_every_steps` defaults
-to 1000; each refresh replaces one sample per domain using fresh noise from the
-same frozen LR weights. Set it to 0 to disable refresh. Source weight and
+to 1000 when omitted (the current SR preset uses 500); each refresh replaces one
+sample per domain using fresh noise from the same frozen LR weights. Set it to 0
+to disable refresh. Source weight and
 configuration hashes are checked before refresh. Each refreshed bank has a
 separate filename, so an earlier
 checkpoint still references its original bank.
@@ -451,8 +505,8 @@ and treats `--steps` as the total target. Keep the source images unchanged too.
 Optimizer progress is restored while data and noise are sampled anew.
 
 Each run saves its resolved data fields and training settings, rather than a
-reference to an editable data preset: stage 1 retains `train.yaml` beside its
-weights; SR uses `config.yaml` and embeds settings in its checkpoints. Resume
+reference to an editable data preset: both stages save `train.yaml` beside their
+weights and embed resolved settings in their training checkpoints. Resume
 rejects `--config`, `--data` and `--bank-size`; only `--steps` changes the target.
 Both stages require explicit data selection and current configuration keys.
 
@@ -490,7 +544,7 @@ increases the number of voxels representing the same field of view:
 ```python
 from src.api import SuperResolutionAPI
 
-sr = SuperResolutionAPI("run/<sr-run>/weights/model.pt", device="cuda")
+sr = SuperResolutionAPI("run/<sr-run>/generator.pt", device="cuda")
 high = sr.super_resolve(direct, seed=0)
 # Tile size, overlap and margin are HR voxels; tiles share one diffusion chain.
 high = sr.super_resolve(scaled, seed=0, tile_size=128, overlap=16)
@@ -516,15 +570,74 @@ for individual HR tiles. At the outer boundary coarse context is replicated.
 When supplying a coarse volume that includes additional context below the desired
 output, its origin must likewise include that negative context offset.
 
-SR does not impose exact HR anchors or accept VF conditions; those belong to
-stage 1. Prefer fractional LR `.pt` input over a discretized LR TIFF.
+SR does not accept plane anchors or VF as model conditions; those belong to
+stage 1. Its sampler can preserve an existing HR subvolume using `base` and
+`base_offset`. Prefer fractional LR `.pt` input over a discretized LR TIFF.
 
 CLI generation saves the HR TIFF, its LR TIFF and a JSON resolution record:
 
 ```bash
-python run_predict.py --weights run/<lr-run>/generator.pt --sr-weights run/<sr-run>/weights/model.pt --output run/predictions/high.tiff --device cuda
-python run_predict.py --input run/predictions/high_lr.tiff --sr-weights run/<sr-run>/weights/model.pt --output run/predictions/another.tiff --device cuda
+python scripts/06_check_hr.py --weight run/<sr-run> --no-view
+python scripts/06_check_hr.py --weight run/<sr-run> --input run/checks/<result>/lr_probs.pt --no-view
 ```
+
+Extent growth and conditioning combinations are available through the Python API
+and the numbered inspection scripts:
+
+To inspect a completed HR model interactively, run
+`python scripts/06_check_hr.py`. It selects the newest SR export directly in
+`run/` and uses that export's saved LR source. It saves `lr.tiff`, `lr_probs.pt`,
+`hr.tiff`, `comparison.png` (LR / nearest baseline / HR in xy, xz, yz), and
+`report.json` under a new `run/checks/<time>_06_check_hr/` directory. The default opens the
+comparison figure; `--napari` opens spatially aligned LR/HR 3D layers instead.
+Use `--no-view` for saving only. The occupancy comparison is a coarse-consistency
+diagnostic, not a reconstruction score against measured 3D truth.
+
+```bash
+python scripts/06_check_hr.py
+python scripts/06_check_hr.py --weight run/<sr-run> --napari
+python scripts/06_check_hr.py --weight run/<sr-run> --input run/predictions/low_lr_probs.pt --no-view
+```
+
+| Python API path | Status | Arguments |
+|---|---|---|
+| LR: none / VF / plane anchors / anchors + VF | Implemented | `vf`, `anchors` |
+| LR directly at larger extent, with the same four conditions | Implemented | `shape=(D, H, W)` |
+| Existing LR → larger LR, including repeated extensions | Implemented | `base`, `shape`, `base_offset` |
+| Existing LR + additional anchors + VF → larger LR | Implemented | Combine the preceding controls |
+| Single or extended LR → HR of the same field of view | Implemented | `sr.super_resolve(low, tile_size=...)` |
+| Existing HR → larger field of view, preserving old HR | Implemented | `extend_hr(lr, sr, base, shape)` |
+| LR extension → HR → further HR extension, repeatedly | Implemented | Reuse the prior HR and its saved LR fractions |
+| SR alone synthesizes a larger field without an expanded coarse volume | Not supported | Extend LR first, then refine |
+| Plane anchors / VF directly into the SR network | Not supported | Apply them during LR generation |
+
+LR `base` accepts arbitrary D,H,W label volumes or C,D,H,W fractions. By default
+it guides the reverse chain and may change. `preserve_base=True`
+fixes the known region throughout sampling; contradictory overlapping anchors
+are rejected. Additional anchors are still learned conditions, not exact output
+constraints. Fully known tiles skip denoiser forwards; boundary tiles still run
+to provide context. Both paths retain the synchronized global diffusion chain.
+
+HR extension uses `from src.api import extend_hr`. It returns `(lr_fractions, hr)`:
+`extend_hr(lr, sr, old_hr, final_hr_shape, low=old_lr, base_offset=(0, 0, 0))`.
+The offset and output shape are HR voxels; extra anchors use the final LR grid.
+Extent growth requires an integer SR ratio and aligned HR sizes/offsets. Omit
+`low` to derive fractional coarse conditions by area-averaging the HR phase
+channels. Supplying original LR fractions avoids that approximation. Existing
+HR labels remain exact; fractional inputs pass through the sampler's fp16 state.
+Height-conditioned extension also requires `base_height_origin` consistent with
+the offset and final `height_origin` (both in source-image pixels).
+
+```bash
+# Exercise the matrix with tiny untrained networks, or supply trained weights.
+python scripts/experiments/prediction_combinations.py --smoke
+python scripts/experiments/prediction_combinations.py --lr-weights run/<lr-run> --sr-weights run/<sr-run> --device cuda --anchor-image data/crop.png
+```
+
+The checker saves each stage as TIFF, LR fractions as `.pt`, center-slice PNGs,
+and a `report.json` with shapes, phase fractions and preserved-label checks.
+Without `--anchor-image` it uses a synthetic phase pattern. The smoke option
+checks execution and preservation, not trained generation quality.
 
 Changing `hi_res_size` in a data preset does not convert an existing trained SR model
 to a different scale. Train weights for the intended scale and original field of
@@ -535,56 +648,74 @@ without it, generated sizes are reported in voxels/source pixels.
 ## Code layout
 
 ```text
+frontend/            Vue UI; npm run dev/build/test
+backend/
+  run.py             HTTP server entry point
+  config.yaml        request, output and download limits
+  src/               HTTP schemas, middleware, routes and responses
+simul/
+  run.py             simulation entry point
+  config.yaml        default synthetic geometry and export settings
+  config_height.yaml height-varying geometry preset
+  src/               synthetic geometry and export
 src/
-  config.py          YAML, domain and resolution contracts
+  config/            YAML I/O, defaults, schemas and resolved settings
   build/             model, data-loader and trainer assembly
   model/             neural networks and diffusion equations
-  data/              datasets, loaders, LR banks, slice sampling and augmentation
+  data/              image sources, datasets, loaders, LR banks and augmentation
   prepare/           shared phase conversion and resolution transforms
   train/             stage-1 and SR training, losses and EMA
   predict/           generation, volume extension and SR inference
-  serve/             HTTP application and request/response handling
   evaluate/          morphology, connectivity and transport measurements
-  simul/             synthetic material simulation
   storage.py         volume and model artifact I/O
-  api/               stable public Python exports
+  api.py             stable public Python exports
 ```
 
-The structure follows the shared `D:/code/guide.md`, linked by `AGENTS.md`.
+Model code follows the shared `D:/code/guide.md`, linked by `AGENTS.md`.
+This project keeps the web UI, HTTP server and simulation as root-level packages.
+`backend/run.py` and `simul/run.py` own their command-line entry points.
+The frontend keeps HTTP encoding in `api.js` and request state in `use-generation.js`.
 Test and lint settings are kept in `pyproject.toml`.
 Model factories live in `build/model.py`; loading the stage-1 inference generator
 lives in `build/predict.py`. Training assembly lives in `build/trainer.py` and
 `build/sr.py`. Import these owner modules directly: `build/__init__.py` does not
 re-export them, so importing the public inference API does not load training.
 
-`train/trainer.py` owns both stages' diffusion updates, while `train/run.py` owns
-the stage-1 loop, TensorBoard records and periodic weights. `train/sr.py` owns
-coarse corruption, SR training state and inference exports; `config.py` owns configuration validation.
-`train/sr_run.py` owns frozen LR bank preparation, resume checks, the SR loop and
-run artifacts; `run_train_2nd.py` parses CLI arguments.
-Stage-1 step counts and save intervals must be positive integers; omit
+`train/trainer.py` owns both stages' diffusion updates. `train/batch.py` defines
+step inputs and results; `train/metrics.py` materializes and records diagnostics.
+`train/run/loop.py` owns the shared loop and save schedule; `low_res.py` and `sr.py`
+in the same folder handle stage setup and resume. `train/run/bank.py` creates and
+refreshes immutable LR bank snapshots. `train/sr.py` owns coarse corruption,
+SR training state and inference exports; `config/` owns configuration validation.
+The root training commands parse CLI arguments.
+Step counts and save intervals must be positive integers; omit
 `archive_every_steps` (or set it to null) to disable archival checkpoints.
 
 `train/loss/` contains loss calculations, including SR coarse
 consistency in `sr.py`, transition consistency in `connectivity.py` and phase-fraction
 loss in `volume_fraction.py`. `data/slice.py` samples sections, aligned diffusion
 pairs and anchor triplets; `evaluate/` owns measurement calculations. `data/dataset.py`
-contains label and fractional-resolution datasets, `data/loader.py` contains their
-batch streams, and `data/bank.py` reads and validates fractional LR banks.
+contains the phase-fraction dataset, `data/loader.py` contains its batch stream,
+and `data/bank.py` reads and validates fractional LR banks. `data/source.py`
+discovers source images and infers height extents.
 `plane.py` owns plane names, numeric axes and row/column directions.
 
-`predict/tiled.py` runs tiled diffusion and continuation. `predict/tile.py` owns
-tile geometry, volume buffers and overlap blending. Evaluation files name their
+`predict/tiling/sampler.py` runs tiled diffusion and continuation. Its sibling
+modules `layout.py`, `state.py` and `fusion.py` own tile geometry, volume buffers
+and overlap blending. `predict/sr/` contains SR inference, extension and memory
+budgets; `predict/random.py` isolates seeded inference RNG state. Evaluation files name their
 measurement: `fid.py`, `connectivity.py`, `seam.py` and `tortuosity.py`.
+Import metrics from their owning modules. FID and KID share image conversion in
+`evaluate/image.py`: binary masks use bool, floating-point images use [0,1],
+and uint8 images use [0,255], regardless of batch contents.
 Tests follow these source responsibilities under `tests/data/`, `tests/model/`,
-`tests/prepare/`, `tests/predict/`, `tests/serve/`, `tests/train/` and
+`tests/prepare/`, `tests/predict/`, `tests/backend/`, `tests/train/` and
 `tests/evaluate/`; cross-module tests stay at the test root. Internal imports use
 the owning modules directly. The public
 `src.api` exports and model state-dictionary formats remain available.
 Existing paper assets and run files retain their paths. `PAPER.md` records prior
 128³ experiments, not results for this new LR/SR configuration.
-The synthetic-data command moved from `gen_data.py` to `scripts/prepare_data.py`:
-`python scripts/prepare_data.py --config config/simul.yaml`.
+Generate synthetic data with `python -m simul.run --config simul/config.yaml`.
 
 For a known 3D reference with a thickness-dependent particle-size distribution:
 
@@ -593,7 +724,7 @@ disable quarter-turn rotations in `xz`/`yz`, allow only x flips in `xz` and y
 flips in `yz`, and choose critic groups appropriate to the anisotropic data.
 
 ```bash
-python scripts/prepare_data.py --config config/simul_height.yaml
+python -m simul.run --config simul/config_height.yaml
 python run_train_1st.py --data config/data/simul_height.yaml --device cuda
 ```
 
@@ -622,14 +753,14 @@ are unchanged and contain no retroactively inferred KID scores.
 ```bash
 python -m pytest tests/test_sr.py tests/test_sr_pipeline.py -q
 python -m pytest tests -q
-python -m ruff check src scripts tests run_train_1st.py run_train_2nd.py run_predict.py run_api.py
+python -m ruff check src scripts tests run_train_1st.py run_train_2nd.py backend simul
 ```
 
 A bounded GPU check compares index/R1, scaled-time/R1 and index/R1+R2, verifies
 LR continuation, then runs generated-LR-bank SR and exports held-out-seed volumes:
 
 ```bash
-python scripts/check_training_stability.py --image data/sample.png --steps 100 --sr-steps 100 --device cuda
+python scripts/experiments/training_stability.py --image data/sample.png --steps 100 --sr-steps 100 --device cuda
 ```
 
 The script uses 128px source crops, 64³ LR and 128³ HR, reduced networks, a short
@@ -648,21 +779,27 @@ accuracy or a unique reconstruction.
 
 ## Web interface
 
-Build the Vue frontend once after cloning or changing files under `front/`:
+Build the Vue frontend once after cloning or changing files under `frontend/`:
 
 ```bash
-cd front
+cd frontend
 npm ci
 npm run build
 cd ..
 ```
 
-The generated `front/dist/` directory is intentionally not committed. Start the
+The generated `frontend/dist/` directory is intentionally not committed. Start the
 API after the build completes:
 
 ```bash
-python run_api.py --weight run/my-experiment/generator.pt --device cuda
+python -m backend.run --weight run/my-experiment/generator.pt --device cuda
 ```
+
+Edit `backend/config.yaml` to adjust dimension, voxel, block, anchor, JSON-body
+and concurrent-download limits, then restart the server. `--config` selects another
+file; `--max-inflight-downloads` overrides that setting for one run. Configuration
+keys are strict and all limits must be positive integers. The 256-phase ceiling
+is fixed by uint8 output and is not configurable.
 
 Open <http://127.0.0.1:8000/> to crop an input section, generate a 3D volume,
 inspect its phases, and reveal its continuation along axis 0.
@@ -693,7 +830,7 @@ and have a separate output-memory budget. Phase-channel conversion writes direct
 into float32 storage without an expanded int64 one-hot intermediate.
 
 SR checks its own RAM/VRAM budget before coarse conversion or HR allocation:
-`src.predict.sr_memory.estimate_sr_memory` includes LR phase conversion, two global
+`src.predict.sr.memory.estimate_sr_memory` includes LR phase conversion, two global
 CPU fp16 states, a circular accumulation slab, interpolation halo, and
 margin-expanded model tiles. State and output storage still scale with HR volume
 size; the estimate is not a guarantee against OOM.
@@ -703,7 +840,7 @@ completes the shared diffusion chain, then selects labels in depth slabs (up to 
 or one plane when a plane is larger). LR/SR probability conversion reuses owned
 float32 model outputs.
 
-The server bounds axes to 1024, total output voxels to 512³, block counts to
+The default server configuration bounds axes to 1024, total output voxels to 512³, block counts to
 64 per axis / 4096 total, and anchors to 32. The actual tile count, including
 overlap and margins, also cannot exceed 4096. Resolved block dimensions are
 checked against the same volume limits before allocation. JSON request bodies
@@ -714,7 +851,7 @@ HTTP 413. Invalid dimensions or counts return HTTP 422.
 Concurrent generation requests return HTTP 503 immediately with `Retry-After: 1`.
 Separately, `create_app(max_inflight_downloads=2)` bounds retained results per
 server process, including generation and active transfers. Configure the limit
-with `run_api.py --max-inflight-downloads`; full capacity returns the same 503
+with `python -m backend.run --max-inflight-downloads`; full capacity returns the same 503
 before generation. Slots are returned after completion, disconnect, cancellation,
 or preparation failure. Slow downloads retain their slots but release the GPU
 generation lock so another request can run when a result slot is available.
@@ -745,3 +882,71 @@ Generated LR → SR inference keeps fractional channels throughout. The CLI save
 for label-based inspection. Supplying a label TIFF intentionally supplies one-hot
 coarse data instead. `InferenceAPI.generate_probs()` and SR's `predict_probs()`
 provide the fractional Python path.
+
+
+### Height-dependent profiles from 2D images
+
+Only 2D images are used as training observations. In the LR preset, enable:
+
+```yaml
+conditioning:
+  height_enabled: true
+  spatial_profile:
+    enabled: true
+    num_bins: 16
+    critic_enabled: false  # optional conditional-critic comparison
+
+loss:
+  spatial_profile_weight: 1.0
+  spatial_profile_gradient_weight: 0.0
+```
+
+The data preset must specify `thickness_axis: z`. Preserve z in augmentation:
+`xz.flip_axes: [x]`, `yz.flip_axes: [y]`, and `rotate_90: false` for both.
+Each crop supplies its own profile. LR uses a spatial adapter, masked local loss,
+joint profile/VF CFG dropout and replay with the original conditions. No 3D truth
+is required. `profile/soft_mae` and `profile/label_mae` use fractions (0.01 means
+one percentage point); passing software tests does not establish generation quality.
+
+```python
+profile = {
+    "axis": "z",
+    "points": [[0.0, [0.1, 0.9]], [1.0, [0.5, 0.5]]],
+    "interpolation": "linear",
+}
+volume = api.generate(
+    domain=0,
+    seed=7,
+    height_origin=256,
+    height_extent=1024,
+    vf_profile=profile,
+)
+```
+
+Knots span the **full reference image** from 0 to 1. `linear` and `constant`
+(left-interval values) are integrated over output cells. With crop=128 and LR=64,
+a 64-voxel output at origin 256 spans 25–37.5% and its phase-0 target mean is 22.5%.
+A supplied `vf` must equal the profile average over the final output interval.
+Tiles use shared source coordinates and tile-local VF. Full-strength anchors and
+preserved base volumes are checked for incompatible phase fractions.
+`generate_probs` and HTTP accept the same dictionary. CLI uses
+`--vf-profile profile.json --height-origin 256 --height-extent 1024`.
+SR receives generated LR fractions plus the same origin/extent; direct profile/VF
+input remains LR-only. SR banks record the crop source, profile and per-image height.
+
+Explicit holdouts can be specified in the data preset:
+
+```yaml
+split:
+  validation_files: [data/material/independent_sample.png]
+  validation_regions:
+    data/material/side.png: [0, 0, 128, 512]  # top, left, height, width in source pixels
+```
+
+Paths must be images in the configured plane folders. Training excludes validation
+files and every crop intersecting a reserved rectangle; each observed plane must
+retain training images. Full source heights are preserved even for region holdouts.
+`data_manifest.json` records source sizes, hashes and the explicit split. Region
+holdouts from one image test spatial interpolation, not independent-specimen
+accuracy. No split is invented automatically. Evaluate held-out 2D statistics
+separately; generated 3D connectivity is a diagnostic, not measured 3D accuracy.

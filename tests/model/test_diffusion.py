@@ -270,3 +270,15 @@ def test_cuda_posterior_and_domain_validation_do_not_read_host_scalars():
     assert not any(
         event.key == "aten::_local_scalar_dense" for event in profile.key_averages()
     )
+
+
+@pytest.mark.parametrize("state", [True, 0.5, torch.tensor([0.5, 1.5])])
+def test_diffusion_rejects_non_integer_states(state):
+    with pytest.raises(ValueError, match="integer"):
+        Diffusion(3).add_noise(torch.zeros(2, 1, 2, 2), state)
+
+
+@pytest.mark.parametrize("domain", [torch.tensor([0.5]), torch.tensor([True])])
+def test_domain_embedding_rejects_non_integer_ids(domain):
+    with pytest.raises(ValueError, match="integer"):
+        embed_domain(torch.nn.Embedding(2, 4), domain, torch.float32)

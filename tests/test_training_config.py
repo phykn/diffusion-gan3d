@@ -3,15 +3,15 @@ from pathlib import Path
 
 import pytest
 
-import src.config as config_module
-from src.config import (
+import src.config.train as config_module
+from src.config.data import validate_sr_source
+from src.config.files import load_yaml, save_yaml
+from src.config.train import (
     load_train_config,
-    load_yaml,
     normalize_train_config,
-    save_yaml,
-    validate_sr_source,
+    validate_sr_config,
 )
-from src.train.sr_run import run_sr_train
+from src.train.run.sr import run_sr_train
 
 
 def test_data_selection_and_snapshot_are_independent_of_cwd(tmp_path, monkeypatch):
@@ -51,7 +51,7 @@ def test_old_keys_are_rejected_without_mutating_input(old):
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
 def test_omitted_critic_lr_follows_generator_but_explicit_value_wins(stage):
-    raw = load_train_config(f"config/train/{stage}.yaml", stage)
+    raw = load_train_config(f"tests/fixtures/config/train/{stage}.yaml", stage)
     raw["optim"].pop("critic_lr", None)
     raw["optim"]["generator_lr"] = 0.0003
     cfg = normalize_train_config(raw, stage)
@@ -65,7 +65,7 @@ def test_omitted_critic_lr_follows_generator_but_explicit_value_wins(stage):
 def test_resolved_snapshot_survives_default_and_learning_rate_changes(
     tmp_path, monkeypatch, stage
 ):
-    cfg = load_train_config(f"config/train/{stage}.yaml", stage)
+    cfg = load_train_config(f"tests/fixtures/config/train/{stage}.yaml", stage)
     snapshot = tmp_path / "saved.yaml"
     save_yaml(snapshot, cfg)
     monkeypatch.setitem(config_module.TRAIN_DEFAULTS, "optim.ema_decay", 0.5)
@@ -97,8 +97,9 @@ def test_explicit_disabled_options_and_defaults_are_not_shared():
     assert cfg["train"]["mixed_precision"] is False
     assert cfg["conditioning"]["anchor"]["ramp_steps"] == 0
     assert cfg["optim"]["ema_decay"] == 0.0
-    cfg["optim"]["adam_betas"][0] = 0.1
-    assert normalize_train_config({})["optim"]["adam_betas"] == [0.5, 0.9]
+    original_betas = cfg["optim"]["adam_betas"].copy()
+    cfg["optim"]["adam_betas"][0] += 0.1
+    assert normalize_train_config({})["optim"]["adam_betas"] == original_betas
 
 
 def test_conflicting_old_and_new_keys_fail_instead_of_overriding():
@@ -121,9 +122,9 @@ def test_conflicting_old_and_new_keys_fail_instead_of_overriding():
 def test_sr_rejects_incompatible_data_before_creating_a_run(tmp_path, change, message):
     base = tmp_path / "base"
     base.mkdir()
-    low = load_train_config("config/train/low_res.yaml")
+    low = load_train_config("tests/fixtures/config/train/low_res.yaml")
     save_yaml(base / "train.yaml", low)
-    cfg = load_train_config("config/train/sr.yaml", "sr")
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     cfg["data"].update(change)
     preset = tmp_path / "sr.yaml"
     save_yaml(preset, cfg)
@@ -135,15 +136,15 @@ def test_sr_rejects_incompatible_data_before_creating_a_run(tmp_path, change, me
 
 
 def test_sr_can_select_other_image_paths_with_the_same_contract():
-    data = load_train_config("config/train/low_res.yaml")["data"]
+    data = load_train_config("tests/fixtures/config/train/low_res.yaml")["data"]
     other = copy.deepcopy(data)
     other["domains"] = {0: {"xy": ["new/images"]}}
-    validate_sr_source(other, data)
+    assert validate_sr_source(other, data) is other
 
 
 @pytest.mark.parametrize("field", ["data", "lr_bank"])
 def test_new_sr_preset_requires_explicit_data_and_bank_guidance(tmp_path, field):
-    cfg = load_yaml("config/train/sr.yaml")
+    cfg = load_yaml("tests/fixtures/config/train/sr.yaml")
     del cfg[field]
     path = tmp_path / "sr.yaml"
     save_yaml(path, cfg)
@@ -153,7 +154,63 @@ def test_new_sr_preset_requires_explicit_data_and_bank_guidance(tmp_path, field)
 
 def test_stage_mismatch_is_rejected():
     with pytest.raises(ValueError, match="expected stage"):
-        load_train_config("config/train/sr.yaml", "low_res")
+        load_train_config("tests/fixtures/config/train/sr.yaml", "low_res")
+
+
+@pytest.mark.parametrize("weights", [None, "", "  ", 42, True])
+def test_sr_requires_source_weights_before_creating_a_run(tmp_path, weights):
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
+    cfg["source"] = {"weights": weights}
+    preset = tmp_path / "sr.yaml"
+    save_yaml(preset, cfg)
+    output = tmp_path / "run"
+    with pytest.raises(ValueError, match="source.weights.*--base-weights"):
+        run_sr_train(config=preset, run_dir=output)
+    assert not output.exists()
+
+
+def test_sr_resume_rejects_an_explicit_lr_source_override(tmp_path):
+    with pytest.raises(ValueError, match="base_weights cannot change on resume"):
+        run_sr_train(
+            base_weights=tmp_path / "generator.pt", resume=tmp_path / "last.pt"
+        )
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("nickname", [None, "", "   ", "  실험_A  "])
+def test_nickname_is_optional_and_normalized(stage, nickname):
+    cfg = normalize_train_config({"nickname": nickname}, stage)
+    assert cfg["nickname"] == (nickname or "").strip()
+    assert normalize_train_config({}, stage)["nickname"] == ""
+
+
+@pytest.mark.parametrize(
+    "nickname", [42, True, "../outside", "a\\b", "a:b", "x*", "x\nq", "end."]
+)
+def test_nickname_rejects_invalid_folder_components(nickname):
+    with pytest.raises(ValueError, match="nickname"):
+        normalize_train_config({"nickname": nickname})
+
+
+@pytest.mark.parametrize("archive", [0, -1, True, 1.5])
+def test_sr_archive_interval_rejects_invalid_values(archive):
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
+    cfg["train"]["archive_every_steps"] = archive
+    with pytest.raises(ValueError, match="archive_every_steps"):
+        validate_sr_config(cfg)
+
+
+def test_sr_validation_returns_resolved_config_without_mutating_input():
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
+    del cfg["optim"]["critic_lr"]
+    del cfg["conditioning"]["height_enabled"]
+    original = copy.deepcopy(cfg)
+
+    validated = validate_sr_config(cfg)
+
+    assert cfg == original
+    assert validated["optim"]["critic_lr"] == cfg["optim"]["generator_lr"]
+    assert validated["conditioning"]["height_enabled"] is False
 
 
 def test_saved_yaml_uses_inline_lists_and_separates_groups(tmp_path):

@@ -23,13 +23,13 @@ from provenance import build_provenance, file_record, validate_output_paths
 
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
-from src.config import load_generation_settings
-from src.evaluate import (
+from src.config.generation import load_generation_settings
+from src.evaluate.anchor import (
     measure_boundaries,
     measure_distance_divergence,
     measure_slice_smoothness,
-    voxel_accuracy,
 )
+from src.evaluate.label import voxel_accuracy
 
 SEEDS = (0, 1, 2, 3)
 INTERNAL_AXES = (0, 1, 2)

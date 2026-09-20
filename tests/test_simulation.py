@@ -8,8 +8,8 @@ import tifffile
 import yaml
 from PIL import Image
 
-from src.simul.export import generate
-from src.simul.geometry import pack, place, radius_profile
+from simul.src.export import generate
+from simul.src.geometry import pack, place, radius_profile
 
 GEOMETRY = {
     "size": 20,
@@ -126,7 +126,7 @@ def test_placed_particle_axes_follow_height_without_overlap():
     assert len(particles) > 10
     # Geometry is checked for every accepted center, not inferred from random
     # section fluctuations. Reconstruct the occupancy to check non-overlap.
-    from src.simul.geometry import make_offsets
+    from simul.src.geometry import make_offsets
 
     reconstructed = np.zeros_like(volume, dtype=int)
     for particle in particles:

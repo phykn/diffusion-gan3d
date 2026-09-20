@@ -30,7 +30,7 @@ def test_estimate_counts_states_but_bounds_fusion_by_tile_depth():
 
 
 def test_estimate_counts_margin_and_overlap_in_resolved_tiles():
-    from src.predict.tiled import TiledGenerator
+    from src.predict.tiling.sampler import TiledGenerator
 
     gen = SimpleNamespace(
         device=torch.device("cpu"),

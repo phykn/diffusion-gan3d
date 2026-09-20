@@ -10,7 +10,8 @@ from PIL import Image
 
 from src.build.model import build_models
 from src.build.trainer import build_trainer
-from src.config import load_train_config, save_yaml
+from src.config.files import save_yaml
+from src.config.train import load_train_config
 from src.data.slice import TripletBatch
 from src.model.critic import ConnectivityCritic2D
 from src.train.state import resume_training, save_training
@@ -23,7 +24,7 @@ def small_config(tmp_path):
     for index in range(4):
         labels = ((np.indices((12, 12)).sum(0) + index) % 3).astype(np.uint8)
         Image.fromarray(labels).save(images / f"{index}.png")
-    cfg = load_train_config("config/train/low_res.yaml")
+    cfg = load_train_config("tests/fixtures/config/train/low_res.yaml")
     cfg["data"].update(
         domains={0: {p: [str(images)] for p in ("xy", "xz", "yz")}},
         num_phases=3,

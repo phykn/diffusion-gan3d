@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from itertools import combinations
 from pathlib import Path
 
-from src.config import find_train_config
+from src.config.files import find_train_config
 
 
 def sha256_file(path: str | Path) -> str:

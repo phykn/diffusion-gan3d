@@ -25,7 +25,7 @@ def scaled_size(size: int, scale: float) -> int:
 
 
 def phase_channels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:
-    if labels.dtype.is_floating_point or labels.dtype == torch.bool:
+    if labels.is_floating_point() or labels.is_complex() or labels.dtype == torch.bool:
         raise ValueError("phase labels must have an integer dtype.")
     if labels.numel() == 0:
         raise ValueError(f"phase labels must be in [0, {num_phases - 1}].")
@@ -44,18 +44,27 @@ def phase_channels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:
 
 
 def resize_phases(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
-    """Resize B,C,H,W or B,C,D,H,W phase channels, never numeric label IDs."""
-    if tuple(probs.shape[2:]) == tuple(shape):
+    shape = tuple(shape)
+    if (
+        probs.ndim not in (4, 5)
+        or len(shape) != probs.ndim - 2
+        or any(type(size) is not int or size < 1 for size in shape)
+    ):
+        raise ValueError("phase channels require a positive 2D or 3D output shape.")
+    source = tuple(probs.shape[2:])
+    if source == shape:
         return probs
-    if all(new <= old for new, old in zip(shape, probs.shape[2:], strict=True)):
-        return F.interpolate(probs, size=shape, mode="area")
+    reduced = tuple(min(new, old) for new, old in zip(shape, source, strict=True))
+    if reduced != source:
+        probs = F.interpolate(probs, size=reduced, mode="area")
+    if reduced == shape:
+        return probs
     mode = "trilinear" if probs.ndim == 5 else "bilinear"
     return F.interpolate(probs, size=shape, mode=mode, align_corners=False)
 
 
 def resize_labels(labels: torch.Tensor, size: int, num_phases: int) -> torch.Tensor:
-    probs = phase_channels(labels.unsqueeze(0), num_phases)
-    return resize_phases(probs, (size,) * labels.ndim).argmax(1).squeeze(0)
+    return resize_crop(labels, size, num_phases).argmax(0)
 
 
 def resize_crop(
@@ -63,13 +72,13 @@ def resize_crop(
     size: int,
     num_phases: int,
 ) -> torch.Tensor:
-    """Return C,H,W phase fractions without discarding subpixel phase occupancy."""
     probs = phase_channels(labels.unsqueeze(0), num_phases)
     return resize_phases(probs, (size,) * labels.ndim).squeeze(0)
 
 
 def downsample(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
-    """Area-average phase occupancy, matching the fractional coarse contract."""
+    if any(new > old for new, old in zip(shape, probs.shape[2:], strict=True)):
+        raise ValueError("downsample cannot expand spatial dimensions.")
     return resize_phases(probs.float(), shape)
 
 
@@ -79,7 +88,6 @@ def coarse_region(
     shape: tuple[int, int, int],
     scale: int,
 ) -> torch.Tensor:
-    """Upsample an aligned HR region, retaining one LR voxel of interpolation halo."""
     if (
         type(scale) is not int
         or scale < 1

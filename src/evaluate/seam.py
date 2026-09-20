@@ -52,6 +52,7 @@ def measure_seams(
             num_phases,
             num_phases,
             dtype=torch.float64,
+            device=vol.device,
         )
         band_counts = {}
         for idx in selected_idx:
@@ -76,9 +77,11 @@ def measure_seams(
         for idx in band_idx:
             seam_counts = band_counts[idx]
             axis_tv.append(transition_tv(seam_counts, inner_counts))
-            axis_delta.append(continuation_delta(seam_counts, inner_counts))
+            delta = continuation_delta(seam_counts, inner_counts)
+            if delta is not None:
+                axis_delta.append(delta)
         tvs.append(max(axis_tv))
-        deltas.append(max(axis_delta))
+        deltas.append(max(axis_delta) if axis_delta else None)
     return SeamQuality(
         transition_tv=tuple(tvs),
         continuation_delta=tuple(deltas),

@@ -1,5 +1,3 @@
-"""Conversions of owned inference outputs; never use for shared training tensors."""
-
 import math
 
 import torch
@@ -13,7 +11,6 @@ def label_chunk_depth(shape) -> int:
 
 @torch.no_grad()
 def labels_from_channels(channels: torch.Tensor) -> torch.Tensor:
-    """C,D,H,W ranks to CPU uint8, with at most one depth slab of int64 indices."""
     shape = channels.shape[1:]
     labels = torch.empty(shape, dtype=torch.uint8, device="cpu")
     depth = label_chunk_depth(shape)

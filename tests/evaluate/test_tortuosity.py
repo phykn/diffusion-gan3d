@@ -32,3 +32,18 @@ def test_tortuosity_orients_selected_phase_for_taufactor(
     assert np.array_equal(calls[0][0], np.moveaxis(volume == 1, 1, 0))
     assert calls[0][1] == "cpu"
     assert calls[1] == (False, 1e-4)
+
+
+def test_tortuosity_preserves_an_explicit_cuda_device_index(monkeypatch):
+    devices = []
+
+    class FakeSolver:
+        def __init__(self, values, *, device):
+            devices.append(device)
+
+        def solve(self, **kwargs):
+            return np.asarray([1.0])
+
+    monkeypatch.setattr(tau, "Solver", FakeSolver)
+    assert tortuosity(np.zeros((2, 2, 2)), device="cuda:3") == 1
+    assert devices == ["cuda:3"]

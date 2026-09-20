@@ -13,3 +13,6 @@ select = ["E4", "E7", "E9", "F", "I"]
 [tool.ruff.lint.per-file-ignores]
 # Standalone scripts add the repository root before importing its modules.
 "scripts/**/*.py" = ["E402"]
+
+"backend/run.py" = ["E402"]
+"simul/run.py" = ["E402"]

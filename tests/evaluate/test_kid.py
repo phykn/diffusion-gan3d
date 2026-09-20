@@ -16,9 +16,9 @@ def test_kid_is_the_unbiased_u_statistic_and_can_be_negative():
     score = compute_kid(
         images, images, "cpu", Features(), subsets=3, subset_size=4, seed=7
     )
-    from src.evaluate.fid import prepare_fid_images
+    from src.evaluate.image import prepare_images
 
-    features = Features()(prepare_fid_images(images))
+    features = Features()(prepare_images(images))
     kernel = (features @ features.T / features.shape[1] + 1) ** 3
     expected = 2 * (kernel.sum() - kernel.diag().sum()) / (4 * 3) - 2 * kernel.mean()
     assert score.mean == pytest.approx(expected.item())
@@ -47,3 +47,11 @@ def test_kid_64_images_uses_bounded_subsets_and_preserves_seeded_caller_rng():
 def test_kid_rejects_invalid_sample_sizes_before_loading_inception(count, options):
     with pytest.raises(ValueError):
         compute_kid(np.zeros((count, 4, 4)), np.zeros((count, 4, 4)), "cpu", **options)
+
+
+def test_kid_intensity_scale_does_not_depend_on_batch_partition():
+    images = torch.arange(4, dtype=torch.uint8).view(4, 1, 1).expand(4, 4, 4)
+    options = {"feature": Features(), "subset_size": 4, "subsets": 2, "seed": 3}
+    single = compute_kid(images, images.flip(0), "cpu", batch_size=1, **options)
+    combined = compute_kid(images, images.flip(0), "cpu", batch_size=4, **options)
+    assert single == combined

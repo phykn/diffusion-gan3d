@@ -1,20 +1,18 @@
 from collections.abc import Sequence
-from contextlib import contextmanager
 from pathlib import Path
 
 import torch
 
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
-from src.config import (
-    find_train_config,
-    get_sizes,
-    load_generation_settings,
-    load_train_config,
-)
+from src.config.data import get_sizes
+from src.config.files import find_train_config
+from src.config.generation import load_generation_settings
+from src.config.train import load_train_config
 from src.predict.memory import estimate_memory, select_storage
-from src.predict.tile import parse_shape
-from src.predict.tiled import TiledGenerator
+from src.predict.random import seeded_rng
+from src.predict.tiling.layout import parse_shape
+from src.predict.tiling.sampler import TiledGenerator
 from src.prepare.resize import resize_crop
 
 
@@ -53,9 +51,15 @@ class InferenceAPI:
         return resize_crop(image, get_sizes(self.data)[1], self.num_phases)
 
     def estimate_memory(
-        self, *, blocks=None, shape=None, size=None, overlap=None, probabilities=False
+        self,
+        *,
+        blocks=None,
+        shape=None,
+        size=None,
+        overlap=None,
+        probabilities=False,
+        base_shape=None,
     ):
-        """Resolve requested geometry without allocating a volume."""
         if sum(value is not None for value in (blocks, shape, size)) > 1:
             raise ValueError("blocks and shape and size cannot be provided together.")
         tiled = blocks is not None or shape is not None
@@ -74,6 +78,7 @@ class InferenceAPI:
             margin=self.generator.default_margin,
             overlap=overlap if tiled else 0,
             probabilities=probabilities,
+            base_shape=base_shape,
         )
 
     def check_memory(self, estimate, *, storage="auto", tiled=True):
@@ -98,6 +103,10 @@ class InferenceAPI:
         storage: str = "auto",
         progress: bool = False,
         height_origin: float = 0.0,
+        base_offset=None,
+        preserve_base: bool = False,
+        height_extent: float | None = None,
+        vf_profile: dict | None = None,
     ) -> torch.Tensor:
         anchors = _validate_anchors(anchors)
         scaled = blocks is not None or shape is not None
@@ -107,8 +116,8 @@ class InferenceAPI:
             raise ValueError("size cannot be combined with blocks or shape.")
         if not scaled and base is not None:
             raise ValueError("base requires blocks or shape.")
-        if base is not None and anchors:
-            raise ValueError("base and anchors cannot be provided together.")
+        if base is None and (base_offset is not None or preserve_base):
+            raise ValueError("base_offset and preserve_base require base.")
         if not scaled and (storage != "auto" or overlap is not None):
             raise ValueError("storage and overlap apply only to scale-up.")
 
@@ -120,7 +129,7 @@ class InferenceAPI:
         )
         overlap = self.settings.overlap if overlap is None else overlap
 
-        with _seeded_rng(seed, self.device):
+        with seeded_rng(seed, self.device):
             if not scaled:
                 return self.generator.generate(
                     anchors=anchors,
@@ -130,6 +139,8 @@ class InferenceAPI:
                     guidance=guidance,
                     domain=domain,
                     height_origin=height_origin,
+                    height_extent=height_extent,
+                    vf_profile=vf_profile,
                 )
 
             return self.scaled.generate(
@@ -137,6 +148,8 @@ class InferenceAPI:
                 shape=shape,
                 overlap=overlap,
                 base=base,
+                base_offset=base_offset,
+                preserve_base=preserve_base,
                 anchors=anchors,
                 anchor_strength=anchor_strength,
                 vf=vf,
@@ -145,6 +158,8 @@ class InferenceAPI:
                 guidance=guidance,
                 domain=domain,
                 height_origin=height_origin,
+                height_extent=height_extent,
+                vf_profile=vf_profile,
             )
 
     def generate_probs(
@@ -156,20 +171,31 @@ class InferenceAPI:
         guidance=None,
         anchor_strength=None,
         height_origin=0.0,
+        height_extent=None,
+        vf_profile=None,
         *,
+        size=None,
         shape=None,
         blocks=None,
         overlap=None,
         storage="auto",
         progress=False,
+        base=None,
+        base_offset=None,
+        preserve_base=False,
     ):
-        """Keep fractional occupancy for downstream SR; same sampling as generate."""
         if shape is not None and blocks is not None:
             raise ValueError("blocks and shape cannot be provided together.")
         tiled = blocks is not None or shape is not None
+        if tiled and size is not None:
+            raise ValueError("size cannot be combined with blocks or shape.")
+        if base is not None and not tiled:
+            raise ValueError("base requires blocks or shape.")
+        if base is None and (base_offset is not None or preserve_base):
+            raise ValueError("base_offset and preserve_base require base.")
         if not tiled and (storage != "auto" or overlap is not None):
             raise ValueError("storage and overlap apply only to scale-up.")
-        options = {}
+        options = {} if size is None else {"size": size}
         sampler = self.generator
         if tiled:
             overlap = self.settings.overlap if overlap is None else overlap
@@ -177,9 +203,15 @@ class InferenceAPI:
                 shape = self.scaled.shape_from_blocks(blocks, overlap)
             sampler = self.scaled
             options = dict(
-                shape=shape, overlap=overlap, storage=storage, progress=progress
+                shape=shape,
+                overlap=overlap,
+                storage=storage,
+                progress=progress,
+                base=base,
+                base_offset=base_offset,
+                preserve_base=preserve_base,
             )
-        with _seeded_rng(seed, self.device):
+        with seeded_rng(seed, self.device):
             return sampler.generate_probs(
                 anchors=_validate_anchors(anchors),
                 vf=vf,
@@ -189,6 +221,8 @@ class InferenceAPI:
                 if anchor_strength is None
                 else anchor_strength,
                 height_origin=height_origin,
+                height_extent=height_extent,
+                vf_profile=vf_profile,
                 **options,
             )
 
@@ -220,20 +254,3 @@ def _validate_anchors(anchors: Sequence[PlaneAnchor]) -> tuple[PlaneAnchor, ...]
     if any(not isinstance(anchor, PlaneAnchor) for anchor in values):
         raise TypeError("anchors must contain only PlaneAnchor values.")
     return values
-
-
-@contextmanager
-def _seeded_rng(seed: int | None, device: torch.device):
-    if seed is None:
-        yield
-        return
-    devices = []
-    if device.type == "cuda":
-        index = device.index
-        devices = [torch.cuda.current_device() if index is None else index]
-    with torch.random.fork_rng(devices=devices):
-        torch.set_rng_state(torch.Generator(device="cpu").manual_seed(seed).get_state())
-        if devices:
-            with torch.cuda.device(devices[0]):
-                torch.cuda.manual_seed(seed)
-        yield

@@ -2,12 +2,8 @@ from collections.abc import Mapping, Sequence
 
 from torch import nn
 
-from src.config import (
-    get_domains,
-    get_plane_groups,
-    get_sr_sizes,
-    normalize_train_config,
-)
+from src.config.data import get_domains, get_plane_groups
+from src.config.train import get_sr_sizes, normalize_train_config
 from src.model.critic import ConnectivityCritic2D, PairCritic2D
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
@@ -72,6 +68,9 @@ def build_denoiser(
         time_scale=get_time_scale(cfg),
         height_enabled=cfg["conditioning"]["height_enabled"],
         coarse_enabled=cfg["stage"] == "sr",
+        profile_enabled=cfg["conditioning"]
+        .get("spatial_profile", {})
+        .get("enabled", False),
     )
 
 
@@ -124,6 +123,18 @@ def build_models(
             network.height_input = nn.Conv2d(
                 1, critic["channels"][0], 3, padding=1, bias=False
             )
+    if cfg["conditioning"]["height_enabled"] and connectivity_critic is not None:
+        connectivity_critic.height_input = nn.Conv2d(
+            3, critic["channels"][0], 3, padding=1, bias=False
+        )
+    if cfg["conditioning"].get("spatial_profile", {}).get("critic_enabled", False):
+        for network in critics.values():
+            network.profile_input = nn.Conv2d(
+                data["num_phases"], critic["channels"][0], 3, padding=1, bias=False
+            )
+        connectivity_critic.profile_input = nn.Conv2d(
+            3 * data["num_phases"], critic["channels"][0], 3, padding=1, bias=False
+        )
     for network in (*critics.values(), connectivity_critic):
         if network is not None:
             network.pyramid_min_size = critic["pyramid_min_size"]
@@ -142,5 +153,6 @@ def build_diffusion(cfg: dict) -> Diffusion:
 
 def build_sr_model(cfg: dict) -> Denoiser3D:
     cfg = normalize_train_config(cfg, "sr")
-    get_sr_sizes(cfg)
+    data = cfg["data"]
+    data["crop_size"], data["lo_res_size"], data["hi_res_size"] = get_sr_sizes(cfg)
     return build_denoiser(cfg, checkpointing=False)

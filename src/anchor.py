@@ -54,6 +54,17 @@ def encode_anchors(
     if not anchors:
         return None
     shape = (volume_size,) * 3 if isinstance(volume_size, int) else volume_size
+    if (
+        len(shape) != 3
+        or any(type(size) is not int or size < 1 for size in shape)
+        or type(batch_size) is not int
+        or batch_size < 1
+        or type(num_phases) is not int
+        or num_phases < 1
+    ):
+        raise ValueError(
+            "anchor volume shape, batch size and phase count must be positive integers."
+        )
 
     target = torch.zeros(
         batch_size,
@@ -83,50 +94,33 @@ def encode_anchors(
     )
 
     for anchor in anchors:
-        if anchor.axis not in (0, 1, 2):
+        if type(anchor.axis) is not int or anchor.axis not in (0, 1, 2):
             raise ValueError("anchor.axis must be one of 0, 1, or 2.")
-        if not 0 <= anchor.index < shape[anchor.axis]:
+        if type(anchor.index) is not int or not 0 <= anchor.index < shape[anchor.axis]:
             raise ValueError("anchor.index is outside the generated volume.")
 
-        image = anchor.image
-        if image.numel() == 0:
-            raise ValueError("anchor.image must not be empty.")
-        if image.dtype.is_floating_point:
-            if image.ndim == 3:
-                image = image.unsqueeze(0).expand(batch_size, -1, -1, -1)
-            if image.ndim != 4 or image.shape[:2] != (batch_size, num_phases):
-                raise ValueError(
-                    "anchor phase fractions must have shape [C,H,W] or [B,C,H,W]."
-                )
-            if validate:
-                valid = (
-                    torch.isfinite(image).all()
-                    & (image >= 0).all()
-                    & (image <= 1).all()
-                )
-                valid = valid & ((image.sum(1) - 1).abs() < 1e-5).all()
-                if not bool(valid):
-                    raise ValueError(
-                        "anchor phase fractions must be finite, non-negative and sum to one."
-                    )
-            probs = image.to(device=device, dtype=dtype)
-        else:
-            if image.ndim == 2:
-                image = image.unsqueeze(0).expand(batch_size, -1, -1)
-            if image.ndim != 3 or image.shape[0] != batch_size:
-                raise ValueError("anchor.image must have shape [H, W] or [B, H, W].")
-            probs = phase_channels(image, num_phases).to(device=device, dtype=dtype)
-
-        height, width = image.shape[-2:]
+        probs = anchor_probabilities(
+            anchor.image, batch_size, num_phases, device, dtype, validate
+        )
+        height, width = probs.shape[-2:]
         plane_shape = tuple(
             size for axis, size in enumerate(shape) if axis != anchor.axis
         )
         if height > plane_shape[0] or width > plane_shape[1]:
             raise ValueError("anchor.image must fit inside the generated plane.")
 
-        row, col = anchor.position or (
-            (plane_shape[0] - height) // 2,
-            (plane_shape[1] - width) // 2,
+        if anchor.position is not None and (
+            len(anchor.position) != 2
+            or any(type(value) is not int for value in anchor.position)
+        ):
+            raise ValueError("anchor.position must contain two integer coordinates.")
+        row, col = (
+            anchor.position
+            if anchor.position is not None
+            else (
+                (plane_shape[0] - height) // 2,
+                (plane_shape[1] - width) // 2,
+            )
         )
         if (
             row < 0
@@ -171,3 +165,32 @@ def encode_anchors(
         source_voxels=source_voxels,
         regions=tuple(regions),
     )
+
+
+def anchor_probabilities(image, batch_size, num_phases, device, dtype, validate):
+    if image.numel() == 0:
+        raise ValueError("anchor.image must not be empty.")
+    if image.dtype.is_floating_point:
+        if image.ndim == 3:
+            image = image.unsqueeze(0).expand(batch_size, -1, -1, -1)
+        if image.ndim != 4 or image.shape[:2] != (batch_size, num_phases):
+            raise ValueError(
+                "anchor phase fractions must have shape [C,H,W] or [B,C,H,W]."
+            )
+        if validate:
+            valid = (
+                torch.isfinite(image).all() & (image >= 0).all() & (image <= 1).all()
+            )
+            valid = valid & ((image.sum(1) - 1).abs() < 1e-5).all()
+            if not bool(valid):
+                raise ValueError(
+                    "anchor phase fractions must be finite, non-negative and sum to one."
+                )
+        probs = image.to(device=device, dtype=dtype)
+    else:
+        if image.ndim == 2:
+            image = image.unsqueeze(0).expand(batch_size, -1, -1)
+        if image.ndim != 3 or image.shape[0] != batch_size:
+            raise ValueError("anchor.image must have shape [H, W] or [B, H, W].")
+        probs = phase_channels(image, num_phases).to(device=device, dtype=dtype)
+    return probs

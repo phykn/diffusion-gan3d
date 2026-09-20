@@ -75,7 +75,7 @@ class Diffusion(nn.Module):
         if step_noise is None:
             step_noise = torch.randn_like(clean)
         else:
-            self.check_matching("step_noise", step_noise, clean)
+            step_noise = self.validate_shape("step_noise", step_noise, clean)
 
         states = transitions + 1
         alpha = self.extract(self.alphas, states, clean)
@@ -90,7 +90,7 @@ class Diffusion(nn.Module):
         transition: int | torch.Tensor,
         noise: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self.check_matching("pred", pred, current)
+        pred = self.validate_shape("pred", pred, current)
         transitions = self.prepare_time(
             transition,
             current,
@@ -110,7 +110,7 @@ class Diffusion(nn.Module):
         if noise is None:
             noise = torch.randn_like(current)
         else:
-            self.check_matching("noise", noise, current)
+            noise = self.validate_shape("noise", noise, current)
 
         active = active.reshape((-1,) + (1,) * (current.ndim - 1))
         sample = mean + variance.sqrt() * noise
@@ -162,7 +162,7 @@ class Diffusion(nn.Module):
         if noise is None:
             noise = torch.randn_like(clean)
         else:
-            self.check_matching("noise", noise, clean)
+            noise = self.validate_shape("noise", noise, clean)
 
         alpha_bar = self.extract(self.alpha_bars, states, clean)
         return alpha_bar.sqrt() * clean + (1.0 - alpha_bar).sqrt() * noise
@@ -200,13 +200,14 @@ class Diffusion(nn.Module):
         return coeff.reshape((ref.shape[0],) + (1,) * (ref.ndim - 1))
 
     @staticmethod
-    def check_matching(
+    def validate_shape(
         name: str,
         values: torch.Tensor,
         ref: torch.Tensor,
-    ) -> None:
+    ) -> torch.Tensor:
         if values.shape != ref.shape:
             raise ValueError(f"{name} must have shape {tuple(ref.shape)}.")
+        return values
 
     @staticmethod
     def prepare_time(
@@ -215,13 +216,16 @@ class Diffusion(nn.Module):
         limit: int,
         name: str,
     ) -> torch.Tensor:
-        if isinstance(value, int):
+        if type(value) is int:
             if not 0 <= value <= limit:
                 raise ValueError(f"{name} must be between 0 and {limit}.")
             return torch.full(
                 (ref.shape[0],), value, device=ref.device, dtype=torch.long
             )
-        time = torch.as_tensor(value, device=ref.device, dtype=torch.long)
+        time = torch.as_tensor(value, device=ref.device)
+        if time.dtype == torch.bool or time.is_floating_point() or time.is_complex():
+            raise ValueError(f"{name} must contain integer indices.")
+        time = time.to(dtype=torch.long)
         if time.ndim == 0:
             time = time.expand(ref.shape[0])
         elif time.shape != (ref.shape[0],):

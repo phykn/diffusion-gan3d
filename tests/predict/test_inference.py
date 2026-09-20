@@ -9,6 +9,7 @@ import torch
 
 from src.api import InferenceAPI, PlaneAnchor
 from src.predict import inference as inference_module
+from src.predict.random import seeded_rng
 
 
 class FakeGenerator:
@@ -75,6 +76,8 @@ def test_generate_without_geometry_uses_direct_generator(api: InferenceAPI) -> N
             "guidance": 1.2,
             "domain": 0,
             "height_origin": 0.0,
+            "height_extent": None,
+            "vf_profile": None,
         }
     ]
     assert api.scaled.calls == []
@@ -246,7 +249,7 @@ def test_seed_scope_only_changes_selected_gpu_and_restores_on_error(
     monkeypatch.setattr(torch.cuda, "device", device)
     monkeypatch.setattr(torch.cuda, "manual_seed", seed_selected)
     try:
-        with inference_module._seeded_rng(7, torch.device("cuda:1")):
+        with seeded_rng(7, torch.device("cuda:1")):
             assert torch.equal(states[0], original[0])
             assert torch.equal(states[1], torch.Generator().manual_seed(7).get_state())
             assert torch.equal(
@@ -268,7 +271,7 @@ def test_seeded_cuda_sampling_restores_cpu_and_device_rng():
     gpu = torch.cuda.get_rng_state(0).clone()
     samples = []
     for _ in range(2):
-        with inference_module._seeded_rng(17, torch.device("cuda:0")):
+        with seeded_rng(17, torch.device("cuda:0")):
             samples.append(torch.randn(16, device="cuda:0").cpu())
     torch.testing.assert_close(*samples, rtol=0, atol=0)
     assert torch.equal(cpu, torch.get_rng_state())

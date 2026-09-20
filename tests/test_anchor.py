@@ -196,3 +196,19 @@ def test_anchor_image_rejects_fractional_phase_labels() -> None:
             device=torch.device("cpu"),
             dtype=torch.float32,
         )
+
+
+@pytest.mark.parametrize(
+    "axis,index,position",
+    [
+        (True, 0, None),
+        (0, 0.5, None),
+        (0, True, None),
+        (0, 0, (False, 0)),
+        (0, 0, ()),
+    ],
+)
+def test_anchor_coordinates_require_explicit_integers(axis, index, position):
+    anchor = PlaneAnchor(torch.zeros(2, 2, dtype=torch.long), axis, index, position)
+    with pytest.raises(ValueError):
+        encode_anchors([anchor], 1, 2, 4, torch.device("cpu"), torch.float32)

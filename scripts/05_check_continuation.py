@@ -1,4 +1,3 @@
-import argparse
 import sys
 from pathlib import Path
 
@@ -11,7 +10,8 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.diagnostic import (
+from scripts.common.cli import check_parser, prepare_check, save_preview
+from scripts.common.diagnostic import (
     format_percent,
     format_ratio,
     parse_unit_interval,
@@ -19,20 +19,23 @@ from scripts.diagnostic import (
 )
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
-from src.config import find_train_config, load_generation_settings, load_train_config
-from src.evaluate import (
+from src.config.files import find_train_config
+from src.config.generation import load_generation_settings
+from src.config.train import load_train_config
+from src.evaluate.anchor import (
     measure_boundaries,
     measure_distance_divergence,
     measure_slice_smoothness,
-    voxel_accuracy,
 )
+from src.evaluate.label import voxel_accuracy
+from src.predict.random import seeded_rng
 from src.storage import save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = check_parser(__file__, "Inspect continuation from one boundary plane.")
     parser.add_argument("--weight", type=Path, required=True)
     parser.add_argument(
         "--anchor",
@@ -49,7 +52,9 @@ def main() -> None:
         help="normalized anchor prediction strength (default: config/gen.yaml)",
     )
     parser.add_argument("--guidance", type=float)
-    parser.add_argument("--out", type=Path, help="optional generated TIFF path")
+    parser.add_argument(
+        "--out", type=Path, help="TIFF path; default: a new directory under run/checks"
+    )
     parser.add_argument("--figure", type=Path, help="optional slice-strip PNG path")
     parser.add_argument(
         "--napari",
@@ -57,9 +62,19 @@ def main() -> None:
         help="inspect the generated volume and condition input in Napari",
     )
     parser.add_argument("--no-view", action="store_true")
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        help="Default: CUDA when available, otherwise CPU.",
+    )
     args = parser.parse_args()
+    args = prepare_check(args, __file__)
+    if args.figure is None:
+        args.figure = args.out.with_name(args.out.stem + "_continuation.png")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     generator = load_generator(args.weight, device=device)
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
@@ -68,64 +83,65 @@ def main() -> None:
         if args.anchor_strength is None
         else args.anchor_strength
     )
+    args.guidance, args.anchor_strength = guidance, anchor_strength
     index = 0 if args.side == "start" else generator.patch_size - 1
     print(f"\nWeights : {args.weight.resolve()}")
     print(f"Boundary: axis {args.axis}, {args.side} plane {index}")
     print(f"Strength: {anchor_strength:.2f}")
-    torch.manual_seed(args.seed)
-    if args.anchor is None:
-        print("Anchor  : unconditioned reference boundary")
-        print("Generating unconditioned reference...", flush=True)
-        reference = generator.generate(
+    with seeded_rng(args.seed, device):
+        if args.anchor is None:
+            print("Anchor  : unconditioned reference boundary")
+            print("Generating unconditioned reference...", flush=True)
+            reference = generator.generate(
+                anchors=(),
+                anchor_strength=0.0,
+                guidance=guidance,
+                domain=args.domain,
+                margin=generator.default_margin,
+            )
+            anchor_image = reference.movedim(args.axis, 0)[index]
+        else:
+            train_config = load_train_config(find_train_config(args.weight))
+            data_config = train_config["data"]
+            crop_size = int(data_config["crop_size"])
+            anchor_image, crop = load_anchor_image(
+                args.anchor,
+                crop_size,
+                generator.patch_size,
+                generator.num_phases,
+            )
+            print(
+                f"Anchor  : {args.anchor.resolve()}, crop {crop} -> "
+                f"input {generator.patch_size} x {generator.patch_size}"
+            )
+        anchor = PlaneAnchor(anchor_image, args.axis, index)
+
+        print("Generating boundary-conditioned volume...", flush=True)
+
+        cpu_rng = torch.random.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
+        generated = generator.generate(
+            anchors=(anchor,),
+            anchor_strength=anchor_strength,
+            guidance=guidance,
+            domain=args.domain,
+            margin=generator.default_margin,
+        )
+        torch.random.set_rng_state(cpu_rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
+        print("Generating same-RNG baseline...", flush=True)
+        baseline = generator.generate(
             anchors=(),
             anchor_strength=0.0,
             guidance=guidance,
             domain=args.domain,
             margin=generator.default_margin,
         )
-        anchor_image = reference.movedim(args.axis, 0)[index]
-    else:
-        train_config = load_train_config(find_train_config(args.weight))
-        data_config = train_config["data"]
-        crop_size = int(data_config["crop_size"])
-        anchor_image, crop = load_anchor_image(
-            args.anchor,
-            crop_size,
-            generator.patch_size,
-            generator.num_phases,
-        )
-        print(
-            f"Anchor  : {args.anchor.resolve()}, crop {crop} -> "
-            f"input {generator.patch_size} x {generator.patch_size}"
-        )
-    anchor = PlaneAnchor(anchor_image, args.axis, index)
 
-    print("Generating boundary-conditioned volume...", flush=True)
-
-    cpu_rng = torch.random.get_rng_state()
-    cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
-    generated = generator.generate(
-        anchors=(anchor,),
-        anchor_strength=anchor_strength,
-        guidance=guidance,
-        domain=args.domain,
-        margin=generator.default_margin,
-    )
-    torch.random.set_rng_state(cpu_rng)
-    if cuda_rng is not None:
-        torch.cuda.set_rng_state_all(cuda_rng)
-    print("Generating same-RNG baseline...", flush=True)
-    baseline = generator.generate(
-        anchors=(),
-        anchor_strength=0.0,
-        guidance=guidance,
-        domain=args.domain,
-        margin=generator.default_margin,
-    )
-
-    if args.out is not None:
-        save_volume(generated, args.out)
-        print(f"Saved   : {args.out.resolve()}")
+    save_volume(generated, args.out)
+    print(f"Saved   : {args.out.resolve()}")
+    save_preview(generated, args, generator.num_phases)
     print_quality(
         generated,
         baseline,

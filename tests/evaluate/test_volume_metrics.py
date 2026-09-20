@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.evaluate import volume as metrics_module
+import src.evaluate.volume as metrics_module
 from src.evaluate.volume import measure_volume
 
 

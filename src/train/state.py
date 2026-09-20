@@ -2,8 +2,10 @@ import hashlib
 from pathlib import Path
 
 import torch
+from PIL import Image
 
-from src.config import normalize_train_config
+from src.config.train import normalize_train_config
+from src.plane import PLANES
 
 
 def fingerprint_data(streams: dict) -> dict:
@@ -19,6 +21,36 @@ def fingerprint_data(streams: dict) -> dict:
         with path.open("rb") as file:
             result[str(path)] = hashlib.file_digest(file, "sha256").hexdigest()
     return result
+
+
+def describe_data(trainer):
+    split = trainer.cfg["data"].get("split", {})
+    records = []
+    for domain, streams in trainer.streams.items():
+        for axis, stream in streams.items():
+            dataset = stream.loader.dataset
+            for group in dataset.path_groups:
+                for path in group:
+                    with Image.open(path) as image:
+                        shape = [image.height, image.width]
+                    records.append(
+                        {
+                            "image_id": str(path.resolve()),
+                            "domain": domain,
+                            "plane": PLANES[axis],
+                            "source_shape": shape,
+                            "sha256": trainer.data_fingerprint[str(path.resolve())],
+                            "validation_region": split.get(
+                                "validation_regions", {}
+                            ).get(str(path.resolve())),
+                        }
+                    )
+    return {
+        "coordinate_units": "source pixels",
+        "height_coordinate": "2 * cell_center / full_source_extent - 1",
+        "training_sources": records,
+        "split": split,
+    }
 
 
 def save_training(path: str | Path, trainer) -> None:

@@ -11,8 +11,9 @@ import torch
 from PIL import Image
 
 from src.build.model import build_models
-from src.config import GenerationSettings, load_generation_settings, save_yaml
-from src.evaluate import (
+from src.config.files import save_yaml
+from src.config.generation import GenerationSettings, load_generation_settings
+from src.evaluate.anchor import (
     BoundaryQuality,
     SliceSmoothness,
     measure_boundaries,
@@ -411,8 +412,9 @@ def test_unconditioned_check_routes_only_domain_condition(
         num_phases = 3
         default_margin = 8
 
-        def generate(self, *, vf, domain, margin):
+        def generate(self, *, vf, guidance, domain, margin):
             calls.append((vf, domain, margin))
+            assert guidance == load_generation_settings().guidance
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
@@ -627,3 +629,40 @@ def _config(root: Path) -> dict:
             "r1_every_steps": 2,
         },
     }
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "02_check_generated.py",
+        "03_check_anchor.py",
+        "04_check_scale_up.py",
+        "05_check_continuation.py",
+    ],
+)
+def test_weight_directory_alone_saves_manual_check_results(
+    tmp_path, monkeypatch, filename
+):
+    import json
+
+    import scripts.common.cli as cli
+
+    torch.set_num_threads(1)
+    cfg = _config(tmp_path)
+    run_dir = tmp_path / "trained"
+    run_dir.mkdir()
+    save_yaml(run_dir / "train.yaml", cfg)
+    model, _, _ = build_models(cfg)
+    save_model(run_dir / "generator.pt", model)
+    module = _load_script(filename)
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(sys, "argv", [filename, "--weight", str(run_dir), "--no-view"])
+    module.main()
+    results = list((tmp_path / "run/checks").glob("*/volume.tiff"))
+    assert len(results) == 1
+    output = results[0]
+    assert output.with_suffix(".png").is_file()
+    report = json.loads(output.with_suffix(".json").read_text())
+    assert report["weight"] == str(run_dir / "generator.pt")
+    assert report["shape"] == list(tifffile.imread(output).shape)

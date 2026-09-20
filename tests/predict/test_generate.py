@@ -11,20 +11,15 @@ from src.anchor import PlaneAnchor
 from src.build.model import build_models
 from src.build.predict import load_generator
 from src.build.trainer import build_trainer
-from src.config import save_yaml
-from src.evaluate import measure_seams
+from src.config.files import save_yaml
+from src.evaluate.seam import measure_seams
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.predict.generator import Generator
-from src.predict.tile import (
-    TileBuffer,
-    VolumeState,
-    crop_output,
-    get_axis_windows,
-    make_fusion,
-    make_tiles,
-)
-from src.predict.tiled import TiledGenerator
+from src.predict.tiling.fusion import get_axis_windows, make_fusion
+from src.predict.tiling.layout import crop_output, make_tiles
+from src.predict.tiling.sampler import TiledGenerator
+from src.predict.tiling.state import TileBuffer, VolumeState
 from src.storage import save_model
 from src.train.ema import build_ema
 
@@ -1532,9 +1527,9 @@ def test_zero_overlap_does_not_force_the_whole_base() -> None:
 @pytest.mark.parametrize(
     "base,error",
     (
-        (torch.zeros((3, 4, 4), dtype=torch.uint8), "shape"),
-        (torch.zeros((4, 4, 4), dtype=torch.float32), "uint8"),
-        (torch.full((4, 4, 4), 3, dtype=torch.uint8), "outside num_phases"),
+        (torch.zeros((7, 4, 4), dtype=torch.uint8), "shape"),
+        (torch.zeros((4, 4, 4), dtype=torch.float32), "integer"),
+        (torch.full((4, 4, 4), 3, dtype=torch.uint8), "phase"),
     ),
 )
 def test_scaled_generation_rejects_invalid_base(
@@ -1545,6 +1540,72 @@ def test_scaled_generation_rejects_invalid_base(
 
     with pytest.raises(ValueError, match=error):
         scaled.generate(shape=6, overlap=0, base=base, progress=False)
+
+
+def test_repeated_extension_preserves_arbitrary_base_and_accepts_new_anchor():
+    model = _AnchorTraceModel()
+    scaled = TiledGenerator(_generator(model, Diffusion(2)))
+    base = torch.ones(5, 4, 4, dtype=torch.uint8)
+    before = base.clone()
+    extra = PlaneAnchor(torch.full((4, 4), 2, dtype=torch.uint8), 0, 7, (0, 0))
+    first = scaled.generate(
+        shape=(8, 4, 4),
+        base=base,
+        base_offset=(0, 0, 0),
+        preserve_base=True,
+        anchors=(extra,),
+        vf=(0.3, 0.3, 0.4),
+        overlap=0,
+        progress=False,
+    )
+    assert torch.equal(first[:5], base)
+    assert any(
+        call.anchor_mask is not None and call.anchor_mask.any() for call in model.calls
+    )
+    assert all(call.vf is not None for call in model.calls)
+    again = scaled.generate(
+        shape=(10, 4, 4),
+        base=first,
+        base_offset=(1, 0, 0),
+        preserve_base=True,
+        overlap=0,
+        progress=False,
+    )
+    assert torch.equal(again[1:9], first)
+    assert torch.equal(base, before)
+
+
+def test_preserved_base_rejects_conflicting_measurements():
+    scaled = TiledGenerator(_generator(_PhaseModel(phase=0), Diffusion(1)))
+    base = torch.ones(4, 4, 4, dtype=torch.uint8)
+    anchor = PlaneAnchor(torch.zeros(4, 4, dtype=torch.uint8), 1, 2, (0, 0))
+    with pytest.raises(ValueError, match="conflicts"):
+        scaled.generate(
+            shape=(8, 4, 4),
+            base=base,
+            base_offset=(0, 0, 0),
+            preserve_base=True,
+            anchors=(anchor,),
+            overlap=0,
+            progress=False,
+        )
+
+
+def test_known_tiles_skip_model_and_fractional_base_is_retained():
+    model = _TraceModel()
+    scaled = TiledGenerator(_generator(model, Diffusion(2)))
+    base = (
+        torch.tensor([0.125, 0.375, 0.5])[:, None, None, None]
+        .expand(3, 8, 4, 4)
+        .clone()
+    )
+    before = base.clone()
+    result = scaled.generate_probs(
+        shape=(8, 4, 4), base=base, preserve_base=True, overlap=0, progress=False
+    )
+    assert torch.allclose(result, base, atol=5e-4)
+    assert torch.equal(base, before)
+    assert not model.calls
 
 
 @pytest.mark.parametrize("vf", (None, (0.5, 0.1, 0.4)))
@@ -2049,6 +2110,8 @@ def _generator(
     use_amp: bool = False,
 ) -> Generator:
     device = torch.device("cpu") if device is None else device
+    if not hasattr(model, "downsample_factor"):
+        model.downsample_factor = 1
     if not hasattr(model, "num_domains"):
         model.num_domains = 1
     return Generator(
@@ -2147,3 +2210,22 @@ def _config(root: Path) -> dict:
             "r1_every_steps": 2,
         },
     }
+
+
+@pytest.mark.parametrize("guidance", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("tiled", [False, True])
+def test_generation_rejects_nonfinite_guidance(guidance, tiled):
+    generator = _generator(_GuidanceTraceModel(), _TraceDiffusion(timesteps=1))
+    with pytest.raises(ValueError, match="guidance"):
+        if tiled:
+            TiledGenerator(generator).generate(
+                shape=generator.patch_size, overlap=0, guidance=guidance, progress=False
+            )
+        else:
+            generator.generate(guidance=guidance)
+
+
+def test_tiled_plan_rejects_boolean_overlap():
+    generator = _generator(_TraceModel(), _TraceDiffusion(timesteps=1))
+    with pytest.raises(ValueError, match="overlap"):
+        TiledGenerator(generator).plan(generator.patch_size, overlap=True)

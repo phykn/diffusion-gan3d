@@ -4,7 +4,8 @@ import torch
 from PIL import Image
 
 from src.build.trainer import build_trainer
-from src.config import get_domains, load_train_config
+from src.config.data import get_domains
+from src.config.train import load_train_config
 from src.data.slice import sample_slices
 from src.plane import PLANES, get_axis
 from src.storage import save_model
@@ -40,7 +41,7 @@ def test_initial_weights_load_by_plane(tmp_path):
     images = tmp_path / "images"
     images.mkdir()
     Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(images / "sample.png")
-    cfg = load_train_config("config/train/low_res.yaml")
+    cfg = load_train_config("tests/fixtures/config/train/low_res.yaml")
     cfg["data"].update(
         domains={0: {plane: [str(images)] for plane in PLANES}},
         crop_size=8,
@@ -75,3 +76,9 @@ def test_initial_weights_load_by_plane(tmp_path):
         torch.testing.assert_close(
             restored.denoiser.state_dict()[key], value, rtol=0, atol=0
         )
+
+
+@pytest.mark.parametrize("domain", [False, 0.0])
+def test_domain_ids_require_integers(domain):
+    with pytest.raises(ValueError, match="domain IDs"):
+        get_domains({"domains": {domain: {"xy": ["images"]}}})

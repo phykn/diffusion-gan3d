@@ -8,17 +8,17 @@ import torch
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from backend.src.app import create_app
+from backend.src.config import load_config
 from src.build.data import build_datasets
 from src.build.model import build_sr_model
 from src.build.sr import build_sr_trainer
-from src.config import (
-    get_sizes,
-    get_sr_sizes,
-    load_train_config,
-)
+from src.config.data import get_sizes
+from src.config.train import get_sr_sizes, load_train_config
 from src.data.slice import sample_slices
 from src.predict.inference import InferenceAPI
-from src.predict.sr import SuperResolutionAPI
+from src.predict.sr.extension import coarsen_volume, extend_hr
+from src.predict.sr.inference import SuperResolutionAPI
 from src.prepare.resize import (
     downsample,
     phase_channels,
@@ -26,7 +26,6 @@ from src.prepare.resize import (
     resize_labels,
     scaled_size,
 )
-from src.serve.app import create_app
 from src.train.loss.sr import consistency_loss
 from src.train.sr import corrupt_coarse, export_sr, resume_sr_training, save_sr_training
 from src.train.trainer import Trainer
@@ -37,7 +36,7 @@ def sr_config(tmp_path, scale=1.5, phases=3):
     folder.mkdir(exist_ok=True)
     labels = (np.indices((24, 24)).sum(0) // 3 % phases).astype(np.uint8)
     Image.fromarray(labels).save(folder / "sample.png")
-    cfg = load_train_config("config/train/sr.yaml", "sr")
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     cfg["data"].update(
         crop_size=16,
         lo_res_size=8,
@@ -59,7 +58,7 @@ def sr_config(tmp_path, scale=1.5, phases=3):
         volume_batch_size=1,
         real_batch_size=2,
         slice_pairs_per_plane=2,
-        checkpoint_every_steps=1,
+        weights_every_steps=1,
         mixed_precision=False,
     )
     cfg["lr_bank"]["samples_per_domain"] = 2
@@ -73,6 +72,55 @@ def export_model(path, cfg):
         path,
     )
     return model
+
+
+@pytest.mark.parametrize("scale,tiled", [(1.5, False), (2, False), (2, True)])
+def test_sr_preserves_offset_base_during_shared_sampling(tmp_path, scale, tiled):
+    torch.set_num_threads(1)
+    cfg = sr_config(tmp_path, scale=scale)
+    path = tmp_path / "sr.pt"
+    export_model(path, cfg)
+    api = SuperResolutionAPI(path, "cpu")
+    low = torch.zeros((16 if tiled else 8, 8, 8), dtype=torch.long)
+    base = torch.arange(6**3).reshape(6, 6, 6).remainder(api.num_phases)
+    before = base.clone()
+    rng = torch.get_rng_state().clone()
+    actual = api.super_resolve(
+        low,
+        seed=3,
+        tile_size=16 if tiled else None,
+        overlap=0,
+        margin=0,
+        base=base,
+        base_offset=(2, 2, 2),
+    )
+    assert torch.equal(actual[2:8, 2:8, 2:8], base)
+    assert torch.equal(base, before)
+    assert torch.equal(torch.get_rng_state(), rng)
+
+
+def test_hr_coarsening_averages_phase_occupancy_not_numeric_ids():
+    labels = (torch.arange(8**3).reshape(8, 8, 8) % 2) * 2
+    fractions = coarsen_volume(labels, 2, 3)
+    assert torch.all(fractions[0] == 0.5)
+    assert torch.all(fractions[1] == 0)
+    assert torch.all(fractions[2] == 0.5)
+    with pytest.raises(ValueError, match="align"):
+        coarsen_volume(labels[:7], 2, 3)
+
+
+def test_hr_extension_rejects_misaligned_geometry_before_lr_sampling(tmp_path):
+    cfg = sr_config(tmp_path, scale=2)
+    sr = SimpleNamespace(config=cfg, scale_factor=2.0, num_phases=3)
+    lr = SimpleNamespace(data=cfg["data"], input_size=8)
+    with pytest.raises(ValueError, match="align"):
+        extend_hr(
+            lr,
+            sr,
+            torch.zeros(8, 8, 8, dtype=torch.long),
+            (20, 16, 16),
+            base_offset=(1, 0, 0),
+        )
 
 
 @pytest.mark.parametrize(
@@ -103,7 +151,7 @@ def test_old_resolution_keys_are_rejected():
 def test_sr_scale_changes_hr_without_changing_lr_data_or_preparation(tmp_path, scale):
     labels = torch.randint(3, (16, 16), generator=torch.Generator().manual_seed(71))
     Image.fromarray(labels.numpy().astype(np.uint8)).save(tmp_path / "sample.png")
-    cfg = load_train_config("config/train/low_res.yaml")
+    cfg = load_train_config("tests/fixtures/config/train/low_res.yaml")
     cfg["data"].update(
         crop_size=16,
         lo_res_size=8,
@@ -117,7 +165,7 @@ def test_sr_scale_changes_hr_without_changing_lr_data_or_preparation(tmp_path, s
     expected_lr = resize_crop(labels, 8, 3)
     assert torch.equal(dataset[tmp_path / "sample.png"], expected_lr)
 
-    sr_cfg = load_train_config("config/train/sr.yaml", "sr")
+    sr_cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     sr_cfg["data"] = copy.deepcopy(cfg["data"])
     sr_cfg["data"]["hi_res_size"] = int(8 * scale)
     high_size = int(8 * scale)
@@ -138,14 +186,14 @@ def test_sr_scale_changes_hr_without_changing_lr_data_or_preparation(tmp_path, s
 
 @pytest.mark.parametrize("high", [None, False, "128", 32, float("inf"), 96.5])
 def test_invalid_sr_grid_is_rejected_before_model_construction(high):
-    cfg = load_train_config("config/train/sr.yaml", "sr")
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     cfg["data"]["hi_res_size"] = high
     with pytest.raises(ValueError):
         build_sr_model(cfg)
 
 
 def test_sr_requires_its_own_grid(tmp_path):
-    cfg = load_train_config("config/train/sr.yaml", "sr")
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     del cfg["data"]["hi_res_size"]
     with pytest.raises(ValueError, match="data.hi_res_size"):
         build_sr_model(cfg)
@@ -182,7 +230,11 @@ def test_web_anchor_preparation_matches_new_dataset(tmp_path):
     api.generator = SimpleNamespace(num_phases=3, patch_size=8)
     crop = torch.arange(16 * 16).reshape(16, 16) % 3
     expected = resize_crop(crop, 8, 3)
-    with TestClient(create_app(inference=api)) as client:
+    with TestClient(
+        create_app(
+            inference=api, config=load_config("tests/fixtures/config/backend.yaml")
+        )
+    ) as client:
         response = client.post("/prepare", json={"image": crop.tolist()})
         assert response.status_code == 200
         assert response.json()["image"] == expected.tolist()
@@ -233,6 +285,11 @@ def test_sr_training_restores_state_without_rng(tmp_path):
     )
     checkpoint = tmp_path / "last.pt"
     save_sr_training(trainer, checkpoint)
+    saved_bytes = checkpoint.read_bytes()
+    with patch("src.train.sr.torch.save", side_effect=OSError("write failed")):
+        with pytest.raises(OSError, match="write failed"):
+            save_sr_training(trainer, checkpoint)
+    assert checkpoint.read_bytes() == saved_bytes
     expected = copy.deepcopy(trainer.denoiser.state_dict())
     expected_critics = copy.deepcopy(trainer.critics.state_dict())
     restored = build_sr_trainer(cfg, bank, torch.device("cpu"))
@@ -326,8 +383,8 @@ def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
 ):
     from types import SimpleNamespace
 
-    import src.predict.sr as sr_module
-    from src.predict import sr_memory
+    import src.predict.sr.inference as sr_module
+    import src.predict.sr.memory as sr_memory
 
     cfg = sr_config(tmp_path, scale=2)
     path = tmp_path / "model.pt"
@@ -351,7 +408,7 @@ def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
 
 
 def test_sr_tiled_refinement_uses_bounded_shared_fusion(tmp_path, monkeypatch):
-    import src.predict.tiled as tiled_module
+    import src.predict.tiling.sampler as tiled_module
 
     cfg = sr_config(tmp_path, scale=2)
     path = tmp_path / "model.pt"
@@ -381,7 +438,7 @@ def test_sr_tiled_refinement_uses_bounded_shared_fusion(tmp_path, monkeypatch):
 def test_sr_labels_match_probabilities_and_use_correct_budget(
     tmp_path, monkeypatch, tiled
 ):
-    import src.predict.sr as sr_module
+    import src.predict.sr.inference as sr_module
 
     cfg = sr_config(tmp_path, scale=2)
     path = tmp_path / "model.pt"
@@ -422,7 +479,7 @@ def test_sr_corruption_does_not_modify_clean_coarse_target():
 
 def test_sr_loss_targets_clean_coarse_while_model_receives_corrupted_input(tmp_path):
     Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(tmp_path / "sample.png")
-    cfg = load_train_config("config/train/sr.yaml", "sr")
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     cfg["data"].update(
         crop_size=8, lo_res_size=8, hi_res_size=8, domains={0: {"xy": [str(tmp_path)]}}
     )
@@ -580,8 +637,8 @@ def test_tiled_coarse_and_height_share_global_coordinates_with_margin(tmp_path):
 def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
     tmp_path, monkeypatch, guidance
 ):
-    from src.predict.tile import VolumeState
-    from src.predict.tiled import TiledGenerator
+    from src.predict.tiling.sampler import TiledGenerator
+    from src.predict.tiling.state import VolumeState
 
     cfg = sr_config(tmp_path, scale=2)
     cfg["model"]["diffusion"]["num_steps"] = 3

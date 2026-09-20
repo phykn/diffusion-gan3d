@@ -1,7 +1,11 @@
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 
-from src.config import get_plane_groups, normalize_train_config
+from src.config.data import get_plane_groups
+from src.config.train import normalize_train_config
+from src.prepare.resize import phase_channels
 
 
 def corrupt_coarse(low, probability, strength):
@@ -19,7 +23,7 @@ def corrupt_coarse(low, probability, strength):
         & active
     )
     labels = torch.randint(low.shape[1], (shape[0], *shape[2:]), device=low.device)
-    replacement = F.one_hot(labels, low.shape[1]).movedim(-1, 1).float()
+    replacement = phase_channels(labels, low.shape[1])
     replacement = F.interpolate(replacement, size=low.shape[2:], mode="nearest")
     corrupted = torch.where(mask, replacement, low)
     # Matching replacements do not contribute to the realized corruption level.
@@ -28,11 +32,15 @@ def corrupt_coarse(low, probability, strength):
 
 
 def save_sr_training(trainer, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save(
         {
             "format": "diffusion-gan3d.sr.train",
             "config": trainer.cfg,
             "step": trainer.completed_steps,
+            "data_fingerprint": trainer.data_fingerprint,
             "updates": trainer.updates,
             "model": trainer.denoiser.state_dict(),
             "ema": trainer.ema_denoiser.state_dict(),
@@ -44,13 +52,16 @@ def save_sr_training(trainer, path):
             },
             "scaler": trainer.scaler.state_dict(),
         },
-        path,
+        temporary,
     )
+    temporary.replace(path)
 
 
 def resume_sr_training(trainer, payload):
     if payload.get("format") != "diffusion-gan3d.sr.train":
         raise ValueError("unsupported SR training checkpoint format.")
+    if payload["data_fingerprint"] != trainer.data_fingerprint:
+        raise ValueError("SR source images changed since the checkpoint.")
     saved = normalize_train_config(payload["config"], "sr")
     if get_plane_groups(saved) != get_plane_groups(trainer.cfg):
         raise ValueError("critic plane_groups cannot change on resume.")

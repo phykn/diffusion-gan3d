@@ -2,17 +2,17 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, Sampler, default_collate
+from torch.utils.data import DataLoader, Sampler
 
 from src.data.dataset import RealDataset
 
 
 class BatchStream:
-    def __init__(self, loader: DataLoader[torch.Tensor]) -> None:
+    def __init__(self, loader: DataLoader[torch.Tensor | dict]) -> None:
         self.loader = loader
-        self.iterator: Iterator[torch.Tensor] = iter(loader)
+        self.iterator: Iterator[torch.Tensor | dict] = iter(loader)
 
-    def next(self) -> torch.Tensor:
+    def next(self) -> torch.Tensor | dict:
         try:
             batch = next(self.iterator)
         except StopIteration:
@@ -43,15 +43,3 @@ class FolderBatchSampler(Sampler[list[Path]]):
 
     def __len__(self) -> int:
         return self.num_batches
-
-
-class SliceStream:
-    def __init__(self, dataset, batch_size: int):
-        self.dataset = dataset
-        self.batch_size = batch_size
-
-    def next(self) -> torch.Tensor:
-        groups = self.dataset.path_groups
-        group = groups[int(torch.randint(len(groups), ()).item())]
-        indices = torch.randint(len(group), (self.batch_size,))
-        return default_collate([self.dataset[group[int(i)]] for i in indices])

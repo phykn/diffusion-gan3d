@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.prepare.resize import phase_channels
+from src.prepare.resize import downsample, phase_channels, resize_phases
 
 
 @pytest.mark.parametrize("shape", [(2, 7, 5), (2, 6, 7, 5)])
@@ -26,6 +26,7 @@ def test_phase_channels_avoids_expanded_int64_one_hot(shape, dtype):
         torch.tensor([[[-1]]]),
         torch.tensor([[[3]]]),
         torch.zeros(1, 2, 2, dtype=torch.float32),
+        torch.ones(1, 2, 2, dtype=torch.complex64) * 1j,
     ],
 )
 def test_phase_channel_validation_is_preserved(labels):
@@ -43,3 +44,17 @@ def test_phase_channels_validates_without_small_integer_overflow(dtype, count):
     assert torch.equal(result.sum(1), torch.ones_like(labels, dtype=torch.float32))
     with pytest.raises(ValueError):
         phase_channels(labels, count - 1)
+
+
+def test_mixed_resize_preserves_area_along_shrinking_axis():
+    probs = torch.zeros(1, 2, 6, 2)
+    probs[:, 0, (0, 5)] = 1
+    probs[:, 1] = 1 - probs[:, 0]
+    result = resize_phases(probs, (2, 4))
+    expected = torch.tensor([1 / 3, 2 / 3]).reshape(1, 2, 1, 1).expand(1, 2, 2, 4)
+    torch.testing.assert_close(result, expected)
+
+
+def test_downsample_rejects_expansion():
+    with pytest.raises(ValueError, match="expand"):
+        downsample(torch.ones(1, 1, 2, 4), (4, 2))

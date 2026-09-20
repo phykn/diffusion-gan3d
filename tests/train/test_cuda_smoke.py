@@ -6,6 +6,7 @@ import torch
 from src.build.model import build_models
 from src.build.trainer import build_optimizers
 from src.model.diffusion import Diffusion
+from src.prepare.resize import phase_channels
 from src.train.ema import build_ema
 from src.train.trainer import Trainer, TrainerComponents, TrainerSettings
 
@@ -114,7 +115,12 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             ema_denoiser=ema,
             critics=critics,
             connectivity_critic=connectivity_critic,
-            streams={0: {axis: CudaStream(images) for axis in (0, 1, 2)}},
+            streams={
+                0: {
+                    axis: CudaStream(phase_channels(images, data["num_phases"]))
+                    for axis in (0, 1, 2)
+                }
+            },
             diffusion=Diffusion(11, beta_min=0.1, beta_max=20.0).to(device),
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,

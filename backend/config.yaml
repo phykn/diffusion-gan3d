@@ -1,0 +1,8 @@
+max_size: 1024 # Maximum image/output length per axis, in pixels/voxels.
+max_voxels: 134217728 # 512^3 output voxels.
+max_blocks: 64
+max_total_blocks: 4096
+max_anchors: 32
+
+max_request_bytes: 16777216 # 16 MiB of JSON before decoding.
+max_inflight_downloads: 2

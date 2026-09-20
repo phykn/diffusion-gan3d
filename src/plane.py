@@ -1,5 +1,3 @@
-"""Plane names for volumes stored as D,H,W = z,y,x."""
-
 AXES = (0, 1, 2)
 
 PLANES = ("xy", "xz", "yz")

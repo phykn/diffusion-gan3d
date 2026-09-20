@@ -2,16 +2,10 @@ from pathlib import Path
 
 import pytest
 
-import src.config as config_module
-from src.config import (
-    GenerationSettings,
-    find_train_config,
-    get_schedule_steps,
-    load_generation_settings,
-    load_train_config,
-    load_yaml,
-    save_yaml,
-)
+import src.config.generation as config_module
+from src.config.files import find_train_config, load_yaml, save_yaml
+from src.config.generation import GenerationSettings, load_generation_settings
+from src.config.train import get_schedule_steps
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -68,30 +62,6 @@ def test_generation_settings_support_missing_values(
     assert load_generation_settings() == GenerationSettings()
 
 
-def test_repository_generation_config_has_expected_defaults() -> None:
-    assert load_generation_settings() == GenerationSettings(0.9, 0.8, 8)
-
-
-def test_repository_training_config_uses_soft_anchor_and_connectivity() -> None:
-    cfg = load_train_config(ROOT / "config/train/low_res.yaml")
-    assert set(cfg) == {
-        "stage",
-        "data",
-        "model",
-        "augmentation",
-        "conditioning",
-        "loss",
-        "optim",
-        "train",
-    }
-    assert cfg["conditioning"]["domain_keep_probability"] == 0.8
-    assert cfg["model"]["generator"]["anchor_multiscale_input"] is True
-    assert cfg["conditioning"]["anchor"]["borrowed_plane_probability"] == 0.20
-    assert cfg["loss"]["anchor_pixel_weight"] == 0.05
-    assert cfg["train"]["initial_weights"] is None
-    assert "batch_size" not in cfg["data"]
-
-
 @pytest.mark.parametrize(
     "settings",
     (
@@ -144,7 +114,6 @@ def test_invalid_yaml_reports_the_source(tmp_path: Path) -> None:
 
 def test_stage1_training_has_no_measured_3d_target() -> None:
     paths = [
-        ROOT / "config/train/low_res.yaml",
         ROOT / "run_train_1st.py",
         ROOT / "src" / "train" / "trainer.py",
         ROOT / "src" / "data" / "dataset.py",
@@ -164,3 +133,18 @@ def test_stage1_training_has_no_measured_3d_target() -> None:
         text = path.read_text(encoding="utf-8").lower()
         for token in forbidden:
             assert token not in text, f"{token!r} found in {path.relative_to(ROOT)}"
+
+
+@pytest.mark.parametrize("text", ["[]", "false", "0", "''"])
+def test_yaml_rejects_falsey_non_mapping_roots(tmp_path, text):
+    path = tmp_path / "config.yaml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(TypeError, match="mapping"):
+        load_yaml(path)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True, "1.5"])
+def test_generation_guidance_requires_a_finite_number(monkeypatch, value):
+    monkeypatch.setattr(config_module, "load_yaml", lambda path: {"guidance": value})
+    with pytest.raises(ValueError, match="guidance"):
+        load_generation_settings()

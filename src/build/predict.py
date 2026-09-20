@@ -3,11 +3,9 @@ from pathlib import Path
 import torch
 
 from src.build.model import build_denoiser, build_diffusion
-from src.config import (
-    find_train_config,
-    get_sizes,
-    load_train_config,
-)
+from src.config.data import get_sizes
+from src.config.files import find_train_config
+from src.config.train import load_train_config
 from src.predict.generator import Generator
 from src.storage import load_model
 

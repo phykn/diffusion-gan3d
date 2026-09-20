@@ -31,15 +31,13 @@ from provenance import (
 )
 
 from src.build.predict import load_generator
-from src.config import load_generation_settings
-from src.evaluate import (
-    compute_fid,
-    compute_kid,
-    percolating_fractions,
-    phase_fraction,
-    tortuosity,
-)
-from src.predict.tiled import TiledGenerator
+from src.config.generation import load_generation_settings
+from src.evaluate.connectivity import percolating_fractions
+from src.evaluate.fid import compute_fid
+from src.evaluate.kid import compute_kid
+from src.evaluate.label import phase_fraction
+from src.evaluate.tortuosity import tortuosity
+from src.predict.tiling.sampler import TiledGenerator
 from src.storage import save_volume
 
 SEEDS = (0, 1, 2, 3)
@@ -229,14 +227,14 @@ def evaluate(
                 "Real 2D crops",
                 seed,
                 fid=compute_fid(
-                    real_reference,
-                    crops,
+                    real_reference.astype(bool),
+                    crops.astype(bool),
                     device,
                     FID_FEATURE_DIMENSIONS,
                 ),
                 kid=compute_kid(
-                    real_reference,
-                    crops,
+                    real_reference.astype(bool),
+                    crops.astype(bool),
                     device,
                     FID_FEATURE_DIMENSIONS,
                     subset_size=KID_SUBSET_SIZE,
@@ -262,14 +260,14 @@ def evaluate(
                 seed,
                 guidance=guidance,
                 fid=compute_fid(
-                    real_reference,
-                    sections,
+                    real_reference.astype(bool),
+                    sections.astype(bool),
                     device,
                     FID_FEATURE_DIMENSIONS,
                 ),
                 kid=compute_kid(
-                    real_reference,
-                    sections,
+                    real_reference.astype(bool),
+                    sections.astype(bool),
                     device,
                     FID_FEATURE_DIMENSIONS,
                     subset_size=KID_SUBSET_SIZE,

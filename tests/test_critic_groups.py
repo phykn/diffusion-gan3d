@@ -9,10 +9,11 @@ from torch import nn
 
 from src.build.sr import build_sr_trainer
 from src.build.trainer import build_trainer
-from src.config import get_plane_groups, load_train_config
+from src.config.data import get_plane_groups
+from src.config.train import load_train_config
 from src.model.critic import CriticScores
 from src.plane import PLANES
-from src.train.run import run_train
+from src.train.run.loop import run_train
 from src.train.sr import resume_sr_training, save_sr_training
 
 GROUPS = [[["xy", "xz", "yz"]], [["xy"], ["xz", "yz"]], [["xy"], ["xz"], ["yz"]]]
@@ -24,7 +25,7 @@ def config(tmp_path, stage, groups):
     Image.fromarray((np.indices((8, 8)).sum(0) % 2).astype(np.uint8)).save(
         images / "sample.png"
     )
-    cfg = load_train_config(f"config/train/{stage}.yaml", stage)
+    cfg = load_train_config(f"tests/fixtures/config/train/{stage}.yaml", stage)
     cfg["data"].update(
         crop_size=8,
         lo_res_size=8,
@@ -50,7 +51,7 @@ def config(tmp_path, stage, groups):
         cfg["model"]["gradient_checkpointing"] = False
         cfg["data"]["hi_res_size"] = 12
         cfg["train"].update(
-            real_batch_size=2, slice_pairs_per_plane=2, checkpoint_every_steps=1
+            real_batch_size=2, slice_pairs_per_plane=2, weights_every_steps=1
         )
         cfg["lr_bank"]["samples_per_domain"] = 2
     return cfg
@@ -109,11 +110,18 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
         for name, model in trainer.critics.items()
     }
     real = {
-        axis: (torch.full((2, 1, 8, 8), float(axis + 1)), torch.zeros(2, 1, 8, 8))
+        axis: (
+            torch.full((2, trainer.num_phases, 8, 8), float(axis + 1)),
+            torch.zeros(2, trainer.num_phases, 8, 8),
+        )
         for axis in range(3)
     }
     fake = {
-        axis: (torch.zeros(2, 1, 8, 8), torch.zeros(2, 1, 8, 8)) for axis in range(3)
+        axis: (
+            torch.zeros(2, trainer.num_phases, 8, 8),
+            torch.zeros(2, trainer.num_phases, 8, 8),
+        )
+        for axis in range(3)
     }
     trainer.diffusion.sample_pair = lambda images, transition: (
         images,

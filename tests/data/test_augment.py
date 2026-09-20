@@ -7,43 +7,28 @@ from src.data.augment import CriticAugment
 
 
 def test_all_square_symmetries_are_distinct() -> None:
-    maps = CriticAugment("isotropic").get_index_maps(torch.device("cpu"), 3, 3)
+    maps = CriticAugment().get_index_maps(torch.device("cpu"), 3, 3)
     actual = {tuple(mapping.tolist()) for mapping in maps}
 
     assert len(actual) == 8
 
 
-def test_true_is_rejected_instead_of_guessing_a_preset() -> None:
-    with pytest.raises(ValueError, match="use isotropic"):
-        CriticAugment(True)
+@pytest.mark.parametrize("planes", [True, False, "isotropic", "anisotropic"])
+def test_global_augmentation_presets_are_rejected(planes):
+    with pytest.raises(ValueError, match="augmentation.planes"):
+        CriticAugment(planes=planes)
 
 
-@pytest.mark.parametrize(
-    ("mode", "expected"),
-    [
-        (False, None),
-        ("isotropic", "isotropic"),
-        ("anisotropic", "anisotropic"),
-    ],
-)
-def test_augment_presets_are_parsed(mode: bool | str, expected: str | None) -> None:
-    assert CriticAugment(mode).mode == expected
-
-
-@pytest.mark.parametrize(
-    "mode",
-    ("transverse_0", "transverse_1", "transverse_2", "directional"),
-)
-def test_removed_augment_presets_are_rejected(mode: str) -> None:
-    with pytest.raises(ValueError, match="false, isotropic"):
-        CriticAugment(mode)
+def test_disabled_augmentation_returns_original_tensors():
+    image = torch.randn(2, 3, 4, 4)
+    assert CriticAugment().apply_together((image,))[0] is image
 
 
 def test_pair_shares_one_transform_and_preserves_gradients() -> None:
     previous = torch.arange(18, dtype=torch.float32).reshape(2, 1, 3, 3)
     previous.requires_grad_()
     current = previous + 100.0
-    augment = CriticAugment("isotropic", 1.0)
+    augment = CriticAugment(planes={"xy": {"flip_axes": ["x", "y"], "rotate_90": True}})
 
     with patch.object(
         augment,
@@ -52,6 +37,7 @@ def test_pair_shares_one_transform_and_preserves_gradients() -> None:
     ):
         transformed_previous, transformed_current = augment.apply_together(
             (previous, current),
+            plane="xy",
         )
 
     assert torch.equal(
@@ -66,7 +52,7 @@ def test_pair_shares_one_transform_and_preserves_gradients() -> None:
 def test_triplet_real_and_fake_share_the_same_transform() -> None:
     real = torch.arange(54, dtype=torch.float32).reshape(2, 3, 1, 3, 3)
     fake = real + 1000.0
-    augment = CriticAugment("isotropic", 1.0)
+    augment = CriticAugment(planes={"xy": {"flip_axes": ["x", "y"], "rotate_90": True}})
 
     with patch.object(
         augment,
@@ -75,6 +61,7 @@ def test_triplet_real_and_fake_share_the_same_transform() -> None:
     ):
         transformed_real, transformed_fake = augment.apply_together(
             (real, fake),
+            plane="xy",
         )
 
     assert torch.equal(
@@ -86,7 +73,7 @@ def test_triplet_real_and_fake_share_the_same_transform() -> None:
 def test_zero_probability_returns_original_tensors() -> None:
     first = torch.randn(2, 3, 4, 4)
     second = torch.randn(2, 3, 4, 4)
-    augment = CriticAugment("isotropic", 0.0)
+    augment = CriticAugment(planes={"xy": {"flip_axes": ["x", "y"]}}, prob=0.0)
 
     actual = augment.apply_together((first, second))
 
@@ -96,12 +83,13 @@ def test_zero_probability_returns_original_tensors() -> None:
 
 def test_rectangular_inputs_use_only_shape_preserving_transforms() -> None:
     inputs = torch.arange(24, dtype=torch.float32).reshape(2, 1, 3, 4)
-    augment = CriticAugment("isotropic", 1.0)
+    augment = CriticAugment(planes={"xy": {"flip_axes": ["x", "y"], "rotate_90": True}})
 
-    with patch("torch.randint", return_value=torch.tensor([1, 3])):
+    with patch("torch.randint", return_value=torch.tensor([0, 2])):
         transforms = augment.sample_transforms(
             2,
             device=inputs.device,
+            plane="xy",
             square=False,
         )
 
@@ -112,7 +100,7 @@ def test_rectangular_inputs_use_only_shape_preserving_transforms() -> None:
 
 def test_rectangular_inputs_reject_quarter_turns() -> None:
     inputs = torch.arange(24, dtype=torch.float32).reshape(2, 1, 3, 4)
-    augment = CriticAugment("isotropic", 1.0)
+    augment = CriticAugment(planes={"xy": {"flip_axes": ["x", "y"], "rotate_90": True}})
 
     with pytest.raises(ValueError, match="shape-preserving"):
         augment.apply_transforms(
@@ -121,19 +109,20 @@ def test_rectangular_inputs_reject_quarter_turns() -> None:
         )
 
 
-def test_anisotropic_pair_uses_only_left_right_flips_and_preserves_gradients() -> None:
+def test_horizontal_flip_policy_preserves_pair_alignment_and_gradients() -> None:
     previous = torch.arange(24, dtype=torch.float32).reshape(2, 1, 3, 4)
     previous.requires_grad_()
     current = previous + 100.0
-    augment = CriticAugment("anisotropic", 1.0)
+    augment = CriticAugment(planes={"xy": {"flip_axes": ["x"]}}, prob=0.5)
 
-    with patch("torch.randint", return_value=torch.tensor([0, 1])):
-        transforms = augment.sample_transforms(2, device=previous.device)
+    with patch("torch.rand", return_value=torch.tensor([1.0, 0.0])):
+        transforms = augment.sample_transforms(2, device=previous.device, plane="xy")
     assert transforms.tolist() == [0, 4]
 
     with patch.object(augment, "sample_transforms", return_value=transforms):
         transformed_previous, transformed_current = augment.apply_together(
             (previous, current),
+            plane="xy",
         )
 
     assert transformed_previous.shape == previous.shape
@@ -211,7 +200,5 @@ def test_plane_policy_does_not_allow_an_implicit_axis_or_global_mode():
     aug = CriticAugment(planes={"xy": {"flip_axes": []}})
     with pytest.raises(ValueError, match="plane is required"):
         aug.apply_together((torch.zeros(2, 1, 3, 3),))
-    with pytest.raises(ValueError, match="not both"):
-        CriticAugment("isotropic", planes={"xy": {"flip_axes": []}})
-    with pytest.raises(ValueError, match="augmentation.planes"):
-        CriticAugment("isotropic", thickness_axis="z")
+    with pytest.raises(TypeError, match="mode"):
+        CriticAugment(mode="isotropic", planes={"xy": {"flip_axes": []}})

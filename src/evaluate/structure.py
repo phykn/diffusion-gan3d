@@ -1,11 +1,9 @@
-"""Reference-free 3D diagnostics and comparisons against measured 2D slices."""
-
 from itertools import combinations
 
 import numpy as np
-import scipy.ndimage as ndi
 import torch
 
+from src.evaluate.connectivity import spanning_fractions
 from src.plane import PLANES
 
 
@@ -52,18 +50,10 @@ def structure_metrics(probs, real, groups):
         span, lower = [], []
         for volume in labels:
             mask = volume == phase
-            components, _ = ndi.label(
-                mask, structure=ndi.generate_binary_structure(3, 1)
-            )
-            counts = np.bincount(components.ravel())
             total = max(int(mask.sum()), 1)
-            fractions, bounds = [], []
+            fractions = spanning_fractions(mask)
+            bounds = []
             for axis in range(3):
-                connected = np.intersect1d(
-                    np.take(components, 0, axis), np.take(components, -1, axis)
-                )
-                connected = connected[connected != 0]
-                fractions.append(float(counts[connected].sum() / total))
                 bounds.append(
                     float(mask.all(axis=axis).sum() * mask.shape[axis] / total)
                 )

@@ -1,46 +1,12 @@
-from collections.abc import Sequence
-from pathlib import Path
-
-from PIL import Image
 from torch.utils.data import DataLoader
 
-from src.config import get_domains, get_sizes, get_sr_sizes, normalize_train_config
+from src.config.data import get_domains, get_sizes
+from src.config.train import get_sr_sizes, normalize_train_config
 from src.data.augment import CriticAugment
-from src.data.dataset import RealDataset, ResolutionDataset
+from src.data.dataset import RealDataset
 from src.data.loader import BatchStream, FolderBatchSampler
+from src.data.source import collect_image_groups
 from src.plane import PLANE_DIRECTIONS, PLANES
-
-IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
-
-
-def resolve_height_metadata(cfg):
-    if not cfg["conditioning"]["height_enabled"]:
-        return
-    data = cfg["data"]
-    thickness = data.get("thickness_axis")
-    if thickness not in ("x", "y", "z"):
-        raise ValueError("height conditioning requires data.thickness_axis.")
-    extents = {}
-    for domain, folders in get_domains(data).items():
-        sizes = set()
-        for axis, paths in folders.items():
-            directions = PLANE_DIRECTIONS[PLANES[axis]]
-            if thickness not in directions:
-                continue
-            direction = directions.index(thickness)
-            for folder in paths:
-                for path in Path(folder).iterdir():
-                    if path.suffix.lower() in IMAGE_EXTENSIONS:
-                        with Image.open(path) as image:
-                            sizes.add(image.size[1 - direction])
-        if len(sizes) != 1:
-            raise ValueError(
-                "height conditioning requires full-thickness side images with one consistent extent per domain."
-            )
-        extents[domain] = sizes.pop()
-    if data.get("height_extents", extents) != extents:
-        raise ValueError("side-image thickness differs from saved height_extents.")
-    data["height_extents"] = extents
 
 
 def build_augmentation(cfg: dict) -> CriticAugment:
@@ -65,36 +31,9 @@ def build_datasets(cfg: dict, high: bool = False) -> dict[int, dict[int, RealDat
     else:
         crop, low, high_size = get_sizes(data)
     datasets = {}
-    for domain_id, folders in get_domains(data).items():
-        grouped = {}
-        for axis in sorted(folders):
-            values = folders[axis]
-            if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-                raise TypeError(f"axis {axis} folders must be a sequence of paths.")
-            if not values:
-                raise ValueError(f"axis {axis} folders must not be empty.")
-            axis_folders = tuple(Path(value) for value in values)
-            if len({folder.resolve() for folder in axis_folders}) != len(axis_folders):
-                raise ValueError(f"axis {axis} folders must not contain duplicates.")
-
-            groups = []
-            for folder in axis_folders:
-                if not folder.is_dir():
-                    raise FileNotFoundError(
-                        f"axis {axis} folder does not exist: {folder}"
-                    )
-                found = sorted(
-                    path
-                    for path in folder.iterdir()
-                    if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-                )
-                if not found:
-                    raise ValueError(f"axis {axis} folder contains no images: {folder}")
-                groups.append(tuple(found))
-            grouped[axis] = tuple(groups)
-
+    for domain_id, grouped in collect_image_groups(data).items():
         datasets[domain_id] = {
-            axis: ResolutionDataset(
+            axis: RealDataset(
                 path_groups,
                 crop,
                 high_size if high else low,
@@ -105,6 +44,7 @@ def build_datasets(cfg: dict, high: bool = False) -> dict[int, dict[int, RealDat
                     else None
                 ),
                 height_enabled=cfg["conditioning"]["height_enabled"],
+                validation_regions=data.get("split", {}).get("validation_regions"),
             )
             for axis, path_groups in grouped.items()
         }

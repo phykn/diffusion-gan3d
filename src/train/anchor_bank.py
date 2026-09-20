@@ -1,10 +1,19 @@
-"""Bounded replay of generated volumes with their original measured plane."""
-
 import math
+from dataclasses import dataclass
 
 import torch
 
-from src.anchor import PlaneAnchor, encode_anchors
+from src.anchor import AnchorCondition, PlaneAnchor, encode_anchors
+
+
+@dataclass(frozen=True)
+class AnchorReplay:
+    condition: AnchorCondition
+    measured: AnchorCondition
+    reference: torch.Tensor
+    height: torch.Tensor | None
+    profile: torch.Tensor | None
+    geometry: list[dict] | None
 
 
 class AnchorBank:
@@ -22,7 +31,16 @@ class AnchorBank:
         self.plane_spacing = plane_spacing
         self.entries: dict[int, list[dict]] = {}
 
-    def add(self, domain, prediction, measured, visible, height=None):
+    def add(
+        self,
+        domain,
+        prediction,
+        measured,
+        visible,
+        height=None,
+        profile=None,
+        geometry=None,
+    ):
         entries = self.entries.setdefault(domain, [])
         for batch in visible.nonzero().flatten().tolist():
             # Transfer only when storing a completed, measured-conditioned sample.
@@ -49,6 +67,10 @@ class AnchorBank:
                 )
             entries.append(
                 dict(
+                    geometry=None if geometry is None else geometry[batch],
+                    profile=None
+                    if profile is None
+                    else profile[batch : batch + 1].detach().cpu(),
                     volume=volume,
                     planes=planes,
                     height=None
@@ -58,7 +80,7 @@ class AnchorBank:
             )
         del entries[: -self.capacity]
 
-    def sample(self, domain, batch_size, device):
+    def sample(self, domain, batch_size, device) -> AnchorReplay | None:
         entries = self.entries.get(domain, [])
         if not entries:
             return None
@@ -118,4 +140,16 @@ class AnchorBank:
         # Continuity targets describe the replay's changes, never artificial
         # jumps introduced by pasting a measured plane. Anchor loss owns the
         # measured values themselves; reconciliation is for conditions only.
-        return condition, measured, volume, height
+        profile = entry["profile"]
+        return AnchorReplay(
+            condition=condition,
+            measured=measured,
+            reference=volume,
+            height=height,
+            profile=None
+            if profile is None
+            else profile.to(device).expand(batch_size, -1, -1),
+            geometry=[entry["geometry"]] * batch_size
+            if entry["geometry"] is not None
+            else None,
+        )

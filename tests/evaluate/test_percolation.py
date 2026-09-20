@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.evaluate import percolating_fractions
+from src.evaluate.connectivity import percolating_fractions
 
 
 @pytest.mark.parametrize("axis", (0, 1, 2))

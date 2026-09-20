@@ -3,6 +3,27 @@ import torch
 from src.plane import AXES
 
 
+def phase_labels(values, num_phases: int | None = None) -> torch.Tensor:
+    values = torch.as_tensor(values)
+    if values.numel() == 0 or values.is_complex():
+        raise ValueError("phase labels must be non-empty real integers.")
+    if num_phases is not None and (type(num_phases) is not int or num_phases < 1):
+        raise ValueError("num_phases must be a positive integer.")
+    labels = values.to(torch.int64)
+    valid = (labels >= 0).all()
+    if values.is_floating_point():
+        valid &= (values == labels.to(values.dtype)).all()
+    message = "phase labels must be non-negative integers."
+    if num_phases is not None:
+        valid &= (labels < num_phases).all()
+        message = f"labels must contain integer phases from 0 to {num_phases - 1}."
+    if labels.device.type == "cuda":
+        torch._assert_async(valid, message)
+    elif not bool(valid):
+        raise ValueError(message)
+    return labels
+
+
 def compute_vf(
     batches: dict[int, torch.Tensor],
     num_phases: int,
@@ -25,31 +46,28 @@ def compute_vf(
             counts.append(images.float().sum(dim=(0, 2, 3)))
             total += images.numel() // num_phases
             continue
-        values = images.to(torch.long)
-        valid = ((values >= 0) & (values < num_phases)).all()
-        if values.device.type == "cuda":
-            torch._assert_async(
-                valid, "training images contain a phase outside num_phases."
-            )
-        elif not bool(valid):
-            raise ValueError("training images contain a phase outside num_phases.")
+        values = phase_labels(images, num_phases)
         counts.append(torch.bincount(values.flatten(), minlength=num_phases).float())
         total += values.numel()
     return torch.stack(counts).sum(0).div(total)
 
 
 def phase_fraction(values, phase: int = 0) -> float:
-    labels = torch.as_tensor(values)
+    labels = phase_labels(values)
+    if type(phase) is not int or phase < 0:
+        raise ValueError("phase must be a non-negative integer.")
     return float((labels == phase).to(torch.float64).mean())
 
 
 def phase_fractions(values, num_phases: int) -> torch.Tensor:
-    labels = torch.as_tensor(values).reshape(-1).to(torch.long)
+    labels = phase_labels(values, num_phases).reshape(-1)
     counts = torch.bincount(labels, minlength=num_phases)
     return counts.to(torch.float64).div(labels.numel())
 
 
 def voxel_accuracy(actual, expected) -> float:
-    actual = torch.as_tensor(actual)
-    expected = torch.as_tensor(expected)
+    actual = phase_labels(actual)
+    expected = phase_labels(expected).to(actual.device)
+    if actual.shape != expected.shape:
+        raise ValueError("actual and expected labels must have the same shape.")
     return float((actual == expected).to(torch.float64).mean())

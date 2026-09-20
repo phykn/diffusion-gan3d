@@ -1,0 +1,13 @@
+max_size: 1024
+
+max_voxels: 134217728
+
+max_blocks: 64
+
+max_total_blocks: 4096
+
+max_anchors: 32
+
+max_request_bytes: 16777216
+
+max_inflight_downloads: 2

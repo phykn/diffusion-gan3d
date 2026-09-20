@@ -1,4 +1,5 @@
 stage: low_res
+nickname: ""
 data: config/data/default.yaml
 
 model:
@@ -33,9 +34,12 @@ augmentation:
 conditioning:
   anchor:
     probability: 0.8
+    ramp_steps: 500  # 초기 anchor 조건과 손실을 천천히 도입한다.
 
 loss:
-  r1_weight: 0.2
+  r1_weight: 0.5
+  r2_weight: 0.1  # fake 입력의 gradient 규제. R1과 같은 주기로 적용한다.
+  r1_every_steps: 8  # 실제 critic 업데이트 횟수 기준
 
   anchor_pixel_weight: 0.05
   volume_fraction_weight: 1.0
@@ -44,17 +48,19 @@ loss:
     max_slice_gap: 8  # LR 격자에서 단면 사이의 최대 간격
     adversarial_weight: 0.25
     normal_transition_weight: 0.1
+    ramp_steps: 5000  # 학습 전반부에 목표 가중치까지 올린다.
 
 optim:
-  generator_lr: 0.00016
-  critic_lr: 0.0001
+  generator_lr: 0.0001
+  critic_lr: 0.00005
 
 train:
-  total_steps: 20000
+  total_steps: 10000
 
   real_batch_size: 8  # 단면별 실제 2D 이미지 수
   volume_batch_size: 1
   slice_pairs_per_plane: 16  # 단면별로 뽑는 diffusion 시점 쌍 수
 
-  weights_every_steps: 100
-  archive_every_steps: 5000  # null이면 단계별 가중치 보관을 끈다
+  weights_every_steps: 25
+  archive_every_steps: 1250  # null이면 단계별 가중치 보관을 끈다
+  structure_every_steps: 25

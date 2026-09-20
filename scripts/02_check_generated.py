@@ -1,4 +1,3 @@
-import argparse
 import sys
 from pathlib import Path
 
@@ -8,18 +7,22 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.diagnostic import show_napari
+from scripts.common.cli import check_parser, prepare_check, save_preview
+from scripts.common.diagnostic import show_napari
 from src.build.predict import load_generator
+from src.config.generation import load_generation_settings
+from src.plane import PLANES
+from src.predict.random import seeded_rng
 from src.storage import save_volume
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = check_parser(__file__, "Inspect an LR model with three orthogonal slices.")
     parser.add_argument(
         "--weight",
         type=Path,
         required=True,
-        help="generator weight to load",
+        help="LR generator.pt or its run directory",
     )
     parser.add_argument(
         "--domain",
@@ -30,16 +33,31 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=Path,
-        help="optional output path for the generated TIFF volume",
+        help="TIFF path; default: a new directory under run/checks",
     )
     parser.add_argument(
         "--napari",
         action="store_true",
         help="show the complete 3D phase volume in Napari",
     )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        help="Default: CUDA when available, otherwise CPU.",
+    )
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--no-view", action="store_true", help="Save without opening a viewer."
+    )
+    parser.add_argument("--guidance", type=float, help="Default: config/gen.yaml.")
     args = parser.parse_args()
+    args = prepare_check(args, __file__)
+    if args.guidance is None:
+        args.guidance = load_generation_settings().guidance
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     weight = args.weight
     print(f"\nWeights : {weight.resolve()}", flush=True)
 
@@ -50,16 +68,18 @@ def main() -> None:
         flush=True,
     )
 
-    vol = generator.generate(
-        vf=None,
-        domain=args.domain,
-        margin=generator.default_margin,
-    )
-    if args.out is not None:
-        save_volume(vol, args.out)
-        print(f"Saved   : {args.out.resolve()}", flush=True)
-    else:
-        print("Complete", flush=True)
+    with seeded_rng(args.seed, device):
+        vol = generator.generate(
+            vf=None,
+            guidance=args.guidance,
+            domain=args.domain,
+            margin=generator.default_margin,
+        )
+    save_volume(vol, args.out)
+    print(f"Saved   : {args.out.resolve()}", flush=True)
+    save_preview(vol, args, generator.num_phases)
+    if args.no_view:
+        return
     if args.napari:
         show_napari(vol)
     else:
@@ -86,7 +106,7 @@ def show_slices(
             vmax=num_phases - 0.5,
             interpolation="nearest",
         )
-        panels[axis].set_title(f"axis {axis}")
+        panels[axis].set_title(PLANES[axis])
         panels[axis].axis("off")
     fig.suptitle("EMA model")
     fig.tight_layout()

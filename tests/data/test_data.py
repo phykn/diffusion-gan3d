@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 
 from src.build.data import build_datasets, build_stream
-from src.config import get_domains
+from src.config.data import get_domains
 from src.data.augment import crop_images
 from src.data.dataset import RealDataset
 from src.data.loader import FolderBatchSampler
@@ -20,138 +20,46 @@ def _save_image(path: Path, image: np.ndarray) -> None:
 
 
 class LabelTransformTest(unittest.TestCase):
-    def test_random_crop_uses_the_sampled_coordinates(self):
+    def test_random_crop_returns_source_origin(self):
         image = np.arange(36, dtype=np.uint8).reshape(6, 6)
-
-        dataset = RealDataset([["unused"]], crop_size=3)
-
+        dataset = RealDataset([["unused"]], crop_size=3, patch_size=3, num_phases=36)
         with patch("numpy.random.randint", side_effect=(1, 2)):
-            cropped = dataset.crop(image)
-
+            cropped, origin = dataset.crop_with_origin(image)
         np.testing.assert_array_equal(cropped, image[1:4, 2:5])
+        self.assertEqual(origin, (1, 2))
 
-    def test_default_crop_size_is_64(self):
-        dataset = RealDataset([["unused"]])
-
-        self.assertEqual(dataset.crop_size, 64)
-        self.assertEqual(dataset.patch_size, 64)
-
-    def test_dataset_resizes_the_crop_to_patch_size(self):
+    def test_dataset_resizes_phase_channels_without_losing_fractional_occupancy(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "image.png"
-            img = np.arange(64, dtype=np.uint8).reshape(8, 8)
-            _save_image(path, img)
-            dataset = RealDataset([[path]], crop_size=4, patch_size=2)
-
+            image = np.tile(np.array([0, 1], dtype=np.uint8), (8, 4))
+            _save_image(path, image)
+            dataset = RealDataset([[path]], crop_size=4, patch_size=2, num_phases=2)
             with patch("numpy.random.randint", side_effect=(2, 3)):
                 actual = dataset[path]
+        torch.testing.assert_close(actual, torch.full((2, 2, 2), 0.5))
 
-        expected = np.asarray(
-            Image.fromarray(img[2:6, 3:7]).resize(
-                (2, 2),
-                resample=Image.Resampling.NEAREST,
-            )
-        )
-        np.testing.assert_array_equal(actual.numpy(), expected)
-
-    def test_default_resize_keeps_the_existing_square_output(self):
-        image = np.arange(32, dtype=np.uint8).reshape(4, 8)
-        dataset = RealDataset([["unused"]], crop_size=8, patch_size=2)
-
-        actual = dataset.resize(image)
-
-        expected = np.asarray(
-            Image.fromarray(image).resize(
-                (2, 2),
-                resample=Image.Resampling.NEAREST,
-            )
-        )
-        np.testing.assert_array_equal(actual, expected)
-
-    def test_partial_crop_preserves_aspect_ratio_at_the_configured_scale(self):
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "image.png"
-            img = np.arange(32, dtype=np.uint8).reshape(4, 8)
-            _save_image(path, img)
-            dataset = RealDataset(
-                [[path]],
-                crop_size=8,
-                patch_size=4,
-                allow_part=True,
-            )
-
-            actual = dataset[path]
-
-        expected = np.asarray(
-            Image.fromarray(img).resize(
-                (4, 2),
-                resample=Image.Resampling.NEAREST,
-            )
-        )
-        self.assertEqual(actual.shape, torch.Size([2, 4]))
-        np.testing.assert_array_equal(actual.numpy(), expected)
-
-    def test_partial_crop_is_rejected_by_default(self):
-        image = np.zeros((3, 8), dtype=np.uint8)
-        dataset = RealDataset([["unused"]], crop_size=4, patch_size=4)
-
+    def test_crop_larger_than_the_image_is_rejected(self):
+        dataset = RealDataset([["unused"]], crop_size=4, patch_size=4, num_phases=2)
         with self.assertRaisesRegex(ValueError, "crop size must fit"):
-            dataset.crop(image)
+            dataset.crop_with_origin(np.zeros((3, 8), dtype=np.uint8))
 
-    def test_partial_crop_flag_requires_a_boolean(self):
-        with self.assertRaisesRegex(TypeError, "must be a boolean"):
-            RealDataset([["unused"]], allow_part=1)
-
-    def test_partial_crop_uses_a_random_window_on_the_long_axis(self):
-        image = np.arange(48, dtype=np.uint8).reshape(4, 12)
-        dataset = RealDataset(
-            [["unused"]],
-            crop_size=8,
-            patch_size=8,
-            allow_part=True,
-        )
-
-        with patch("numpy.random.randint", side_effect=(0, 3)):
-            cropped = dataset.crop(image)
-
-        np.testing.assert_array_equal(cropped, image[:, 3:11])
-
-    def test_partial_crop_keeps_an_extremely_thin_image_nonempty(self):
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "image.png"
-            _save_image(path, np.arange(2, dtype=np.uint8).reshape(1, 2))
-            dataset = RealDataset(
-                [[path]],
-                crop_size=8,
-                patch_size=2,
-                allow_part=True,
-            )
-
-            actual = dataset[path]
-
-        self.assertEqual(actual.shape, torch.Size([1, 1]))
+    def test_partial_crop_option_is_not_supported(self):
+        with self.assertRaises(TypeError):
+            RealDataset([["unused"]], 8, 4, 2, allow_part=True)
 
     def test_one_image_can_fill_a_replacement_batch(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "image.png"
             _save_image(path, np.full((8, 8), 2, dtype=np.uint8))
-            dataset = RealDataset(
-                [[path]],
-                crop_size=4,
-                patch_size=4,
-            )
+            dataset = RealDataset([[path]], crop_size=4, patch_size=4, num_phases=3)
             stream = build_stream(
-                dataset,
-                batch_size=3,
-                num_workers=0,
-                pin_memory=False,
+                dataset, batch_size=3, num_workers=0, pin_memory=False
             )
-
             batch = stream.next()
-
-        self.assertEqual(batch.shape, torch.Size([3, 4, 4]))
-        self.assertEqual(batch.dtype, torch.long)
-        self.assertTrue(bool((batch == 2).all()))
+        self.assertEqual(batch.shape, torch.Size([3, 3, 4, 4]))
+        self.assertEqual(batch.dtype, torch.float32)
+        self.assertTrue(bool((batch[:, 2] == 1).all()))
+        self.assertEqual(batch[:, :2].count_nonzero(), 0)
 
 
 class AxisDataTest(unittest.TestCase):

@@ -79,6 +79,7 @@ class CriticBase(nn.Module):
         self.gradient_checkpointing = gradient_checkpointing
         self.pyramid_min_size = 16
         self.height_input = None
+        self.profile_input = None
         self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv2d(input_channels, widths[0], 3, padding=1)
         self.blocks = nn.ModuleList(
@@ -105,9 +106,12 @@ class CriticBase(nn.Module):
         embedding: torch.Tensor,
         domain: torch.Tensor,
         height: torch.Tensor | None = None,
+        profile: torch.Tensor | None = None,
     ) -> CriticScores:
+        domain_emb = embed_domain(self.domain_embedding, domain, inputs.dtype)
+        embedding = (embedding + domain_emb) * INV_SQRT_TWO
         scores = tuple(
-            self.score_level(level, embedding, domain, height)
+            self.score_level(level, embedding, height, profile)
             for level in area_pyramid(inputs, self.pyramid_min_size)
         )
         return CriticScores(
@@ -116,17 +120,15 @@ class CriticBase(nn.Module):
             scores if len(scores) > 1 else (),
         )
 
-    def score_level(self, inputs, embedding, domain, height=None) -> CriticScores:
-        domain_emb = embed_domain(
-            self.domain_embedding,
-            domain,
-            inputs.dtype,
-        )
-        embedding = (embedding + domain_emb) * INV_SQRT_TWO
+    def score_level(self, inputs, embedding, height=None, profile=None) -> CriticScores:
         x = self.input(inputs)
         if height is not None and self.height_input is not None:
             x = x + self.height_input(
                 F.interpolate(height.to(inputs), size=inputs.shape[-2:], mode="area")
+            )
+        if profile is not None and self.profile_input is not None:
+            x = x + self.profile_input(
+                F.interpolate(profile.to(inputs), size=inputs.shape[-2:], mode="area")
             )
         for idx, block in enumerate(self.blocks):
             x = self.apply_block(block, x, embedding)
@@ -190,6 +192,7 @@ class PairCritic2D(CriticBase):
         time: torch.Tensor,
         domain: torch.Tensor,
         height: torch.Tensor | None = None,
+        profile: torch.Tensor | None = None,
     ) -> CriticScores:
         embedding = self.time_mlp(
             self.time_embedding(time.to(device=x_previous.device) * self.time_scale).to(
@@ -197,7 +200,11 @@ class PairCritic2D(CriticBase):
             )
         )
         return self.score(
-            torch.cat((x_previous, x_current), dim=1), embedding, domain, height
+            torch.cat((x_previous, x_current), dim=1),
+            embedding,
+            domain,
+            height,
+            profile,
         )
 
 
@@ -234,6 +241,7 @@ class ConnectivityCritic2D(CriticBase):
         gaps: torch.Tensor,
         domain: torch.Tensor,
         height: torch.Tensor | None = None,
+        profile: torch.Tensor | None = None,
     ) -> CriticScores:
         if triplets.ndim != 5 or triplets.shape[1] != 3:
             raise ValueError("triplets must have shape [B, 3, C, H, W].")
@@ -251,8 +259,15 @@ class ConnectivityCritic2D(CriticBase):
                 "axes must contain only 0, 1, or 2 and gaps must be positive."
             )
 
-        forward = self.score_once(triplets, axes, gaps, domain)
-        reverse = self.score_once(triplets.flip(1), axes, gaps, domain)
+        forward = self.score_once(triplets, axes, gaps, domain, height, profile)
+        reverse = self.score_once(
+            triplets.flip(1),
+            axes,
+            gaps,
+            domain,
+            None if height is None else height.flip(1),
+            None if profile is None else profile.flip(1),
+        )
         directed = (
             axes == self.directed_axis
             if self.directed_axis is not None
@@ -292,12 +307,17 @@ class ConnectivityCritic2D(CriticBase):
         gaps: torch.Tensor,
         domain: torch.Tensor,
         height: torch.Tensor | None = None,
+        profile: torch.Tensor | None = None,
     ) -> CriticScores:
         axis_embedding = self.axis_embedding(axes).to(dtype=triplets.dtype)
         gap_embedding = self.gap_mlp(self.gap_embedding(gaps)).to(dtype=triplets.dtype)
         embedding = (axis_embedding + gap_embedding) * INV_SQRT_TWO
         return self.score(
-            self.connectivity_images(triplets).flatten(1, 2), embedding, domain
+            self.connectivity_images(triplets).flatten(1, 2),
+            embedding,
+            domain,
+            None if height is None else height.flatten(1, 2),
+            None if profile is None else profile.flatten(1, 2),
         )
 
     @staticmethod

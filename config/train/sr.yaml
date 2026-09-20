@@ -1,5 +1,9 @@
 stage: sr
+nickname: ""
 data: config/data/default.yaml
+
+source:
+  weights: run/09180815/generator.pt
 
 model:
   generator:
@@ -31,23 +35,29 @@ augmentation:
       rotate_90: true
 
 loss:
-  r1_weight: 0.2
+  r1_weight: 0.5
+  r2_weight: 0.1  # fake 입력의 gradient 규제. R1과 같은 주기로 적용한다.
+  r1_every_steps: 8  # 실제 critic 업데이트 횟수 기준
 
   downsample_consistency_weight: 10.0
 
 optim:
-  generator_lr: 0.0001  # critic_lr를 생략하면 같은 학습률 사용
+  generator_lr: 0.0001
+  critic_lr: 0.00005
 
 # 고정된 LR 모델에서 생성한 조건용 볼륨이며, 측정한 3D 정답이 아니다.
 lr_bank:
   samples_per_domain: 8
   guidance: 0.9  # bank 생성 시 도메인 조건 강도. gen.yaml과 독립적이다.
+  refresh_every_steps: 500  # 도메인별로 한 볼륨씩 교체한다.
 
 train:
-  total_steps: 20000
+  total_steps: 10000
 
   volume_batch_size: 1
   real_batch_size: 8
   slice_pairs_per_plane: 8
 
-  checkpoint_every_steps: 100
+  weights_every_steps: 50
+  archive_every_steps: 1250  # null이면 단계별 가중치 보관을 끈다
+  structure_every_steps: 50

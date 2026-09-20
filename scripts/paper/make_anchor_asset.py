@@ -31,7 +31,7 @@ from provenance import (
 
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
-from src.config import load_generation_settings
+from src.config.generation import load_generation_settings
 
 AXIS = 0
 SEED = 0

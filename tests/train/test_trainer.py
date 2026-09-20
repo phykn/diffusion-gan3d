@@ -18,14 +18,15 @@ from src.data.slice import sample_pairs as sample_volume_pairs
 from src.evaluate.label import compute_vf
 from src.model.diffusion import Diffusion
 from src.model.layers import NULL_DOMAIN
-from src.plane import PLANES
+from src.plane import PLANE_DIRECTIONS, PLANES
+from src.prepare.resize import phase_channels
 from src.train.anchor_bank import AnchorBank
+from src.train.batch import ConditionPresence
 from src.train.ema import build_ema
 from src.train.loss.gan import get_critic_r1
-from src.train.run import run_train
+from src.train.metrics import Metrics
+from src.train.run.loop import run_train
 from src.train.trainer import (
-    ConditionPresence,
-    Metrics,
     Trainer,
     TrainerComponents,
     TrainerSettings,
@@ -120,6 +121,9 @@ def sample_pairs(
 
 def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
     trainer = object.__new__(Trainer)
+    trainer.sampling_height = None
+    trainer.sampling_profile = None
+    trainer.profile_settings = {"enabled": False}
     trainer.num_phases = 2
     trainer.patch_size = 1
     trainer.device = torch.device("cpu")
@@ -175,6 +179,9 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
 
 def test_anchor_transitions_prioritize_the_final_step() -> None:
     trainer = object.__new__(Trainer)
+    trainer.sampling_height = None
+    trainer.sampling_profile = None
+    trainer.profile_settings = {"enabled": False}
     trainer.diffusion = Diffusion(11)
 
     with (
@@ -274,6 +281,9 @@ class _ConstantStream:
 
 def test_get_batches_uses_one_domain_for_all_axes() -> None:
     trainer = object.__new__(Trainer)
+    trainer.sampling_height = None
+    trainer.sampling_profile = None
+    trainer.profile_settings = {"enabled": False}
     trainer.device = torch.device("cpu")
     streams = {
         domain: {
@@ -294,6 +304,9 @@ def test_get_batches_uses_one_domain_for_all_axes() -> None:
 
 def test_missing_axes_borrow_from_axis_providers() -> None:
     trainer = object.__new__(Trainer)
+    trainer.sampling_height = None
+    trainer.sampling_profile = None
+    trainer.profile_settings = {"enabled": False}
     trainer.device = torch.device("cpu")
     trainer.streams = {
         0: {0: _ConstantStream(torch.full((1, 2, 2), 10))},
@@ -341,6 +354,9 @@ def test_domain_dropout_masks_every_axis_critic() -> None:
 
 def test_domain_dropout_probability_controls_the_model_condition() -> None:
     trainer = object.__new__(Trainer)
+    trainer.sampling_height = None
+    trainer.sampling_profile = None
+    trainer.profile_settings = {"enabled": False}
     trainer.domain_dropout = 0.0
     assert trainer.sample_domain_condition(2) == 2
 
@@ -350,6 +366,9 @@ def test_domain_dropout_probability_controls_the_model_condition() -> None:
 
 def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
     trainer = object.__new__(Trainer)
+    trainer.sampling_height = None
+    trainer.sampling_profile = None
+    trainer.profile_settings = {"enabled": False}
     trainer.anchor_training_probability = 0.5
     trainer.use_multi_anchor_next = False
     trainer.anchor_bank = AnchorBank()
@@ -422,8 +441,11 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         .clone()
     )
     streams = {
-        0: {0: _ConstantStream(images)},
-        1: {axis: _ConstantStream(images) for axis in (0, 1, 2)},
+        0: {0: _ConstantStream(phase_channels(images, data.num_phases))},
+        1: {
+            axis: _ConstantStream(phase_channels(images, data.num_phases))
+            for axis in (0, 1, 2)
+        },
     }
     trainer = _make_trainer(
         cfg,
@@ -501,7 +523,10 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
         cfg,
     )
     images = torch.randint(0, data.num_phases, (data.batch_size, 8, 8))
-    streams = {axis: _ConstantStream(images) for axis in (0, 1, 2)}
+    streams = {
+        axis: _ConstantStream(phase_channels(images, data.num_phases))
+        for axis in (0, 1, 2)
+    }
     trainer = _make_trainer(
         cfg,
         denoiser=denoiser,
@@ -515,7 +540,15 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
         connectivity_optim=connectivity_optim,
         device=torch.device("cpu"),
     )
-    trainer.critic_augment = Mock(wraps=CriticAugment("isotropic", prob=1.0))
+    trainer.critic_augment = Mock(
+        wraps=CriticAugment(
+            planes={
+                plane: {"flip_axes": list(PLANE_DIRECTIONS[plane]), "rotate_90": True}
+                for plane in PLANES
+            },
+            prob=1.0,
+        )
+    )
     denoiser_before = _parameters(denoiser)
     critic_before = {axis: _parameters(critics[PLANES[axis]]) for axis in (0, 1, 2)}
     local_before = {
@@ -640,7 +673,10 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
         ema_denoiser=ema,
         critics=critics,
         connectivity_critic=connectivity_critic,
-        streams={axis: _ConstantStream(images) for axis in (0, 1, 2)},
+        streams={
+            axis: _ConstantStream(phase_channels(images, data.num_phases))
+            for axis in (0, 1, 2)
+        },
         diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
         denoiser_optim=denoiser_optim,
         critic_optims=critic_optims,
@@ -842,7 +878,7 @@ def test_training_critics_match_each_axis_rectangular_real_shape() -> None:
     trainer.r1_gamma = 0.01
     trainer.r1_interval = 1
     for axis, shape in shapes.items():
-        streams[axis].images = torch.randint(0, 3, (2, *shape))
+        streams[axis].images = phase_channels(torch.randint(0, 3, (2, *shape)), 3)
 
     observed = {axis: [] for axis in (0, 1, 2)}
     hooks = [
@@ -919,6 +955,9 @@ def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
 
 def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
     trainer = object.__new__(Trainer)
+    trainer.sampling_height = None
+    trainer.sampling_profile = None
+    trainer.profile_settings = {"enabled": False}
     trainer.volume_batch_size = 4
     trainer.device = torch.device("cpu")
     trainer.cfg_drop_each_probability = 0.1
@@ -935,6 +974,9 @@ def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
 
 def test_single_condition_dropout_matches_joint_marginal_visibility() -> None:
     trainer = object.__new__(Trainer)
+    trainer.sampling_height = None
+    trainer.sampling_profile = None
+    trainer.profile_settings = {"enabled": False}
     trainer.volume_batch_size = 2
     trainer.device = torch.device("cpu")
     trainer.cfg_drop_each_probability = 0.1
@@ -1037,7 +1079,12 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
 
 def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
     trainer = object.__new__(Trainer)
+    trainer.sampling_height = None
+    trainer.sampling_profile = None
+    trainer.profile_settings = {"enabled": False}
     trainer.device = torch.device("cpu")
+    trainer.cfg = {"stage": "low_res", "data": {}}
+    trainer.streams = {}
     trainer.ema_denoiser = nn.Linear(2, 2)
     trainer.critics = nn.ModuleDict(
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
@@ -1064,9 +1111,16 @@ def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
 
 def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr("src.train.run.loop.save_training", lambda *args: None)
     trainer = object.__new__(Trainer)
+    trainer.sampling_height = None
+    trainer.sampling_profile = None
+    trainer.profile_settings = {"enabled": False}
     trainer.device = torch.device("cpu")
+    trainer.cfg = {"stage": "low_res", "data": {}}
+    trainer.streams = {}
     trainer.ema_denoiser = nn.Linear(2, 2)
     trainer.critics = nn.ModuleDict(
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
@@ -1186,7 +1240,7 @@ def _conditioning_trainer(
         crop_size,
     )
     streams = {
-        axis: _ConstantStream((base + axis).remainder(3).to(torch.long))
+        axis: _ConstantStream(phase_channels((base + axis).remainder(3).long(), 3))
         for axis in axes
     }
     trainer = _make_trainer(
@@ -1360,7 +1414,8 @@ def test_replay_keeps_measurement_and_plane_density(size, count):
     )
     prediction = torch.zeros(1, 2, size, size, size)
     bank.add(0, prediction, measured, torch.tensor([True]))
-    condition, target, reference, _ = bank.sample(0, 2, torch.device("cpu"))
+    replay = bank.sample(0, 2, torch.device("cpu"))
+    condition, target, reference = replay.condition, replay.measured, replay.reference
     assert condition.planes == count
     torch.testing.assert_close(
         condition.image[:, :, 2], measured.image[:, :, 2].expand(2, -1, -1, -1)
@@ -1384,7 +1439,8 @@ def test_replay_continuity_reference_excludes_pasted_measurement_jump():
     )
     bank = AnchorBank(capacity=1)
     bank.add(0, prediction, measured, torch.tensor([True]))
-    condition, target, reference, _ = bank.sample(0, 1, torch.device("cpu"))
+    replay = bank.sample(0, 1, torch.device("cpu"))
+    condition, target, reference = replay.condition, replay.measured, replay.reference
     torch.testing.assert_close(reference, prediction)
     torch.testing.assert_close(condition.image[:, :, 2], measured.image[:, :, 2])
     sampler = AnchorTripletSampler(max_gap=1, windows_per_plane=1)

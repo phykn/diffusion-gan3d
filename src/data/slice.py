@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -13,6 +13,8 @@ class TripletBatch:
     axes: torch.Tensor
     gaps: torch.Tensor
     center_slots: torch.Tensor
+    height: torch.Tensor | None = None
+    profile: torch.Tensor | None = None
 
     def __len__(self) -> int:
         return self.values.shape[0]
@@ -129,9 +131,10 @@ class AnchorTripletSampler:
         reference: torch.Tensor,
         condition: AnchorCondition,
         generator: torch.Generator | None = None,
+        height: torch.Tensor | None = None,
     ) -> tuple[TripletBatch, TripletBatch]:
-        self._check_volume(prediction)
-        self._check_volume(reference)
+        prediction = self._check_volume(prediction)
+        reference = self._check_volume(reference)
         if prediction.shape != reference.shape:
             raise ValueError(
                 "prediction and reference volumes must have matching shapes."
@@ -142,7 +145,11 @@ class AnchorTripletSampler:
             condition,
             generator=generator,
         )
-        return self._extract_triplets(reference, located), located.triplets
+        real, fake = self._extract_triplets(reference, located), located.triplets
+        if height is not None:
+            heights = self._extract_triplets(height, located).values
+            real, fake = replace(real, height=heights), replace(fake, height=heights)
+        return real, fake
 
     def _extract_triplets(
         self,
@@ -178,7 +185,7 @@ class AnchorTripletSampler:
         condition: AnchorCondition,
         generator: torch.Generator | None = None,
     ) -> LocatedTriplets:
-        self._check_volume(volume)
+        volume = self._check_volume(volume)
         expected_axis_shape = (volume.shape[0], 3) + tuple(volume.shape[2:])
         expected_mask_shape = (volume.shape[0], 1) + tuple(volume.shape[2:])
         if condition.axis_masks.shape != expected_axis_shape:
@@ -290,9 +297,10 @@ class AnchorTripletSampler:
             tuple(relations),
         )
 
-    def _check_volume(self, volume: torch.Tensor) -> None:
+    def _check_volume(self, volume: torch.Tensor) -> torch.Tensor:
         if volume.ndim != 5:
             raise ValueError("volume must have shape [B, C, D, H, W].")
+        return volume
 
     def _sample_gap(
         self,

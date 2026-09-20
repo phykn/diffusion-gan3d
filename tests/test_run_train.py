@@ -1,20 +1,111 @@
+import json
 import os
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 from PIL import Image
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from run_train_1st import make_run_dir
-from src.config import save_yaml
+from src.config.files import load_yaml, save_yaml
 from src.plane import PLANES
-from src.train.run import run_train, write_metrics
-from src.train.trainer import Metrics
+from src.train.metrics import Metrics, write_metrics
+from src.train.run.loop import make_run_dir, run_train
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
+    tmp_path, monkeypatch, stage, interrupt
+):
+    metrics = Metrics(
+        generator=1.0,
+        generator_total=1.0,
+        critic=2.0,
+        r1=0.0,
+        transition=1,
+        volume_size=8,
+        domain=0,
+        critic_axes=(2.0, 2.0, 2.0),
+        anchor_planes=0,
+        anchor_conflict_rate=0.0,
+        anchor_loss=0.0,
+        anchor_accuracy=0.0,
+        generator_connectivity=0.0,
+        critic_connectivity=0.0,
+        connectivity_r1=0.0,
+        anchor_ramp=0.0,
+    )
+    trainer = SimpleNamespace(cfg={"stage": stage}, completed_steps=1)
+    prepared, trained, exports, checkpoints = [], [], [], []
+
+    def step(index):
+        assert prepared[-1] == index
+        if interrupt and index == 3:
+            raise KeyboardInterrupt
+        trained.append(index)
+        trainer.completed_steps = index + 1
+        return metrics
+
+    trainer.step = step
+    monkeypatch.setattr("src.train.run.loop.describe_data", lambda _: {"sources": []})
+    monkeypatch.setattr(
+        "src.train.run.loop.save_weights",
+        lambda trainer, path, stage: exports.append(
+            (trainer.completed_steps, path.relative_to(tmp_path).as_posix(), stage)
+        ),
+    )
+    monkeypatch.setattr(
+        "src.train.run.loop.save_training",
+        lambda path, trainer: checkpoints.append(("low_res", trainer.completed_steps)),
+    )
+    monkeypatch.setattr(
+        "src.train.run.loop.save_sr_training",
+        lambda trainer, path: checkpoints.append(("sr", trainer.completed_steps)),
+    )
+    with pytest.raises(KeyboardInterrupt) if interrupt else nullcontext():
+        run_train(
+            trainer,
+            steps=5,
+            save_every=3,
+            checkpoint_every=2,
+            run_dir=tmp_path,
+            start_step=1,
+            before_step=prepared.append,
+        )
+
+    expected_steps = [2, 3] if interrupt else [2, 3, 4, 5]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
+    ]
+    assert [record["step"] for record in records] == expected_steps
+    assert [index + 1 for index in trained] == expected_steps
+    assert prepared == ([1, 2, 3] if interrupt else [1, 2, 3, 4])
+    events = EventAccumulator(str(tmp_path / "tensorboard")).Reload()
+    assert [value.step for value in events.Scalars("loss/generator")] == expected_steps
+    assert load_yaml(tmp_path / "train.yaml") == trainer.cfg
+    assert json.loads((tmp_path / "data_manifest.json").read_text()) == {"sources": []}
+    assert checkpoints == ([(stage, 3)] if interrupt else [(stage, 3), (stage, 5)])
+    assert exports == [
+        (2, "checkpoints/step_00000002", stage),
+        (3, ".", stage),
+        *(
+            [(3, ".", stage)]
+            if interrupt
+            else [
+                (4, "checkpoints/step_00000004", stage),
+                (5, ".", stage),
+            ]
+        ),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -40,18 +131,35 @@ def test_invalid_schedule_fails_before_training_or_creating_logs(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_run_directory_uses_minute_name_and_numeric_collision_suffix(
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("nickname", ["", "실험_A"])
+def test_run_directory_preserves_stage_and_nickname_on_collision(
     tmp_path: Path,
+    stage: str,
+    nickname: str,
 ) -> None:
-    with patch("run_train_1st.datetime") as current:
+    with patch("src.train.run.loop.datetime") as current:
         current.now.return_value.astimezone.return_value.strftime.return_value = (
             "08052314"
         )
-        first = make_run_dir(tmp_path)
-        second = make_run_dir(tmp_path)
+        first = make_run_dir(tmp_path, stage, nickname=nickname)
+        marker = first / "keep.txt"
+        marker.write_text("existing run")
+        second = make_run_dir(tmp_path, stage, nickname=nickname)
 
-    assert first.name == "08052314"
-    assert second.name == "0805231402"
+    label = f"_{nickname}" if nickname else ""
+    assert first.name == f"08052314_{stage}{label}"
+    assert second.name == f"08052314_02_{stage}{label}"
+    assert marker.read_text() == "existing run"
+
+
+def test_explicit_run_directory_is_preserved_and_never_reused(tmp_path):
+    target = tmp_path / "experiment"
+    assert (
+        make_run_dir(tmp_path / "unused", "sr", target, "ignored") == target.resolve()
+    )
+    with pytest.raises(FileExistsError):
+        make_run_dir(tmp_path / "unused", "sr", target)
 
 
 def test_metrics_separate_multi_plane_anchor_quality() -> None:
@@ -140,6 +248,7 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     save_yaml(
         config,
         {
+            "nickname": "coarse",
             "data": {
                 "domains": {0: folders},
                 "crop_size": 8,
@@ -218,7 +327,8 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
         "import sys; "
         "from pathlib import Path; "
         "import run_train_1st; "
-        "run_train_1st.RUN_ROOT = Path(sys.argv.pop(1)); "
+        "import src.train.run.low_res; "
+        "src.train.run.low_res.PROJECT_ROOT = Path(sys.argv.pop(1)); "
         "run_train_1st.main()"
     )
     result = subprocess.run(
@@ -226,7 +336,7 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
             sys.executable,
             "-c",
             runner,
-            str(run_root),
+            str(tmp_path),
             "--config",
             str(config),
             "--device",
@@ -243,8 +353,9 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     assert result.returncode == 0, result.stderr
     run_dirs = tuple(run_root.iterdir())
     assert len(run_dirs) == 1
-    assert len(run_dirs[0].name) == 8
-    assert run_dirs[0].name.isdigit()
+    timestamp, stage = run_dirs[0].name.split("_", 1)
+    assert len(timestamp) == 8 and timestamp.isdigit()
+    assert stage == "low_res_coarse"
     weights = run_dirs[0] / "generator.pt"
     assert weights.is_file()
     expected_critics = ("critic_c.pt",) + tuple(

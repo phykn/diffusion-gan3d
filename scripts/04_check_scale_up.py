@@ -12,7 +12,8 @@ from matplotlib.patches import Rectangle
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.diagnostic import (
+from scripts.common.cli import check_parser, prepare_check, save_preview
+from scripts.common.diagnostic import (
     parse_unit_interval,
     select_display_index,
     select_indices,
@@ -20,10 +21,12 @@ from scripts.diagnostic import (
 )
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
-from src.config import load_generation_settings
-from src.evaluate import SeamQuality, measure_seams, phase_fractions, voxel_accuracy
-from src.predict.tile import TilePlan
-from src.predict.tiled import TiledGenerator
+from src.config.generation import load_generation_settings
+from src.evaluate.label import phase_fractions, voxel_accuracy
+from src.evaluate.seam import SeamQuality, measure_seams
+from src.predict.random import seeded_rng
+from src.predict.tiling.layout import TilePlan
+from src.predict.tiling.sampler import TiledGenerator
 from src.storage import load_volume, save_volume
 
 AXIS = 0
@@ -49,12 +52,14 @@ class ScaleAssessment:
 
 
 def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
-    parser = argparse.ArgumentParser()
+    parser = check_parser(
+        __file__, "Inspect LR tiled generation; defaults to 2 x 2 x 2 blocks."
+    )
     parser.add_argument(
         "--weight",
         type=Path,
         required=True,
-        help="generator weight to load",
+        help="LR generator.pt or its run directory",
     )
     parser.add_argument(
         "--domain",
@@ -103,7 +108,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser.add_argument(
         "--out",
         type=Path,
-        help="optional output path for the generated TIFF volume",
+        help="TIFF path; default: a new directory under run/checks",
     )
     parser.add_argument(
         "--napari",
@@ -115,7 +120,14 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
         action="store_true",
         help="skip interactive visualization",
     )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        help="Default: CUDA when available, otherwise CPU.",
+    )
+    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    args = prepare_check(args, __file__)
     if args.count is not None and args.count < 0:
         parser.error("--count must be non-negative.")
     return parser, args
@@ -251,12 +263,18 @@ def main() -> None:
             "--gt requires active anchors (--count > 0 and --anchor-strength > 0)."
         )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     weight = args.weight
     print(f"\nWeights : {weight.resolve()}", flush=True)
 
     generator = load_generator(weight, device=device)
-    overlap = settings.overlap if args.overlap is None else args.overlap
+    overlap = (
+        min(settings.overlap, (generator.patch_size - 1) // 2)
+        if args.overlap is None
+        else args.overlap
+    )
     margin = generator.default_margin if args.margin is None else args.margin
     guidance = settings.guidance if args.guidance is None else args.guidance
     args.guidance = guidance
@@ -267,33 +285,34 @@ def main() -> None:
     plan = scaled.plan(generation_shape, overlap)
     print_plan(plan, device)
     print(f"Output  : {' × '.join(map(str, shape))}, margin {margin}")
-    base_result = generate_base(parser, args, generator, anchor_count)
-    base = base_result.volume
-    target = base_result.target
-    indices = base_result.indices
-    base_acc = base_result.accuracy
+    with seeded_rng(args.seed, device):
+        base_result = generate_base(parser, args, generator, anchor_count)
+        base = base_result.volume
+        target = base_result.target
+        indices = base_result.indices
+        base_acc = base_result.accuracy
 
-    print("Scaling...", flush=True)
+        print("Scaling...", flush=True)
 
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats(device)
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats(device)
 
-    start = perf_counter()
-    vol = scaled.generate(
-        blocks=tuple(args.blocks),
-        overlap=overlap,
-        margin=margin,
-        base=base,
-        vf=None,
-        guidance=guidance,
-        domain=args.domain,
-    )
+        start = perf_counter()
+        vol = scaled.generate(
+            blocks=tuple(args.blocks),
+            overlap=overlap,
+            margin=margin,
+            base=base,
+            vf=None,
+            guidance=guidance,
+            domain=args.domain,
+        )
     stats = scaled.stats
     elapsed = perf_counter() - start
-    if args.out is not None:
-        save_volume(vol, args.out)
-        print(f"Saved   : {args.out.resolve()}", flush=True)
+    save_volume(vol, args.out)
+    print(f"Saved   : {args.out.resolve()}", flush=True)
+    save_preview(vol, args, generator.num_phases)
     assessment = assess_result(
         vol,
         base_result,

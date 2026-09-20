@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.predict import sr_memory
+import src.predict.sr.memory as sr_memory
 
 
 def test_sr_budget_counts_shared_states_slab_and_coarse_label_conversion():
