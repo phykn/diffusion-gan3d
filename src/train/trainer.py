@@ -1,6 +1,6 @@
 import math
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import torch
 from torch import nn
@@ -26,6 +26,8 @@ from src.train.batch import (
     ConditionPresence,
     DenoiserBatch,
     DenoiserUpdate,
+    RealBatch,
+    SampledPairs,
     StepPreparation,
 )
 from src.train.coarse import corrupt_coarse
@@ -65,7 +67,9 @@ class TrainerComponents:
     critic_augment: CriticAugment | None = None
     coarse_bank: dict | None = None
     bank_origins: dict | None = None
+    bank_extents: dict | None = None
     critic_groups_by_domain: dict | None = None
+    data_fingerprint: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,13 @@ class TrainerSettings:
     consistency_tolerance: float = 0.0
     coarse_corruption_probability: float = 0.0
     coarse_corruption_strength: float = 0.0
+    cfg: dict = field(default_factory=dict)
+    height_data: dict | None = None
+    profile_settings: dict = field(
+        default_factory=lambda: {"enabled": False, "num_bins": 16}
+    )
+    profile_weight: float = 0.0
+    profile_gradient_weight: float = 0.0
 
 
 class Trainer:
@@ -117,6 +128,9 @@ class Trainer:
         self.streams = components.streams
         self.bank = components.coarse_bank
         self.bank_origins = components.bank_origins
+        self.bank_extents = components.bank_extents
+        self.data_fingerprint = components.data_fingerprint
+        self.cfg = settings.cfg
         self.critic_groups_by_domain = components.critic_groups_by_domain
         self.critic_groups = (
             {
@@ -203,20 +217,11 @@ class Trainer:
             name: 0 for name in (*self.critics, "connectivity", "generator")
         }
         self.completed_steps = 0
-        self.height_data = None
-        self.bank_extents = None
-        self.real_heights = {}
-        self.real_extents = {}
-        self.real_profiles = {}
-        self.profile_settings = {"enabled": False, "num_bins": 16}
-        self.profile_weight = 0.0
-        self.profile_gradient_weight = 0.0
-        self.real_origins = {}
-        self.fake_heights = {}
-        self.sampling_height = None
-        self.sampling_profile = None
-        self.fake_profiles = {}
-        self.sampling_presence = None
+        self.path_maps = []
+        self.height_data = settings.height_data
+        self.profile_settings = settings.profile_settings
+        self.profile_weight = settings.profile_weight
+        self.profile_gradient_weight = settings.profile_gradient_weight
         self.diagnostics = {}
         self.generator_updated = True
         self.critic_augment = (
@@ -252,16 +257,13 @@ class Trainer:
         anchor = None if selection is None else selection.condition
         clean_probs = (prediction + 1.0) * 0.5
         measured = None if selection is None else selection.measured
-        self.sampling_height = prepared.model_conditions.get("height")
-        self.sampling_profile = (
+        profile = (
             prepared.model_conditions.get("profile")
             if self.profile_settings.get("critic_enabled", False)
             else None
         )
-        self.sampling_presence = presence.vf.to(self.device)
-        fake = self._sample_fake_pairs(
-            previous, current, real, anchor, presence.anchor, measured
-        )
+        profile_present = presence.vf.to(self.device)
+        fake = self._sample_fake_pairs(previous, current, prepared)
         connectivity_real, connectivity_fake = self.make_connectivity_triplets(
             prediction,
             None if selection is None else selection.reference,
@@ -271,6 +273,9 @@ class Trainer:
             if self.profile_settings["enabled"]
             else presence.anchor,
             None if selection is None else selection.source,
+            height=prepared.model_conditions.get("height"),
+            profile=profile,
+            profile_present=profile_present,
         )
         if measured is not None and transition == 0:
             self.diagnostics.update(
@@ -294,6 +299,7 @@ class Trainer:
             real,
             step,
             critic_domains,
+            profile_present=profile_present,
         )
         if self.connectivity_weight > 0.0:
             critic_connectivity, connectivity_r1 = self.update_connectivity_critic(
@@ -336,7 +342,7 @@ class Trainer:
         self.scaler.update()
         if self.structure_every_steps and (step + 1) % self.structure_every_steps == 0:
             self.diagnostics.update(
-                structure_metrics(clean_probs, real, self.critic_groups)
+                structure_metrics(clean_probs, real.images, self.critic_groups)
             )
         self.completed_steps = step + 1
         self.diagnostics["amp/scale"] = self.scaler.get_scale()
@@ -355,50 +361,57 @@ class Trainer:
         self,
         previous: torch.Tensor,
         current: torch.Tensor,
-        real: dict[int, torch.Tensor],
-        anchor: AnchorCondition | None,
-        anchor_present: torch.Tensor,
-        measured: AnchorCondition | None = None,
-    ) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+        prepared: StepPreparation,
+    ) -> SampledPairs:
+        real = prepared.real
+        selection = prepared.selection
+        anchor = None if selection is None else selection.condition
+        measured = None if selection is None else selection.measured
+        anchor_present = prepared.presence.anchor
         visible = (
             None if anchor is None else self.visible_anchor(anchor, anchor_present)
         )
         excluded = (
             None if measured is None else self.visible_anchor(measured, anchor_present)
         )
-        result = {}
-        self.fake_heights = {}
-        self.fake_profiles = {}
+        result = SampledPairs(pairs={})
+        volume_height = prepared.model_conditions.get("height")
+        profile = (
+            prepared.model_conditions.get("profile")
+            if self.profile_settings.get("critic_enabled", False)
+            else None
+        )
+        profile_present = prepared.presence.vf.to(self.device)
         for axis in self.active_axes:
-            height = self.sampling_height if axis in self.real_heights else None
-            if height is not None and self.sampling_profile is not None:
+            height = volume_height if axis in real.heights else None
+            if height is not None and profile is not None:
                 field = profile_field(
-                    self.sampling_profile * 2 - 1, previous.shape[-3:]
-                ) * self.sampling_presence.reshape(-1, 1, 1, 1, 1)
+                    profile * 2 - 1, previous.shape[-3:]
+                ) * profile_present.reshape(-1, 1, 1, 1, 1)
                 height = torch.cat((height, field), 1)
             pairs = sample_pairs(
                 previous,
                 current,
                 axis,
                 self.slice_pairs_per_axis,
-                tuple(real[axis].shape[-2:]),
+                tuple(real.images[axis].shape[-2:]),
                 anchor=visible,
                 measured=excluded,
                 height=height,
             )
             pairs = self.critic_augment.apply_together(pairs, plane=axis)
-            result[axis] = pairs[:2]
+            result.pairs[axis] = pairs[:2]
             if len(pairs) == 3:
-                self.fake_heights[axis] = pairs[2][:, :1]
-                if self.sampling_profile is not None:
-                    self.fake_profiles[axis] = pairs[2][:, 1:]
+                result.heights[axis] = pairs[2][:, :1]
+                if profile is not None:
+                    result.profiles[axis] = pairs[2][:, 1:]
         return result
 
     def _make_denoiser_batch(
         self,
         prepared: StepPreparation,
         connectivity_domains: torch.Tensor,
-        fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        fake: SampledPairs,
         connectivity_real: TripletBatch,
         connectivity_fake: TripletBatch,
         logits: torch.Tensor,
@@ -409,7 +422,7 @@ class Trainer:
             transition=prepared.transition,
             connectivity_domains=connectivity_domains,
             critic_domains=prepared.critic_domains,
-            fake=fake,
+            fake=fake.pairs,
             connectivity_real=connectivity_real,
             connectivity_fake=connectivity_fake,
             logits=logits,
@@ -426,8 +439,8 @@ class Trainer:
             connectivity_ramp=prepared.connectivity_ramp,
             target_vf=prepared.target_vf,
             vf_present=prepared.presence.vf,
-            fake_heights=self.fake_heights,
-            fake_profiles=self.fake_profiles,
+            fake_heights=fake.heights,
+            fake_profiles=fake.profiles,
             profile=prepared.model_conditions.get("profile"),
             coarse_target=prepared.coarse_target,
         )
@@ -443,7 +456,6 @@ class Trainer:
             self.connectivity_critic.train()
 
         domain = self.sample_target_domain()
-        self.sampled_domain = domain
         if self.critic_groups_by_domain is not None:
             self.critic_groups = self.critic_groups_by_domain[domain]
             self.axis_critics = {
@@ -455,7 +467,7 @@ class Trainer:
         model_domain = self.sample_domain_condition(domain)
         batch_domains = self.select_batch_domains(domain)
         batches = self.get_batches(domain, batch_domains)
-        own_batches = {axis: batches[axis] for axis in self.streams[domain]}
+        own_batches = {axis: batches.images[axis] for axis in self.streams[domain]}
         critic_domains = self.make_critic_domains(
             domain,
             model_domain,
@@ -522,18 +534,18 @@ class Trainer:
         if self.height_data is not None:
             height = None if selection is None else selection.height
             if height is None:
-                axis = next(a for a in self.streams[domain] if a in self.real_origins)
+                axis = next(a for a in self.streams[domain] if a in batches.origins)
                 height = self.volume_height(
-                    self.real_origins[axis][: self.volume_batch_size],
+                    batches.origins[axis][: self.volume_batch_size],
                     domain,
-                    self.real_extents[axis][: self.volume_batch_size],
+                    batches.extents[axis][: self.volume_batch_size],
                 )
             model_conditions["height"] = height
         if self.profile_settings["enabled"]:
             profile = None if selection is None else selection.profile
             if profile is None:
-                axis = next(a for a in own_batches if a in self.real_profiles)
-                profile = self.real_profiles[axis][: self.volume_batch_size]
+                axis = next(a for a in own_batches if a in batches.profiles)
+                profile = batches.profiles[axis][: self.volume_batch_size]
             target_vf = profile.mean(-1)
             model_conditions.update(
                 profile=profile,
@@ -636,6 +648,9 @@ class Trainer:
         transition: int,
         visible: torch.Tensor | None = None,
         source: str | None = None,
+        height: torch.Tensor | None = None,
+        profile: torch.Tensor | None = None,
+        profile_present: torch.Tensor | None = None,
     ) -> tuple[TripletBatch, TripletBatch]:
         empty = TripletBatch(
             values=prediction.new_empty(
@@ -656,11 +671,10 @@ class Trainer:
             return empty, empty
         anchor = self.visible_anchor(anchor, visible)
 
-        height = self.sampling_height
-        if self.sampling_profile is not None:
+        if profile is not None:
             field = profile_field(
-                self.sampling_profile * 2 - 1, prediction.shape[-3:]
-            ) * self.sampling_presence.reshape(-1, 1, 1, 1, 1)
+                profile * 2 - 1, prediction.shape[-3:]
+            ) * profile_present.reshape(-1, 1, 1, 1, 1)
             height = torch.cat((height, field), 1)
         real, fake = self.anchor_triplets.sample(
             prediction,
@@ -678,9 +692,7 @@ class Trainer:
             TripletBatch(
                 values=augmented[0],
                 height=None if real.height is None else augmented[2][:, :, :1],
-                profile=augmented[2][:, :, 1:]
-                if self.sampling_profile is not None
-                else None,
+                profile=augmented[2][:, :, 1:] if profile is not None else None,
                 axes=real.axes,
                 gaps=real.gaps,
                 center_slots=real.center_slots,
@@ -688,9 +700,7 @@ class Trainer:
             TripletBatch(
                 values=augmented[1],
                 height=None if real.height is None else augmented[2][:, :, :1],
-                profile=augmented[2][:, :, 1:]
-                if self.sampling_profile is not None
-                else None,
+                profile=augmented[2][:, :, 1:] if profile is not None else None,
                 axes=fake.axes,
                 gaps=fake.gaps,
                 center_slots=fake.center_slots,
@@ -749,23 +759,19 @@ class Trainer:
         self,
         domain: int,
         batch_domains: dict[int, int] | None = None,
-    ) -> dict[int, torch.Tensor]:
+    ) -> RealBatch:
         if batch_domains is None:
             batch_domains = self.select_batch_domains(domain)
-        self.batch_domains = batch_domains
-        batches = {}
-        self.real_origins, self.real_heights = {}, {}
-        self.real_extents, self.real_profiles = {}, {}
-        self.real_geometry = {}
+        batches = RealBatch(images={}, domains=batch_domains)
         for axis in self.active_axes:
             batch = self.streams[batch_domains[axis]][axis].next()
             images = batch["image"]
             if self.height_data is not None:
                 origins = batch["height_origin"]
                 if axis != 0:
-                    self.real_origins[axis] = origins
-                    self.real_extents[axis] = batch["height_extent"]
-                    self.real_geometry[axis] = [
+                    batches.origins[axis] = origins
+                    batches.extents[axis] = batch["height_extent"]
+                    batches.geometry[axis] = [
                         {
                             "image_id": image_id,
                             "height_origin": float(origin),
@@ -782,7 +788,7 @@ class Trainer:
                             strict=True,
                         )
                     ]
-                    self.real_heights[axis] = height_field(
+                    batches.heights[axis] = height_field(
                         images.shape[-2:],
                         0,
                         origins,
@@ -790,11 +796,11 @@ class Trainer:
                         batch["height_extent"],
                         self.device,
                     )
-            batches[axis] = images.to(self.device, non_blocking=True)
-            if self.profile_settings["enabled"] and axis in self.real_origins:
-                self.real_profiles[axis] = rebin_profile(
+            batches.images[axis] = images.to(self.device, non_blocking=True)
+            if self.profile_settings["enabled"] and axis in batches.origins:
+                batches.profiles[axis] = rebin_profile(
                     image_profile(
-                        batches[axis], bins=self.profile_settings["num_bins"]
+                        batches.images[axis], bins=self.profile_settings["num_bins"]
                     ),
                     self.patch_size,
                 )
@@ -889,7 +895,7 @@ class Trainer:
 
     def sample_anchor(
         self,
-        batches: dict[int, torch.Tensor],
+        batches: RealBatch,
         volume_size: int,
         owned_axes: tuple[int, ...] | None = None,
         domain: int = 0,
@@ -925,27 +931,27 @@ class Trainer:
 
     def sample_real_anchor(
         self,
-        batches: dict[int, torch.Tensor],
+        batches: RealBatch,
         volume_size: int,
         owned_axes: tuple[int, ...] | None = None,
     ) -> AnchorSelection:
         if owned_axes is None:
-            owned_axes = tuple(batches)
-        shared_axes = tuple(axis for axis in batches if axis not in owned_axes)
+            owned_axes = tuple(batches.images)
+        shared_axes = tuple(axis for axis in batches.images if axis not in owned_axes)
         use_shared = (
             bool(shared_axes)
             and self.anchor_shared_axis_probability > 0.0
             and bool(torch.rand(()) < self.anchor_shared_axis_probability)
         )
         axes = shared_axes if use_shared else owned_axes
-        if self.real_origins:
+        if batches.origins:
             # An xy section has no observed absolute height along z.
-            axes = tuple(a for a in axes if a in self.real_origins)
+            axes = tuple(a for a in axes if a in batches.origins)
             if not axes:
-                axes = tuple(a for a in owned_axes if a in self.real_origins)
+                axes = tuple(a for a in owned_axes if a in batches.origins)
                 use_shared = False
         axis = axes[int(torch.randint(len(axes), ()).item())]
-        images = batches[axis]
+        images = batches.images[axis]
         batch_indices = torch.randperm(
             images.shape[0],
             device="cpu",
@@ -980,17 +986,17 @@ class Trainer:
             source="shared" if use_shared else "real",
             measured=condition,
             height=self.volume_height(
-                self.real_origins[axis][batch_indices],
-                self.batch_domains[axis],
-                self.real_extents[axis][batch_indices],
+                batches.origins[axis][batch_indices],
+                batches.domains[axis],
+                batches.extents[axis][batch_indices],
             )
-            if axis in self.real_origins
+            if axis in batches.origins
             else None,
-            profile=self.real_profiles[axis][batch_indices.to(self.device)]
-            if axis in self.real_profiles
+            profile=batches.profiles[axis][batch_indices.to(self.device)]
+            if axis in batches.profiles
             else None,
-            geometry=[self.real_geometry[axis][int(index)] for index in batch_indices]
-            if axis in self.real_origins
+            geometry=[batches.geometry[axis][int(index)] for index in batch_indices]
+            if axis in batches.origins
             else None,
         )
 
@@ -1046,17 +1052,18 @@ class Trainer:
     def update_critics(
         self,
         transition: int,
-        fake: dict[int, tuple[torch.Tensor, torch.Tensor]],
-        batches: dict[int, torch.Tensor],
+        fake: SampledPairs,
+        batches: RealBatch,
         step: int,
         domains: dict[int, int],
+        profile_present: torch.Tensor | None = None,
     ) -> tuple[list[float], float, float, float]:
         critic_losses = [0.0] * len(AXES)
         r1_sum = 0.0
         global_sum = 0.0
         local_sum = 0.0
         local_weight = self.critic_local_weight
-        groups = self.active_groups(fake)
+        groups = self.active_groups(fake.pairs)
         for group, axes in groups.items():
             count = self.updates[group]
             regularize = (count + 1) % self.r1_interval == 0
@@ -1067,7 +1074,7 @@ class Trainer:
             optimizer = self.critic_optims[group]
             optimizer.zero_grad(set_to_none=True)
             for axis in axes:
-                images = batches[axis]
+                images = batches.images[axis]
                 if (
                     images.ndim != 4
                     or images.shape[1] != self.num_phases
@@ -1082,14 +1089,14 @@ class Trainer:
                     real,
                     transition,
                 )
-                real_height = self.real_heights.get(axis)
-                if real_height is not None and self.sampling_profile is not None:
-                    profile = (self.real_profiles[axis] * 2 - 1)[..., None].expand(
+                real_height = batches.heights.get(axis)
+                if real_height is not None and axis in fake.profiles:
+                    profile = (batches.profiles[axis] * 2 - 1)[..., None].expand(
                         -1, -1, *real_height.shape[-2:]
                     )
-                    present = self.sampling_presence[
+                    present = profile_present[
                         torch.randint(
-                            len(self.sampling_presence),
+                            len(profile_present),
                             (len(profile),),
                             device=self.device,
                         )
@@ -1108,18 +1115,16 @@ class Trainer:
                     {} if real_height is None else {"height": augmented[2][:, :1]}
                 )
                 fake_conditions = (
-                    {}
-                    if axis not in self.fake_heights
-                    else {"height": self.fake_heights[axis]}
+                    {} if axis not in fake.heights else {"height": fake.heights[axis]}
                 )
 
-                if real_height is not None and self.sampling_profile is not None:
+                if real_height is not None and axis in fake.profiles:
                     real_conditions["profile"] = augmented[2][:, 1:]
-                    fake_conditions["profile"] = self.fake_profiles[axis]
+                    fake_conditions["profile"] = fake.profiles[axis]
 
                 real_prev.requires_grad_(regularize)
                 real_curr.requires_grad_(regularize)
-                fake_prev, fake_curr = fake[axis]
+                fake_prev, fake_curr = fake.pairs[axis]
                 fake_prev = fake_prev.detach().float().requires_grad_(apply_r2)
                 fake_curr = fake_curr.detach().float()
                 fake_time = self.make_time(transition, fake_prev.shape[0])

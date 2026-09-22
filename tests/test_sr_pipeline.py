@@ -15,7 +15,7 @@ from src.build.trainer import build_trainer
 from src.config.files import load_yaml, save_yaml
 from src.config.train import load_train_config
 from src.storage import load_volume
-from src.train.run.bank import file_hash, refresh_bank, save_bank
+from src.train.run.bank import file_hash, publish_bank, refresh_bank, save_bank
 from src.train.run.loop import run_train
 
 
@@ -231,15 +231,13 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
         },
         "lr_bank": {"refresh_every_steps": 2, "guidance": 1},
     }
-    trainer = SimpleNamespace(
-        cfg=cfg,
-        completed_steps=2,
-        device=torch.device("cpu"),
-        bank={0: torch.full((2, 2, 8, 8, 8), 0.5)},
-        bank_origins=None,
-        bank_extents=None,
-        bank_conditions=None,
-    )
+    bank = {
+        "format": "diffusion-gan3d.lr-bank",
+        "volumes": {0: torch.full((2, 2, 8, 8, 8), 0.5)},
+        "height_origins": None,
+        "height_extents": None,
+        "conditions": None,
+    }
     monkeypatch.setattr(
         "src.train.run.bank.load_generator",
         lambda *args: SimpleNamespace(
@@ -248,16 +246,20 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
             )
         ),
     )
-    refresh_bank(trainer, tmp_path)
+    original_source = dict(cfg["source"])
+    refresh_bank(bank, cfg, 2, torch.device("cpu"))
+    assert cfg["source"] == original_source
+    assert not (tmp_path / "lr_bank/step_00000002.pt").exists()
+    publish_bank(bank, cfg, tmp_path, 2)
     assert old_bank.read_bytes() == b"original bank"
-    assert trainer.bank[0][0, 0].eq(1).all()
-    assert trainer.bank[0][1].eq(0.5).all()
+    assert bank["volumes"][0][0, 0].eq(1).all()
+    assert bank["volumes"][0][1].eq(0.5).all()
     assert cfg["source"]["bank_sha256"] == file_hash(
         tmp_path / "lr_bank/step_00000002.pt"
     )
     source_config.write_text("stage: sr\n", encoding="utf-8")
     with pytest.raises(ValueError, match="configuration changed"):
-        refresh_bank(trainer, tmp_path)
+        refresh_bank(bank, cfg, 4, torch.device("cpu"))
 
 
 def test_bank_snapshot_cannot_overwrite_a_published_step(tmp_path):

@@ -1,12 +1,10 @@
 from pathlib import Path
 
 import torch
-from tqdm import trange
 
-from src.build.data import build_augmentation, build_datasets
-from src.build.predict import load_generator
+from src.build.data import build_augmentation
 from src.build.sr import build_sr_trainer
-from src.config.data import get_domains, validate_sr_source
+from src.config.data import validate_sr_source
 from src.config.files import PROJECT_ROOT, find_train_config
 from src.config.train import (
     get_sr_sizes,
@@ -18,11 +16,10 @@ from src.data.bank import load_bank
 from src.data.source import infer_height_extents
 from src.train.relocate import relocate_checkpoint
 from src.train.run.bank import (
+    create_bank,
     file_hash,
-    model_bank_condition,
+    publish_bank,
     refresh_bank,
-    sample_bank_condition,
-    save_bank,
 )
 from src.train.run.loop import make_run_dir, run_train
 from src.train.state import resume_sr_training
@@ -69,34 +66,9 @@ def run_sr_train(
             "sr",
             data=data,
         )
-        if base_weights is None:
-            configured = cfg.get("source", {}).get("weights")
-            if not isinstance(configured, str) or not configured.strip():
-                raise ValueError(
-                    "set source.weights in the SR config or provide --base-weights."
-                )
-            base_path = PROJECT_ROOT / Path(configured).expanduser()
-        else:
-            base_path = base_weights.expanduser()
-        base_path = base_path.resolve()
-        if base_path.is_dir():
-            base_path = base_path / "generator.pt"
-        base_cfg = load_train_config(find_train_config(base_path))
-        if cfg["conditioning"]["height_enabled"]:
-            cfg["data"]["height_extents"] = infer_height_extents(cfg["data"])
-        cfg["data"] = validate_sr_source(cfg["data"], base_cfg["data"])
-        if (
-            cfg["conditioning"]["height_enabled"]
-            != base_cfg["conditioning"]["height_enabled"]
-        ):
-            raise ValueError("SR height conditioning must match the frozen LR source.")
+        base_cfg = prepare_source(cfg, base_weights)
         if bank_size is not None:
             cfg["lr_bank"]["samples_per_domain"] = bank_size
-        cfg["source"] = {
-            "weights": str(base_path),
-            "weights_sha256": file_hash(base_path),
-            "config_sha256": file_hash(find_train_config(base_path)),
-        }
     if steps is not None:
         cfg["train"]["total_steps"] = steps
     cfg = validate_sr_config(cfg)
@@ -105,51 +77,8 @@ def run_sr_train(
         raise ValueError("--steps must exceed the completed checkpoint step.")
     run_dir = make_run_dir(PROJECT_ROOT / "run", "sr", run_dir, cfg["nickname"])
     if payload is None:
-        generator = load_generator(base_path, device)
-        bank = {}
-        origins, extents, bank_conditions = {}, {}, {}
-        datasets = (
-            build_datasets(base_cfg) if cfg["conditioning"]["height_enabled"] else None
-        )
-        for domain in get_domains(cfg["data"]):
-            bank_conditions[domain] = [
-                sample_bank_condition(base_cfg, domain, datasets)
-                for _ in range(cfg["lr_bank"]["samples_per_domain"])
-            ]
-            origins[domain] = torch.tensor(
-                [c.get("height_origin", 0.0) for c in bank_conditions[domain]]
-            )
-            extents[domain] = torch.tensor(
-                [c.get("height_extent", 1.0) for c in bank_conditions[domain]]
-            )
-            bank[domain] = torch.stack(
-                [
-                    generator.generate_probs(
-                        domain=domain,
-                        guidance=cfg["lr_bank"]["guidance"],
-                        **model_bank_condition(bank_conditions[domain][i]),
-                    )
-                    for i in trange(
-                        cfg["lr_bank"]["samples_per_domain"],
-                        desc=f"LR bank domain {domain}",
-                    )
-                ]
-            )
-        del generator
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-        bank_payload = {
-            "format": "diffusion-gan3d.lr-bank",
-            "volumes": bank,
-            "height_extents": extents,
-            "conditions": bank_conditions,
-            "height_origins": origins
-            if cfg["conditioning"]["height_enabled"]
-            else None,
-            "data": cfg["data"],
-            "source": dict(cfg["source"]),
-        }
-        cfg["source"].update(save_bank(run_dir, 0, bank_payload))
+        bank_payload = create_bank(cfg, base_cfg, device)
+        publish_bank(bank_payload, cfg, run_dir, 0)
     trainer = build_sr_trainer(
         cfg,
         bank_payload["volumes"],
@@ -157,7 +86,6 @@ def run_sr_train(
         bank_payload.get("height_origins"),
         bank_payload.get("height_extents"),
     )
-    trainer.bank_conditions = bank_payload.get("conditions")
     if payload:
         resume_sr_training(trainer, payload)
     cfg = trainer.cfg
@@ -167,7 +95,8 @@ def run_sr_train(
     def before_step(step: int) -> None:
         interval = cfg["lr_bank"]["refresh_every_steps"]
         if interval and step and step % interval == 0:
-            refresh_bank(trainer, run_dir)
+            refresh_bank(bank_payload, cfg, step, device, trainer.path_maps)
+            publish_bank(bank_payload, cfg, run_dir, step)
 
     run_train(
         trainer,
@@ -180,3 +109,33 @@ def run_sr_train(
     )
 
     return run_dir
+
+
+def prepare_source(cfg: dict, base_weights: Path | None) -> dict:
+    if base_weights is None:
+        configured = cfg.get("source", {}).get("weights")
+        if not isinstance(configured, str) or not configured.strip():
+            raise ValueError(
+                "set source.weights in the SR config or provide --base-weights."
+            )
+        base_path = PROJECT_ROOT / Path(configured).expanduser()
+    else:
+        base_path = base_weights.expanduser()
+    base_path = base_path.resolve()
+    if base_path.is_dir():
+        base_path = base_path / "generator.pt"
+    base_cfg = load_train_config(find_train_config(base_path))
+    if cfg["conditioning"]["height_enabled"]:
+        cfg["data"]["height_extents"] = infer_height_extents(cfg["data"])
+    cfg["data"] = validate_sr_source(cfg["data"], base_cfg["data"])
+    if (
+        cfg["conditioning"]["height_enabled"]
+        != base_cfg["conditioning"]["height_enabled"]
+    ):
+        raise ValueError("SR height conditioning must match the frozen LR source.")
+    cfg["source"] = {
+        "weights": str(base_path),
+        "weights_sha256": file_hash(base_path),
+        "config_sha256": file_hash(find_train_config(base_path)),
+    }
+    return base_cfg

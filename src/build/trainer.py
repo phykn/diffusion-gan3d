@@ -57,7 +57,7 @@ def build_optimizers(
 
 
 def build_trainer(
-    cfg: dict, device: torch.device, bank=None, bank_origins=None
+    cfg: dict, device: torch.device, bank=None, bank_origins=None, bank_extents=None
 ) -> Trainer:
     cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
     sr = cfg["stage"] == "sr"
@@ -138,7 +138,7 @@ def build_trainer(
         for domain_id, axes in datasets.items()
     }
 
-    trainer = Trainer(
+    return Trainer(
         components=TrainerComponents(
             denoiser=denoiser,
             ema_denoiser=ema,
@@ -154,6 +154,8 @@ def build_trainer(
             critic_augment=critic_augment,
             coarse_bank=bank,
             bank_origins=bank_origins,
+            bank_extents=bank_extents,
+            data_fingerprint=fingerprint_data(streams),
             critic_groups_by_domain=(
                 {
                     domain: {
@@ -170,6 +172,13 @@ def build_trainer(
             ),
         ),
         settings=TrainerSettings(
+            cfg=cfg,
+            height_data=data if conditioning["height_enabled"] else None,
+            profile_settings=conditioning.get(
+                "spatial_profile", {"enabled": False, "num_bins": 16}
+            ),
+            profile_weight=loss.get("spatial_profile_weight", 0.0),
+            profile_gradient_weight=loss.get("spatial_profile_gradient_weight", 0.0),
             volume_batch_size=train["volume_batch_size"],
             num_phases=data["num_phases"],
             patch_size=get_sr_sizes(cfg)[2] if sr else get_sizes(data)[1],
@@ -212,12 +221,3 @@ def build_trainer(
             ),
         ),
     )
-    trainer.profile_settings = conditioning.get(
-        "spatial_profile", {"enabled": False, "num_bins": 16}
-    )
-    trainer.profile_weight = loss.get("spatial_profile_weight", 0.0)
-    trainer.profile_gradient_weight = loss.get("spatial_profile_gradient_weight", 0.0)
-    trainer.cfg = cfg
-    trainer.height_data = cfg["data"] if cfg["conditioning"]["height_enabled"] else None
-    trainer.data_fingerprint = fingerprint_data(streams)
-    return trainer

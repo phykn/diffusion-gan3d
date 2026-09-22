@@ -1,6 +1,6 @@
 import copy
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -21,7 +21,7 @@ from src.predict.sr.inference import SuperResolutionAPI
 from src.predict.tiling.sampler import TiledGenerator
 from src.prepare.resize import resize_crop
 from src.train.loss.anchor import SoftAnchorLoss
-from src.train.run.bank import file_hash
+from src.train.run.bank import file_hash, refresh_bank
 from src.train.run.low_res import run_low_res_train
 from src.train.run.sr import run_sr_train
 from src.train.state import export_sr, resume_training, save_training
@@ -288,6 +288,72 @@ def test_profile_training_replay_and_conditional_critics(tmp_path):
     torch.testing.assert_close(
         restored.anchor_bank.entries[0][0]["profile"], original["profile"]
     )
+
+
+def test_real_batch_keeps_geometry_after_loading_another_batch(tmp_path):
+    cfg = configuration(tmp_path, height=True)
+    cfg["conditioning"]["spatial_profile"].update(enabled=True, num_bins=4)
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    trainer.active_axes = (1,)
+
+    def sample(origin, phase):
+        images = torch.zeros(2, 2, 8, 8)
+        images[:, phase] = 1
+        return {
+            "image": images,
+            "image_id": [f"source-{origin}.png"] * 2,
+            "height_origin": torch.full((2,), float(origin)),
+            "height_extent": torch.full((2,), 24.0),
+            "crop_origin": torch.tensor([[origin, 0]] * 2),
+            "source_shape": torch.tensor([[24, 24]] * 2),
+        }
+
+    with patch.object(
+        trainer.streams[0][1], "next", side_effect=[sample(0, 0), sample(8, 1)]
+    ):
+        first = trainer.get_batches(0)
+        second = trainer.get_batches(0)
+
+    for batch, origin, phase in ((first, 0, 0), (second, 8, 1)):
+        selected = trainer.sample_real_anchor(batch, volume_size=8)
+        assert selected.geometry[0]["image_id"] == f"source-{origin}.png"
+        assert selected.geometry[0]["crop_origin"] == [origin, 0]
+        expected = 2 * (torch.arange(8) + origin + 0.5) / 24 - 1
+        torch.testing.assert_close(selected.height[0, 0, :, 0, 0], expected)
+        assert selected.profile[0, phase].eq(1).all()
+        assert selected.profile[0, 1 - phase].eq(0).all()
+
+
+def test_failed_bank_generation_preserves_volume_and_its_conditions(tmp_path):
+    cfg = configuration(tmp_path, height=True)
+    cfg["conditioning"]["spatial_profile"].update(enabled=True, num_bins=4)
+    save_yaml(tmp_path / "train.yaml", cfg)
+    source = tmp_path / "generator.pt"
+    source.write_bytes(b"frozen source")
+    cfg["source"] = {
+        "weights": str(source),
+        "weights_sha256": file_hash(source),
+        "config_sha256": file_hash(tmp_path / "train.yaml"),
+    }
+    cfg["lr_bank"] = {"refresh_every_steps": 1, "guidance": 1.0}
+    bank = {
+        "volumes": {0: torch.full((1, 2, 8, 8, 8), 0.5)},
+        "height_origins": {0: torch.tensor([0.0])},
+        "height_extents": {0: torch.tensor([24.0])},
+        "conditions": {0: [{"height_origin": 0.0, "image_id": "original.png"}]},
+    }
+    before = copy.deepcopy(bank)
+    generator = Mock()
+    generator.generate_probs.side_effect = RuntimeError("generation failed")
+    with (
+        patch("src.train.run.bank.load_generator", return_value=generator),
+        pytest.raises(RuntimeError, match="generation failed"),
+    ):
+        refresh_bank(bank, cfg, 1, torch.device("cpu"))
+    assert "vf_profile" in generator.generate_probs.call_args.kwargs
+    assert bank["conditions"] == before["conditions"]
+    for key in ("volumes", "height_origins", "height_extents"):
+        torch.testing.assert_close(bank[key], before[key], rtol=0, atol=0)
 
 
 def test_profile_cfg_removes_profile_and_keeps_height(tmp_path):

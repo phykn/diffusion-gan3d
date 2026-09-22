@@ -43,6 +43,4 @@ def build_sr_trainer(
     domains = get_domains(data)
     _, low_size, _ = get_sr_sizes(cfg)
     bank = validate_bank(bank, domains, low_size, data["num_phases"])
-    trainer = build_trainer(cfg, device, bank, bank_origins)
-    trainer.bank_extents = bank_extents
-    return trainer
+    return build_trainer(cfg, device, bank, bank_origins, bank_extents)

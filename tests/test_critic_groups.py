@@ -13,6 +13,7 @@ from src.config.data import get_plane_groups
 from src.config.train import load_train_config
 from src.model.critic import CriticScores
 from src.plane import PLANES
+from src.train.batch import RealBatch, SampledPairs
 from src.train.run.loop import run_train
 from src.train.state import resume_sr_training, save_sr_training
 
@@ -152,8 +153,8 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
     )
     trainer.update_critics(
         0,
-        fake,
-        {axis: (pair[0] + 1) * 0.5 for axis, pair in real.items()},
+        SampledPairs(fake),
+        RealBatch({axis: (pair[0] + 1) * 0.5 for axis, pair in real.items()}),
         0,
         {axis: 0 for axis in range(3)},
     )

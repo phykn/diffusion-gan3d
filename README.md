@@ -133,6 +133,7 @@ Anchors start at the output origin, including when generating multiple blocks.
 | `src/prepare/` | Phase-fraction resizing and physical height/profile coordinates |
 | `src/model/`, `src/build/` | Neural networks and diffusion; model/data/trainer assembly |
 | `src/train/trainer.py`, `src/train/loss/` | Training steps, optimizer updates, and losses |
+| `src/train/batch.py` | Explicit step inputs, sampled pairs, and their coordinates/conditions |
 | `src/train/state.py`, `src/train/coarse.py` | LR/SR checkpoint state; coarse-input corruption |
 | `src/train/run/` | Run setup, LR bank generation, logging, and checkpoint scheduling |
 | `src/predict/` | Inference, volume conversion, and memory estimates |
@@ -146,8 +147,13 @@ Anchors start at the output origin, including when generating multiple blocks.
 | `run/` | Local weights and generated outputs |
 
 Training commands enter `src/train/run/`, which uses `src/build/` to assemble the
-trainer. The web UI calls the backend, which delegates generation to the inference
-APIs. Model weights and training checkpoints have separate formats; keep
+trainer with its settings and data metadata. Each real batch carries its images,
+domains, height coordinates, profiles, and source geometry through the training
+step. SR bank creation and refresh live in `src/train/run/bank.py`; the runner
+publishes a snapshot after preparation succeeds.
+
+The web UI calls the backend, which delegates generation to the inference APIs.
+Model weights and training checkpoints have separate formats; keep
 `generator.pt` for inference and `checkpoints/last.pt` for resume.
 
 [Method and recorded experiments](PAPER.md) · [MIT License](LICENSE)

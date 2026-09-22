@@ -21,7 +21,7 @@ from src.model.layers import NULL_DOMAIN
 from src.plane import PLANE_DIRECTIONS, PLANES
 from src.prepare.resize import phase_channels
 from src.train.anchor_bank import AnchorBank
-from src.train.batch import ConditionPresence
+from src.train.batch import ConditionPresence, RealBatch
 from src.train.ema import build_ema
 from src.train.loss.gan import get_critic_r1
 from src.train.metrics import Metrics
@@ -109,8 +109,6 @@ def sample_pairs(
 
 def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
     trainer = object.__new__(Trainer)
-    trainer.sampling_height = None
-    trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
     trainer.num_phases = 2
     trainer.patch_size = 1
@@ -167,8 +165,6 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
 
 def test_anchor_transitions_prioritize_the_final_step() -> None:
     trainer = object.__new__(Trainer)
-    trainer.sampling_height = None
-    trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
     trainer.diffusion = Diffusion(11)
 
@@ -270,8 +266,6 @@ class _ConstantStream:
 def test_get_batches_uses_one_domain_for_all_axes() -> None:
     trainer = object.__new__(Trainer)
     trainer.height_data = None
-    trainer.sampling_height = None
-    trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
     trainer.device = torch.device("cpu")
     streams = {
@@ -286,7 +280,7 @@ def test_get_batches_uses_one_domain_for_all_axes() -> None:
 
     batches = trainer.get_batches(1)
 
-    assert all(bool((batch == 1).all()) for batch in batches.values())
+    assert all(bool((batch == 1).all()) for batch in batches.images.values())
     assert all(stream.calls == 0 for stream in streams[0].values())
     assert all(stream.calls == 1 for stream in streams[1].values())
 
@@ -294,8 +288,6 @@ def test_get_batches_uses_one_domain_for_all_axes() -> None:
 def test_missing_axes_borrow_from_axis_providers() -> None:
     trainer = object.__new__(Trainer)
     trainer.height_data = None
-    trainer.sampling_height = None
-    trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
     trainer.device = torch.device("cpu")
     trainer.streams = {
@@ -314,7 +306,7 @@ def test_missing_axes_borrow_from_axis_providers() -> None:
     critic_domains = trainer.make_critic_domains(0, 0, sources)
 
     assert sources == {0: 0, 1: 1, 2: 1}
-    assert [int(batches[axis][0, 0, 0]) for axis in (0, 1, 2)] == [10, 21, 22]
+    assert [int(batches.images[axis][0, 0, 0]) for axis in (0, 1, 2)] == [10, 21, 22]
     assert critic_domains == {0: 0, 1: NULL_DOMAIN, 2: NULL_DOMAIN}
 
 
@@ -344,8 +336,6 @@ def test_domain_dropout_masks_every_axis_critic() -> None:
 
 def test_domain_dropout_probability_controls_the_model_condition() -> None:
     trainer = object.__new__(Trainer)
-    trainer.sampling_height = None
-    trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
     trainer.domain_dropout = 0.0
     assert trainer.sample_domain_condition(2) == 2
@@ -356,8 +346,6 @@ def test_domain_dropout_probability_controls_the_model_condition() -> None:
 
 def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
     trainer = object.__new__(Trainer)
-    trainer.sampling_height = None
-    trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
     trainer.anchor_training_probability = 0.5
     trainer.use_multi_anchor_next = False
@@ -367,11 +355,13 @@ def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
     trainer.sample_real_anchor = Mock(return_value=Mock(source="real"))
 
     with patch("src.train.trainer.torch.rand", return_value=torch.tensor(0.9)):
-        assert trainer.sample_anchor({}, 2, owned_axes=()) is None
+        assert trainer.sample_anchor(RealBatch({}), 2, owned_axes=()) is None
     assert not trainer.use_multi_anchor_next
 
     trainer.anchor_training_probability = 1.0
-    sources = [trainer.sample_anchor({}, 2, owned_axes=()).source for _ in range(3)]
+    sources = [
+        trainer.sample_anchor(RealBatch({}), 2, owned_axes=()).source for _ in range(3)
+    ]
 
     assert sources == [
         "real",
@@ -728,7 +718,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         return original_compute_vf(batches, num_phases)
 
     def track_critics(transition, fake, batches, step, domain, **kwargs):
-        critic_batch_ids.extend(id(batches[axis]) for axis in (0, 1, 2))
+        critic_batch_ids.extend(id(batches.images[axis]) for axis in (0, 1, 2))
         return original_update_critics(
             transition,
             fake,
@@ -894,7 +884,7 @@ def test_training_critics_match_each_axis_rectangular_real_shape() -> None:
 
 def test_real_anchor_preserves_a_rectangular_observation() -> None:
     trainer, _, _ = _conditioning_trainer(anchored=True)
-    batches = {axis: torch.randint(0, 3, (2, 4, 8)) for axis in (0, 1, 2)}
+    batches = RealBatch({axis: torch.randint(0, 3, (2, 4, 8)) for axis in (0, 1, 2)})
 
     selection = trainer.sample_real_anchor(batches, volume_size=8)
 
@@ -945,8 +935,6 @@ def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
 
 def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
     trainer = object.__new__(Trainer)
-    trainer.sampling_height = None
-    trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
     trainer.volume_batch_size = 4
     trainer.device = torch.device("cpu")
@@ -964,8 +952,6 @@ def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
 
 def test_single_condition_dropout_matches_joint_marginal_visibility() -> None:
     trainer = object.__new__(Trainer)
-    trainer.sampling_height = None
-    trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
     trainer.volume_batch_size = 2
     trainer.device = torch.device("cpu")
@@ -1069,8 +1055,6 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
 
 def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) -> None:
     trainer = object.__new__(Trainer)
-    trainer.sampling_height = None
-    trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
     trainer.device = torch.device("cpu")
     trainer.cfg = {"stage": "low_res", "data": {}}
@@ -1104,8 +1088,6 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
 ) -> None:
     monkeypatch.setattr("src.train.run.loop.save_training", lambda *args: None)
     trainer = object.__new__(Trainer)
-    trainer.sampling_height = None
-    trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
     trainer.device = torch.device("cpu")
     trainer.cfg = {"stage": "low_res", "data": {}}

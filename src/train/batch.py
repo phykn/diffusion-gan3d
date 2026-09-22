@@ -8,6 +8,24 @@ from src.data.slice import TripletBatch
 
 
 @dataclass(frozen=True)
+class RealBatch:
+    images: dict[int, torch.Tensor]
+    domains: dict[int, int] = field(default_factory=dict)
+    origins: dict[int, torch.Tensor] = field(default_factory=dict)
+    extents: dict[int, torch.Tensor] = field(default_factory=dict)
+    heights: dict[int, torch.Tensor] = field(default_factory=dict)
+    profiles: dict[int, torch.Tensor] = field(default_factory=dict)
+    geometry: dict[int, list[dict]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SampledPairs:
+    pairs: dict[int, tuple[torch.Tensor, torch.Tensor]]
+    heights: dict[int, torch.Tensor] = field(default_factory=dict)
+    profiles: dict[int, torch.Tensor] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class DenoiserUpdate:
     adversarial: torch.Tensor
     total: torch.Tensor
@@ -51,7 +69,7 @@ class StepPreparation:
     transition: int
     domain: int
     critic_domains: dict[int, int]
-    real: dict[int, torch.Tensor]
+    real: RealBatch
     selection: "AnchorSelection | None"
     target_vf: torch.Tensor
     presence: "ConditionPresence"
