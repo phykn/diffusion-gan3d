@@ -2,7 +2,7 @@ from collections.abc import Mapping, Sequence
 
 from torch import nn
 
-from src.config.data import get_domains, get_plane_groups
+from src.config.data import get_domains, get_plane_groups, get_sr_plane_groups
 from src.config.train import get_sr_sizes, normalize_train_config
 from src.model.critic import ConnectivityCritic2D, PairCritic2D
 from src.model.denoiser import Denoiser3D
@@ -87,14 +87,14 @@ def build_models(
     domains = get_domains(data)
     num_domains = len(domains)
     denoiser = build_denoiser(cfg)
-    groups = get_plane_groups(cfg)
     if cfg["stage"] == "sr":
         groups = {
-            f"{domain}_{group}": axes
-            for domain, planes in domains.items()
-            for group, axes in groups.items()
-            if set(axes).intersection(planes)
+            group: axes
+            for domain_groups in get_sr_plane_groups(cfg).values()
+            for group, axes in domain_groups.items()
         }
+    else:
+        groups = get_plane_groups(cfg)
     critics = nn.ModuleDict(
         {
             group: PairCritic2D(

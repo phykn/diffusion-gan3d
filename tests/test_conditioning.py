@@ -706,6 +706,29 @@ def test_dataset_dict_geometry_is_independent_of_height_conditioning(
         assert batch["height_extent"].tolist() == ([24.0] if axis else [-1.0]) * 2
 
 
+@pytest.mark.parametrize("invalid", ["bank_domains", "missing_extents", "extra_extents"])
+def test_height_conditioned_sr_rejects_mismatched_bank_domains(tmp_path, invalid):
+    cfg = configuration(tmp_path, stage="sr", height=True)
+    bank = {0: torch.full((2, 2, 8, 8, 8), 0.5)}
+    origins = {0: torch.tensor([2.0, 8.0])}
+    extents = {0: torch.tensor([24.0, 24.0])}
+    if invalid == "bank_domains":
+        bank[1] = bank.pop(0)
+        origins[1] = origins.pop(0)
+        extents = None
+        message = "LR bank domains must match"
+    elif invalid == "missing_extents":
+        extents.clear()
+        message = "height extent domains must match"
+    else:
+        extents[1] = extents[0].clone()
+        message = "height extent domains must match"
+    with patch("src.build.sr.build_trainer") as build:
+        with pytest.raises(ValueError, match=message):
+            build_sr_trainer(cfg, bank, torch.device("cpu"), origins, extents)
+        build.assert_not_called()
+
+
 def test_height_conditioned_sr_uses_fractional_bank_and_zero_level_at_inference(
     tmp_path,
 ):

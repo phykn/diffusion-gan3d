@@ -66,6 +66,19 @@ def get_plane_groups(cfg: Mapping) -> dict[str, tuple[int, ...]]:
     return dict(sorted(result.items(), key=lambda item: item[1]))
 
 
+def get_sr_plane_groups(cfg: Mapping) -> dict[int, dict[str, tuple[int, ...]]]:
+    """Name SR critics by domain and keep only each domain's observed planes."""
+    groups = get_plane_groups(cfg)
+    return {
+        domain: {
+            f"{domain}_{group}": tuple(axis for axis in axes if axis in planes)
+            for group, axes in groups.items()
+            if set(axes).intersection(planes)
+        }
+        for domain, planes in get_domains(cfg["data"]).items()
+    }
+
+
 def get_domains(
     data: Mapping[str, object],
 ) -> dict[int, dict[int, Sequence[str | Path]]]:

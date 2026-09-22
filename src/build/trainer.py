@@ -9,7 +9,7 @@ from src.build.data import (
     build_stream,
 )
 from src.build.model import build_diffusion, build_models
-from src.config.data import get_domains, get_plane_groups, get_sizes
+from src.config.data import get_sizes, get_sr_plane_groups
 from src.config.train import get_schedule_steps, get_sr_sizes, normalize_train_config
 from src.data.source import infer_height_extents
 from src.storage import load_model
@@ -65,42 +65,9 @@ def build_trainer(
         raise ValueError("only SR training requires a coarse bank.")
     train = cfg["train"]
     data = cfg["data"]
-    model = cfg["model"]
-    generator = model["generator"]
-    loss = cfg["loss"]
-    conditioning = cfg["conditioning"]
-    if conditioning["height_enabled"]:
+    if cfg["conditioning"]["height_enabled"]:
         data["height_extents"] = infer_height_extents(data)
-    anchor = conditioning.get("anchor", {})
-    connectivity = loss.get("connectivity", {})
-    optim = cfg["optim"]
-    anchor_start_step, anchor_ramp_steps = (
-        (0, 0)
-        if sr
-        else get_schedule_steps(
-            anchor,
-            "conditioning.anchor",
-        )
-    )
-    connectivity_start, connectivity_ramp = (
-        (0, 0) if sr else get_schedule_steps(connectivity, "loss.connectivity")
-    )
-    if (
-        anchor.get("probability", 0.0) > 0.0
-        and anchor_start_step < train["total_steps"]
-        and train["volume_batch_size"] > train["real_batch_size"]
-    ):
-        raise ValueError(
-            "train.volume_batch_size must not exceed train.real_batch_size when "
-            "anchor training is enabled."
-        )
-    if (
-        conditioning["height_enabled"]
-        and train["volume_batch_size"] > train["real_batch_size"]
-    ):
-        raise ValueError(
-            "height conditioning requires real_batch_size >= volume_batch_size."
-        )
+    settings = _build_settings(cfg, device)
     critic_augment = build_augmentation(cfg)
     denoiser, critics, connectivity_critic = build_models(cfg)
     denoiser = denoiser.to(device)
@@ -123,7 +90,6 @@ def build_trainer(
         connectivity_critic,
         cfg,
     )
-    use_amp = train["mixed_precision"] and device.type == "cuda"
     datasets = build_datasets(cfg, high=sr)
     streams = {
         domain_id: {
@@ -149,75 +115,91 @@ def build_trainer(
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,
             connectivity_optim=connectivity_optim,
-            scaler=torch.amp.GradScaler("cuda", enabled=use_amp),
+            scaler=torch.amp.GradScaler("cuda", enabled=settings.amp_enabled),
             device=device,
             critic_augment=critic_augment,
             coarse_bank=bank,
             bank_origins=bank_origins,
             bank_extents=bank_extents,
             data_fingerprint=fingerprint_data(streams),
-            critic_groups_by_domain=(
-                {
-                    domain: {
-                        f"{domain}_{group}": tuple(
-                            axis for axis in axes if axis in planes
-                        )
-                        for group, axes in get_plane_groups(cfg).items()
-                        if set(axes).intersection(planes)
-                    }
-                    for domain, planes in get_domains(data).items()
-                }
-                if sr
-                else None
-            ),
+            critic_groups_by_domain=get_sr_plane_groups(cfg) if sr else None,
         ),
-        settings=TrainerSettings(
-            cfg=cfg,
-            height_data=data if conditioning["height_enabled"] else None,
-            profile_settings=conditioning.get(
-                "spatial_profile", {"enabled": False, "num_bins": 16}
-            ),
-            profile_weight=loss.get("spatial_profile_weight", 0.0),
-            profile_gradient_weight=loss.get("spatial_profile_gradient_weight", 0.0),
-            volume_batch_size=train["volume_batch_size"],
-            num_phases=data["num_phases"],
-            patch_size=get_sr_sizes(cfg)[2] if sr else get_sizes(data)[1],
-            slice_pairs_per_axis=train["slice_pairs_per_plane"],
-            ema_decay=optim["ema_decay"],
-            r1_gamma=loss["r1_weight"],
-            r1_interval=loss["r1_every_steps"],
-            critic_local_weight=loss["critic_local_weight"],
-            anchor_training_probability=anchor.get("probability", 0.0),
-            anchor_start_step=anchor_start_step,
-            anchor_ramp_steps=anchor_ramp_steps,
-            anchor_pixel_loss_weight=loss.get("anchor_pixel_weight", 0.0),
-            anchor_shared_axis_probability=anchor.get(
-                "borrowed_plane_probability", 0.0
-            ),
-            anchor_bank_capacity=anchor.get("bank_capacity", 0),
-            anchor_plane_spacing=anchor.get("plane_spacing", 1),
-            structure_every_steps=train["structure_every_steps"],
-            connectivity_weight=connectivity.get("adversarial_weight", 0.0),
-            normal_transition_weight=connectivity.get("normal_transition_weight", 0.0),
-            connectivity_max_gap=connectivity.get("max_slice_gap", 1),
-            connectivity_start_step=connectivity_start,
-            connectivity_ramp_steps=connectivity_ramp,
-            connectivity_windows_per_plane=connectivity.get("windows_per_plane", 1),
-            vf_loss_weight=loss.get("volume_fraction_weight", 0.0),
-            domain_dropout=1.0 - conditioning["domain_keep_probability"],
-            cfg_drop_each_probability=conditioning.get(
-                "dropout_probability_per_case", 0.0
-            ),
-            latent_channels=generator["latent_channels"],
-            amp_enabled=use_amp,
-            r2_gamma=loss["r2_weight"],
-            consistency_weight=loss.get("downsample_consistency_weight", 0.0),
-            consistency_tolerance=loss.get("downsample_mse_tolerance", 0.0),
-            coarse_corruption_probability=conditioning.get(
-                "coarse_corruption_probability", 0.0
-            ),
-            coarse_corruption_strength=conditioning.get(
-                "coarse_corruption_strength", 0.0
-            ),
+        settings=settings,
+    )
+
+
+def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
+    sr = cfg["stage"] == "sr"
+    train = cfg["train"]
+    data = cfg["data"]
+    generator = cfg["model"]["generator"]
+    loss = cfg["loss"]
+    conditioning = cfg["conditioning"]
+    anchor = conditioning.get("anchor", {})
+    connectivity = loss.get("connectivity", {})
+    optim = cfg["optim"]
+    anchor_start_step, anchor_ramp_steps = (
+        (0, 0) if sr else get_schedule_steps(anchor, "conditioning.anchor")
+    )
+    connectivity_start, connectivity_ramp = (
+        (0, 0) if sr else get_schedule_steps(connectivity, "loss.connectivity")
+    )
+    if (
+        anchor.get("probability", 0.0) > 0.0
+        and anchor_start_step < train["total_steps"]
+        and train["volume_batch_size"] > train["real_batch_size"]
+    ):
+        raise ValueError(
+            "train.volume_batch_size must not exceed train.real_batch_size when "
+            "anchor training is enabled."
+        )
+    if (
+        conditioning["height_enabled"]
+        and train["volume_batch_size"] > train["real_batch_size"]
+    ):
+        raise ValueError(
+            "height conditioning requires real_batch_size >= volume_batch_size."
+        )
+    return TrainerSettings(
+        cfg=cfg,
+        height_data=data if conditioning["height_enabled"] else None,
+        profile_settings=conditioning.get(
+            "spatial_profile", {"enabled": False, "num_bins": 16}
         ),
+        profile_weight=loss.get("spatial_profile_weight", 0.0),
+        profile_gradient_weight=loss.get("spatial_profile_gradient_weight", 0.0),
+        volume_batch_size=train["volume_batch_size"],
+        num_phases=data["num_phases"],
+        patch_size=get_sr_sizes(cfg)[2] if sr else get_sizes(data)[1],
+        slice_pairs_per_axis=train["slice_pairs_per_plane"],
+        ema_decay=optim["ema_decay"],
+        r1_gamma=loss["r1_weight"],
+        r1_interval=loss["r1_every_steps"],
+        critic_local_weight=loss["critic_local_weight"],
+        anchor_training_probability=anchor.get("probability", 0.0),
+        anchor_start_step=anchor_start_step,
+        anchor_ramp_steps=anchor_ramp_steps,
+        anchor_pixel_loss_weight=loss.get("anchor_pixel_weight", 0.0),
+        anchor_shared_axis_probability=anchor.get("borrowed_plane_probability", 0.0),
+        anchor_bank_capacity=anchor.get("bank_capacity", 0),
+        anchor_plane_spacing=anchor.get("plane_spacing", 1),
+        structure_every_steps=train["structure_every_steps"],
+        connectivity_weight=connectivity.get("adversarial_weight", 0.0),
+        normal_transition_weight=connectivity.get("normal_transition_weight", 0.0),
+        connectivity_max_gap=connectivity.get("max_slice_gap", 1),
+        connectivity_start_step=connectivity_start,
+        connectivity_ramp_steps=connectivity_ramp,
+        connectivity_windows_per_plane=connectivity.get("windows_per_plane", 1),
+        vf_loss_weight=loss.get("volume_fraction_weight", 0.0),
+        domain_dropout=1.0 - conditioning["domain_keep_probability"],
+        cfg_drop_each_probability=conditioning.get("dropout_probability_per_case", 0.0),
+        latent_channels=generator["latent_channels"],
+        amp_enabled=train["mixed_precision"] and device.type == "cuda",
+        r2_gamma=loss["r2_weight"],
+        consistency_weight=loss.get("downsample_consistency_weight", 0.0),
+        consistency_tolerance=loss.get("downsample_mse_tolerance", 0.0),
+        coarse_corruption_probability=conditioning.get(
+            "coarse_corruption_probability", 0.0
+        ),
+        coarse_corruption_strength=conditioning.get("coarse_corruption_strength", 0.0),
     )
