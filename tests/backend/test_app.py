@@ -80,7 +80,7 @@ def client(
     (assets / "app.js").write_text("", encoding="utf-8")
     monkeypatch.setattr(server_module, "FRONTEND_DIR", front)
     monkeypatch.setattr(
-        server_module,
+        response_module,
         "measure_volume",
         lambda _volume, device: VolumeMetrics(porosity=0.25, tortuosity=1.5),
     )
@@ -157,7 +157,7 @@ def test_metrics_are_opt_in_and_remain_under_generation_lock(client, monkeypatch
         calls.append(volume.shape)
         return VolumeMetrics(porosity=0.25, tortuosity=None)
 
-    monkeypatch.setattr(server_module, "measure_volume", measure)
+    monkeypatch.setattr(response_module, "measure_volume", measure)
     response = client.post("/generate", json={"format": "raw"})
     assert response.status_code == 200 and not calls
     assert "x-porosity" not in response.headers
