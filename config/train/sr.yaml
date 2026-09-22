@@ -20,19 +20,7 @@ model:
 # 단면의 행/열: xy=(y,x), xz=(z,x), yz=(z,y). 그룹 공유와 별도로 설정한다.
 augmentation:
   probability: 0.5
-
-  planes:
-    xy:
-      flip_axes: [x, y]
-      rotate_90: true
-
-    xz:
-      flip_axes: [x, z]
-      rotate_90: true
-
-    yz:
-      flip_axes: [y, z]
-      rotate_90: true
+  auto_planes: true  # 높이 조건을 켜면 z축 위치를 보존하는 증강으로 결정한다.
 
 loss:
   r1_weight: 0.5
@@ -48,7 +36,7 @@ optim:
 # 고정된 LR 모델에서 생성한 조건용 볼륨이며, 측정한 3D 정답이 아니다.
 lr_bank:
   samples_per_domain: 8
-  guidance: 0.9  # bank 생성 시 도메인 조건 강도. gen.yaml과 독립적이다.
+  guidance: 0.9  # 측정 조건의 CFG 강도. 도메인·높이만 있으면 효과가 없다.
   refresh_every_steps: 500  # 도메인별로 한 볼륨씩 교체한다.
 
 train:

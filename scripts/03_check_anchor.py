@@ -9,7 +9,13 @@ from matplotlib.colors import ListedColormap
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.cli import check_parser, prepare_check, save_preview
+from scripts.common.cli import (
+    add_height_arguments,
+    check_parser,
+    height_options,
+    prepare_check,
+    save_preview,
+)
 from scripts.common.diagnostic import (
     format_percent,
     format_ratio,
@@ -96,6 +102,7 @@ def main() -> None:
         choices=("cpu", "cuda"),
         help="Default: CUDA when available, otherwise CPU.",
     )
+    add_height_arguments(parser)
     args = parser.parse_args()
     args = prepare_check(args, __file__)
     if args.count < 0:
@@ -126,6 +133,7 @@ def main() -> None:
             anchor_strength=0.0,
             guidance=guidance,
             domain=args.domain,
+            **height_options(args),
             margin=generator.default_margin,
         )
         target_slices = get_slices(target, args.axis)
@@ -152,6 +160,7 @@ def main() -> None:
             anchor_strength=anchor_strength,
             guidance=guidance,
             domain=args.domain,
+            **height_options(args),
             margin=generator.default_margin,
         )
         torch.random.set_rng_state(cpu_rng)
@@ -163,6 +172,7 @@ def main() -> None:
             anchor_strength=0.0,
             guidance=guidance,
             domain=args.domain,
+            **height_options(args),
             margin=generator.default_margin,
         )
     save_volume(gen, args.out)

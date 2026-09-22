@@ -48,13 +48,17 @@ def create_app(
     app.state.download_slots = BoundedSemaphore(config.max_inflight_downloads)
 
     @app.get("/health")
-    def health() -> dict[str, str | int]:
+    def health() -> dict:
+        generator = app.state.inference.generator
         return {
             "status": "ready",
             "device": str(app.state.inference.device),
             "crop_size": app.state.inference.crop_size,
             "input_size": app.state.inference.input_size,
             "num_phases": app.state.inference.num_phases,
+            "num_domains": generator.num_domains,
+            "height_enabled": generator.height_data is not None,
+            "height_extents": (generator.height_data or {}).get("height_extents", {}),
         }
 
     @app.post("/prepare")

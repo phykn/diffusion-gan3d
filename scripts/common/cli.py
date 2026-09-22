@@ -21,6 +21,25 @@ def resolve_weight(path):
     return path / "generator.pt" if path.is_dir() else path
 
 
+def add_height_arguments(parser, origin_default=0.0):
+    parser.add_argument(
+        "--height-origin",
+        type=float,
+        default=origin_default,
+        help="Output Z origin in source pixels; real xz/yz crops infer it when omitted.",
+    )
+    parser.add_argument(
+        "--height-extent", type=float, help="Full source Z extent in pixels."
+    )
+
+
+def height_options(args):
+    origin, extent = args.height_origin, args.height_extent
+    if origin in (None, 0) and extent is None:
+        return {}
+    return {"height_origin": 0.0 if origin is None else origin, "height_extent": extent}
+
+
 def result_directory(name):
     return (
         PROJECT_ROOT

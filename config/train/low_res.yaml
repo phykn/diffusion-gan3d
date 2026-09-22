@@ -17,19 +17,7 @@ model:
 # 단면의 행/열: xy=(y,x), xz=(z,x), yz=(z,y). 그룹 공유와 별도로 설정한다.
 augmentation:
   probability: 0.5
-
-  planes:
-    xy:
-      flip_axes: [x, y]
-      rotate_90: true
-
-    xz:
-      flip_axes: [x, z]
-      rotate_90: true
-
-    yz:
-      flip_axes: [y, z]
-      rotate_90: true
+  auto_planes: true  # 높이 조건을 켜면 z축 위치를 보존하는 증강으로 결정한다.
 
 conditioning:
   anchor:

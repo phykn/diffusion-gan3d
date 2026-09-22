@@ -31,9 +31,12 @@ function readMetric(headers, name) {
   return Number.isFinite(number) ? number : null
 }
 
-export async function generateVolume(image, seed, blocks, signal) {
+export async function generateVolume(image, seed, blocks, signal, conditions = {}) {
+  const { axis = 0, domain = 0, height_origin, height_extent } = conditions
   const response = await request('/generate', {
-    anchors: [{ image, axis: 0, index: 0 }],
+    anchors: [{ image, axis, index: 0, position: [0, 0] }],
+    domain,
+    ...(height_origin === undefined ? {} : { height_origin, height_extent }),
     seed,
     ...(blocks.some(value => value > 1) ? { blocks } : {}),
     format: 'raw',

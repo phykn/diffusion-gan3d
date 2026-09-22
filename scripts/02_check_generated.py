@@ -7,7 +7,13 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.cli import check_parser, prepare_check, save_preview
+from scripts.common.cli import (
+    add_height_arguments,
+    check_parser,
+    height_options,
+    prepare_check,
+    save_preview,
+)
 from scripts.common.diagnostic import show_napari
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
@@ -50,6 +56,7 @@ def main() -> None:
         "--no-view", action="store_true", help="Save without opening a viewer."
     )
     parser.add_argument("--guidance", type=float, help="Default: config/gen.yaml.")
+    add_height_arguments(parser)
     args = parser.parse_args()
     args = prepare_check(args, __file__)
     if args.guidance is None:
@@ -73,6 +80,7 @@ def main() -> None:
             vf=None,
             guidance=args.guidance,
             domain=args.domain,
+            **height_options(args),
             margin=generator.default_margin,
         )
     save_volume(vol, args.out)

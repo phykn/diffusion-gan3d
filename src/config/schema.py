@@ -20,6 +20,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
         ),
         "augmentation": {
             "probability": None,
+            "auto_planes": None,
             "planes": {
                 plane: dict.fromkeys(("flip_axes", "rotate_90")) for plane in PLANES
             },

@@ -46,6 +46,10 @@ def describe_data(trainer):
                         }
                     )
     return {
+        "has_measured_3d_reference": False,
+        "connectivity_reference": "generated_replay"
+        if trainer.connectivity_critic is not None
+        else None,
         "coordinate_units": "source pixels",
         "height_coordinate": "2 * cell_center / full_source_extent - 1",
         "training_sources": records,

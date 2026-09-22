@@ -1079,7 +1079,7 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
     assert math.isclose(metrics.vf_loss, 0.0, abs_tol=1e-7)
 
 
-def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
+def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) -> None:
     trainer = object.__new__(Trainer)
     trainer.sampling_height = None
     trainer.sampling_profile = None
@@ -1093,6 +1093,9 @@ def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
     )
     trainer.connectivity_critic = nn.Linear(2, 1)
     trainer.step = Mock(side_effect=KeyboardInterrupt)
+    checkpoint = tmp_path / "checkpoints" / "last.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"previous complete training state")
 
     with pytest.raises(KeyboardInterrupt):
         run_train(
@@ -1102,13 +1105,9 @@ def test_interrupt_saves_all_weights_and_is_reraised(tmp_path: Path) -> None:
             run_dir=tmp_path,
         )
 
-    assert (tmp_path / "generator.pt").is_file()
-    assert tuple(path.name for path in sorted(tmp_path.glob("critic_*.pt"))) == (
-        "critic_c.pt",
-        "critic_xy.pt",
-        "critic_xz.pt",
-        "critic_yz.pt",
-    )
+    assert not (tmp_path / "generator.pt").exists()
+    assert not list(tmp_path.glob("critic_*.pt"))
+    assert checkpoint.read_bytes() == b"previous complete training state"
 
 
 def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(

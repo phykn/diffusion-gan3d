@@ -61,12 +61,17 @@ def test_boundary_continuation_defaults_to_an_unconditioned_reference(
     assert "Generating unconditioned reference" in output
 
 
+@pytest.mark.parametrize("height", [False, True])
 def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    height: bool,
 ) -> None:
     cfg = _config(tmp_path)
+    cfg.setdefault("conditioning", {})["height_enabled"] = height
+    if height:
+        cfg["data"].update(thickness_axis="z", height_extents={0: None})
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
@@ -89,6 +94,8 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
             str(weights),
             "--anchor",
             str(anchor_path),
+            "--axis",
+            "1" if height else "0",
             "--out",
             str(output_path),
             "--figure",
@@ -103,13 +110,13 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     assert figure_path.is_file()
     output = capsys.readouterr().out
     assert "crop (1, 2, 16, 16) -> input 8 x 8" in output
-    assert "Boundary: axis 0, start plane 0" in output
+    assert f"Boundary: axis {int(height)}, start plane 0" in output
     assert "Anchor match" in output
     assert "First change" in output
     assert "farthest" in output
 
 
-def test_continuation_anchor_keeps_indexed_labels_and_uses_nearest_resize(
+def test_continuation_anchor_keeps_indexed_phases_and_fractional_resize(
     tmp_path: Path,
 ) -> None:
     source = np.array(
@@ -134,7 +141,23 @@ def test_continuation_anchor_keeps_indexed_labels_and_uses_nearest_resize(
     labels, crop = module.load_anchor_image(path, 4, 2, 3)
 
     assert crop == (1, 1, 4, 4)
-    assert labels.tolist() == [[1, 2], [2, 0]]
+    assert labels.argmax(0).tolist() == [[1, 2], [2, 0]]
+    assert labels.shape == (3, 2, 2)
+    source[1, 1] = 0
+    Image.fromarray(source).save(path)
+    fractions, _ = module.load_anchor_image(path, 4, 2, 3)
+    torch.testing.assert_close(fractions[:, 0, 0], torch.tensor([0.25, 0.75, 0.0]))
+
+
+def test_continuation_strip_renders_every_distance(monkeypatch):
+    module = _load_script("05_check_continuation.py")
+    seen = []
+    monkeypatch.setattr(module.plt, "show", lambda: seen.extend(plt.gcf().axes))
+    volume = torch.arange(8).reshape(8, 1, 1).expand(8, 3, 3) % 2
+    module.render_strip(volume, volume[0], 0, "start", 2, None, True)
+    populated = [panel for panel in seen if panel.images]
+    assert len(populated) == 6  # anchor plus distances 0, 1, 2, 4, 7
+    assert populated[-1].get_title() == "Generated d=7"
 
 
 def test_boundary_continuation_napari_shows_generated_volume_only(
@@ -666,3 +689,67 @@ def test_weight_directory_alone_saves_manual_check_results(
     report = json.loads(output.with_suffix(".json").read_text())
     assert report["weight"] == str(run_dir / "generator.pt")
     assert report["shape"] == list(tifffile.imread(output).shape)
+
+
+@pytest.mark.parametrize(
+    "filename,extra",
+    [
+        ("02_check_generated.py", []),
+        ("03_check_anchor.py", ["--count", "1"]),
+        (
+            "04_check_scale_up.py",
+            [
+                "--blocks",
+                "2",
+                "1",
+                "1",
+                "--overlap",
+                "1",
+                "--margin",
+                "0",
+                "--count",
+                "0",
+            ],
+        ),
+        ("05_check_continuation.py", []),
+    ],
+)
+def test_inspection_scripts_support_mixed_source_heights(
+    tmp_path, monkeypatch, filename, extra
+):
+    import json
+
+    cfg = _config(tmp_path)
+    cfg.setdefault("conditioning", {})["height_enabled"] = True
+    cfg["data"].update(thickness_axis="z", height_extents={0: None})
+    run = tmp_path / "run"
+    run.mkdir()
+    save_yaml(run / "train.yaml", cfg)
+    model, _, _ = build_models(cfg)
+    weights = save_model(run / "generator.pt", model)
+    output = tmp_path / "volume.tiff"
+    module = _load_script(filename)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            filename,
+            "--weight",
+            str(weights),
+            "--out",
+            str(output),
+            "--height-origin",
+            "5",
+            "--height-extent",
+            "96",
+            "--no-view",
+            "--device",
+            "cpu",
+            *extra,
+        ],
+    )
+    module.main()
+    metadata = json.loads(output.with_suffix(".json").read_text())
+    assert metadata["height_origin"] == 5
+    assert metadata["height_extent"] == 96
+    assert output.is_file()

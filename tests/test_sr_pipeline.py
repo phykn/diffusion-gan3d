@@ -170,8 +170,6 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     out = tmp_path / "result"
     check_hr(
         [
-            "--lr-weight",
-            str(base_dir),
             "--weight",
             str(resumed),
             "--out",
@@ -203,6 +201,11 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
         ]
     )
     assert torch.equal(load_volume(out / "hr.tiff"), load_volume(out2 / "hr.tiff"))
+    assert json.loads((out / "report.json").read_text())["lr_source_verified"] is True
+    with (base_dir / "train.yaml").open("a") as config_file:
+        config_file.write("\n# changed after SR training\n")
+    with pytest.raises(ValueError, match="configuration changed"):
+        check_hr(["--weight", str(resumed), "--no-view", "--device", "cpu"])
 
 
 def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(

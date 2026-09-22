@@ -17,6 +17,7 @@ from src.predict.inference import InferenceAPI
 from src.predict.sr.inference import SuperResolutionAPI
 from src.prepare.resize import downsample, phase_channels
 from src.storage import load_probabilities, load_volume, save_probabilities, save_volume
+from src.train.run.bank import validate_frozen_source
 
 
 def latest_sr():
@@ -97,6 +98,9 @@ def main(argv=None):
     parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--height-origin", type=float, default=0.0)
+    parser.add_argument(
+        "--height-extent", type=float, help="Full source height in pixels."
+    )
     parser.add_argument("--lr-guidance", type=float)
     parser.add_argument("--guidance", type=float, default=1.0, help="SR guidance.")
     parser.add_argument(
@@ -126,7 +130,12 @@ def main(argv=None):
     cfg = normalize_train_config(payload["config"], "sr")
     del payload
     lr_weight = None
-    common = dict(domain=args.domain, seed=args.seed, height_origin=args.height_origin)
+    common = dict(
+        domain=args.domain,
+        seed=args.seed,
+        height_origin=args.height_origin,
+        height_extent=args.height_extent,
+    )
     if args.input:
         low = (
             load_probabilities(args.input)
@@ -136,7 +145,7 @@ def main(argv=None):
     else:
         stored_source = cfg.get("source", {}).get("weights")
         if args.lr_weight:
-            lr_weight = args.lr_weight.resolve()
+            lr_weight = resolve_weight(args.lr_weight)
         elif stored_source:
             lr_weight = Path(stored_source)
             if not lr_weight.is_absolute():
@@ -145,6 +154,8 @@ def main(argv=None):
             raise ValueError(
                 "SR export has no LR source. Supply --lr-weight or --input."
             )
+        if not args.lr_weight:
+            validate_frozen_source(lr_weight, cfg["source"])
         print(f"LR weights: {lr_weight}\nGenerating LR...", flush=True)
         lr = InferenceAPI(lr_weight, args.device)
         validate_sr_source(cfg["data"], lr.data)
@@ -189,6 +200,7 @@ def main(argv=None):
         "sr_weights": str(weight),
         "lr_weights": str(lr_weight) if lr_weight else None,
         "input": str(args.input.resolve()) if args.input else None,
+        "lr_source_verified": not args.input and not args.lr_weight,
         **common,
         "crop_size": sr.crop_size,
         "lo_res_size": sr.lo_res_size,

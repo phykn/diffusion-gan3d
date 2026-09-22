@@ -58,3 +58,34 @@ def test_mixed_resize_preserves_area_along_shrinking_axis():
 def test_downsample_rejects_expansion():
     with pytest.raises(ValueError, match="expand"):
         downsample(torch.ones(1, 1, 2, 4), (4, 2))
+
+
+def test_nonintegral_resize_integrates_pixel_area():
+    labels = torch.zeros(1, 3, 3, dtype=torch.long)
+    labels[0, 1, 1] = 1
+    resized = resize_phases(phase_channels(labels, 2), (2, 2))
+    torch.testing.assert_close(resized[0, 1], torch.full((2, 2), 1 / 9))
+
+
+@pytest.mark.parametrize(
+    "source,target",
+    [
+        ((7, 5), (3, 2)),
+        ((3, 3), (5, 7)),
+        ((7, 3), (3, 5)),
+        ((7, 5, 9), (3, 2, 4)),
+        ((3, 4, 5), (5, 8, 7)),
+        ((8, 6, 4), (4, 3, 2)),
+        ((3, 5), (6, 15)),
+    ],
+)
+def test_resize_preserves_simplex_phase_amount_and_gradient(source, target):
+    logits = torch.randn(2, 3, *source, requires_grad=True)
+    probs = logits.softmax(1)
+    actual = resize_phases(probs, target)
+    dims = tuple(range(2, actual.ndim))
+    torch.testing.assert_close(actual.mean(dims), probs.mean(dims))
+    torch.testing.assert_close(actual.sum(1), torch.ones(2, *target))
+    assert actual.min() >= 0
+    actual.square().mean().backward()
+    assert torch.isfinite(logits.grad).all() and logits.grad.abs().sum() > 0

@@ -44,6 +44,12 @@ def phase_channels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:
 
 
 def resize_phases(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+    """Resize cell fractions without changing the amount of each phase.
+
+    Non-integral resizes integrate source/target cell overlaps. PyTorch's
+    ``area`` mode uses overlapping adaptive-pooling bins for these sizes.
+    Integral enlargement retains the existing cell-centered linear interpolation.
+    """
     shape = tuple(shape)
     if (
         probs.ndim not in (4, 5)
@@ -55,12 +61,34 @@ def resize_phases(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
     if source == shape:
         return probs
     reduced = tuple(min(new, old) for new, old in zip(shape, source, strict=True))
-    if reduced != source:
+    if reduced != source and all(old % new == 0 for old, new in zip(source, reduced)):
         probs = F.interpolate(probs, size=reduced, mode="area")
+    else:
+        for axis, size in enumerate(reduced, 2):
+            if size != probs.shape[axis]:
+                probs = _resize_fraction_axis(probs, axis, size)
     if reduced == shape:
         return probs
+    for axis, size in enumerate(shape, 2):
+        if size % probs.shape[axis] != 0:
+            probs = _resize_fraction_axis(probs, axis, size)
     mode = "trilinear" if probs.ndim == 5 else "bilinear"
     return F.interpolate(probs, size=shape, mode=mode, align_corners=False)
+
+
+def _resize_fraction_axis(probs, axis, size):
+    source = probs.shape[axis]
+    edges = torch.arange(size + 1, device=probs.device, dtype=torch.float64)
+    edges = edges * source / size
+    cells = torch.arange(source, device=probs.device, dtype=torch.float64)
+    overlap = (
+        torch.minimum(edges[1:, None], cells + 1)
+        - torch.maximum(edges[:-1, None], cells)
+    ).clamp_min(0) / (source / size)
+    # Keep conservation and simplex accuracy under training autocast as well.
+    with torch.autocast(device_type=probs.device.type, enabled=False):
+        values = probs if probs.dtype == torch.float64 else probs.float()
+        return (values.movedim(axis, -1) @ overlap.to(values.dtype).T).movedim(-1, axis)
 
 
 def resize_labels(labels: torch.Tensor, size: int, num_phases: int) -> torch.Tensor:

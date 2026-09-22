@@ -1,6 +1,6 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { cropAndResizeLabels, readPngLabels } from '../image-labels.js'
+import { cropAnchor, readPngLabels } from '../image-labels.js'
 
 const props = defineProps({
   file: File,
@@ -68,8 +68,8 @@ function point(event) {
 }
 
 function clamp() {
-  state.crop.x = Math.max(0, Math.min(state.crop.x, state.image.naturalWidth - state.crop.size))
-  state.crop.y = Math.max(0, Math.min(state.crop.y, state.image.naturalHeight - state.crop.size))
+  state.crop.x = Math.max(0, Math.min(Math.round(state.crop.x), state.image.naturalWidth - state.crop.size))
+  state.crop.y = Math.max(0, Math.min(Math.round(state.crop.y), state.image.naturalHeight - state.crop.size))
 }
 
 function pointerDown(event) {
@@ -140,8 +140,8 @@ watch(() => [props.file, props.cropSize], ([file], previous, onCleanup) => {
     state.image = image
     state.sourceLabels = sourceLabels
     state.crop = {
-      x: (image.naturalWidth - cropSize) / 2,
-      y: (image.naturalHeight - cropSize) / 2,
+      x: Math.floor((image.naturalWidth - cropSize) / 2),
+      y: Math.floor((image.naturalHeight - cropSize) / 2),
       size: cropSize,
     }
     emit('ready', true)
@@ -158,9 +158,7 @@ watch(() => [props.file, props.cropSize], ([file], previous, onCleanup) => {
 function getAnchorImage() {
   if (!state.image || !state.crop) return null
   if (!state.sourceLabels) throw new Error('The image does not contain raw PNG label values.')
-  const labels = cropAndResizeLabels(state.sourceLabels, state.crop, props.cropSize)
-  if (new Set(labels.flat()).size < 2) throw new Error('The selected crop contains only one visible phase.')
-  return labels
+  return cropAnchor(state.sourceLabels, state.crop, props.cropSize)
 }
 onMounted(() => {
   observer = new ResizeObserver(draw)

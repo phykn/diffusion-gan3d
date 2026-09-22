@@ -26,6 +26,7 @@ class FakeInference:
     crop_size = 96
     input_size = 128
     num_phases = 2
+    generator = SimpleNamespace(num_domains=1, height_data=None)
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -96,7 +97,19 @@ def test_health_reports_loaded_device(client: TestClient) -> None:
         "crop_size": 96,
         "input_size": 128,
         "num_phases": 2,
+        "num_domains": 1,
+        "height_enabled": False,
+        "height_extents": {},
     }
+
+
+def test_health_reports_height_and_domain_requirements(client, service):
+    service.generator = SimpleNamespace(
+        num_domains=2, height_data={"height_extents": {0: 128, 1: None}}
+    )
+    info = client.get("/health").json()
+    assert info["num_domains"] == 2 and info["height_enabled"] is True
+    assert info["height_extents"] == {"0": 128, "1": None}
 
 
 def test_frontend_is_served_by_the_api_process(client: TestClient) -> None:

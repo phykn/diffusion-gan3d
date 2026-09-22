@@ -85,6 +85,10 @@ test('grayscale PNG data is decoded as raw phase values', async () => {
   ])
   const decoded = await decodePngLabels(png.buffer)
   assert.deepEqual(Array.from(decoded.labels), [0, 1, 2])
+  // Increasing width without adding a pixel used to silently append phase 0.
+  const truncated = png.slice()
+  new DataView(truncated.buffer).setUint32(16, 4)
+  await assert.rejects(decodePngLabels(truncated.buffer), /declared dimensions/)
 })
 
 test('indexed labels are resized with nearest-neighbor sampling', () => {

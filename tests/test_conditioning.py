@@ -390,6 +390,54 @@ def test_sr_bank_records_2d_profile_and_per_image_extent(tmp_path):
     assert height.call_args.args[-1] == 32
 
 
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+def test_interrupt_during_optimizer_step_saves_a_resumable_completed_step(
+    tmp_path, stage
+):
+    import signal
+
+    from src.train.run.loop import run_train
+    from src.train.sr import resume_sr_training
+    from src.train.state import resume_training
+
+    cfg = configuration(tmp_path, stage=stage)
+    bank = {0: torch.rand(2, 2, 8, 8, 8).softmax(1)}
+
+    def make_trainer():
+        return (
+            build_trainer(cfg, torch.device("cpu"))
+            if stage == "low_res"
+            else build_sr_trainer(cfg, bank, torch.device("cpu"))
+        )
+
+    trainer = make_trainer()
+    original_step = trainer.denoiser_optim.step
+    original_handler = signal.getsignal(signal.SIGINT)
+
+    def interrupt_after_optimizer(*args, **kwargs):
+        result = original_step(*args, **kwargs)
+        signal.raise_signal(signal.SIGINT)
+        return result
+
+    run = tmp_path / "interrupted"
+    with patch.object(trainer.denoiser_optim, "step", interrupt_after_optimizer):
+        with pytest.raises(KeyboardInterrupt):
+            run_train(trainer, steps=3, save_every=10, run_dir=run)
+    assert signal.getsignal(signal.SIGINT) == original_handler
+    payload = torch.load(run / "checkpoints/last.pt", weights_only=True)
+    assert payload["step"] == trainer.completed_steps == 1
+    assert payload["generator_optim"]["state"]
+    assert (run / "generator.pt").is_file()
+    restored = make_trainer()
+    if stage == "low_res":
+        resume_training(restored, payload)
+    else:
+        resume_sr_training(restored, payload)
+    assert restored.completed_steps == 1
+    assert np.isfinite(restored.step(1).generator_total)
+    assert restored.completed_steps == 2
+
+
 def test_profile_sr_training_refresh_and_geometry_artifacts(tmp_path):
     from src.train.run.sr import run_sr_train
 

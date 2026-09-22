@@ -15,6 +15,17 @@ def file_hash(path: Path) -> str:
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
+def validate_frozen_source(source: Path, recorded: dict) -> None:
+    for key, path, label in (
+        ("weights_sha256", source, "weights"),
+        ("config_sha256", find_train_config(source), "configuration"),
+    ):
+        if not recorded.get(key):
+            raise ValueError(f"frozen LR source has no saved {label} hash.")
+        if file_hash(path) != recorded[key]:
+            raise ValueError(f"frozen LR source {label} changed since SR training.")
+
+
 def save_bank(run_dir: Path, step: int, payload: dict) -> dict:
     path = run_dir / "lr_bank" / f"step_{step:08d}.pt"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -27,10 +38,7 @@ def save_bank(run_dir: Path, step: int, payload: dict) -> dict:
 def refresh_bank(trainer, run_dir: Path) -> None:
     cfg = trainer.cfg
     source = Path(cfg["source"]["weights"])
-    if file_hash(source) != cfg["source"]["weights_sha256"]:
-        raise ValueError("frozen LR source weights changed before bank refresh.")
-    if file_hash(find_train_config(source)) != cfg["source"]["config_sha256"]:
-        raise ValueError("frozen LR source configuration changed before bank refresh.")
+    validate_frozen_source(source, cfg["source"])
     generator = load_generator(source, trainer.device)
     height_enabled = cfg["conditioning"]["height_enabled"]
     base_cfg = load_train_config(find_train_config(source)) if height_enabled else None

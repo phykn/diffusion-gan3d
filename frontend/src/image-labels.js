@@ -107,6 +107,9 @@ export async function decodePngLabels(buffer) {
   const rowBytes = Math.ceil(png.width * channels * png.bitDepth / 8)
   const bytesPerPixel = Math.max(1, Math.ceil(channels * png.bitDepth / 8))
   const decoded = await inflate(png.compressed)
+  if (png.width < 1 || png.height < 1 || decoded.length !== (rowBytes + 1) * png.height) {
+    throw new Error('PNG pixel data does not match its declared dimensions.')
+  }
   const labels = new Uint8Array(png.width * png.height)
   let sourceOffset = 0
   let previous = null
@@ -159,4 +162,15 @@ export function cropAndResizeLabels(source, crop, inputSize) {
     labels.push(outputRow)
   }
   return labels
+}
+
+export function cropAnchor(source, crop, cropSize) {
+  // Use the same integer cell boundaries for the labels and their height metadata.
+  const x = Math.max(0, Math.min(Math.round(crop.x), source.width - cropSize))
+  const y = Math.max(0, Math.min(Math.round(crop.y), source.height - cropSize))
+  return {
+    image: cropAndResizeLabels(source, { x, y, size: cropSize }, cropSize),
+    cropOrigin: [y, x],
+    sourceShape: [source.height, source.width],
+  }
 }

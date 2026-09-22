@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import subprocess
 import sys
 from contextlib import nullcontext
@@ -49,7 +50,7 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
     def step(index):
         assert prepared[-1] == index
         if interrupt and index == 3:
-            raise KeyboardInterrupt
+            signal.raise_signal(signal.SIGINT)
         trained.append(index)
         trainer.completed_steps = index + 1
         return metrics
@@ -81,7 +82,7 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
             before_step=prepared.append,
         )
 
-    expected_steps = [2, 3] if interrupt else [2, 3, 4, 5]
+    expected_steps = [2, 3, 4] if interrupt else [2, 3, 4, 5]
     records = [
         json.loads(line)
         for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
@@ -93,12 +94,12 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
     assert [value.step for value in events.Scalars("loss/generator")] == expected_steps
     assert load_yaml(tmp_path / "train.yaml") == trainer.cfg
     assert json.loads((tmp_path / "data_manifest.json").read_text()) == {"sources": []}
-    assert checkpoints == ([(stage, 3)] if interrupt else [(stage, 3), (stage, 5)])
+    assert checkpoints == [(stage, 3), (stage, 4 if interrupt else 5)]
     assert exports == [
         (2, "checkpoints/step_00000002", stage),
         (3, ".", stage),
         *(
-            [(3, ".", stage)]
+            [(4, "checkpoints/step_00000004", stage), (4, ".", stage)]
             if interrupt
             else [
                 (4, "checkpoints/step_00000004", stage),

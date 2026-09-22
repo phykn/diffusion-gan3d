@@ -38,16 +38,35 @@ Add options only when needed:
 | `--device cpu` | Run without a GPU; scripts `02–06` |
 | `--seed 1` | Generate a different sample; default: `0` |
 | `--domain 1` | Select another training domain; default: `0` |
+| `--height-origin`, `--height-extent` | Output Z origin and full source height in pixels; scripts `02–06` |
 | `--out PATH` | PNG for `01`, TIFF for `02–05`, output directory for `06` |
 | `--help` | Show all options and an example command |
 
 `03` and `05` take anchors from generated reference volumes, not measured 3D
 truth. To use a real boundary image, add `--anchor image.png` to `05`.
+Use `--axis 1` for xz or `--axis 2` for yz. For height-conditioned models,
+`05` infers the centered crop's Z origin and full image height unless overridden.
+Its anchor preparation preserves the same phase fractions as training and the web UI.
 `04` defaults to 2 × 2 × 2 tiles; use `--blocks D H W` to change the layout.
 
 `02–05` read guidance defaults from `config/gen.yaml`. In `06`, SR guidance
 defaults to `1.0` and LR guidance follows `config/gen.yaml`.
 If the saved LR source has moved, add `--lr-weight "new/LR/path"` to `06`.
+The default stored source is checked against its saved weight and configuration
+hashes. An explicit `--lr-weight` selects a different source and is recorded as
+unverified in `report.json`. Use `--height-extent` with `06` when source images
+have different heights; it is forwarded to both LR and SR in source-pixel units.
+
+Training connectivity losses compare against generated replay volumes. They
+measure consistency with previous generations, not agreement with measured 3D
+connectivity. `data_manifest.json` records this reference type. Assess generated
+connectivity separately with the volume connectivity/percolation metrics.
+
+The default training presets resolve `augmentation.auto_planes` to explicit
+plane policies. Height conditioning preserves z order in xz/yz; xy can still
+rotate and flip. Custom `augmentation.planes` policies remain explicit and are
+validated. Ctrl+C finishes the current training step and saves both inference
+weights and `checkpoints/last.pt` for resuming.
 
 Shared helpers live in `scripts/common/`, experiment drivers in
 `scripts/experiments/`, and paper reproduction tools in `scripts/paper/`.

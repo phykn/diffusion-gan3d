@@ -10,7 +10,13 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.cli import check_parser, prepare_check, save_preview
+from scripts.common.cli import (
+    add_height_arguments,
+    check_parser,
+    height_options,
+    prepare_check,
+    save_preview,
+)
 from scripts.common.diagnostic import (
     format_percent,
     format_ratio,
@@ -29,6 +35,7 @@ from src.evaluate.anchor import (
 )
 from src.evaluate.label import voxel_accuracy
 from src.predict.random import seeded_rng
+from src.prepare.resize import resize_crop
 from src.storage import save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
@@ -67,6 +74,7 @@ def main() -> None:
         choices=("cpu", "cuda"),
         help="Default: CUDA when available, otherwise CPU.",
     )
+    add_height_arguments(parser, origin_default=None)
     args = parser.parse_args()
     args = prepare_check(args, __file__)
     if args.figure is None:
@@ -97,6 +105,7 @@ def main() -> None:
                 anchor_strength=0.0,
                 guidance=guidance,
                 domain=args.domain,
+                **height_options(args),
                 margin=generator.default_margin,
             )
             anchor_image = reference.movedim(args.axis, 0)[index]
@@ -110,6 +119,12 @@ def main() -> None:
                 generator.patch_size,
                 generator.num_phases,
             )
+            if generator.height_data is not None and args.axis in (1, 2):
+                if args.height_origin is None:
+                    args.height_origin = float(crop[0])
+                if args.height_extent is None:
+                    with Image.open(args.anchor) as source:
+                        args.height_extent = float(source.height)
             print(
                 f"Anchor  : {args.anchor.resolve()}, crop {crop} -> "
                 f"input {generator.patch_size} x {generator.patch_size}"
@@ -125,6 +140,7 @@ def main() -> None:
             anchor_strength=anchor_strength,
             guidance=guidance,
             domain=args.domain,
+            **height_options(args),
             margin=generator.default_margin,
         )
         torch.random.set_rng_state(cpu_rng)
@@ -136,23 +152,25 @@ def main() -> None:
             anchor_strength=0.0,
             guidance=guidance,
             domain=args.domain,
+            **height_options(args),
             margin=generator.default_margin,
         )
 
     save_volume(generated, args.out)
     print(f"Saved   : {args.out.resolve()}")
     save_preview(generated, args, generator.num_phases)
+    anchor_labels = anchor_image.argmax(0) if anchor_image.ndim == 3 else anchor_image
     print_quality(
         generated,
         baseline,
-        anchor_image,
+        anchor_labels,
         args.axis,
         index,
     )
     if args.figure is not None or (not args.no_view and not args.napari):
         render_strip(
             generated,
-            anchor_image,
+            anchor_labels,
             args.axis,
             args.side,
             generator.num_phases,
@@ -184,18 +202,7 @@ def load_anchor_image(
         values[top : top + crop_size, left : left + crop_size],
         copy=True,
     )
-    row_indices = np.minimum(
-        crop_size - 1,
-        (
-            (np.arange(input_size, dtype=np.float64) + 0.5) * crop_size / input_size
-        ).astype(np.int64),
-    )
-    resized = crop[np.ix_(row_indices, row_indices)]
-    if int(resized.max()) >= num_phases:
-        raise ValueError(
-            f"anchor image must contain phases from 0 to {num_phases - 1}."
-        )
-    return torch.from_numpy(resized).to(torch.long), (
+    return resize_crop(torch.from_numpy(crop), input_size, num_phases), (
         top,
         left,
         crop_size,
@@ -263,16 +270,13 @@ def render_strip(
     distances = tuple(dict.fromkeys(distances))
     images = (anchor,) + tuple(slices[distance] for distance in distances)
     index = 0 if side == "start" else len(slices) - 1
-    titles = (
-        f"Condition input (target)\naxis {axis}, index {index}",
-        tuple(
-            (
-                f"Generated output\naxis {axis}, index {index}"
-                if distance == 0
-                else f"Generated d={distance}"
-            )
-            for distance in distances
-        ),
+    titles = (f"Condition input (target)\naxis {axis}, index {index}",) + tuple(
+        (
+            f"Generated output\naxis {axis}, index {index}"
+            if distance == 0
+            else f"Generated d={distance}"
+        )
+        for distance in distances
     )
     columns = 5
     rows = (len(images) + columns - 1) // columns

@@ -74,6 +74,10 @@ npm run dev
 ```
 
 Server limits are configured in [`backend/config.yaml`](backend/config.yaml).
+Select the section plane and, for multi-domain models, the domain in the sidebar.
+Height-conditioned xz/yz inputs use the crop row as their Z origin and the full
+uploaded image height as their extent. XY inputs require separate Z coordinates.
+Anchors start at the output origin, including when generating multiple blocks.
 
 ## Project layout
 

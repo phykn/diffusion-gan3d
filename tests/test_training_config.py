@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import src.config.train as config_module
+from src.build.data import build_augmentation
 from src.config.data import validate_sr_source
 from src.config.files import load_yaml, save_yaml
 from src.config.train import (
@@ -12,6 +13,29 @@ from src.config.train import (
     validate_sr_config,
 )
 from src.train.run.sr import run_sr_train
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("height", [False, True])
+def test_default_presets_resolve_height_safe_augmentation(stage, height):
+    raw = load_yaml(f"config/train/{stage}.yaml")
+    raw["data"] = load_yaml(raw["data"])
+    raw.setdefault("conditioning", {})["height_enabled"] = height
+    cfg = normalize_train_config(raw, stage)
+    augment = build_augmentation(cfg)
+    assert set(augment.plane_transforms[0]) == set(range(8))
+    for plane in (1, 2):
+        assert set(augment.plane_transforms[plane]) == (
+            {0, 4} if height else set(range(8))
+        )
+    assert normalize_train_config(cfg, stage) == cfg
+
+
+def test_auto_augmentation_does_not_override_explicit_policy():
+    with pytest.raises(ValueError, match="or explicit planes"):
+        normalize_train_config(
+            {"data": {}, "augmentation": {"auto_planes": True, "planes": {}}}
+        )
 
 
 def test_data_selection_and_snapshot_are_independent_of_cwd(tmp_path, monkeypatch):

@@ -1,4 +1,5 @@
 import argparse
+import copy
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,13 @@ from matplotlib.patches import Rectangle
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.cli import check_parser, prepare_check, save_preview
+from scripts.common.cli import (
+    add_height_arguments,
+    check_parser,
+    height_options,
+    prepare_check,
+    save_preview,
+)
 from scripts.common.diagnostic import (
     parse_unit_interval,
     select_display_index,
@@ -126,6 +133,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Default: CUDA when available, otherwise CPU.",
     )
     parser.add_argument("--seed", type=int, default=0)
+    add_height_arguments(parser)
     args = parser.parse_args()
     args = prepare_check(args, __file__)
     if args.count is not None and args.count < 0:
@@ -149,6 +157,7 @@ def generate_base(
         base = generator.generate(
             guidance=args.guidance,
             domain=args.domain,
+            **height_options(args),
             margin=args.margin,
         )
         return BaseResult(base, None, (), None)
@@ -165,6 +174,7 @@ def generate_base(
         anchor_strength=args.anchor_strength,
         guidance=args.guidance,
         domain=args.domain,
+        **height_options(args),
         margin=args.margin,
     )
     return BaseResult(
@@ -286,7 +296,18 @@ def main() -> None:
     print_plan(plan, device)
     print(f"Output  : {' × '.join(map(str, shape))}, margin {margin}")
     with seeded_rng(args.seed, device):
-        base_result = generate_base(parser, args, generator, anchor_count)
+        base_args = copy.copy(args)
+        if getattr(generator, "height_data", None) is not None:
+            generator.validate_height(
+                shape, args.domain, args.height_origin, args.height_extent
+            )
+            base_args.height_origin += (
+                (shape[0] - generator.patch_size)
+                // 2
+                * generator.height_data["crop_size"]
+                / generator.height_data["lo_res_size"]
+            )
+        base_result = generate_base(parser, base_args, generator, anchor_count)
         base = base_result.volume
         target = base_result.target
         indices = base_result.indices
@@ -307,6 +328,7 @@ def main() -> None:
             vf=None,
             guidance=guidance,
             domain=args.domain,
+            **height_options(args),
         )
     stats = scaled.stats
     elapsed = perf_counter() - start

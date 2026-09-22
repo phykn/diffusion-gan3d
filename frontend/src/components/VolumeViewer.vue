@@ -81,7 +81,7 @@ function configureAppearance() {
   property.setRGBTransferFunction(0, colorTransfer)
   property.setScalarOpacity(0, opacityTransfer)
   property.setScalarOpacityUnitDistance(0, .85)
-  property.setInterpolationTypeToLinear()
+  property.setInterpolationTypeToNearest()
   property.setShade(true)
   property.setAmbient(.72)
   property.setDiffuse(.36)

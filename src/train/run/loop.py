@@ -1,8 +1,11 @@
 import json
+import signal
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from threading import Event, current_thread, main_thread
 
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -50,6 +53,28 @@ def save_weights(trainer: Trainer, root: Path, stage: str = "low_res") -> None:
         save_model(root / "critic_c.pt", trainer.connectivity_critic)
 
 
+def save_checkpoint(trainer, root, stage):
+    if stage == "sr":
+        save_sr_training(trainer, root / "checkpoints" / "last.pt")
+    else:
+        save_training(root / "checkpoints" / "last.pt", trainer)
+    save_weights(trainer, root, stage)
+
+
+@contextmanager
+def deferred_sigint():
+    """Let a training step finish before handling a terminal interrupt."""
+    requested = Event()
+    in_main_thread = current_thread() is main_thread()
+    if in_main_thread:
+        previous = signal.signal(signal.SIGINT, lambda *_: requested.set())
+    try:
+        yield requested
+    finally:
+        if in_main_thread:
+            signal.signal(signal.SIGINT, previous)
+
+
 def run_train(
     trainer: Trainer,
     steps: int,
@@ -80,6 +105,7 @@ def run_train(
     )
     weights = root / "generator.pt"
     with (
+        deferred_sigint() as stop,
         SummaryWriter(root / "tensorboard") as writer,
         (root / "metrics.jsonl").open("w", encoding="utf-8") as log,
         tqdm(
@@ -88,11 +114,16 @@ def run_train(
             dynamic_ncols=True,
         ) as bar,
     ):
+        at_boundary = True
         try:
             for step in bar:
+                if stop.is_set():
+                    raise KeyboardInterrupt
+                at_boundary = False
                 if before_step is not None:
                     before_step(step)
                 metrics = trainer.step(step)
+                at_boundary = True
                 done = step + 1
                 write_metrics(writer, done, metrics)
                 log.write(
@@ -101,15 +132,16 @@ def run_train(
                 )
                 log.flush()
                 if done % save_every == 0 or done == steps:
-                    save_weights(trainer, root, stage)
-                    if stage == "sr":
-                        save_sr_training(trainer, root / "checkpoints" / "last.pt")
-                    else:
-                        save_training(root / "checkpoints" / "last.pt", trainer)
+                    save_checkpoint(trainer, root, stage)
                 if checkpoint_every is not None and done % checkpoint_every == 0:
                     checkpoint_root = root / "checkpoints" / f"step_{done:08d}"
                     save_weights(trainer, checkpoint_root, stage)
+                if stop.is_set():
+                    raise KeyboardInterrupt
         except KeyboardInterrupt:
-            save_weights(trainer, root, stage)
+            # A direct exception inside a step may leave partially updated
+            # optimizers. Never overwrite a safe checkpoint with that state.
+            if at_boundary:
+                save_checkpoint(trainer, root, stage)
             raise
     return weights

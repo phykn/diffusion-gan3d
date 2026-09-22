@@ -7,7 +7,7 @@ from src.config.defaults import STAGE_DEFAULTS, TRAIN_DEFAULTS
 from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml
 from src.config.schema import validate_config_keys
 from src.data.split import resolve_split
-from src.plane import PLANES
+from src.plane import PLANE_DIRECTIONS, PLANES
 
 
 def load_train_config(
@@ -81,6 +81,23 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
                 "height conditioning uses the fixed z axis (xz/yz image rows)."
             )
         cfg["data"]["thickness_axis"] = "z"
+    augmentation = cfg.get("augmentation", {})
+    auto_planes = augmentation.get("auto_planes", False)
+    if type(auto_planes) is not bool:
+        raise ValueError("augmentation.auto_planes must be a boolean.")
+    if auto_planes:
+        if "planes" in augmentation:
+            raise ValueError("choose augmentation.auto_planes or explicit planes.")
+        thickness = cfg["data"].get("thickness_axis")
+        augmentation["planes"] = {
+            plane: {
+                "flip_axes": [axis for axis in axes if axis != thickness],
+                "rotate_90": thickness not in axes,
+            }
+            for plane, axes in PLANE_DIRECTIONS.items()
+        }
+        # Store resolved policies so checkpoint behavior is independent of defaults.
+        augmentation.pop("auto_planes")
     if (
         type(cfg["train"]["structure_every_steps"]) is not int
         or cfg["train"]["structure_every_steps"] < 0
