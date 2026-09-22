@@ -20,6 +20,22 @@ def _save_image(path: Path, image: np.ndarray) -> None:
 
 
 class LabelTransformTest(unittest.TestCase):
+    def test_tiff_stacks_are_rejected_but_single_sections_are_preserved(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "sections.tiff"
+            frames = [
+                Image.fromarray(np.full((8, 8), phase, dtype=np.uint8))
+                for phase in range(3)
+            ]
+            frames[0].save(path, save_all=True, append_images=frames[1:])
+            dataset = RealDataset([[path]], 8, 8, 3)
+            with self.assertRaisesRegex(ValueError, "one 2D frame"):
+                dataset[path]
+            frames[2].save(path)
+            item = dataset[path]
+            self.assertTrue(torch.equal(item["image"].argmax(0), torch.full((8, 8), 2)))
+            self.assertEqual(item["source_shape"].tolist(), [8, 8])
+
     def test_random_crop_returns_source_origin(self):
         image = np.arange(36, dtype=np.uint8).reshape(6, 6)
         dataset = RealDataset([["unused"]], crop_size=3, patch_size=3, num_phases=36)

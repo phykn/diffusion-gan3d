@@ -1,13 +1,12 @@
 import math
 from itertools import pairwise
 
+import torch
 import torch.nn.functional as F
 
 from src.predict.base import prepare_base
-from src.predict.convert import labels_from_channels
 from src.predict.tiling.layout import TilePlan, axis_starts, make_tiles
 from src.predict.tiling.sampler import TiledGenerator
-from src.predict.tiling.state import collect_probabilities
 from src.prepare.resize import coarse_region, resize_phases
 
 
@@ -77,7 +76,12 @@ def refine_tiled(
             result["height"] = height
         return result
 
-    current = sampler.sample(
+    probabilities = output_kind == "probabilities"
+    output = torch.empty(
+        (api.num_phases, *shape) if probabilities else shape,
+        dtype=torch.float32 if probabilities else torch.uint8,
+    )
+    sampler.sample(
         current,
         next_state,
         tiles,
@@ -85,12 +89,9 @@ def refine_tiled(
         base=known,
         vf=None,
         domain=domain,
-        labels=None,
+        output=output,
         progress=False,
         guidance=guidance,
         tile_conditions=conditions,
     )
-    region = tuple(slice(margin, margin + n) for n in shape)
-    if output_kind == "labels":
-        return labels_from_channels(current.read(region).squeeze(0))
-    return collect_probabilities(current, tiles, shape, margin, api.num_phases)
+    return output

@@ -114,6 +114,10 @@ class Denoiser3D(nn.Module):
         multipliers = tuple(channel_multipliers)
 
         channels = tuple(base_channels * scale for scale in multipliers)
+        if not channels or any(channel < 2 for channel in channels):
+            raise ValueError(
+                "denoiser channels must be at least two for channel normalization."
+            )
         levels = len(channels)
         self.downsample_factor = 2 ** (levels - 1)
         self.gradient_checkpointing = gradient_checkpointing

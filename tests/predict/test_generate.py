@@ -716,6 +716,45 @@ def test_scaled_generator_returns_probabilities_and_categorical_volume() -> None
     assert scaled.stats is not None
 
 
+@pytest.mark.parametrize("margin", [0, 1])
+@pytest.mark.parametrize("steps", [1, 3])
+def test_tiled_outputs_preserve_close_phase_probabilities(margin, steps, monkeypatch):
+    expected = torch.tensor([0.33332, 0.33335, 0.33333])
+
+    class Model(torch.nn.Module):
+        num_domains = 1
+        downsample_factor = 1
+
+        def forward(self, current, time, latent, **conditions):
+            clean = expected.to(current).reshape(1, 3, 1, 1, 1) * 2 - 1
+            return clean.expand_as(current)
+
+    scaled = TiledGenerator(_generator(Model(), Diffusion(steps)))
+    original = VolumeState.write
+    writes = []
+
+    def record(state, region, values):
+        assert state.values.dtype == torch.float16
+        writes.append(region)
+        original(state, region, values)
+
+    monkeypatch.setattr(VolumeState, "write", record)
+    options = dict(shape=(9, 7, 5), overlap=1, margin=margin, progress=False)
+    torch.manual_seed(5)
+    probs = scaled.generate_probs(**options)
+    probability_writes = len(writes)
+    writes.clear()
+    torch.manual_seed(5)
+    labels = scaled.generate(**options)
+    assert len(writes) == probability_writes
+    assert probs.shape == (3, 9, 7, 5) and probs.dtype == torch.float32
+    torch.testing.assert_close(
+        probs, expected[:, None, None, None].expand_as(probs), rtol=0, atol=1e-7
+    )
+    assert torch.all(labels == 1)
+    assert torch.equal(probs.argmax(0), labels.long())
+
+
 def test_blocks_define_fixed_tiles_and_margin_reduced_output() -> None:
     scaled = TiledGenerator(_generator(_ControlledModel(), Diffusion(1), patch_size=8))
 

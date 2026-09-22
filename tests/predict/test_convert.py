@@ -75,6 +75,31 @@ def test_uint8_labels_preserve_phase_255_and_reject_phase_256():
     assert labels.item() == 255
 
 
+@pytest.mark.parametrize("probabilities", [False, True])
+def test_final_slab_crops_context_and_keeps_source_values(probabilities):
+    clean = torch.linspace(-1, 1, 3 * 3 * 4 * 5).reshape(1, 3, 3, 4, 5)
+    original = clean.clone()
+    region = (slice(0, 3), slice(3, 7), slice(4, 9))
+    shape = (4, 5, 6)
+    output = torch.full(
+        (3, *shape) if probabilities else shape,
+        255,
+        dtype=torch.float32 if probabilities else torch.uint8,
+    )
+    expected = output.clone()
+    selected = clean[:, :, 2:3, :, :4]
+    if probabilities:
+        selected = convert.owned_clean_to_probs_(selected.clone()).squeeze(0)
+        expected[:, 0:1, 1:5, 2:6] = selected
+    else:
+        expected[0:1, 1:5, 2:6] = selected.argmax(1).squeeze(0).to(torch.uint8)
+    write_output(output, region, clean, margin=2)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    torch.testing.assert_close(clean, original, rtol=0, atol=0)
+    write_output(output, (slice(0, 1),) * 3, clean[:, :, :1, :1, :1], margin=2)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("shape", [(2, 2, 2), (0, 1, 1, 1), (2, 0, 1, 1)])
 def test_label_conversion_rejects_invalid_shapes(shape):
     with pytest.raises(ValueError, match="C,D,H,W"):

@@ -65,6 +65,8 @@ class RealDataset(Dataset[dict]):
 
     def decode(self, path: Path) -> np.ndarray:
         with Image.open(path) as img:
+            if getattr(img, "n_frames", 1) != 1:
+                raise ValueError(f"training images must contain one 2D frame: {path}")
             data = np.asarray(img)
         return self.check_image(np.array(data, copy=True))
 

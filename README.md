@@ -42,6 +42,9 @@ Set image folders, phase counts, and resolutions in
 [`config/data/default.yaml`](config/data/default.yaml). Inputs are 2D images
 containing integer phase IDs (0–255, with `num_phases` between 1 and 256);
 plane names are `xy`, `xz`, and `yz`.
+Each training image must contain exactly one 2D frame; split multi-page TIFF
+stacks into individual sections first. Generator channel widths must be at least
+2 because single-channel normalization discards the input signal.
 Edit the [LR](config/train/low_res.yaml) and [SR](config/train/sr.yaml) training
 presets as needed.
 

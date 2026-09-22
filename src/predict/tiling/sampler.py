@@ -15,7 +15,6 @@ from src.predict.tiling.layout import (
     Tile,
     TilePlan,
     axis_starts,
-    crop_output,
     make_tiles,
     output_plan,
     parse_shape,
@@ -23,7 +22,6 @@ from src.predict.tiling.layout import (
 from src.predict.tiling.state import (
     TileBuffer,
     VolumeState,
-    collect_probabilities,
     write_output,
 )
 
@@ -224,9 +222,14 @@ class TiledGenerator:
             height_extent,
         )
         current, next_state = self.make_states(plan, storage)
-        labels = None if probabilities else torch.empty(plan.shape, dtype=torch.uint8)
+        output = torch.empty(
+            (self.generator.num_phases, *output_shape)
+            if probabilities
+            else output_shape,
+            dtype=torch.float32 if probabilities else torch.uint8,
+        )
         self.fill_noise(current, tiles)
-        current = self.sample(
+        self.sample(
             current,
             next_state,
             tiles,
@@ -234,7 +237,7 @@ class TiledGenerator:
             base,
             vf,
             domain,
-            labels=labels,
+            output=output,
             progress=progress,
             guidance=guidance,
             tile_anchors=tile_anchors,
@@ -245,11 +248,7 @@ class TiledGenerator:
             height_domain=height_domain,
         )
         self.stats = output_plan(plan, output_shape)
-        if labels is not None:
-            return crop_output(labels, output_shape, margin)
-        return collect_probabilities(
-            current, tiles, output_shape, margin, self.generator.num_phases
-        )
+        return output
 
     def validate_profile_constraints(
         self, spec, shape, plan, tiles, anchors, base, domain, origin, extent
@@ -454,7 +453,7 @@ class TiledGenerator:
         base: Base | None,
         vf: torch.Tensor | None,
         domain: torch.Tensor,
-        labels: torch.Tensor | None,
+        output: torch.Tensor | None,
         progress: bool,
         guidance: float = 1.0,
         tile_anchors: tuple = (),
@@ -496,7 +495,7 @@ class TiledGenerator:
                     base.condition(
                         current, generator.diffusion, transition + 1, plan.tile_size
                     )
-                final_labels = labels if transition == 0 else None
+                final_output = output if transition == 0 else None
                 self.step(
                     current,
                     next_state,
@@ -507,7 +506,7 @@ class TiledGenerator:
                     domain,
                     transition,
                     plan,
-                    final_labels,
+                    final_output,
                     fusion,
                     tile_buffer,
                     guidance=guidance,
@@ -520,7 +519,7 @@ class TiledGenerator:
                     tile_conditions=tile_conditions,
                     base=base,
                 )
-                if final_labels is None:
+                if final_output is None:
                     current, next_state = next_state, current
                 bar.update()
         return current
@@ -536,7 +535,7 @@ class TiledGenerator:
         domain: torch.Tensor,
         transition: int,
         plan: TilePlan,
-        labels: torch.Tensor | None,
+        output: torch.Tensor | None,
         fusion: Fusion,
         tile_buffer: TileBuffer | None = None,
         guidance: float = 1.0,
@@ -639,9 +638,10 @@ class TiledGenerator:
                     tiles[layer_start : index + 1],
                     fusion,
                     transition,
-                    labels,
+                    output,
                     next_z,
                     base=base,
+                    margin=plan.margin,
                 )
                 layer_start = index + 1
 
@@ -652,9 +652,10 @@ class TiledGenerator:
         tiles: tuple[Tile, ...],
         fusion: Fusion,
         transition: int,
-        labels: torch.Tensor | None,
+        output: torch.Tensor | None,
         stop: int,
         base: Base | None = None,
+        margin: int = 0,
     ) -> None:
         generator = self.generator
         for tile in tiles:
@@ -667,7 +668,7 @@ class TiledGenerator:
                 clean = fusion.pred_sum[region] / weights
                 if base is not None:
                     base.constrain(clean, global_region)
-                if labels is None:
+                if output is None:
                     previous = current.read(global_region).float()
                     updated = generator.diffusion.sample_posterior(
                         previous,
@@ -680,7 +681,7 @@ class TiledGenerator:
                         )
                     next_state.write(global_region, updated)
                 else:
-                    write_output(labels, global_region, clean)
+                    write_output(output, global_region, clean, margin)
                 fusion.pred_sum[region].zero_()
                 weights.zero_()
 

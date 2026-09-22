@@ -31,10 +31,12 @@ def get_generator_channels(model: Mapping[str, object]) -> tuple[int, tuple[int,
         raise TypeError("model.generator.channels must be a sequence.")
     values = tuple(channels)
     if not values or any(
-        not isinstance(value, int) or isinstance(value, bool) or value < 1
+        not isinstance(value, int) or isinstance(value, bool) or value < 2
         for value in values
     ):
-        raise ValueError("model.generator.channels must contain positive integers.")
+        raise ValueError(
+            "model.generator.channels must contain integers of at least two."
+        )
     base = values[0]
     if any(value % base for value in values):
         raise ValueError(

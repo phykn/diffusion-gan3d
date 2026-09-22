@@ -3,7 +3,7 @@ import math
 import torch
 
 from src.phase import validate_num_phases
-from src.predict.convert import owned_clean_to_probs_
+from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 
 
 class VolumeState:
@@ -112,27 +112,27 @@ class TileBuffer:
 
 
 def write_output(
-    labels: torch.Tensor,
+    output: torch.Tensor,
     target: tuple[slice, slice, slice],
     clean: torch.Tensor,
+    margin: int = 0,
 ) -> None:
     validate_num_phases(clean.shape[1])
-    values = clean.argmax(dim=1).squeeze(0).to(device="cpu", dtype=torch.uint8)
-    labels[target].copy_(values)
-
-
-def collect_probabilities(state, tiles, shape, margin, num_phases):
-    output = torch.empty(num_phases, *shape, dtype=torch.float32)
-    for tile in tiles:
-        source = tuple(
-            slice(max(part.start, margin), min(part.stop, margin + n))
-            for part, n in zip(tile.target, shape)
-        )
-        if any(part.start >= part.stop for part in source):
-            continue
-        target = tuple(
-            slice(part.start - margin, part.stop - margin) for part in source
-        )
-        values = owned_clean_to_probs_(state.read(source).float()).squeeze(0)
-        output[(slice(None), *target)].copy_(values)
-    return output
+    source, destination = [], []
+    for part, size, length in zip(
+        target, output.shape[-3:], clean.shape[-3:], strict=True
+    ):
+        start = 0 if part.start is None else part.start
+        stop = start + length if part.stop is None else part.stop
+        left, right = max(start, margin), min(stop, margin + size)
+        if left >= right:
+            return
+        source.append(slice(left - start, right - start))
+        destination.append(slice(left - margin, right - margin))
+    values = clean[(slice(None), slice(None), *source)]
+    if output.ndim == 3:
+        output[tuple(destination)].copy_(labels_from_channels(values.squeeze(0)))
+    else:
+        # Write final probabilities before the FP16 diffusion state can round ties.
+        probs = owned_clean_to_probs_(values.clone()).squeeze(0)
+        output[(slice(None), *destination)].copy_(probs)

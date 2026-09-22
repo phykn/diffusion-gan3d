@@ -2,6 +2,8 @@ import unittest
 
 import torch
 
+from src.build.model import build_denoiser
+from src.config.train import load_train_config
 from src.model.critic import CriticScores, GroupNorm, PairCritic2D
 from src.model.denoiser import ChannelNorm3D, Denoiser3D
 from src.model.layers import AdaptiveNorm
@@ -44,6 +46,32 @@ def _domain(inputs: torch.Tensor, value: int = 0) -> torch.Tensor:
 
 
 class Denoiser3DTest(unittest.TestCase):
+    def test_denoiser_rejects_a_single_normalized_channel(self):
+        with self.assertRaisesRegex(ValueError, "at least two"):
+            Denoiser3D(3, 1, (1, 2), 8, 4, 1)
+
+    def test_lr_and_sr_builders_reject_degenerate_channel_settings(self):
+        for stage in ("low_res", "sr"):
+            with self.subTest(stage=stage):
+                cfg = load_train_config(
+                    f"tests/fixtures/config/train/{stage}.yaml", stage
+                )
+                cfg["model"]["generator"]["channels"] = [1, 2]
+                with self.assertRaisesRegex(ValueError, "at least two"):
+                    build_denoiser(cfg)
+
+    def test_smallest_supported_channels_keep_input_gradients(self):
+        torch.manual_seed(9)
+        model = Denoiser3D(3, 2, (1, 2), 8, 4, 1)
+        inputs = torch.randn(1, 3, 4, 4, 4, requires_grad=True)
+        time, latent, domain = torch.zeros(1), torch.zeros(1, 4), _domain(inputs)
+        output = model(inputs, time, latent, domain)
+        changed = model(-inputs, time, latent, domain)
+        self.assertFalse(torch.equal(output, changed))
+        output[:, 0].mean().backward()
+        self.assertTrue(bool(torch.isfinite(inputs.grad).all()))
+        self.assertGreater(float(inputs.grad.abs().sum()), 0)
+
     def test_3d_norm_is_independent_at_each_spatial_position(self):
         norm = ChannelNorm3D(4)
         inputs = torch.randn(2, 4, 3, 4, 5)

@@ -477,6 +477,42 @@ def test_sr_corruption_does_not_modify_clean_coarse_target():
     torch.testing.assert_close(corrupted.sum(1), torch.ones_like(corrupted[:, 0]))
 
 
+@pytest.mark.parametrize("tiled", [False, True])
+def test_sr_shared_sampling_keeps_final_precision_and_fractional_base(
+    tmp_path, monkeypatch, tiled
+):
+    cfg = sr_config(tmp_path, scale=2)
+    path = tmp_path / "model.pt"
+    export_model(path, cfg)
+    api = SuperResolutionAPI(path)
+    expected = torch.tensor([0.33332, 0.33335, 0.33333])
+
+    def predict(current, *args, **kwargs):
+        return (expected.to(current).reshape(1, 3, 1, 1, 1) * 2 - 1).expand_as(current)
+
+    monkeypatch.setattr(api.generator, "predict", predict)
+    base = expected[:, None, None, None].expand(3, 4, 4, 4).clone()
+    before = base.clone()
+    low = torch.zeros(6, 6, 6, dtype=torch.long)
+    options = dict(
+        seed=11,
+        margin=2,
+        tile_size=8 if tiled else None,
+        overlap=2,
+        base=base,
+        base_offset=(2, 4, 6),
+    )
+    probs = api.predict_probs(low, **options)
+    labels = api.super_resolve(low, **options)
+    torch.testing.assert_close(
+        probs, expected[:, None, None, None].expand_as(probs), rtol=0, atol=1e-7
+    )
+    torch.testing.assert_close(probs[:, 2:6, 4:8, 6:10], before, rtol=0, atol=1e-7)
+    assert torch.equal(base, before)
+    assert torch.all(labels == 1)
+    assert torch.equal(probs.argmax(0), labels.long())
+
+
 def test_sr_loss_targets_clean_coarse_while_model_receives_corrupted_input(tmp_path):
     Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(tmp_path / "sample.png")
     cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
@@ -637,6 +673,7 @@ def test_tiled_coarse_and_height_share_global_coordinates_with_margin(tmp_path):
 def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
     tmp_path, monkeypatch, guidance
 ):
+    import src.predict.tiling.sampler as tiled_sampler
     from src.predict.tiling.sampler import TiledGenerator
     from src.predict.tiling.state import VolumeState
 
@@ -646,8 +683,10 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
     export_model(path, cfg)
     api = SuperResolutionAPI(path)
     calls, writes = [], {}
+    final_writes = torch.zeros(16, 12, 12, dtype=torch.int32)
     active = None
     original_step, original_write = TiledGenerator.step, VolumeState.write
+    original_output = tiled_sampler.write_output
 
     def step(sampler, *args, **kwargs):
         nonlocal active
@@ -660,6 +699,13 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
         if active is not None:
             writes[active][region] += 1
         original_write(state, region, values)
+
+    def write_output(output, region, clean, margin=0):
+        assert active == 0
+        assert clean.dtype == torch.float32
+        assert margin == 2
+        final_writes[region] += 1
+        original_output(output, region, clean, margin)
 
     def predict(values, time, latent, **conditions):
         assert conditions.get("vf") is None
@@ -681,6 +727,7 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
 
     monkeypatch.setattr(TiledGenerator, "step", step)
     monkeypatch.setattr(VolumeState, "write", write)
+    monkeypatch.setattr(tiled_sampler, "write_output", write_output)
     monkeypatch.setattr(api.generator, "predict", predict)
     monkeypatch.setattr(api.generator.diffusion, "sample", forbidden)
     low = torch.rand(3, 6, 4, 4).softmax(0)
@@ -692,9 +739,10 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
         )
         torch.testing.assert_close(first[2], second[2], atol=0, rtol=0)
         torch.testing.assert_close(first[3][:, :, 4:], second[3][:, :, :8])
-    assert all(
-        torch.equal(counts, torch.ones_like(counts)) for counts in writes.values()
-    )
+    assert set(writes) == {0, 1, 2}
+    assert all(writes[time].eq(1).all() for time in (1, 2))
+    assert writes[0].eq(0).all()
+    assert final_writes[2:-2, 2:-2, 2:-2].eq(1).all()
     torch.testing.assert_close(output.sum(0), torch.ones(12, 8, 8))
 
 
