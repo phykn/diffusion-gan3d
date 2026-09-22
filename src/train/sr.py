@@ -37,6 +37,7 @@ def save_sr_training(trainer, path):
             "config": trainer.cfg,
             "step": trainer.completed_steps,
             "data_fingerprint": trainer.data_fingerprint,
+            "path_maps": getattr(trainer, "path_maps", []),
             "updates": trainer.updates,
             "model": trainer.denoiser.state_dict(),
             "ema": trainer.ema_denoiser.state_dict(),
@@ -79,6 +80,7 @@ def resume_sr_training(trainer, payload):
     trainer.scaler.load_state_dict(payload["scaler"])
     trainer.updates = dict(payload["updates"])
     trainer.completed_steps = payload["step"]
+    trainer.path_maps = payload.get("path_maps", [])
 
 
 def export_sr(trainer, path):

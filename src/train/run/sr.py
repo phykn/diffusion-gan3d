@@ -16,6 +16,7 @@ from src.config.train import (
 )
 from src.data.bank import load_bank
 from src.data.source import infer_height_extents
+from src.train.relocate import relocate_checkpoint
 from src.train.run.bank import (
     file_hash,
     model_bank_condition,
@@ -36,7 +37,10 @@ def run_sr_train(
     steps: int | None = None,
     bank_size: int | None = None,
     data: Path | None = None,
+    path_map: list[tuple[str, str]] | None = None,
 ) -> Path:
+    if path_map and resume is None:
+        raise ValueError("path_map requires --resume.")
     if base_weights is not None and resume is not None:
         raise ValueError("base_weights cannot change on resume.")
     device = torch.device(device)
@@ -53,6 +57,7 @@ def run_sr_train(
         payload = torch.load(resume, map_location="cpu", weights_only=True)
         if payload.get("format") != "diffusion-gan3d.sr.train":
             raise ValueError("resume requires an SR training checkpoint.")
+        payload = relocate_checkpoint(payload, path_map)
         cfg = normalize_train_config(payload["config"], "sr")
         bank_path = Path(cfg["source"]["bank"])
         if file_hash(bank_path) != cfg["source"]["bank_sha256"]:

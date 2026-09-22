@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import taufactor as tau
 import torch
@@ -23,4 +25,10 @@ def tortuosity(
     )
     solver = tau.Solver(conductive, device=str(selected_device))
     value = solver.solve(verbose=False, conv_crit=convergence)
-    return float(np.asarray(value).reshape(-1)[0])
+    if not solver.converged:
+        raise RuntimeError("tortuosity solver did not converge.")
+    result = float(np.asarray(value).reshape(-1)[0])
+    if math.isnan(result) or result <= 0:
+        raise RuntimeError("tortuosity solver returned an invalid result.")
+    # Positive infinity is meaningful for a phase without a percolating path.
+    return result

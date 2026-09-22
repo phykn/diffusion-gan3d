@@ -14,6 +14,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--resume", type=Path)
     parser.add_argument(
+        "--path-map",
+        nargs=2,
+        action="append",
+        metavar=("OLD", "NEW"),
+        help="Relocate saved path prefixes on resume; repeat for multiple roots.",
+    )
+    parser.add_argument(
         "--steps", type=int, help="Total target steps, including completed steps."
     )
     parser.add_argument("--data", type=Path, help="Data YAML; overrides config.data.")

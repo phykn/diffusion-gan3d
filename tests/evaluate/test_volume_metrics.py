@@ -3,6 +3,7 @@ import pytest
 import torch
 
 import src.evaluate.volume as metrics_module
+from src.evaluate.tortuosity import tau
 from src.evaluate.volume import measure_volume
 
 
@@ -42,4 +43,24 @@ def test_measure_volume_marks_failed_tortuosity_unavailable(
     )
 
     assert result.porosity == pytest.approx(1.0)
+    assert result.tortuosity is None
+
+
+def test_unconverged_solver_keeps_porosity_but_marks_tortuosity_unavailable(
+    monkeypatch,
+):
+    class Solver:
+        converged = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def solve(self, **kwargs):
+            return np.array([2.75])
+
+    monkeypatch.setattr(tau, "Solver", Solver)
+    result = measure_volume(
+        torch.zeros(2, 2, 2, dtype=torch.uint8), torch.device("cpu")
+    )
+    assert result.porosity == 1
     assert result.tortuosity is None

@@ -76,6 +76,7 @@ def save_training(path: str | Path, trainer) -> None:
         "use_multi_anchor_next": trainer.use_multi_anchor_next,
         "anchor_bank": trainer.anchor_bank.entries,
         "data_fingerprint": trainer.data_fingerprint,
+        "path_maps": getattr(trainer, "path_maps", []),
     }
     atomic_torch_save(payload, path)
 
@@ -107,3 +108,4 @@ def resume_training(trainer, payload: dict) -> None:
     trainer.completed_steps = payload["step"]
     trainer.use_multi_anchor_next = payload["use_multi_anchor_next"]
     trainer.anchor_bank.entries = payload["anchor_bank"]
+    trainer.path_maps = payload.get("path_maps", [])

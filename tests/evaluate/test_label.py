@@ -4,7 +4,9 @@ import sys
 import numpy as np
 import pytest
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
+import src.evaluate.label as label_module
 from src.evaluate.label import phase_fraction, phase_fractions, voxel_accuracy
 
 
@@ -52,3 +54,41 @@ def test_label_metrics_do_not_import_inception_or_transport_solvers():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("strided", [False, True])
+def test_phase_fraction_bounds_intermediate_allocations(monkeypatch, strided):
+    values = (torch.arange(7 * 9 * 11).reshape(7, 9, 11) % 3).to(torch.uint8)
+    if strided:
+        values = values.transpose(0, 2)
+    expected = (values == 1).sum().item() / values.numel()
+    monkeypatch.setattr(label_module, "LABEL_CHUNK_ELEMENTS", 32)
+
+    class BoundedAllocations(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            result = func(*args, **(kwargs or {}))
+            if str(func) in (
+                "aten._to_copy.default",
+                "aten.clone.default",
+                "aten.eq.Scalar",
+            ):
+                assert result.numel() <= 32
+            return result
+
+    with BoundedAllocations():
+        assert phase_fraction(values, 1) == expected
+
+
+@pytest.mark.parametrize("value", [-1, 0.5, float("nan"), float("inf")])
+def test_chunked_phase_fraction_still_validates_every_label(monkeypatch, value):
+    monkeypatch.setattr(label_module, "LABEL_CHUNK_ELEMENTS", 4)
+    values = torch.zeros(3, 5)
+    values[0, 0] = value
+    with pytest.raises(ValueError):
+        phase_fraction(values)
+
+
+def test_chunked_phase_fraction_supports_scalars_and_rejects_empty_input():
+    assert phase_fraction(torch.tensor(2), 2) == 1
+    with pytest.raises(ValueError, match="non-empty"):
+        phase_fraction(torch.empty(0))

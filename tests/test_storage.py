@@ -12,6 +12,7 @@ from src.storage import (
     save_probabilities,
     save_volume,
 )
+from src.train.run.bank import save_bank
 from src.train.sr import export_sr
 
 
@@ -110,3 +111,36 @@ def test_atomic_save_replaces_existing_artifact(tmp_path):
     assert atomic_torch_save({"step": 2}, path) == path
     assert torch.load(path, weights_only=True) == {"step": 2}
     assert list(path.parent.iterdir()) == [path]
+
+
+def test_failed_bank_write_can_be_retried_without_publishing_partial_file(
+    tmp_path, monkeypatch
+):
+    def fail(payload, file):
+        file.write(b"partial snapshot")
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch, "save", fail)
+        with pytest.raises(OSError, match="disk full"):
+            save_bank(tmp_path, 7, {"step": 7})
+    assert list((tmp_path / "lr_bank").iterdir()) == []
+    saved = save_bank(tmp_path, 7, {"step": 7})
+    assert torch.load(saved["bank"], weights_only=True) == {"step": 7}
+
+
+def test_exclusive_save_preserves_concurrently_published_file(tmp_path, monkeypatch):
+    import os
+
+    path = tmp_path / "snapshot.pt"
+    link = os.link
+
+    def competing_link(source, destination):
+        Path(destination).write_bytes(b"another complete snapshot")
+        link(source, destination)
+
+    monkeypatch.setattr(os, "link", competing_link)
+    with pytest.raises(FileExistsError):
+        atomic_torch_save({"step": 7}, path, overwrite=False)
+    assert path.read_bytes() == b"another complete snapshot"
+    assert list(tmp_path.iterdir()) == [path]

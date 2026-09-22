@@ -21,6 +21,9 @@ from src.predict.sr.inference import SuperResolutionAPI
 from src.predict.tiling.sampler import TiledGenerator
 from src.prepare.resize import resize_crop
 from src.train.loss.anchor import SoftAnchorLoss
+from src.train.run.bank import file_hash
+from src.train.run.low_res import run_low_res_train
+from src.train.run.sr import run_sr_train
 from src.train.sr import export_sr
 from src.train.state import resume_training, save_training
 
@@ -192,6 +195,70 @@ def configuration(tmp_path, stage="low_res", height=False):
         cfg["data"]["hi_res_size"] = 16
         cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2)
     return cfg
+
+
+def test_height_conditioned_sr_refresh_survives_repeated_directory_moves(tmp_path):
+    torch.set_num_threads(1)
+    original = tmp_path / "original"
+    original.mkdir()
+    lr_cfg = configuration(original, height=True)
+    lr_cfg["data"]["split"] = {
+        "validation_regions": {str(original / "images/sample.png"): [0, 0, 1, 1]}
+    }
+    save_yaml(original / "lr.yaml", lr_cfg)
+    run_low_res_train(config=original / "lr.yaml", steps=1, run_dir=original / "lr")
+    sr_cfg = configuration(original, "sr", height=True)
+    sr_cfg["lr_bank"].update(samples_per_domain=1, refresh_every_steps=1)
+    save_yaml(original / "sr.yaml", sr_cfg)
+    run_sr_train(
+        config=original / "sr.yaml",
+        base_weights=original / "lr",
+        steps=1,
+        run_dir=original / "sr",
+    )
+    source_hash = file_hash(original / "lr/train.yaml")
+    checkpoint = original / "sr/checkpoints/last.pt"
+    for step, name in ((2, "moved"), (3, "moved_again")):
+        destination = tmp_path / name
+        relative_checkpoint = checkpoint.relative_to(original)
+        previous = original
+        original.rename(destination)
+        original = destination
+        checkpoint = original / relative_checkpoint
+        before = torch.load(checkpoint, weights_only=True)
+        output = original / f"resumed_{step}"
+        run_sr_train(
+            resume=checkpoint,
+            steps=step,
+            run_dir=output,
+            path_map=[(str(previous), str(original))],
+        )
+        checkpoint = output / "checkpoints/last.pt"
+        saved = torch.load(checkpoint, weights_only=True)
+        assert saved["step"] == step
+        assert len(saved["path_maps"]) == step - 1
+        assert (
+            saved["config"]["source"]["weights_sha256"]
+            == before["config"]["source"]["weights_sha256"]
+        )
+        assert saved["config"]["source"]["config_sha256"] == source_hash
+        assert file_hash(original / "lr/train.yaml") == source_hash
+        bank = torch.load(saved["config"]["source"]["bank"], weights_only=True)
+        condition = bank["conditions"][0][0]
+        assert Path(condition["image_id"]) == original / "images/sample.png"
+        assert condition["image_sha256"] == file_hash(Path(condition["image_id"]))
+    # Repeating a resume needs no maps until files move again.
+    run_sr_train(resume=checkpoint, steps=4, run_dir=original / "same_location")
+    source_config = original / "lr/train.yaml"
+    with source_config.open("a", encoding="utf-8") as file:
+        file.write("\n# modified frozen source\n")
+    with pytest.raises(ValueError, match="configuration changed"):
+        run_sr_train(resume=checkpoint, steps=4, run_dir=original / "invalid_source")
+    bank_path = Path(saved["config"]["source"]["bank"])
+    with bank_path.open("ab") as file:
+        file.write(b"changed")
+    with pytest.raises(ValueError, match="bank changed"):
+        run_sr_train(resume=checkpoint, steps=4, run_dir=original / "invalid_bank")
 
 
 def test_profile_training_replay_and_conditional_critics(tmp_path):

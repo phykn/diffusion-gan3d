@@ -2,6 +2,21 @@ import torch
 
 from src.plane import AXES
 
+LABEL_CHUNK_ELEMENTS = 1024**2
+
+
+def _label_chunks(values):
+    # Split views before conversion, including for non-contiguous input. A
+    # flatten/reshape of the full input could itself allocate another volume.
+    pending = [values]
+    while pending:
+        part = pending.pop()
+        if part.numel() <= LABEL_CHUNK_ELEMENTS:
+            yield phase_labels(part)
+        else:
+            axis = max(range(part.ndim), key=lambda axis: part.shape[axis])
+            pending.extend(part.split((part.shape[axis] + 1) // 2, dim=axis))
+
 
 def phase_labels(values, num_phases: int | None = None) -> torch.Tensor:
     values = torch.as_tensor(values)
@@ -53,10 +68,13 @@ def compute_vf(
 
 
 def phase_fraction(values, phase: int = 0) -> float:
-    labels = phase_labels(values)
     if type(phase) is not int or phase < 0:
         raise ValueError("phase must be a non-negative integer.")
-    return float((labels == phase).to(torch.float64).mean())
+    values = torch.as_tensor(values)
+    count = torch.zeros((), dtype=torch.int64, device=values.device)
+    for labels in _label_chunks(values):
+        count += (labels == phase).sum()
+    return count.item() / values.numel()
 
 
 def phase_fractions(values, num_phases: int) -> torch.Tensor:

@@ -59,6 +59,25 @@ python run_train_2nd.py --base-weights "run/my-lr-run" --device cuda
 SR trains from a frozen LR model and real HR sections. Weights, resolved settings,
 and metrics are saved under `run/`.
 
+Resume from `checkpoints/last.pt` with `--resume`; `--steps` is the total target,
+including completed steps. Each resume writes to a new run directory.
+If files moved to another computer, copy the original images and run artifacts,
+then map their old path prefixes to their new locations:
+
+```powershell
+& .\.venv\Scripts\python.exe run_train_1st.py --resume "D:/project/run/my-lr-run/checkpoints/last.pt" --path-map "C:/project" "D:/project" --steps 20000 --device cuda
+```
+
+The same `--path-map OLD NEW` option works for `run_train_2nd.py`; repeat it for
+separate image and run roots. SR also needs its saved LR bank and frozen LR
+`generator.pt`/`train.yaml`. Keep those files unchanged: path mapping preserves
+image, bank, and source hashes and all training settings. Mappings persist in
+new checkpoints, including for height-conditioned bank refreshes; provide new
+mappings only when paths move again.
+
+SR bank snapshots publish atomically and never replace an existing step. Store
+runs on a filesystem with hard-link support (such as NTFS or ext4).
+
 ## Generate and inspect
 
 Pass a run directory or a `generator.pt` file:

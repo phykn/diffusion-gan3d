@@ -5,9 +5,11 @@ import torch
 
 from src.build.data import build_datasets
 from src.build.predict import load_generator
-from src.config.files import find_train_config, save_yaml
-from src.config.train import load_train_config
+from src.config.files import find_train_config, load_yaml, save_yaml
+from src.config.train import normalize_train_config
 from src.prepare.profile import image_profile
+from src.storage import atomic_torch_save
+from src.train.relocate import PathRemapper
 
 
 def file_hash(path: Path) -> str:
@@ -28,10 +30,8 @@ def validate_frozen_source(source: Path, recorded: dict) -> None:
 
 def save_bank(run_dir: Path, step: int, payload: dict) -> dict:
     path = run_dir / "lr_bank" / f"step_{step:08d}.pt"
-    path.parent.mkdir(parents=True, exist_ok=True)
     # Published banks may be referenced by older runs; never overwrite them.
-    with path.open("xb") as file:
-        torch.save(payload, file)
+    atomic_torch_save(payload, path, overwrite=False)
     return {"bank": str(path), "bank_sha256": file_hash(path)}
 
 
@@ -41,7 +41,15 @@ def refresh_bank(trainer, run_dir: Path) -> None:
     validate_frozen_source(source, cfg["source"])
     generator = load_generator(source, trainer.device)
     height_enabled = cfg["conditioning"]["height_enabled"]
-    base_cfg = load_train_config(find_train_config(source)) if height_enabled else None
+    base_cfg = (
+        normalize_train_config(
+            PathRemapper(getattr(trainer, "path_maps", [])).config(
+                load_yaml(find_train_config(source))
+            )
+        )
+        if height_enabled
+        else None
+    )
     datasets = build_datasets(base_cfg) if height_enabled else None
     interval = cfg["lr_bank"]["refresh_every_steps"]
     for domain, volumes in trainer.bank.items():

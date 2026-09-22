@@ -6,6 +6,7 @@ import torch
 from src.build.trainer import build_trainer
 from src.config.files import PROJECT_ROOT
 from src.config.train import load_train_config, normalize_train_config
+from src.train.relocate import relocate_checkpoint
 from src.train.run.loop import make_run_dir, run_train
 from src.train.state import resume_training
 
@@ -17,7 +18,10 @@ def run_low_res_train(
     run_dir: Path | None = None,
     steps: int | None = None,
     data: Path | None = None,
+    path_map: list[tuple[str, str]] | None = None,
 ) -> Path:
+    if path_map and resume is None:
+        raise ValueError("path_map requires --resume.")
     device = torch.device(device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available.")
@@ -30,6 +34,7 @@ def run_low_res_train(
         payload = torch.load(resume, map_location="cpu", weights_only=True)
         if payload.get("format") != "diffusion-gan3d.lr.train":
             raise ValueError("--resume requires an LR training checkpoint.")
+        payload = relocate_checkpoint(payload, path_map)
         cfg = normalize_train_config(payload["config"])
     else:
         cfg = load_train_config(

@@ -18,6 +18,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     source.add_argument("--resume", type=Path)
     parser.add_argument(
+        "--path-map",
+        nargs=2,
+        action="append",
+        metavar=("OLD", "NEW"),
+        help="Relocate saved path prefixes on resume; repeat for multiple roots.",
+    )
+    parser.add_argument(
         "--device",
         choices=("cpu", "cuda"),
         default="cuda" if torch.cuda.is_available() else "cpu",

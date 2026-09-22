@@ -8,10 +8,12 @@ import torch
 from torch import nn
 
 
-def atomic_torch_save(payload, path: str | Path) -> Path:
-    """Replace an artifact only after its complete serialization succeeds."""
+def atomic_torch_save(payload, path: str | Path, *, overwrite: bool = True) -> Path:
+    """Publish a complete artifact, optionally refusing to replace an existing one."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not overwrite and path.exists():
+        raise FileExistsError(path)
     temporary = tempfile.NamedTemporaryFile(
         dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
     )
@@ -21,7 +23,12 @@ def atomic_torch_save(payload, path: str | Path) -> Path:
             torch.save(payload, temporary)
             temporary.flush()
             os.fsync(temporary.fileno())
-        temporary_path.replace(path)
+        if overwrite:
+            temporary_path.replace(path)
+        else:
+            # Link the complete file atomically; unlike replace, this cannot
+            # overwrite a snapshot published concurrently by another writer.
+            os.link(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
     return path

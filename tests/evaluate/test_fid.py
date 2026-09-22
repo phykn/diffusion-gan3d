@@ -81,3 +81,43 @@ def test_uint8_images_keep_their_intensity_scale_even_when_dark():
 def test_invalid_float_images_are_rejected(value):
     with pytest.raises(ValueError, match="finite and in"):
         prepare_images(torch.full((1, 2, 2), value))
+
+
+def test_fid_batches_all_samples_without_changing_score():
+    class Features(torch.nn.Module):
+        num_features = 2
+
+        def __init__(self, limit):
+            super().__init__()
+            self.limit = limit
+            self.seen = 0
+
+        def forward(self, images):
+            assert len(images) <= self.limit
+            assert not torch.is_grad_enabled()
+            self.seen += len(images)
+            values = images.double().flatten(1)
+            return torch.stack((values.mean(1), values.square().mean(1)), 1)
+
+    rng = np.random.default_rng(3)
+    real = rng.integers(0, 256, (17, 4, 4), dtype=np.uint8)
+    generated = rng.integers(0, 256, (23, 4, 4), dtype=np.uint8)
+    reference = Features(23)
+    expected = compute_fid(real, generated, "cpu", reference, batch_size=23)
+    bounded = Features(4)
+    actual = compute_fid(real, generated, "cpu", bounded, batch_size=4)
+    assert bounded.seen == reference.seen == 40
+    assert actual == pytest.approx(expected, rel=1e-9, abs=1e-8)
+
+
+@pytest.mark.parametrize("batch_size", [0, -1, True, 1.5])
+def test_fid_rejects_invalid_batch_size_before_loading_model(batch_size):
+    with pytest.raises(ValueError, match="batch_size"):
+        compute_fid(
+            torch.zeros(2, 4, 4), torch.zeros(2, 4, 4), "cpu", batch_size=batch_size
+        )
+
+
+def test_fid_requires_enough_images_before_loading_model():
+    with pytest.raises(ValueError, match="at least two"):
+        compute_fid(torch.zeros(1, 4, 4), torch.zeros(2, 4, 4), "cpu")
