@@ -15,8 +15,8 @@ class CudaStream:
     def __init__(self, images: torch.Tensor) -> None:
         self.images = images
 
-    def next(self) -> torch.Tensor:
-        return self.images.clone()
+    def next(self) -> dict:
+        return {"image": self.images.clone()}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")

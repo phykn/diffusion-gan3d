@@ -75,6 +75,12 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     cfg["nickname"] = nickname
     if type(cfg["conditioning"]["height_enabled"]) is not bool:
         raise ValueError("conditioning.height_enabled must be a boolean.")
+    if cfg["conditioning"]["height_enabled"]:
+        if cfg["data"].get("thickness_axis") not in (None, "z"):
+            raise ValueError(
+                "height conditioning uses the fixed z axis (xz/yz image rows)."
+            )
+        cfg["data"]["thickness_axis"] = "z"
     if (
         type(cfg["train"]["structure_every_steps"]) is not int
         or cfg["train"]["structure_every_steps"] < 0

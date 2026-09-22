@@ -163,7 +163,7 @@ def test_sr_scale_changes_hr_without_changing_lr_data_or_preparation(tmp_path, s
     assert get_sizes(cfg["data"]) == (16, 8, 8)
     dataset = build_datasets(cfg)[0][0]
     expected_lr = resize_crop(labels, 8, 3)
-    assert torch.equal(dataset[tmp_path / "sample.png"], expected_lr)
+    assert torch.equal(dataset[tmp_path / "sample.png"]["image"], expected_lr)
 
     sr_cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     sr_cfg["data"] = copy.deepcopy(cfg["data"])
@@ -172,9 +172,9 @@ def test_sr_scale_changes_hr_without_changing_lr_data_or_preparation(tmp_path, s
     assert get_sr_sizes(sr_cfg) == (16, 8, high_size)
     high_ds = build_datasets(sr_cfg, high=True)[0][0]
     assert torch.equal(
-        high_ds[tmp_path / "sample.png"], resize_crop(labels, high_size, 3)
+        high_ds[tmp_path / "sample.png"]["image"], resize_crop(labels, high_size, 3)
     )
-    assert torch.equal(dataset[tmp_path / "sample.png"], expected_lr)
+    assert torch.equal(dataset[tmp_path / "sample.png"]["image"], expected_lr)
     assert sr_cfg["data"]["lo_res_size"] == cfg["data"]["lo_res_size"]
 
     api = object.__new__(InferenceAPI)
@@ -205,9 +205,9 @@ def test_crop_hr_lr_pipeline_and_phase_ids(tmp_path):
     high_ds = build_datasets(cfg, high=True)[0][0]
     path = low_ds.path_groups[0][0]
     np.random.seed(12)
-    low = low_ds[path]
+    low = low_ds[path]["image"]
     np.random.seed(12)
-    high = high_ds[path]
+    high = high_ds[path]["image"]
     assert low.shape == (3, 8, 8) and high.shape == (3, 12, 12)
     torch.testing.assert_close(low.sum(0), torch.ones(8, 8))
     torch.testing.assert_close(high.sum(0), torch.ones(12, 12))
@@ -731,7 +731,8 @@ def test_sr_runs_full_reverse_chain_and_training_uses_matching_hr_slices(tmp_pat
         for call in forward.call_args_list
     )
     assert all(
-        stream.next().shape[-2:] == (12, 12) for stream in trainer.streams[0].values()
+        stream.next()["image"].shape[-2:] == (12, 12)
+        for stream in trainer.streams[0].values()
     )
     assert not metrics.vf_active and metrics.anchor_planes == 0
     assert trainer.denoiser.coarse_input.weight.grad.abs().sum() > 0

@@ -25,6 +25,12 @@ containing integer phase IDs; plane names are `xy`, `xz`, and `yz`.
 Edit the [LR](config/train/low_res.yaml) and [SR](config/train/sr.yaml) training
 presets as needed.
 
+Datasets always return a dict containing `image` and source/crop metadata.
+With `conditioning.height_enabled: true`, height is fixed to z: the vertical
+direction of `xz`/`yz` sections. No height-axis setting is needed; side-image
+heights are saved for inference. `xy` sections have no measured z coordinate
+(`height_origin` and `height_extent` are -1).
+
 ```bash
 python run_train_1st.py --device cuda
 python run_train_2nd.py --base-weights "run/my-lr-run" --device cuda
@@ -46,6 +52,12 @@ python scripts/06_check_hr.py --weight "run/my-sr-run"
 
 Results are saved under `run/checks/`. Add `--no-view` to save without opening a
 viewer. See the [manual-check guide](docs/checks.md) for all six scripts.
+
+Height-conditioned inference uses the saved side-image height and starts at
+`height_origin=0` by default. If source heights differ within a domain, pass the
+intended source's `height_extent`; use `height_origin` for an offset crop.
+Both values use original image pixels, and the requested volume must fit inside
+that height.
 
 ## Web interface
 

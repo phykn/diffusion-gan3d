@@ -4,7 +4,6 @@ from pathlib import Path
 from PIL import Image
 
 from src.config.data import get_domains
-from src.plane import PLANE_DIRECTIONS, PLANES
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
 ImageGroups = dict[int, dict[int, tuple[tuple[Path, ...], ...]]]
@@ -58,21 +57,18 @@ def collect_image_groups(data: dict) -> ImageGroups:
 
 
 def infer_height_extents(data: dict) -> dict[int, int | None]:
-    thickness = data.get("thickness_axis")
-    if thickness not in ("x", "y", "z"):
-        raise ValueError("height conditioning requires data.thickness_axis.")
+    if data.get("thickness_axis") not in (None, "z"):
+        raise ValueError("height conditioning uses the fixed z axis.")
     extents = {}
     for domain, planes in collect_image_groups(data).items():
         sizes = set()
         for axis, groups in planes.items():
-            directions = PLANE_DIRECTIONS[PLANES[axis]]
-            if thickness not in directions:
+            if axis == 0:
                 continue
-            direction = directions.index(thickness)
             for paths in groups:
                 for path in paths:
                     with Image.open(path) as image:
-                        sizes.add(image.size[1 - direction])
+                        sizes.add(image.height)
         if not sizes:
             raise ValueError(
                 "height conditioning requires full-thickness side images per domain."

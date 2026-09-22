@@ -75,7 +75,7 @@ def main() -> None:
         for col in range(SAMPLES):
             group = ds.path_groups[np.random.randint(len(ds.path_groups))]
             path = group[np.random.randint(len(group))]
-            img = ds[path].argmax(0).numpy()
+            img = ds[path]["image"].argmax(0).numpy()
             panels[row, col].imshow(
                 img,
                 cmap="gray",

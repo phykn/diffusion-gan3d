@@ -209,9 +209,8 @@ class SuperResolutionAPI:
                 )
             return
         data = self.config["data"]
-        axis = {"z": 0, "y": 1, "x": 2}[data["thickness_axis"]]
         extent = resolve_extent(data, domain, extent)
-        maximum = extent - shape[axis] * self.crop_size / self.lo_res_size
+        maximum = extent - shape[0] * self.crop_size / self.lo_res_size
         if not math.isfinite(origin) or not 0 <= origin <= maximum:
             raise ValueError(
                 "height_origin places the LR volume outside the measured thickness."
@@ -223,12 +222,11 @@ class SuperResolutionAPI:
         if not self.config["conditioning"]["height_enabled"]:
             return None
         data = self.config["data"]
-        axis = {"z": 0, "y": 1, "x": 2}[data["thickness_axis"]]
         spacing = self.crop_size / self.hi_res_size
         return height_field(
             shape,
-            axis,
-            origin + start[axis] * spacing,
+            0,
+            origin + start[0] * spacing,
             spacing,
             resolve_extent(data, domain, extent),
             self.device,

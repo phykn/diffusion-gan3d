@@ -57,6 +57,29 @@ def config(tmp_path, stage, groups):
     return cfg
 
 
+def test_isotropic_shared_connectivity_critic_receives_axis_ids(tmp_path):
+    trainer = build_trainer(config(tmp_path, "low_res", GROUPS[0]), torch.device("cpu"))
+    critic = trainer.connectivity_critic
+    assert critic.directed_axis is None
+    axes = torch.arange(3)
+    received = []
+    hook = critic.axis_embedding.register_forward_pre_hook(
+        lambda module, args: received.append(args[0].clone())
+    )
+    try:
+        critic(
+            torch.rand(3, 3, 2, 8, 8),
+            axes,
+            torch.ones(3),
+            torch.zeros(3, dtype=torch.long),
+        )
+    finally:
+        hook.remove()
+    assert len(received) == 2  # Forward and reversed triplets both retain axis IDs.
+    for actual in received:
+        torch.testing.assert_close(actual, axes)
+
+
 @pytest.mark.parametrize("groups", GROUPS)
 def test_lr_groups_train_once_and_save_one_file_per_group(tmp_path, groups):
     torch.set_num_threads(1)

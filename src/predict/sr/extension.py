@@ -63,7 +63,7 @@ def extend_hr(
     progress=False,
     probabilities=False,
 ):
-    data = validate_sr_source(sr.config["data"], lr.data)
+    validate_sr_source(sr.config["data"], lr.data)
     if not sr.scale_factor.is_integer():
         raise ValueError("HR extension requires an integer SR scale.")
     scale = int(sr.scale_factor)
@@ -81,8 +81,7 @@ def extend_hr(
     if any(n < lr.input_size for n in low_shape):
         raise ValueError("extended LR shape must be at least the LR model grid.")
     if sr.config["conditioning"]["height_enabled"]:
-        axis = {"z": 0, "y": 1, "x": 2}[data["thickness_axis"]]
-        expected = height_origin + position[axis] * sr.crop_size / sr.hi_res_size
+        expected = height_origin + position[0] * sr.crop_size / sr.hi_res_size
         if base_height_origin is None or not math.isclose(base_height_origin, expected):
             raise ValueError(
                 "base_height_origin must match its position in the extended height field."

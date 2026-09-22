@@ -274,13 +274,14 @@ class _ConstantStream:
         self.images = images
         self.calls = 0
 
-    def next(self) -> torch.Tensor:
+    def next(self) -> dict:
         self.calls += 1
-        return self.images.clone()
+        return {"image": self.images.clone()}
 
 
 def test_get_batches_uses_one_domain_for_all_axes() -> None:
     trainer = object.__new__(Trainer)
+    trainer.height_data = None
     trainer.sampling_height = None
     trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}
@@ -304,6 +305,7 @@ def test_get_batches_uses_one_domain_for_all_axes() -> None:
 
 def test_missing_axes_borrow_from_axis_providers() -> None:
     trainer = object.__new__(Trainer)
+    trainer.height_data = None
     trainer.sampling_height = None
     trainer.sampling_profile = None
     trainer.profile_settings = {"enabled": False}

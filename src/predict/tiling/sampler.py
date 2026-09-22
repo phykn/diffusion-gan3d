@@ -586,12 +586,11 @@ class TiledGenerator:
                     }
                 )
             if generator.height_data is not None:
-                axis = {"z": 0, "y": 1, "x": 2}[generator.height_data["thickness_axis"]]
                 conditions["height"] = generator.height_condition(
                     values.shape[-3:],
                     height_domain,
                     height_origin,
-                    tile.source[axis].start - plan.margin,
+                    tile.source[0].start - plan.margin,
                     height_extent,
                 )
             tile_vf = vf

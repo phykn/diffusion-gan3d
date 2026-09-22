@@ -8,7 +8,7 @@ from src.data.source import collect_image_groups, infer_height_extents
 def test_height_inference_ignores_directories_with_image_extensions(tmp_path):
     Image.fromarray(np.zeros((12, 10), dtype=np.uint8)).save(tmp_path / "image.png")
     (tmp_path / "folder.png").mkdir()
-    data = {"domains": {0: {"xz": [str(tmp_path)]}}, "thickness_axis": "z"}
+    data = {"domains": {0: {"xz": [str(tmp_path)]}}}
 
     assert infer_height_extents(data) == {0: 12}
 
@@ -57,3 +57,19 @@ def test_height_inference_uses_training_images_and_checks_saved_extents(tmp_path
     data["height_extents"] = {0: 20}
     with pytest.raises(ValueError, match="differs from saved height_extents"):
         infer_height_extents(data)
+
+
+def test_height_inference_uses_side_rows_and_ignores_xy_size(tmp_path):
+    planes = {}
+    for plane, shape in (("xy", (7, 19)), ("xz", (12, 10)), ("yz", (12, 17))):
+        folder = tmp_path / plane
+        folder.mkdir()
+        Image.fromarray(np.zeros(shape, dtype=np.uint8)).save(folder / "image.png")
+        planes[plane] = [folder]
+    assert infer_height_extents({"domains": {0: planes}}) == {0: 12}
+
+
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_height_inference_rejects_other_axes(axis):
+    with pytest.raises(ValueError, match="fixed z axis"):
+        infer_height_extents({"thickness_axis": axis})

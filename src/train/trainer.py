@@ -759,11 +759,10 @@ class Trainer:
         self.real_geometry = {}
         for axis in self.active_axes:
             batch = self.streams[batch_domains[axis]][axis].next()
-            if isinstance(batch, dict):
-                images = batch["image"]
+            images = batch["image"]
+            if self.height_data is not None:
                 origins = batch["height_origin"]
-                thickness = {"z": 0, "y": 1, "x": 2}[self.height_data["thickness_axis"]]
-                if axis != thickness:
+                if axis != 0:
                     self.real_origins[axis] = origins
                     self.real_extents[axis] = batch["height_extent"]
                     self.real_geometry[axis] = [
@@ -783,17 +782,14 @@ class Trainer:
                             strict=True,
                         )
                     ]
-                    direction = [a for a in AXES if a != axis].index(thickness)
                     self.real_heights[axis] = height_field(
                         images.shape[-2:],
-                        direction,
+                        0,
                         origins,
                         self.height_data["crop_size"] / images.shape[-1],
                         batch["height_extent"],
                         self.device,
                     )
-            else:
-                images = batch
             batches[axis] = images.to(self.device, non_blocking=True)
             if self.profile_settings["enabled"] and axis in self.real_origins:
                 self.real_profiles[axis] = rebin_profile(
@@ -806,10 +802,9 @@ class Trainer:
 
     def volume_height(self, origins, domain, extents=None):
         data = self.height_data
-        axis = {"z": 0, "y": 1, "x": 2}[data["thickness_axis"]]
         return height_field(
             (self.patch_size,) * 3,
-            axis,
+            0,
             origins,
             data["crop_size"] / self.patch_size,
             data["height_extents"][domain] if extents is None else extents,

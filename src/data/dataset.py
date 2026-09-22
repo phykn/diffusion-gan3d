@@ -7,18 +7,20 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from src.data.split import training_origin
+from src.plane import get_axis
 from src.prepare.resize import resize_crop
 
 
-class RealDataset(Dataset[torch.Tensor | dict]):
+class RealDataset(Dataset[dict]):
+    """Image and source geometry; z is the row direction of xz/yz images."""
+
     def __init__(
         self,
         path_groups: Sequence[Sequence[str | Path]],
         crop_size: int,
         patch_size: int,
         num_phases: int,
-        height_direction: int | None = None,
-        height_enabled: bool = False,
+        plane: str | int = "xz",
         validation_regions: dict | None = None,
     ) -> None:
         self.path_groups = tuple(
@@ -34,22 +36,20 @@ class RealDataset(Dataset[torch.Tensor | dict]):
         self.crop_size = crop_size
         self.patch_size = patch_size
         self.num_phases = num_phases
-        self.height_direction = height_direction
-        self.height_enabled = height_enabled
+        self.axis = get_axis(plane)
+        self.height_direction = 0 if self.axis != 0 else None
         self.validation_regions = validation_regions or {}
 
     def __len__(self) -> int:
         return sum(len(group) for group in self.path_groups)
 
-    def __getitem__(self, path: str | Path) -> torch.Tensor | dict:
+    def __getitem__(self, path: str | Path) -> dict:
         path = Path(path).resolve()
         source = self.decode(path)
         excluded = self.validation_regions.get(str(path))
         crop, origin = self.crop_with_origin(source, excluded)
         labels = torch.from_numpy(crop.copy()).long()
         image = resize_crop(labels, self.patch_size, self.num_phases)
-        if not self.height_enabled:
-            return image
         return {
             "image": image,
             "image_id": str(path),

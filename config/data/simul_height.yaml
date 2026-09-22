@@ -5,7 +5,6 @@ domains:
     yz: [run/simul_height/slices/2]
 
 num_phases: 3
-thickness_axis: z
 
 # Side images retain their full 128-pixel thickness; training crops span 64.
 crop_size: 64

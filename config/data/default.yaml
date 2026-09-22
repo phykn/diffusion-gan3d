@@ -9,6 +9,7 @@ domains:
 num_phases: 2
 
 # 두께 방향의 반전·축 교환을 증강에서 금지. 방향 제약이 없으면 null.
+# height conditioning을 켜면 z축(xz/yz 이미지 세로)으로 자동 고정된다.
 thickness_axis: null
 
 # 원본에서 관찰할 범위와 모델 격자 크기는 독립적이다.

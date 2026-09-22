@@ -32,8 +32,7 @@ def test_heldout_crop_keeps_full_original_height(tmp_path):
         4,
         2,
         2,
-        height_direction=0,
-        height_enabled=True,
+        plane="xz",
         validation_regions={str(path.resolve()): [0, 0, 10, 16]},
     )
     for _ in range(10):

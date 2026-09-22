@@ -8,12 +8,12 @@ import torch
 from PIL import Image
 
 from src.anchor import PlaneAnchor, encode_anchors
-from src.build.data import build_datasets
+from src.build.data import build_datasets, build_stream
 from src.build.predict import load_generator
 from src.build.sr import build_sr_trainer
 from src.build.trainer import build_trainer
 from src.config.files import save_yaml
-from src.config.train import load_train_config
+from src.config.train import load_train_config, normalize_train_config
 from src.data.source import infer_height_extents
 from src.model.diffusion import Diffusion
 from src.predict.generator import Generator
@@ -154,7 +154,6 @@ def configuration(tmp_path, stage="low_res", height=False):
     )
     cfg["conditioning"]["height_enabled"] = height
     if height:
-        cfg["data"]["thickness_axis"] = "z"
         for plane, flips in (("xz", ["x"]), ("yz", ["y"])):
             cfg["augmentation"]["planes"][plane] = {
                 "flip_axes": flips,
@@ -470,6 +469,16 @@ def test_height_origin_survives_loader_training_export_and_tiles(tmp_path):
     save_yaml(tmp_path / "train.yaml", trainer.cfg)
     torch.save(trainer.denoiser.state_dict(), tmp_path / "generator.pt")
     generator = load_generator(tmp_path / "generator.pt", torch.device("cpu"))
+    assert generator.height_data["thickness_axis"] == "z"
+    with patch.object(
+        generator.diffusion, "sample", wraps=generator.diffusion.sample
+    ) as sample:
+        generated = generator.generate_probs(size=8, margin=0)
+    assert generated.shape == (2, 8, 8, 8)
+    field = sample.call_args.kwargs["conditions"]["height"]
+    expected = 2 * (torch.arange(8) + 0.5) / 24 - 1
+    torch.testing.assert_close(field[0, 0, :, 0, 0], expected)
+    torch.testing.assert_close(field[0, 0, :, -1, -1], expected)
     heights = []
     original = generator.predict
 
@@ -485,6 +494,50 @@ def test_height_origin_survives_loader_training_export_and_tiles(tmp_path):
     assert result.shape == (2, 12, 8, 8)
     torch.testing.assert_close(heights[0][:, :, 4:], heights[1][:, :, :4])
     assert heights[0][0, 0, 0, 0, 0] == pytest.approx(2 * 3.5 / 24 - 1)
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("height", [False, True])
+def test_dataset_dict_geometry_is_independent_of_height_conditioning(
+    tmp_path, stage, height
+):
+    cfg = configuration(tmp_path, stage=stage, height=height)
+    path = tmp_path / "images/sample.png"
+    Image.fromarray(np.zeros((24, 32), dtype=np.uint8)).save(path)
+    datasets = build_datasets(cfg, high=stage == "sr")[0]
+    keys = {
+        "image",
+        "image_id",
+        "source_shape",
+        "crop_origin",
+        "height_origin",
+        "height_extent",
+    }
+    for axis, dataset in datasets.items():
+        stream = build_stream(dataset, 2, 0, False)
+        with patch("src.data.dataset.np.random.randint", side_effect=[7, 2, 7, 2]):
+            batch = stream.next()
+        assert set(batch) == keys
+        size = 16 if stage == "sr" else 8
+        assert batch["image"].shape == (2, 2, size, size)
+        assert batch["image_id"] == [str(path.resolve())] * 2
+        assert batch["source_shape"].tolist() == [[24, 32]] * 2
+        assert batch["crop_origin"].tolist() == [[7, 2]] * 2
+        assert batch["height_origin"].tolist() == ([7.0] if axis else [-1.0]) * 2
+        assert batch["height_extent"].tolist() == ([24.0] if axis else [-1.0]) * 2
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("axis", [None, "z", "x", "y"])
+def test_height_axis_is_fixed_when_conditioning_is_enabled(tmp_path, stage, axis):
+    cfg = configuration(tmp_path, stage=stage, height=True)
+    cfg["data"]["thickness_axis"] = axis
+    if axis in (None, "z"):
+        assert normalize_train_config(cfg, stage)["data"]["thickness_axis"] == "z"
+        assert cfg["data"]["thickness_axis"] == axis
+    else:
+        with pytest.raises(ValueError, match="fixed z axis"):
+            normalize_train_config(cfg, stage)
 
 
 def test_height_conditioned_sr_uses_fractional_bank_and_zero_level_at_inference(

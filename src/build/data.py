@@ -6,7 +6,7 @@ from src.data.augment import CriticAugment
 from src.data.dataset import RealDataset
 from src.data.loader import BatchStream, FolderBatchSampler
 from src.data.source import collect_image_groups
-from src.plane import PLANE_DIRECTIONS, PLANES
+from src.plane import PLANES
 
 
 def build_augmentation(cfg: dict) -> CriticAugment:
@@ -38,12 +38,7 @@ def build_datasets(cfg: dict, high: bool = False) -> dict[int, dict[int, RealDat
                 crop,
                 high_size if high else low,
                 data["num_phases"],
-                height_direction=(
-                    PLANE_DIRECTIONS[PLANES[axis]].index(data["thickness_axis"])
-                    if data.get("thickness_axis") in PLANE_DIRECTIONS[PLANES[axis]]
-                    else None
-                ),
-                height_enabled=cfg["conditioning"]["height_enabled"],
+                plane=axis,
                 validation_regions=data.get("split", {}).get("validation_regions"),
             )
             for axis, path_groups in grouped.items()

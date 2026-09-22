@@ -35,7 +35,7 @@ class LabelTransformTest(unittest.TestCase):
             _save_image(path, image)
             dataset = RealDataset([[path]], crop_size=4, patch_size=2, num_phases=2)
             with patch("numpy.random.randint", side_effect=(2, 3)):
-                actual = dataset[path]
+                actual = dataset[path]["image"]
         torch.testing.assert_close(actual, torch.full((2, 2, 2), 0.5))
 
     def test_crop_larger_than_the_image_is_rejected(self):
@@ -55,7 +55,7 @@ class LabelTransformTest(unittest.TestCase):
             stream = build_stream(
                 dataset, batch_size=3, num_workers=0, pin_memory=False
             )
-            batch = stream.next()
+            batch = stream.next()["image"]
         self.assertEqual(batch.shape, torch.Size([3, 3, 4, 4]))
         self.assertEqual(batch.dtype, torch.float32)
         self.assertTrue(bool((batch[:, 2] == 1).all()))
@@ -183,7 +183,7 @@ class DomainDataTest(unittest.TestCase):
             for axis in range(3):
                 expected = 3 * domain + axis
                 self.assertTrue(
-                    bool((samples[domain, axis].argmax(0) == expected).all())
+                    bool((samples[domain, axis]["image"].argmax(0) == expected).all())
                 )
 
     def test_domain_ids_are_contiguous_and_start_at_zero(self):
@@ -256,7 +256,7 @@ class DomainDataTest(unittest.TestCase):
                 num_workers=0,
                 pin_memory=False,
             )
-            batch = stream.next()
+            batch = stream.next()["image"]
 
         self.assertEqual(tuple(len(group) for group in dataset.path_groups), (2, 4))
         self.assertEqual(paths, list(dataset.path_groups[1][:3]))

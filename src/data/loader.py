@@ -8,11 +8,11 @@ from src.data.dataset import RealDataset
 
 
 class BatchStream:
-    def __init__(self, loader: DataLoader[torch.Tensor | dict]) -> None:
+    def __init__(self, loader: DataLoader[dict]) -> None:
         self.loader = loader
-        self.iterator: Iterator[torch.Tensor | dict] = iter(loader)
+        self.iterator: Iterator[dict] = iter(loader)
 
-    def next(self) -> torch.Tensor | dict:
+    def next(self) -> dict:
         try:
             batch = next(self.iterator)
         except StopIteration:
