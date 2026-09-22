@@ -117,7 +117,7 @@ def build_models(
             embedding_channels=generator["embedding_channels"],
             num_domains=num_domains,
             gradient_checkpointing=model["gradient_checkpointing"],
-            directed_axis={"z": 0, "y": 1, "x": 2}.get(data.get("thickness_axis")),
+            directed_axis=0 if cfg["conditioning"]["height_enabled"] else None,
         )
     )
     if cfg["conditioning"]["height_enabled"]:

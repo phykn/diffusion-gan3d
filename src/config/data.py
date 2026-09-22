@@ -16,10 +16,7 @@ def validate_sr_source(data: Mapping, base_data: Mapping) -> Mapping:
         raise ValueError("SR data.num_phases must match the stage-1 model.")
     if set(get_domains(data)) != set(get_domains(base_data)):
         raise ValueError("SR data domain IDs must match the stage-1 model.")
-    if data.get("height_extents") != base_data.get("height_extents") or (
-        data.get("height_extents")
-        and data.get("thickness_axis") != base_data.get("thickness_axis")
-    ):
+    if data.get("height_extents") != base_data.get("height_extents"):
         raise ValueError("SR height coordinates must match the stage-1 model.")
     return data
 

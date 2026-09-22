@@ -6,7 +6,6 @@ domains:
 
 num_phases: 3
 
-# Side images retain their full 128-pixel thickness; training crops span 64.
 crop_size: 64
 lo_res_size: 32
 hi_res_size: 64

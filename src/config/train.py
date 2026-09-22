@@ -76,12 +76,6 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     cfg["nickname"] = nickname
     if type(cfg["conditioning"]["height_enabled"]) is not bool:
         raise ValueError("conditioning.height_enabled must be a boolean.")
-    if cfg["conditioning"]["height_enabled"]:
-        if cfg["data"].get("thickness_axis") not in (None, "z"):
-            raise ValueError(
-                "height conditioning uses the fixed z axis (xz/yz image rows)."
-            )
-        cfg["data"]["thickness_axis"] = "z"
     augmentation = cfg.get("augmentation", {})
     auto_planes = augmentation.get("auto_planes", False)
     if type(auto_planes) is not bool:
@@ -89,11 +83,11 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     if auto_planes:
         if "planes" in augmentation:
             raise ValueError("choose augmentation.auto_planes or explicit planes.")
-        thickness = cfg["data"].get("thickness_axis")
+        height_axis = "z" if cfg["conditioning"]["height_enabled"] else None
         augmentation["planes"] = {
             plane: {
-                "flip_axes": [axis for axis in axes if axis != thickness],
-                "rotate_90": thickness not in axes,
+                "flip_axes": [axis for axis in axes if axis != height_axis],
+                "rotate_90": height_axis not in axes,
             }
             for plane, axes in PLANE_DIRECTIONS.items()
         }
@@ -123,13 +117,8 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
             raise ValueError("spatial_profile.enabled must be a boolean.")
         if type(profile["num_bins"]) is not int or profile["num_bins"] < 1:
             raise ValueError("spatial_profile.num_bins must be a positive integer.")
-        if profile["enabled"] and (
-            not cfg["conditioning"]["height_enabled"]
-            or cfg["data"].get("thickness_axis") != "z"
-        ):
-            raise ValueError(
-                "spatial_profile requires height_enabled and thickness_axis z."
-            )
+        if profile["enabled"] and not cfg["conditioning"]["height_enabled"]:
+            raise ValueError("spatial_profile requires height_enabled.")
     optim = cfg["optim"]
     if "critic_lr" not in optim and "generator_lr" in optim:
         optim["critic_lr"] = optim["generator_lr"]

@@ -153,7 +153,7 @@ def test_gradient_export_records_truth_and_physical_axis(tmp_path):
     cfg["geometry"] = {**GEOMETRY, "radius_gradient": [0.7, 1.3]}
     result = generate(cfg)
     metadata = yaml.safe_load((tmp_path / "output" / "simulation.yaml").read_text())
-    assert metadata["thickness_axis"] == "z"
+    assert metadata["height_axis"] == "z"
     assert metadata["geometry"]["radius_gradient"] == [0.7, 1.3]
     truth = tifffile.imread(result.volumes[0])
     with Image.open(result.slices[1][8]) as image:

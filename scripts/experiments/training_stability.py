@@ -1,7 +1,7 @@
 """Bounded LR ablations and LR -> SR execution/held-out-region checks.
 
 This uses one label image under an isotropic assumption. It does not validate
-anisotropic acquisition, absolute thickness conditioning, or measured 3D fidelity.
+anisotropic acquisition, absolute height conditioning, or measured 3D fidelity.
 """
 
 import argparse

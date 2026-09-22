@@ -14,7 +14,6 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                 "crop_size",
                 "lo_res_size",
                 "hi_res_size",
-                "thickness_axis",
                 "height_extents",
             )
         ),

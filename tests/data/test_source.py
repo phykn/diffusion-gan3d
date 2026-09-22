@@ -48,7 +48,6 @@ def test_height_inference_uses_training_images_and_checks_saved_extents(tmp_path
         Image.fromarray(np.zeros((height, 10), dtype=np.uint8)).save(tmp_path / name)
     data = {
         "domains": {0: {"xz": [tmp_path]}},
-        "thickness_axis": "z",
         "split": {"validation_files": [str((tmp_path / "validation.png").resolve())]},
     }
 
@@ -69,7 +68,7 @@ def test_height_inference_uses_side_rows_and_ignores_xy_size(tmp_path):
     assert infer_height_extents({"domains": {0: planes}}) == {0: 12}
 
 
-@pytest.mark.parametrize("axis", ["x", "y"])
-def test_height_inference_rejects_other_axes(axis):
-    with pytest.raises(ValueError, match="fixed z axis"):
-        infer_height_extents({"thickness_axis": axis})
+def test_height_inference_requires_side_images(tmp_path):
+    Image.fromarray(np.zeros((12, 10), dtype=np.uint8)).save(tmp_path / "image.png")
+    with pytest.raises(ValueError, match="full-height side images"):
+        infer_height_extents({"domains": {0: {"xy": [tmp_path]}}})

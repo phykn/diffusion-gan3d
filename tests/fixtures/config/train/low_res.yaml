@@ -9,7 +9,6 @@ data:
       xz: [data]
       yz: [data]
   num_phases: 2
-  thickness_axis: null
   crop_size: 128
   lo_res_size: 64
   hi_res_size: 128

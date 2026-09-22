@@ -13,7 +13,7 @@ from src.build.predict import load_generator
 from src.build.sr import build_sr_trainer
 from src.build.trainer import build_trainer
 from src.config.files import save_yaml
-from src.config.train import load_train_config, normalize_train_config
+from src.config.train import load_train_config
 from src.data.source import infer_height_extents
 from src.model.diffusion import Diffusion
 from src.predict.generator import Generator
@@ -582,7 +582,7 @@ def test_height_origin_survives_loader_training_export_and_tiles(tmp_path):
     save_yaml(tmp_path / "train.yaml", trainer.cfg)
     torch.save(trainer.denoiser.state_dict(), tmp_path / "generator.pt")
     generator = load_generator(tmp_path / "generator.pt", torch.device("cpu"))
-    assert generator.height_data["thickness_axis"] == "z"
+    assert generator.height_data["height_extents"] == {0: 24}
     with patch.object(
         generator.diffusion, "sample", wraps=generator.diffusion.sample
     ) as sample:
@@ -638,19 +638,6 @@ def test_dataset_dict_geometry_is_independent_of_height_conditioning(
         assert batch["crop_origin"].tolist() == [[7, 2]] * 2
         assert batch["height_origin"].tolist() == ([7.0] if axis else [-1.0]) * 2
         assert batch["height_extent"].tolist() == ([24.0] if axis else [-1.0]) * 2
-
-
-@pytest.mark.parametrize("stage", ["low_res", "sr"])
-@pytest.mark.parametrize("axis", [None, "z", "x", "y"])
-def test_height_axis_is_fixed_when_conditioning_is_enabled(tmp_path, stage, axis):
-    cfg = configuration(tmp_path, stage=stage, height=True)
-    cfg["data"]["thickness_axis"] = axis
-    if axis in (None, "z"):
-        assert normalize_train_config(cfg, stage)["data"]["thickness_axis"] == "z"
-        assert cfg["data"]["thickness_axis"] == axis
-    else:
-        with pytest.raises(ValueError, match="fixed z axis"):
-            normalize_train_config(cfg, stage)
 
 
 def test_height_conditioned_sr_uses_fractional_bank_and_zero_level_at_inference(

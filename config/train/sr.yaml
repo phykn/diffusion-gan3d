@@ -10,22 +10,20 @@ model:
     channels: [16, 32, 64, 64]
 
   critic:
-    # 등방 구조: 세 평면이 하나의 critic을 공유한다.
     plane_groups: [[xy, xz, yz]]
     channels: [32, 64, 128]
 
   diffusion:
     num_steps: 10
 
-# 단면의 행/열: xy=(y,x), xz=(z,x), yz=(z,y). 그룹 공유와 별도로 설정한다.
 augmentation:
   probability: 0.5
-  auto_planes: true  # 높이 조건을 켜면 z축 위치를 보존하는 증강으로 결정한다.
+  auto_planes: true
 
 loss:
   r1_weight: 0.5
-  r2_weight: 0.1  # fake 입력의 gradient 규제. R1과 같은 주기로 적용한다.
-  r1_every_steps: 8  # 실제 critic 업데이트 횟수 기준
+  r2_weight: 0.1
+  r1_every_steps: 8
 
   downsample_consistency_weight: 10.0
 
@@ -33,11 +31,10 @@ optim:
   generator_lr: 0.0001
   critic_lr: 0.00005
 
-# 고정된 LR 모델에서 생성한 조건용 볼륨이며, 측정한 3D 정답이 아니다.
 lr_bank:
   samples_per_domain: 8
-  guidance: 0.9  # 측정 조건의 CFG 강도. 도메인·높이만 있으면 효과가 없다.
-  refresh_every_steps: 500  # 도메인별로 한 볼륨씩 교체한다.
+  guidance: 0.9
+  refresh_every_steps: 500
 
 train:
   total_steps: 10000
@@ -47,5 +44,5 @@ train:
   slice_pairs_per_plane: 8
 
   weights_every_steps: 50
-  archive_every_steps: 1250  # null이면 단계별 가중치 보관을 끈다
+  archive_every_steps: 1250
   structure_every_steps: 50

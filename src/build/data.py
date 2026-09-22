@@ -15,7 +15,7 @@ def build_augmentation(cfg: dict) -> CriticAugment:
     augment = CriticAugment(
         prob=settings.get("probability", 0.5),
         planes=planes,
-        thickness_axis=cfg["data"].get("thickness_axis"),
+        preserve_height=cfg["conditioning"]["height_enabled"],
     )
     active = {axis for axes in get_domains(cfg["data"]).values() for axis in axes}
     if planes is not None and any(PLANES[axis] not in planes for axis in active):

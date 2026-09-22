@@ -191,7 +191,7 @@ def test_lr_resume_after_moving_files_preserves_holdouts_and_hash_checks(tmp_pat
         )
 
 
-def test_connectivity_preserves_thickness_order():
+def test_connectivity_preserves_height_order():
     torch.manual_seed(3)
     old = ConnectivityCritic2D(2, [4, 8], 8, 1)
     directed = ConnectivityCritic2D(2, [4, 8], 8, 1, directed_axis=0)
@@ -209,13 +209,14 @@ def test_connectivity_preserves_thickness_order():
     )
 
 
-def test_time_scaling_is_shared_without_changing_weight_shapes(tmp_path):
+@pytest.mark.parametrize("height", [False, True])
+def test_time_scaling_is_shared_without_changing_weight_shapes(tmp_path, height):
     cfg = small_config(tmp_path)
-    cfg["data"]["thickness_axis"] = "z"
+    cfg["conditioning"]["height_enabled"] = height
     generator, critics, connectivity = build_models(cfg)
     assert generator.time_scale == 500
     assert all(critic.time_scale == 500 for critic in critics.values())
-    assert connectivity.directed_axis == 0
+    assert connectivity.directed_axis == (0 if height else None)
     cfg["model"]["diffusion"]["time_embedding"] = "index"
     unscaled, _, _ = build_models(cfg)
     unscaled.load_state_dict(generator.state_dict(), strict=True)

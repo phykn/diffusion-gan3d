@@ -50,7 +50,9 @@ presets as needed.
 
 Datasets always return a dict containing `image` and source/crop metadata.
 With `conditioning.height_enabled: true`, height is fixed to z: the vertical
-direction of `xz`/`yz` sections. No height-axis setting is needed; side-image
+direction of `xz`/`yz` section images in source pixels. Augmentation and the
+connectivity critic automatically preserve this height direction when height
+conditioning is enabled, so there is no separate axis setting. Source-image
 heights are saved for inference. `xy` sections have no measured z coordinate
 (`height_origin` and `height_extent` are -1).
 

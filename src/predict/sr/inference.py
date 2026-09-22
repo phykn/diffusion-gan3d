@@ -213,7 +213,7 @@ class SuperResolutionAPI:
         maximum = extent - shape[0] * self.crop_size / self.lo_res_size
         if not math.isfinite(origin) or not 0 <= origin <= maximum:
             raise ValueError(
-                "height_origin places the LR volume outside the measured thickness."
+                "height_origin places the LR volume outside the source image height."
             )
 
         return extent

@@ -71,7 +71,7 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     cfg = _config(tmp_path)
     cfg.setdefault("conditioning", {})["height_enabled"] = height
     if height:
-        cfg["data"].update(thickness_axis="z", height_extents={0: None})
+        cfg["data"]["height_extents"] = {0: None}
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
@@ -721,7 +721,7 @@ def test_inspection_scripts_support_mixed_source_heights(
 
     cfg = _config(tmp_path)
     cfg.setdefault("conditioning", {})["height_enabled"] = True
-    cfg["data"].update(thickness_axis="z", height_extents={0: None})
+    cfg["data"]["height_extents"] = {0: None}
     run = tmp_path / "run"
     run.mkdir()
     save_yaml(run / "train.yaml", cfg)

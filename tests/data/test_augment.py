@@ -144,7 +144,7 @@ def test_physical_horizontal_flips_preserve_rows_and_transform_conditions_togeth
     inputs = torch.arange(24, dtype=torch.float32).reshape(2, 1, 3, 4).requires_grad_()
     depth = torch.arange(3).reshape(1, 1, 3, 1).expand(2, 1, 3, 4)
     aug = CriticAugment(
-        planes={plane: {"flip_axes": [flip], "rotate_90": False}}, thickness_axis="z"
+        planes={plane: {"flip_axes": [flip], "rotate_90": False}}, preserve_height=True
     )
     image, coordinates, mask = aug.apply_together(
         (inputs, depth, depth > 0), plane=plane
@@ -164,7 +164,7 @@ def test_mixed_plane_triplets_use_each_planes_physical_axes():
             "xz": {"flip_axes": ["x"]},
             "yz": {"flip_axes": []},
         },
-        thickness_axis="z",
+        preserve_height=True,
     )
     real, fake = aug.apply_together((data, data + 1000), plane=torch.tensor([0, 1, 2]))
     assert torch.equal(real[0], data[0].flip(-2))
@@ -182,14 +182,15 @@ def test_mixed_plane_triplets_use_each_planes_physical_axes():
         ("yz", {"rotate_90": True}),
     ],
 )
-def test_thickness_reversals_and_axis_exchanges_are_rejected(plane, policy):
-    with pytest.raises(ValueError, match="preserve thickness"):
-        CriticAugment(planes={plane: policy}, thickness_axis="z")
+def test_height_reversals_and_axis_exchanges_are_rejected(plane, policy):
+    with pytest.raises(ValueError, match="preserve height"):
+        CriticAugment(planes={plane: policy}, preserve_height=True)
+    assert CriticAugment(planes={plane: policy}).plane_transforms
 
 
 def test_plane_rotation_policy_preserves_rectangular_shapes():
     aug = CriticAugment(
-        planes={"xy": {"flip_axes": [], "rotate_90": True}}, thickness_axis="z"
+        planes={"xy": {"flip_axes": [], "rotate_90": True}}, preserve_height=True
     )
     data = torch.arange(12).reshape(1, 1, 3, 4)
     (out,) = aug.apply_together((data,), plane="xy")

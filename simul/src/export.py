@@ -29,7 +29,7 @@ def generate(cfg: dict) -> Export:
     vol_dir, slice_dirs = make_dirs(root)
     (root / "simulation.yaml").write_text(
         yaml.safe_dump(
-            {"geometry": geometry, "thickness_axis": "z", "count": count},
+            {"geometry": geometry, "height_axis": "z", "count": count},
             sort_keys=False,
         ),
         encoding="utf-8",

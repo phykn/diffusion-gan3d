@@ -57,8 +57,6 @@ def collect_image_groups(data: dict) -> ImageGroups:
 
 
 def infer_height_extents(data: dict) -> dict[int, int | None]:
-    if data.get("thickness_axis") not in (None, "z"):
-        raise ValueError("height conditioning uses the fixed z axis.")
     extents = {}
     for domain, planes in collect_image_groups(data).items():
         sizes = set()
@@ -71,9 +69,9 @@ def infer_height_extents(data: dict) -> dict[int, int | None]:
                         sizes.add(image.height)
         if not sizes:
             raise ValueError(
-                "height conditioning requires full-thickness side images per domain."
+                "height conditioning requires full-height side images per domain."
             )
         extents[domain] = sizes.pop() if len(sizes) == 1 else None
     if data.get("height_extents", extents) != extents:
-        raise ValueError("side-image thickness differs from saved height_extents.")
+        raise ValueError("side-image height differs from saved height_extents.")
     return extents

@@ -11,13 +11,11 @@ class CriticAugment:
         self,
         planes: Mapping | None = None,
         prob: float = 1.0,
-        thickness_axis: str | None = None,
+        preserve_height: bool = False,
     ) -> None:
         self.prob = float(prob)
         if not math.isfinite(self.prob) or not 0 <= self.prob <= 1:
             raise ValueError("augmentation probability must be between zero and one.")
-        if thickness_axis not in (None, "x", "y", "z"):
-            raise ValueError("data.thickness_axis must be x, y, z or null.")
         self.plane_transforms = None
         if planes is not None:
             if not isinstance(planes, Mapping) or not planes:
@@ -43,11 +41,11 @@ class CriticAugment:
                     )
                 if not isinstance(rotate, bool):
                     raise ValueError(f"{plane}.rotate_90 must be true or false.")
-                if thickness_axis in flips or (
-                    rotate and thickness_axis in (rows, cols)
+                if preserve_height and (
+                    "z" in flips or (rotate and "z" in (rows, cols))
                 ):
                     raise ValueError(
-                        f"{plane} augmentation must preserve thickness axis {thickness_axis}."
+                        f"{plane} augmentation must preserve height along z."
                     )
                 allowed = {0}
                 if cols in flips:

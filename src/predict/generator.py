@@ -69,11 +69,6 @@ class Generator:
         height_data: dict | None = None,
     ) -> None:
         self.model = model
-        if height_data is not None and height_data.get("thickness_axis") not in (
-            None,
-            "z",
-        ):
-            raise ValueError("height conditioning uses the fixed z axis.")
         self.height_data = height_data
         self.num_domains = model.num_domains
         self.diffusion = diffusion
@@ -365,7 +360,7 @@ class Generator:
         length = shape[0] * data["crop_size"] / data["lo_res_size"]
         if not math.isfinite(origin) or origin < 0 or origin + length > extent:
             raise ValueError(
-                "height_origin places the volume outside the measured thickness."
+                "height_origin places the volume outside the source image height."
             )
 
         return extent

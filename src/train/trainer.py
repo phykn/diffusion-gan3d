@@ -939,7 +939,7 @@ class Trainer:
         )
         axes = shared_axes if use_shared else owned_axes
         if self.real_origins:
-            # A section normal to thickness has no observed absolute height.
+            # An xy section has no observed absolute height along z.
             axes = tuple(a for a in axes if a in self.real_origins)
             if not axes:
                 axes = tuple(a for a in owned_axes if a in self.real_origins)
