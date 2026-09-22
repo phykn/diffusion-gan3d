@@ -11,7 +11,12 @@ import vtkGenericRenderWindow from '@kitware/vtk.js/Rendering/Misc/GenericRender
 
 import { replaceVolumeData } from '../volume-data.js'
 
-const props = defineProps({ values: Uint8Array, shape: Array, busy: Boolean, numPhases: { type: Number, default: 2 } })
+const props = defineProps({
+  values: Uint8Array,
+  shape: Array,
+  busy: Boolean,
+  numPhases: { type: Number, default: 2 },
+})
 const host = ref(null)
 const defaultPhaseColors = ['#25282a', '#d98266', '#5f8d8a', '#d6a84f', '#8c6bb1', '#77945a']
 const phaseVisibility = ref([])
@@ -31,12 +36,20 @@ let resizeObserver
 
 function ensurePhaseState() {
   const count = Math.max(1, Math.floor(Number(props.numPhases) || 2))
-  phaseVisibility.value = Array.from({ length: count }, (_, index) => phaseVisibility.value[index] ?? true)
-  phaseColors.value = Array.from({ length: count }, (_, index) => phaseColors.value[index] ?? defaultPhaseColors[index % defaultPhaseColors.length])
+  phaseVisibility.value = Array.from(
+    { length: count }, (_, index) => phaseVisibility.value[index] ?? true,
+  )
+  phaseColors.value = Array.from(
+    { length: count },
+    (_, index) => phaseColors.value[index] ?? defaultPhaseColors[index % defaultPhaseColors.length],
+  )
 }
 
 function initialize() {
-  view = vtkGenericRenderWindow.newInstance({ background: [.973, .965, .941], listenWindowResize: false })
+  view = vtkGenericRenderWindow.newInstance({
+    background: [.973, .965, .941],
+    listenWindowResize: false,
+  })
   view.setContainer(host.value)
   renderer = view.getRenderer()
   renderWindow = view.getRenderWindow()
@@ -143,17 +156,23 @@ function setCamera(front) {
   renderWindow.render()
 }
 
-function setDefaultView() { setCamera(false) }
+function setDefaultView() {
+  setCamera(false)
+}
 function reset() {
   resetClipDepth(props.shape)
   setCamera(true)
 }
 function togglePhase(phase) {
-  phaseVisibility.value = phaseVisibility.value.map((visible, index) => index === phase ? !visible : visible)
+  phaseVisibility.value = phaseVisibility.value.map(
+    (visible, index) => index === phase ? !visible : visible,
+  )
   updateAppearance()
 }
 function setPhaseColor(phase, event) {
-  phaseColors.value = phaseColors.value.map((color, index) => index === phase ? event.target.value : color)
+  phaseColors.value = phaseColors.value.map(
+    (color, index) => index === phase ? event.target.value : color,
+  )
   updateAppearance()
 }
 
@@ -185,15 +204,36 @@ onBeforeUnmount(() => {
     <header class="panel-header">
       <div><h2>3D Generated</h2></div>
       <div class="phase-toggles">
-        <div v-for="(color, phase) in phaseColors" :key="phase" class="phase-control" :class="{ active: phaseVisibility[phase] }">
-          <button type="button" :aria-pressed="phaseVisibility[phase]" @click="togglePhase(phase)">Phase {{ phase }}</button>
-          <label :title="`Phase ${phase} color`"><input :value="color" type="color" :aria-label="`Phase ${phase} color`" @input="setPhaseColor(phase, $event)"><i :style="{ background: color }"></i></label>
+        <div
+          v-for="(color, phase) in phaseColors"
+          :key="phase"
+          class="phase-control"
+          :class="{ active: phaseVisibility[phase] }"
+        >
+          <button
+            type="button"
+            :aria-pressed="phaseVisibility[phase]"
+            @click="togglePhase(phase)"
+          >Phase {{ phase }}</button>
+          <label :title="`Phase ${phase} color`">
+            <input
+              :value="color"
+              type="color"
+              :aria-label="`Phase ${phase} color`"
+              @input="setPhaseColor(phase, $event)"
+            >
+            <i :style="{ background: color }"></i>
+          </label>
         </div>
       </div>
     </header>
     <div ref="host" class="canvas-wrap volume-canvas">
-      <div v-if="!values && !busy" class="empty-state"><strong>No generated volume</strong></div>
-      <div v-if="busy" class="loading"><span></span><strong>Generating…</strong></div>
+      <div v-if="!values && !busy" class="empty-state">
+        <strong>No generated volume</strong>
+      </div>
+      <div v-if="busy" class="loading">
+        <span></span><strong>Generating…</strong>
+      </div>
     </div>
     <footer class="volume-footer">
       <span>{{ shape ? shape.join(' × ') : '—' }}</span>

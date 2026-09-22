@@ -28,27 +28,37 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
         "optim": dict.fromkeys(
             ("generator_lr", "critic_lr", "adam_betas", "ema_decay")
         ),
+        "model": {
+            "gradient_checkpointing": None,
+            "generator": dict.fromkeys(
+                ("channels", "embedding_channels", "latent_channels")
+            ),
+            "critic": dict.fromkeys(("channels", "plane_groups", "pyramid_min_size")),
+            "diffusion": dict.fromkeys(
+                ("num_steps", "beta_min", "beta_max", "time_embedding")
+            ),
+        },
+        "train": dict.fromkeys(
+            (
+                "total_steps",
+                "mixed_precision",
+                "volume_batch_size",
+                "real_batch_size",
+                "slice_pairs_per_plane",
+                "num_workers",
+                "weights_every_steps",
+                "archive_every_steps",
+                "structure_every_steps",
+            )
+        ),
+        "loss": dict.fromkeys(
+            ("critic_local_weight", "r1_weight", "r1_every_steps", "r2_weight")
+        ),
     }
     common["data"]["split"] = dict.fromkeys(("validation_files", "validation_regions"))
     if stage == "low_res":
+        common["model"]["generator"]["anchor_multiscale_input"] = None
         schema = common | {
-            "model": {
-                "gradient_checkpointing": None,
-                "generator": dict.fromkeys(
-                    (
-                        "channels",
-                        "embedding_channels",
-                        "latent_channels",
-                        "anchor_multiscale_input",
-                    )
-                ),
-                "critic": dict.fromkeys(
-                    ("channels", "plane_groups", "pyramid_min_size")
-                ),
-                "diffusion": dict.fromkeys(
-                    ("num_steps", "beta_min", "beta_max", "time_embedding")
-                ),
-            },
             "conditioning": {
                 "height_enabled": None,
                 "spatial_profile": dict.fromkeys(
@@ -67,59 +77,33 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                     )
                 ),
             },
-            "loss": dict.fromkeys(
-                (
-                    "critic_local_weight",
-                    "r1_weight",
-                    "r1_every_steps",
-                    "r2_weight",
-                    "anchor_pixel_weight",
-                    "volume_fraction_weight",
-                    "spatial_profile_weight",
-                    "spatial_profile_gradient_weight",
-                )
-            )
-            | {
-                "connectivity": dict.fromkeys(
+            "loss": common["loss"]
+            | (
+                dict.fromkeys(
                     (
-                        "max_slice_gap",
-                        "adversarial_weight",
-                        "normal_transition_weight",
-                        "start_step",
-                        "ramp_steps",
-                        "windows_per_plane",
+                        "anchor_pixel_weight",
+                        "volume_fraction_weight",
+                        "spatial_profile_weight",
+                        "spatial_profile_gradient_weight",
                     )
-                ),
-            },
-            "train": dict.fromkeys(
-                (
-                    "total_steps",
-                    "mixed_precision",
-                    "initial_weights",
-                    "num_workers",
-                    "real_batch_size",
-                    "volume_batch_size",
-                    "slice_pairs_per_plane",
-                    "weights_every_steps",
-                    "archive_every_steps",
-                    "structure_every_steps",
                 )
+                | {
+                    "connectivity": dict.fromkeys(
+                        (
+                            "max_slice_gap",
+                            "adversarial_weight",
+                            "normal_transition_weight",
+                            "start_step",
+                            "ramp_steps",
+                            "windows_per_plane",
+                        )
+                    )
+                }
             ),
+            "train": common["train"] | {"initial_weights": None},
         }
     else:
         schema = common | {
-            "model": {
-                "gradient_checkpointing": None,
-                "generator": dict.fromkeys(
-                    ("channels", "embedding_channels", "latent_channels")
-                ),
-                "critic": dict.fromkeys(
-                    ("channels", "plane_groups", "pyramid_min_size")
-                ),
-                "diffusion": dict.fromkeys(
-                    ("num_steps", "beta_min", "beta_max", "time_embedding")
-                ),
-            },
             "conditioning": dict.fromkeys(
                 (
                     "coarse_corruption_probability",
@@ -128,34 +112,15 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                     "domain_keep_probability",
                 )
             ),
-            "loss": dict.fromkeys(
-                (
-                    "critic_local_weight",
-                    "r1_weight",
-                    "r1_every_steps",
-                    "r2_weight",
-                    "downsample_consistency_weight",
-                    "downsample_mse_tolerance",
-                )
+            "loss": common["loss"]
+            | dict.fromkeys(
+                ("downsample_consistency_weight", "downsample_mse_tolerance")
             ),
             "lr_bank": dict.fromkeys(
                 ("samples_per_domain", "guidance", "refresh_every_steps")
             ),
             "source": dict.fromkeys(
                 ("weights", "weights_sha256", "config_sha256", "bank", "bank_sha256")
-            ),
-            "train": dict.fromkeys(
-                (
-                    "total_steps",
-                    "mixed_precision",
-                    "volume_batch_size",
-                    "real_batch_size",
-                    "slice_pairs_per_plane",
-                    "num_workers",
-                    "weights_every_steps",
-                    "archive_every_steps",
-                    "structure_every_steps",
-                )
             ),
         }
 

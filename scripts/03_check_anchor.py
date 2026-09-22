@@ -13,13 +13,13 @@ from scripts.common.cli import (
     add_height_arguments,
     check_parser,
     height_options,
+    parse_unit_interval,
     prepare_check,
     save_preview,
 )
 from scripts.common.diagnostic import (
     format_percent,
     format_ratio,
-    parse_unit_interval,
     select_display_index,
     select_indices,
     show_napari,

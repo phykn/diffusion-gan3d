@@ -44,7 +44,11 @@ export async function generateVolume(image, seed, blocks, signal, conditions = {
   }, signal)
   const shape = response.headers.get('X-Volume-Shape')?.split(',').map(Number)
   const size = shape?.reduce((total, value) => total * value, 1)
-  if (!shape || shape.length !== 3 || !shape.every(value => Number.isSafeInteger(value) && value > 0) || !Number.isSafeInteger(size)) {
+  if (
+    !shape || shape.length !== 3
+    || !shape.every(value => Number.isSafeInteger(value) && value > 0)
+    || !Number.isSafeInteger(size)
+  ) {
     throw new Error('The API returned an invalid volume shape.')
   }
   const values = new Uint8Array(await response.arrayBuffer())

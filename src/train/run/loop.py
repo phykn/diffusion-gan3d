@@ -13,8 +13,7 @@ from tqdm import tqdm
 from src.config.files import save_yaml
 from src.storage import save_model
 from src.train.metrics import write_metrics
-from src.train.sr import export_sr, save_sr_training
-from src.train.state import describe_data, save_training
+from src.train.state import describe_data, export_sr, save_sr_training, save_training
 from src.train.trainer import Trainer
 
 

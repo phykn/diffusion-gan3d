@@ -9,17 +9,17 @@ from src.data.slice import TripletBatch
 
 @dataclass(frozen=True)
 class DenoiserUpdate:
-    adversarial: float
-    total: float
-    global_loss: float
-    local_loss: float
-    connectivity: float
-    normal_transition: float
-    anchor: float
-    anchor_coarse: float
-    anchor_pixel: float
-    anchor_accuracy: float
-    vf: float
+    adversarial: torch.Tensor
+    total: torch.Tensor
+    global_loss: torch.Tensor
+    local_loss: torch.Tensor
+    connectivity: torch.Tensor
+    normal_transition: torch.Tensor
+    anchor: torch.Tensor
+    anchor_coarse: torch.Tensor
+    anchor_pixel: torch.Tensor
+    anchor_accuracy: torch.Tensor
+    vf: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -40,8 +40,8 @@ class DenoiserBatch:
     target_vf: torch.Tensor
     vf_present: torch.Tensor
     connectivity_ramp: float = 1.0
-    fake_heights: dict = field(default_factory=dict)
-    fake_profiles: dict = field(default_factory=dict)
+    fake_heights: dict[int, torch.Tensor] = field(default_factory=dict)
+    fake_profiles: dict[int, torch.Tensor] = field(default_factory=dict)
     profile: torch.Tensor | None = None
     coarse_target: torch.Tensor | None = None
 

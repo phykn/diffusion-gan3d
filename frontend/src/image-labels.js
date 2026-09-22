@@ -136,8 +136,6 @@ export async function decodePngLabels(buffer) {
   return { width: png.width, height: png.height, labels }
 }
 
-export const decodeIndexedPng = decodePngLabels
-
 export async function readPngLabels(file) {
   const name = file?.name?.toLowerCase() || ''
   if (file?.type !== 'image/png' && !name.endsWith('.png')) {

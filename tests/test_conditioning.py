@@ -24,8 +24,7 @@ from src.train.loss.anchor import SoftAnchorLoss
 from src.train.run.bank import file_hash
 from src.train.run.low_res import run_low_res_train
 from src.train.run.sr import run_sr_train
-from src.train.sr import export_sr
-from src.train.state import resume_training, save_training
+from src.train.state import export_sr, resume_training, save_training
 
 
 def test_subpixel_phase_fraction_reaches_anchor_and_soft_loss():
@@ -464,8 +463,7 @@ def test_interrupt_during_optimizer_step_saves_a_resumable_completed_step(
     import signal
 
     from src.train.run.loop import run_train
-    from src.train.sr import resume_sr_training
-    from src.train.state import resume_training
+    from src.train.state import resume_sr_training, resume_training
 
     cfg = configuration(tmp_path, stage=stage)
     bank = {0: torch.rand(2, 2, 8, 8, 8).softmax(1)}

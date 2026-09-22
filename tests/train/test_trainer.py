@@ -38,15 +38,7 @@ class Config(dict):
         return self[name]
 
 
-DataConfig = Config
-ModelConfig = Config
-DiffusionConfig = Config
-OptimConfig = Config
-LoopConfig = Config
-TrainConfig = Config
-
-
-def AnchorConfig(**values):
+def _anchor_config(**values):
     cfg = Config(
         multiscale_input=False,
         train_prob=0.0,
@@ -59,11 +51,7 @@ def AnchorConfig(**values):
     return cfg
 
 
-def VfConfig(**values):
-    return Config(**values)
-
-
-def ConnectivityConfig(**values):
+def _connectivity_config(**values):
     cfg = Config(
         weight=0.0,
         phase_transition_weight=0.0,
@@ -72,7 +60,7 @@ def ConnectivityConfig(**values):
     return cfg
 
 
-def ConditioningConfig(**values):
+def _conditioning_config(**values):
     cfg = Config(joint_each_prob=0.0)
     cfg.update(values)
     return cfg
@@ -393,7 +381,7 @@ def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
 
 
 def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
-    data = DataConfig(
+    data = Config(
         domains={0: {0: "."}, 1: {0: ".", 1: ".", 2: "."}},
         crop_size=8,
         input_size=8,
@@ -401,7 +389,7 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         batch_size=2,
         domain_dropout=0.0,
     )
-    model = ModelConfig(
+    model = Config(
         base_channels=4,
         channel_multipliers=(1, 2),
         embedding_channels=8,
@@ -409,7 +397,7 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         critic_channels=(4, 8),
         gradient_checkpointing=False,
     )
-    optim = OptimConfig(
+    optim = Config(
         denoiser_lr=1e-3,
         critic_lr=1e-3,
         beta1=0.0,
@@ -422,7 +410,7 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         data,
         model,
         optim,
-        anchor=AnchorConfig(
+        anchor=_anchor_config(
             train_prob=1.0,
             cross_domain_prob=1.0,
         ),
@@ -491,14 +479,14 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
 
 
 def test_training_step_updates_denoiser_and_all_critics() -> None:
-    data = DataConfig(
+    data = Config(
         domains={0: {0: ".", 1: ".", 2: "."}},
         crop_size=8,
         input_size=8,
         num_phases=3,
         batch_size=2,
     )
-    model = ModelConfig(
+    model = Config(
         base_channels=4,
         channel_multipliers=(1, 2),
         embedding_channels=8,
@@ -506,7 +494,7 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
         critic_channels=(4, 8),
         gradient_checkpointing=False,
     )
-    optim = OptimConfig(
+    optim = Config(
         denoiser_lr=1e-3,
         critic_lr=1e-3,
         beta1=0.0,
@@ -628,14 +616,14 @@ def test_training_step_with_one_axis_updates_only_that_critic(axis: int) -> None
 
 
 def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
-    data = DataConfig(
+    data = Config(
         domains={0: {0: ".", 1: ".", 2: "."}},
         crop_size=8,
         input_size=8,
         num_phases=3,
         batch_size=2,
     )
-    model = ModelConfig(
+    model = Config(
         base_channels=4,
         channel_multipliers=(1, 2),
         embedding_channels=8,
@@ -643,7 +631,7 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
         critic_channels=(4, 8),
         gradient_checkpointing=False,
     )
-    optim = OptimConfig(
+    optim = Config(
         denoiser_lr=1e-3,
         critic_lr=1e-3,
         beta1=0.0,
@@ -656,7 +644,7 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
         data,
         model,
         optim,
-        anchor=AnchorConfig(
+        anchor=_anchor_config(
             train_prob=1.0,
         ),
     )
@@ -1186,14 +1174,14 @@ def _conditioning_trainer(
     cfg_drop_each_probability: float = 0.0,
     axes: tuple[int, ...] = (0, 1, 2),
 ) -> tuple[Trainer, nn.Module, dict[int, _ConstantStream]]:
-    data = DataConfig(
+    data = Config(
         domains={0: {axis: "." for axis in axes}},
         crop_size=crop_size,
         input_size=patch_size,
         num_phases=3,
         batch_size=2,
     )
-    model = ModelConfig(
+    model = Config(
         base_channels=4,
         channel_multipliers=(1, 2),
         embedding_channels=8,
@@ -1201,7 +1189,7 @@ def _conditioning_trainer(
         critic_channels=(4, 8),
         gradient_checkpointing=False,
     )
-    optim = OptimConfig(
+    optim = Config(
         denoiser_lr=1e-3,
         critic_lr=1e-3,
         beta1=0.0,
@@ -1214,16 +1202,16 @@ def _conditioning_trainer(
         data,
         model,
         optim,
-        anchor=AnchorConfig(
+        anchor=_anchor_config(
             train_prob=1.0 if anchored else 0.0,
             start_step=anchor_start_step,
             ramp_steps=anchor_ramp_steps,
         ),
-        connectivity=ConnectivityConfig(
+        connectivity=_connectivity_config(
             weight=connectivity_weight,
             phase_transition_weight=normal_transition_weight,
         ),
-        conditioning=ConditioningConfig(
+        conditioning=_conditioning_config(
             joint_each_prob=cfg_drop_each_probability,
         ),
     )
@@ -1261,7 +1249,7 @@ def _conditioning_trainer(
 
 
 def _make_trainer(
-    cfg: TrainConfig,
+    cfg: Config,
     *,
     denoiser,
     ema_denoiser,
@@ -1318,24 +1306,24 @@ def _make_trainer(
 
 
 def _config(
-    data: DataConfig,
-    model: ModelConfig,
-    optim: OptimConfig,
+    data: Config,
+    model: Config,
+    optim: Config,
     *,
-    anchor: AnchorConfig | None = None,
+    anchor: Config | None = None,
     connectivity: Config | None = None,
-    vf: VfConfig | None = None,
+    vf: Config | None = None,
     conditioning: Config | None = None,
-) -> TrainConfig:
-    anchor = AnchorConfig() if anchor is None else anchor
+) -> Config:
+    anchor = _anchor_config() if anchor is None else anchor
     anchor["connectivity"] = (
-        ConnectivityConfig() if connectivity is None else connectivity
+        _connectivity_config() if connectivity is None else connectivity
     )
-    conditioning = ConditioningConfig() if conditioning is None else conditioning
+    conditioning = _conditioning_config() if conditioning is None else conditioning
     connectivity = anchor["connectivity"]
-    vf = VfConfig(weight=1.0) if vf is None else vf
-    return TrainConfig(
-        data=DataConfig(
+    vf = Config(weight=1.0) if vf is None else vf
+    return Config(
+        data=Config(
             domains={
                 domain: {PLANES[axis]: paths for axis, paths in planes.items()}
                 for domain, planes in data.domains.items()
@@ -1344,7 +1332,7 @@ def _config(
             crop_size=data.crop_size,
             lo_res_size=data.input_size,
         ),
-        model=ModelConfig(
+        model=Config(
             gradient_checkpointing=model.gradient_checkpointing,
             generator=Config(
                 channels=[
@@ -1386,13 +1374,13 @@ def _config(
                 normal_transition_weight=connectivity.phase_transition_weight,
             ),
         ),
-        optim=OptimConfig(
+        optim=Config(
             generator_lr=optim.denoiser_lr,
             critic_lr=optim.critic_lr,
             adam_betas=[optim.beta1, optim.beta2],
             ema_decay=0.9,
         ),
-        train=LoopConfig(
+        train=Config(
             initial_weights=None,
             total_steps=1,
             volume_batch_size=1,

@@ -16,6 +16,13 @@ def check_parser(script, description):
     )
 
 
+def parse_unit_interval(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("value must be between zero and one")
+    return parsed
+
+
 def resolve_weight(path):
     path = Path(path).expanduser().resolve()
     return path / "generator.pt" if path.is_dir() else path

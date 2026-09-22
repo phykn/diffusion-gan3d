@@ -471,7 +471,7 @@ class TiledGenerator:
             current.values.device.type == "cpu" and generator.device.type == "cuda",
         )
         fusion = make_fusion(
-            plan, tiles, generator.num_phases, current.values.device, generator.device
+            plan, generator.num_phases, current.values.device
         )
         with tqdm(
             total=generator.diffusion.timesteps,

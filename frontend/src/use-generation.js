@@ -16,7 +16,9 @@ export function useGeneration(cropEditor) {
   const error = ref(false)
   const health = ref(null)
   const result = ref(null)
-  const ready = computed(() => Boolean(file.value && cropReady.value && health.value && !busy.value))
+  const ready = computed(() => Boolean(
+    file.value && cropReady.value && health.value && !busy.value,
+  ))
   const gate = createRequestGate()
   const controller = new AbortController()
 
@@ -52,7 +54,9 @@ export function useGeneration(cropEditor) {
   watch(seed, invalidateResult)
   watch(blocks, invalidateResult, { deep: true })
   watch([plane, domain, heightOrigin, heightExtent], invalidateResult)
-  watch(domain, value => { heightExtent.value = health.value?.height_extents?.[value] ?? null })
+  watch(domain, value => {
+    heightExtent.value = health.value?.height_extents?.[value] ?? null
+  })
 
   async function generate() {
     if (!ready.value) return
@@ -62,21 +66,27 @@ export function useGeneration(cropEditor) {
     status.value = ''
     try {
       const crop = cropEditor.value?.getAnchorImage()
-      if (!crop) throw new Error(`Choose a valid ${health.value.crop_size} × ${health.value.crop_size} crop first.`)
+      if (!crop) {
+        throw new Error(`Choose a valid ${health.value.crop_size} × ${health.value.crop_size} crop first.`)
+      }
       const requestSeed = normalizeSeed(seed.value)
       const requestBlocks = normalizeBlocks(blocks.value)
       const conditions = { axis: plane.value, domain: domain.value }
       if (health.value.height_enabled) {
         conditions.height_origin = plane.value === 0 ? heightOrigin.value : crop.cropOrigin[0]
         conditions.height_extent = plane.value === 0 ? heightExtent.value : crop.sourceShape[0]
-        if (!Number.isFinite(conditions.height_origin) || conditions.height_origin < 0
-          || !Number.isFinite(conditions.height_extent) || conditions.height_extent <= 0) {
+        if (
+          !Number.isFinite(conditions.height_origin) || conditions.height_origin < 0
+          || !Number.isFinite(conditions.height_extent) || conditions.height_extent <= 0
+        ) {
           throw new Error('Enter a non-negative Z origin and a positive full Z extent in source pixels.')
         }
       }
       const image = await prepareImage(crop.image, controller.signal)
       if (!gate.accepts(token)) return
-      const next = await generateVolume(image, requestSeed, requestBlocks, controller.signal, conditions)
+      const next = await generateVolume(
+        image, requestSeed, requestBlocks, controller.signal, conditions,
+      )
       if (gate.accepts(token)) result.value = next
     } catch (reason) {
       if (!gate.accepts(token)) return
@@ -87,5 +97,23 @@ export function useGeneration(cropEditor) {
     }
   }
 
-  return { cropReady, file, seed, blocks, plane, domain, heightOrigin, heightExtent, busy, status, error, health, result, ready, invalidateResult, selectFile, generate }
+  return {
+    cropReady,
+    file,
+    seed,
+    blocks,
+    plane,
+    domain,
+    heightOrigin,
+    heightExtent,
+    busy,
+    status,
+    error,
+    health,
+    result,
+    ready,
+    invalidateResult,
+    selectFile,
+    generate,
+  }
 }

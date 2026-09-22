@@ -28,6 +28,7 @@ from src.train.batch import (
     DenoiserUpdate,
     StepPreparation,
 )
+from src.train.coarse import corrupt_coarse
 from src.train.ema import update_ema
 from src.train.loss.anchor import SoftAnchorLoss
 from src.train.loss.connectivity import compute_transition_loss
@@ -41,7 +42,6 @@ from src.train.loss.spatial_profile import compute_profile_loss
 from src.train.loss.sr import consistency_loss
 from src.train.loss.volume_fraction import compute_vf_loss
 from src.train.metrics import Metrics, materialize_metrics
-from src.train.sr import corrupt_coarse
 from src.train.step import (
     input_gradient_norms,
     step_optimizer,
@@ -1251,70 +1251,10 @@ class Trainer:
         if self.connectivity_critic is not None:
             self.connectivity_critic.requires_grad_(False)
         try:
-            heads = []
             local_weight = self.critic_local_weight
-            groups = self.active_groups(batch.fake)
-            diagnose = (self.updates["generator"] + 1) % self.r1_interval == 0
             with self.autocast():
-                for axis in self.active_axes:
-                    fake_prev, fake_curr = batch.fake[axis]
-                    if not len(fake_prev):
-                        continue
-                    if diagnose:
-                        # A separate leaf measures conditional sensitivity without
-                        # reconnecting the preceding reverse chain to the generator.
-                        fake_curr = fake_curr.detach().requires_grad_(True)
-                    time = self.make_time(batch.transition, fake_prev.shape[0])
-                    domains = self.make_domain(
-                        batch.critic_domains[axis],
-                        fake_prev.shape[0],
-                    )
-                    scores = self.critics[self.axis_critics[axis]](
-                        fake_prev,
-                        fake_curr,
-                        time,
-                        domains,
-                        **(
-                            {
-                                "height": batch.fake_heights[axis],
-                                **(
-                                    {"profile": batch.fake_profiles[axis]}
-                                    if axis in batch.fake_profiles
-                                    else {}
-                                ),
-                            }
-                            if axis in batch.fake_heights
-                            else {}
-                        ),
-                    )
-                    head = get_generator_loss(scores)
-                    if diagnose:
-                        # Undo only the batch mean, retaining local-head weights
-                        # and pyramid averaging from the actual generator loss.
-                        norms = input_gradient_norms(
-                            head.combine(local_weight) * len(fake_prev),
-                            (fake_prev, fake_curr),
-                        )
-                        prefix = (
-                            f"generator_input_gradient/{self.axis_critics[axis]}"
-                            f"/{axis}/t{batch.transition}"
-                        )
-                        for name, norm in zip(("previous", "current"), norms):
-                            self.diagnostics[f"{prefix}/{name}"] = norm
-                    count = len(groups[self.axis_critics[axis]]) * len(groups)
-                    heads.append(
-                        HeadLoss(head.global_loss / count, head.local_loss / count)
-                    )
-                global_loss = (
-                    torch.stack([loss.global_loss for loss in heads]).sum()
-                    if heads
-                    else batch.logits.sum() * 0
-                )
-                local_loss = (
-                    torch.stack([loss.local_loss for loss in heads]).sum()
-                    if heads
-                    else batch.logits.sum() * 0
-                )
+                head = self._adversarial_loss(batch)
+                global_loss, local_loss = head.global_loss, head.local_loss
                 adversarial_loss = global_loss + local_weight * local_loss
                 connectivity_loss = adversarial_loss.new_zeros(())
                 if len(batch.connectivity_fake) and self.connectivity_weight > 0.0:
@@ -1376,52 +1316,10 @@ class Trainer:
                     + self.vf_loss_weight * vf_loss
                 )
                 if batch.profile is not None:
-                    profile_loss = compute_profile_loss(
-                        batch.clean_probs,
-                        batch.profile,
-                        batch.vf_present,
-                        self.profile_settings["num_bins"],
-                        self.profile_gradient_weight,
-                        self.profile_weight,
-                    )
-                    total = total + profile_loss
-                    self.diagnostics["profile/loss"] = profile_loss.detach()
-                    soft = batch.clean_probs.detach().mean((-1, -2))
-                    labels = phase_profile(
-                        batch.clean_probs.detach().argmax(1), self.num_phases
-                    )
-                    active = batch.vf_present.to(soft).reshape(-1, 1, 1)
-                    denom = active.sum().clamp_min(1) * soft.shape[1] * soft.shape[2]
-                    self.diagnostics["profile/soft_mae"] = (
-                        (soft - batch.profile).abs() * active
-                    ).sum() / denom
-                    self.diagnostics["profile/label_mae"] = (
-                        (labels - batch.profile).abs() * active
-                    ).sum() / denom
+                    total = total + self._profile_loss(batch)
                 if batch.coarse_target is not None:
-                    consistency, error = consistency_loss(
-                        batch.clean_probs,
-                        batch.coarse_target,
-                        self.consistency_tolerance,
-                    )
-                    total = total + self.consistency_weight * consistency
-                    self.diagnostics["consistency"] = consistency.detach()
-                    self.diagnostics["lr_mse"] = error.detach()
-                    depth = batch.coarse_target.shape[-3]
-                    target_profile = phase_profile(
-                        batch.coarse_target.detach(), self.num_phases
-                    )
-                    soft_profile = phase_profile(
-                        batch.clean_probs.detach(), self.num_phases, depth
-                    )
-                    label_profile = phase_profile(
-                        batch.clean_probs.detach().argmax(1), self.num_phases, depth
-                    )
-                    self.diagnostics["profile/sr_coarse_soft_mae"] = (
-                        (soft_profile - target_profile).abs().mean()
-                    )
-                    self.diagnostics["profile/sr_coarse_label_mae"] = (
-                        (label_profile - target_profile).abs().mean()
+                    total = total + self.consistency_weight * self._consistency_loss(
+                        batch
                     )
             total = validate_loss(total, "generator")
             self.scaler.scale(total).backward()
@@ -1448,6 +1346,108 @@ class Trainer:
             anchor_accuracy=anchor_accuracy.detach(),
             vf=vf_loss.detach(),
         )
+
+    def _adversarial_loss(self, batch: DenoiserBatch) -> HeadLoss:
+        heads = []
+        local_weight = self.critic_local_weight
+        groups = self.active_groups(batch.fake)
+        diagnose = (self.updates["generator"] + 1) % self.r1_interval == 0
+        for axis in self.active_axes:
+            fake_prev, fake_curr = batch.fake[axis]
+            if not len(fake_prev):
+                continue
+            if diagnose:
+                # A separate leaf measures conditional sensitivity without
+                # reconnecting the preceding reverse chain to the generator.
+                fake_curr = fake_curr.detach().requires_grad_(True)
+            time = self.make_time(batch.transition, fake_prev.shape[0])
+            domains = self.make_domain(
+                batch.critic_domains[axis],
+                fake_prev.shape[0],
+            )
+            conditions = {}
+            if axis in batch.fake_heights:
+                conditions["height"] = batch.fake_heights[axis]
+                if axis in batch.fake_profiles:
+                    conditions["profile"] = batch.fake_profiles[axis]
+            scores = self.critics[self.axis_critics[axis]](
+                fake_prev,
+                fake_curr,
+                time,
+                domains,
+                **conditions,
+            )
+            head = get_generator_loss(scores)
+            if diagnose:
+                # Undo only the batch mean, retaining local-head weights
+                # and pyramid averaging from the actual generator loss.
+                norms = input_gradient_norms(
+                    head.combine(local_weight) * len(fake_prev),
+                    (fake_prev, fake_curr),
+                )
+                prefix = (
+                    f"generator_input_gradient/{self.axis_critics[axis]}"
+                    f"/{axis}/t{batch.transition}"
+                )
+                for name, norm in zip(("previous", "current"), norms):
+                    self.diagnostics[f"{prefix}/{name}"] = norm
+            count = len(groups[self.axis_critics[axis]]) * len(groups)
+            heads.append(HeadLoss(head.global_loss / count, head.local_loss / count))
+        global_loss = (
+            torch.stack([loss.global_loss for loss in heads]).sum()
+            if heads
+            else batch.logits.sum() * 0
+        )
+        local_loss = (
+            torch.stack([loss.local_loss for loss in heads]).sum()
+            if heads
+            else batch.logits.sum() * 0
+        )
+        return HeadLoss(global_loss, local_loss)
+
+    def _profile_loss(self, batch: DenoiserBatch) -> torch.Tensor:
+        profile_loss = compute_profile_loss(
+            batch.clean_probs,
+            batch.profile,
+            batch.vf_present,
+            self.profile_settings["num_bins"],
+            self.profile_gradient_weight,
+            self.profile_weight,
+        )
+        self.diagnostics["profile/loss"] = profile_loss.detach()
+        soft = batch.clean_probs.detach().mean((-1, -2))
+        labels = phase_profile(batch.clean_probs.detach().argmax(1), self.num_phases)
+        active = batch.vf_present.to(soft).reshape(-1, 1, 1)
+        denom = active.sum().clamp_min(1) * soft.shape[1] * soft.shape[2]
+        self.diagnostics["profile/soft_mae"] = (
+            (soft - batch.profile).abs() * active
+        ).sum() / denom
+        self.diagnostics["profile/label_mae"] = (
+            (labels - batch.profile).abs() * active
+        ).sum() / denom
+        return profile_loss
+
+    def _consistency_loss(self, batch: DenoiserBatch) -> torch.Tensor:
+        consistency, error = consistency_loss(
+            batch.clean_probs,
+            batch.coarse_target,
+            self.consistency_tolerance,
+        )
+        self.diagnostics["consistency"] = consistency.detach()
+        self.diagnostics["lr_mse"] = error.detach()
+        depth = batch.coarse_target.shape[-3]
+        target_profile = phase_profile(batch.coarse_target.detach(), self.num_phases)
+        soft_profile = phase_profile(batch.clean_probs.detach(), self.num_phases, depth)
+        label_profile = phase_profile(
+            batch.clean_probs.detach().argmax(1), self.num_phases, depth
+        )
+        self.diagnostics["profile/sr_coarse_soft_mae"] = (
+            (soft_profile - target_profile).abs().mean()
+        )
+        self.diagnostics["profile/sr_coarse_label_mae"] = (
+            (label_profile - target_profile).abs().mean()
+        )
+        return consistency
 
     def make_time(self, transition: int, batch: int) -> torch.Tensor:
         return torch.full(

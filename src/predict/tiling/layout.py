@@ -8,6 +8,8 @@ import torch
 
 @dataclass(frozen=True)
 class TilePlan:
+    """Tiling geometry in z/y/x order, with the padded grid kept for reporting."""
+
     shape: tuple[int, int, int]
     tile_size: int
     overlap: int
@@ -25,6 +27,8 @@ class TilePlan:
 
 @dataclass(frozen=True)
 class Tile:
+    """Read overlapping context from source; write only the owned target region."""
+
     source: tuple[slice, slice, slice]
     target: tuple[slice, slice, slice]
     margins: tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
@@ -34,6 +38,7 @@ def output_plan(
     plan: TilePlan,
     output_shape: tuple[int, int, int],
 ) -> TilePlan:
+    """Report output-space shape/seams while retaining the generation tile grid."""
     margin = plan.margin
     seams = tuple(
         tuple(

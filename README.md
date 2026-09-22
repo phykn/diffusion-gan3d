@@ -125,11 +125,27 @@ Anchors start at the output origin, including when generating multiple blocks.
 
 | Path | Purpose |
 | --- | --- |
-| `src/` | Models, data preparation, training, inference, and evaluation |
-| `config/` | Data, training, and generation settings |
-| `scripts/` | Numbered inspection scripts |
+| `src/api.py` | Public inference APIs, plane anchors, HR extension, and app factory |
+| `src/config/`, `config/` | Configuration loading, validation, defaults, and presets |
+| `src/data/` | Image sources, datasets, batch streams, augmentation, and slice sampling |
+| `src/prepare/` | Phase-fraction resizing and physical height/profile coordinates |
+| `src/model/`, `src/build/` | Neural networks and diffusion; model/data/trainer assembly |
+| `src/train/trainer.py`, `src/train/loss/` | Training steps, optimizer updates, and losses |
+| `src/train/state.py`, `src/train/coarse.py` | LR/SR checkpoint state; coarse-input corruption |
+| `src/train/run/` | Run setup, LR bank generation, logging, and checkpoint scheduling |
+| `src/predict/` | Inference, volume conversion, and memory estimates |
+| `src/predict/tiling/`, `src/predict/sr/` | Overlapping-tile sampling and super-resolution |
+| `src/evaluate/` | Label, slice, volume, connectivity, and structure measurements |
+| `src/anchor.py`, `src/plane.py`, `src/storage.py` | Anchor encoding, plane conventions, and artifact I/O |
+| `scripts/` | Numbered inspections, shared CLI/display helpers, experiments, and paper tools |
 | `backend/`, `frontend/` | HTTP service and web UI |
 | `simul/` | Synthetic data generation; run `python simul/run.py` |
+| `tests/`, `frontend/test/` | Python and frontend regression tests |
 | `run/` | Local weights and generated outputs |
+
+Training commands enter `src/train/run/`, which uses `src/build/` to assemble the
+trainer. The web UI calls the backend, which delegates generation to the inference
+APIs. Model weights and training checkpoints have separate formats; keep
+`generator.pt` for inference and `checkpoints/last.pt` for resume.
 
 [Method and recorded experiments](PAPER.md) · [MIT License](LICENSE)

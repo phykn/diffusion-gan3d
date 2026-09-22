@@ -25,7 +25,7 @@ from src.train.run.bank import (
     save_bank,
 )
 from src.train.run.loop import make_run_dir, run_train
-from src.train.sr import resume_sr_training
+from src.train.state import resume_sr_training
 
 
 def run_sr_train(

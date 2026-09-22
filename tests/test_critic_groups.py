@@ -14,7 +14,7 @@ from src.config.train import load_train_config
 from src.model.critic import CriticScores
 from src.plane import PLANES
 from src.train.run.loop import run_train
-from src.train.sr import resume_sr_training, save_sr_training
+from src.train.state import resume_sr_training, save_sr_training
 
 GROUPS = [[["xy", "xz", "yz"]], [["xy"], ["xz", "yz"]], [["xy"], ["xz"], ["yz"]]]
 

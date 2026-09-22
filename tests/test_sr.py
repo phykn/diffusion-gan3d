@@ -26,8 +26,9 @@ from src.prepare.resize import (
     resize_labels,
     scaled_size,
 )
+from src.train.coarse import corrupt_coarse
 from src.train.loss.sr import consistency_loss
-from src.train.sr import corrupt_coarse, export_sr, resume_sr_training, save_sr_training
+from src.train.state import export_sr, resume_sr_training, save_sr_training
 from src.train.trainer import Trainer
 
 
@@ -286,7 +287,7 @@ def test_sr_training_restores_state_without_rng(tmp_path):
     checkpoint = tmp_path / "last.pt"
     save_sr_training(trainer, checkpoint)
     saved_bytes = checkpoint.read_bytes()
-    with patch("src.train.sr.torch.save", side_effect=OSError("write failed")):
+    with patch("src.storage.torch.save", side_effect=OSError("write failed")):
         with pytest.raises(OSError, match="write failed"):
             save_sr_training(trainer, checkpoint)
     assert checkpoint.read_bytes() == saved_bytes

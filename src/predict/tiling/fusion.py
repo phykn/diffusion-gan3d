@@ -28,10 +28,8 @@ class Fusion:
 
 def make_fusion(
     plan: TilePlan,
-    tiles: tuple[Tile, ...],
     num_phases: int,
     device: torch.device,
-    tile_device: torch.device,
 ) -> Fusion:
     # Tiles are traversed in z/y/x order. Once the next z layer starts, no
     # future prediction can affect earlier voxels, so a single tile-depth

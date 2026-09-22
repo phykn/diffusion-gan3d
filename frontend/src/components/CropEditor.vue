@@ -68,8 +68,12 @@ function point(event) {
 }
 
 function clamp() {
-  state.crop.x = Math.max(0, Math.min(Math.round(state.crop.x), state.image.naturalWidth - state.crop.size))
-  state.crop.y = Math.max(0, Math.min(Math.round(state.crop.y), state.image.naturalHeight - state.crop.size))
+  state.crop.x = Math.max(0, Math.min(
+    Math.round(state.crop.x), state.image.naturalWidth - state.crop.size,
+  ))
+  state.crop.y = Math.max(0, Math.min(
+    Math.round(state.crop.y), state.image.naturalHeight - state.crop.size,
+  ))
 }
 
 function pointerDown(event) {
@@ -173,7 +177,20 @@ defineExpose({ getAnchorImage })
 
 <template>
   <section class="panel">
-    <header class="panel-header"><div><h2>Image</h2></div></header>
-    <div class="canvas-wrap crop-canvas" :class="{ 'crop-canvas--disabled': disabled }"><canvas ref="canvas" @pointerdown="pointerDown" @pointermove="pointerMove" @pointerup="state.drag = null" @pointercancel="state.drag = null"/><div v-if="!state.image" class="empty-state"><strong>No section selected</strong></div></div>
+    <header class="panel-header">
+      <div><h2>Image</h2></div>
+    </header>
+    <div class="canvas-wrap crop-canvas" :class="{ 'crop-canvas--disabled': disabled }">
+      <canvas
+        ref="canvas"
+        @pointerdown="pointerDown"
+        @pointermove="pointerMove"
+        @pointerup="state.drag = null"
+        @pointercancel="state.drag = null"
+      />
+      <div v-if="!state.image" class="empty-state">
+        <strong>No section selected</strong>
+      </div>
+    </div>
   </section>
 </template>

@@ -52,26 +52,84 @@ function setBlock(index, event) {
 <template>
   <aside class="sidebar">
     <div class="sidebar-section">
-      <label class="upload-button" :class="{ 'upload-button--dragging': dragging, 'upload-button--disabled': busy }" @dragenter.prevent="!busy && (dragging = true)" @dragover.prevent @dragleave.prevent="dragging = false" @drop.prevent="accept($event.dataTransfer.files)">
-        <input class="visually-hidden" type="file" accept="image/png" :disabled="busy" @change="selectInput">
+      <label
+        class="upload-button"
+        :class="{ 'upload-button--dragging': dragging, 'upload-button--disabled': busy }"
+        @dragenter.prevent="!busy && (dragging = true)"
+        @dragover.prevent
+        @dragleave.prevent="dragging = false"
+        @drop.prevent="accept($event.dataTransfer.files)"
+      >
+        <input
+          class="visually-hidden"
+          type="file"
+          accept="image/png"
+          :disabled="busy"
+          @change="selectInput"
+        >
         <strong>{{ file?.name || 'Upload image' }}</strong>
       </label>
     </div>
-    <label class="number-control"><span>Section plane</span><select v-model.number="plane" :disabled="busy"><option :value="0">XY · rows Y</option><option :value="1">XZ · rows Z</option><option :value="2">YZ · rows Z</option></select></label>
-    <label v-if="health?.num_domains > 1" class="number-control"><span>Domain</span><select v-model.number="domain" :disabled="busy"><option v-for="n in health.num_domains" :key="n" :value="n - 1">{{ n - 1 }}</option></select></label>
+    <label class="number-control">
+      <span>Section plane</span>
+      <select v-model.number="plane" :disabled="busy">
+        <option :value="0">XY · rows Y</option>
+        <option :value="1">XZ · rows Z</option>
+        <option :value="2">YZ · rows Z</option>
+      </select>
+    </label>
+    <label v-if="health?.num_domains > 1" class="number-control">
+      <span>Domain</span>
+      <select v-model.number="domain" :disabled="busy">
+        <option v-for="n in health.num_domains" :key="n" :value="n - 1">{{ n - 1 }}</option>
+      </select>
+    </label>
     <template v-if="health?.height_enabled && plane === 0">
-      <label class="number-control"><span>Z origin (px)</span><input v-model.number="heightOrigin" type="number" min="0" :disabled="busy"></label>
-      <label class="number-control"><span>Full Z extent (px)</span><input v-model.number="heightExtent" type="number" min="1" :disabled="busy"></label>
+      <label class="number-control">
+        <span>Z origin (px)</span>
+        <input v-model.number="heightOrigin" type="number" min="0" :disabled="busy">
+      </label>
+      <label class="number-control">
+        <span>Full Z extent (px)</span>
+        <input v-model.number="heightExtent" type="number" min="1" :disabled="busy">
+      </label>
     </template>
     <p v-else-if="health?.height_enabled" class="status">Z origin follows the crop rows. Full Z extent is the uploaded image height.</p>
-    <div class="blocks-control"><span>Blocks</span><label v-for="(axis, index) in ['Z', 'Y', 'X']" :key="axis"><small>{{ axis }}</small><input :value="blocks[index]" type="number" :min="MIN_BLOCKS" :max="MAX_BLOCKS" step="1" :disabled="busy" @input="setBlock(index, $event)"></label></div>
-    <label class="number-control"><span>Seed</span><input :value="seed" type="number" min="0" step="1" :disabled="busy" @input="setSeed"></label>
-    <button class="primary-button" type="button" :disabled="!ready" @click="emit('generate')">{{ busy ? 'RUNNING…' : 'RUN' }}</button>
+    <div class="blocks-control">
+      <span>Blocks</span>
+      <label v-for="(axis, index) in ['Z', 'Y', 'X']" :key="axis">
+        <small>{{ axis }}</small>
+        <input
+          :value="blocks[index]"
+          type="number"
+          :min="MIN_BLOCKS"
+          :max="MAX_BLOCKS"
+          step="1"
+          :disabled="busy"
+          @input="setBlock(index, $event)"
+        >
+      </label>
+    </div>
+    <label class="number-control">
+      <span>Seed</span>
+      <input :value="seed" type="number" min="0" step="1" :disabled="busy" @input="setSeed">
+    </label>
+    <button class="primary-button" type="button" :disabled="!ready" @click="emit('generate')">
+      {{ busy ? 'RUNNING…' : 'RUN' }}
+    </button>
     <p v-if="error" class="status status--error">{{ status }}</p>
     <dl class="metrics">
-      <div><dt>Porosity</dt><dd>{{ Number.isFinite(porosity) ? `${(porosity * 100).toFixed(2)}%` : '—' }}</dd></div>
-      <div><dt>Tortuosity</dt><dd>{{ Number.isFinite(tortuosity) ? tortuosity.toFixed(3) : '—' }}</dd></div>
+      <div>
+        <dt>Porosity</dt>
+        <dd>{{ Number.isFinite(porosity) ? `${(porosity * 100).toFixed(2)}%` : '—' }}</dd>
+      </div>
+      <div>
+        <dt>Tortuosity</dt>
+        <dd>{{ Number.isFinite(tortuosity) ? tortuosity.toFixed(3) : '—' }}</dd>
+      </div>
     </dl>
-    <div class="server-state" :class="{ ready: health }"><span></span>{{ health ? `Inference ready · ${health.device}` : 'Connecting to inference…' }}</div>
+    <div class="server-state" :class="{ ready: health }">
+      <span></span>{{ health ? `Inference ready · ${health.device}` : 'Connecting to inference…' }}
+    </div>
   </aside>
 </template>

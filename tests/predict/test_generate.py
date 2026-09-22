@@ -1130,10 +1130,8 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
     latent = torch.zeros(1, 4)
     fusion = make_fusion(
         plan,
-        tiles,
         scaled.generator.num_phases,
         current.values.device,
-        scaled.generator.device,
     )
 
     scaled.step(
@@ -1166,7 +1164,7 @@ def test_circular_slab_matches_full_weighted_fusion(shape, overlap):
     current = VolumeState(3, shape, torch.device("cpu"))
     current.values.copy_(torch.randn_like(current.values))
     next_state = VolumeState(3, shape, torch.device("cpu"))
-    fusion = make_fusion(plan, tiles, 3, torch.device("cpu"), torch.device("cpu"))
+    fusion = make_fusion(plan, 3, torch.device("cpu"))
     assert fusion.pred_sum.shape == (1, 3, min(shape[0], 4), *shape[1:])
     expected = torch.zeros_like(current.values, dtype=torch.float32)
     weights = torch.zeros((1, 1, *shape))
@@ -1238,10 +1236,8 @@ def test_boundary_tile_reads_only_bounded_context() -> None:
     current.values[0, 0].copy_(coordinates)
     fusion = make_fusion(
         plan,
-        tiles,
         scaled.generator.num_phases,
         current.values.device,
-        scaled.generator.device,
     )
 
     scaled.step(
