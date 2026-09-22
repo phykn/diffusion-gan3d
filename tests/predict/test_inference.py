@@ -181,17 +181,25 @@ def test_cpu_seed_never_queries_the_cuda_device(
     [
         ({"blocks": 2, "shape": 16}, "blocks and shape"),
         ({"blocks": 2, "size": 8}, "size cannot"),
+        ({"shape": 16, "size": 8}, "size cannot"),
         ({"base": torch.zeros(8, 8, 8)}, "base requires"),
+        ({"shape": 16, "base_offset": (0, 0, 0)}, "require base"),
+        ({"shape": 16, "preserve_base": True}, "require base"),
         ({"overlap": 4}, "only to scale-up"),
+        ({"storage": "cpu"}, "only to scale-up"),
     ],
 )
+@pytest.mark.parametrize("method", ["generate", "generate_probs"])
 def test_generate_rejects_ambiguous_inputs(
     api: InferenceAPI,
     kwargs: dict,
     message: str,
+    method: str,
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        api.generate(**kwargs)
+        getattr(api, method)(**kwargs)
+    assert api.generator.calls == []
+    assert api.scaled.calls == []
 
 
 def test_public_inference_import_does_not_load_training():

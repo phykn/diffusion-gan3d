@@ -109,17 +109,9 @@ class InferenceAPI:
         vf_profile: dict | None = None,
     ) -> torch.Tensor:
         anchors = _validate_anchors(anchors)
-        scaled = blocks is not None or shape is not None
-        if blocks is not None and shape is not None:
-            raise ValueError("blocks and shape cannot be provided together.")
-        if scaled and size is not None:
-            raise ValueError("size cannot be combined with blocks or shape.")
-        if not scaled and base is not None:
-            raise ValueError("base requires blocks or shape.")
-        if base is None and (base_offset is not None or preserve_base):
-            raise ValueError("base_offset and preserve_base require base.")
-        if not scaled and (storage != "auto" or overlap is not None):
-            raise ValueError("storage and overlap apply only to scale-up.")
+        tiled = _validate_generation_options(
+            blocks, shape, size, base, base_offset, preserve_base, storage, overlap
+        )
 
         guidance = self.settings.guidance if guidance is None else guidance
         anchor_strength = (
@@ -130,7 +122,7 @@ class InferenceAPI:
         overlap = self.settings.overlap if overlap is None else overlap
 
         with seeded_rng(seed, self.device):
-            if not scaled:
+            if not tiled:
                 return self.generator.generate(
                     anchors=anchors,
                     vf=vf,
@@ -184,17 +176,10 @@ class InferenceAPI:
         base_offset=None,
         preserve_base=False,
     ):
-        if shape is not None and blocks is not None:
-            raise ValueError("blocks and shape cannot be provided together.")
-        tiled = blocks is not None or shape is not None
-        if tiled and size is not None:
-            raise ValueError("size cannot be combined with blocks or shape.")
-        if base is not None and not tiled:
-            raise ValueError("base requires blocks or shape.")
-        if base is None and (base_offset is not None or preserve_base):
-            raise ValueError("base_offset and preserve_base require base.")
-        if not tiled and (storage != "auto" or overlap is not None):
-            raise ValueError("storage and overlap apply only to scale-up.")
+        tiled = _validate_generation_options(
+            blocks, shape, size, base, base_offset, preserve_base, storage, overlap
+        )
+
         options = {} if size is None else {"size": size}
         sampler = self.generator
         if tiled:
@@ -225,6 +210,23 @@ class InferenceAPI:
                 vf_profile=vf_profile,
                 **options,
             )
+
+
+def _validate_generation_options(
+    blocks, shape, size, base, base_offset, preserve_base, storage, overlap
+) -> bool:
+    tiled = blocks is not None or shape is not None
+    if blocks is not None and shape is not None:
+        raise ValueError("blocks and shape cannot be provided together.")
+    if tiled and size is not None:
+        raise ValueError("size cannot be combined with blocks or shape.")
+    if not tiled and base is not None:
+        raise ValueError("base requires blocks or shape.")
+    if base is None and (base_offset is not None or preserve_base):
+        raise ValueError("base_offset and preserve_base require base.")
+    if not tiled and (storage != "auto" or overlap is not None):
+        raise ValueError("storage and overlap apply only to scale-up.")
+    return tiled
 
 
 def _resolve_device(device: str | torch.device | None) -> torch.device:

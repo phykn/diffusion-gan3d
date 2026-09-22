@@ -59,26 +59,14 @@ def describe_data(trainer):
 
 
 def save_training(path: str | Path, trainer) -> None:
-    payload = {
-        "format": "diffusion-gan3d.lr.train",
-        "config": trainer.cfg,
-        "step": trainer.completed_steps,
-        "model": trainer.denoiser.state_dict(),
-        "ema": trainer.ema_denoiser.state_dict(),
-        "critics": trainer.critics.state_dict(),
-        "connectivity": trainer.connectivity_critic.state_dict(),
-        "generator_optim": trainer.denoiser_optim.state_dict(),
-        "critic_optims": {
-            key: opt.state_dict() for key, opt in trainer.critic_optims.items()
-        },
-        "connectivity_optim": trainer.connectivity_optim.state_dict(),
-        "scaler": trainer.scaler.state_dict(),
-        "updates": trainer.updates,
-        "use_multi_anchor_next": trainer.use_multi_anchor_next,
-        "anchor_bank": trainer.anchor_bank.entries,
-        "data_fingerprint": trainer.data_fingerprint,
-        "path_maps": getattr(trainer, "path_maps", []),
-    }
+    payload = _capture_state(trainer)
+    payload.update(
+        format="diffusion-gan3d.lr.train",
+        connectivity=trainer.connectivity_critic.state_dict(),
+        connectivity_optim=trainer.connectivity_optim.state_dict(),
+        use_multi_anchor_next=trainer.use_multi_anchor_next,
+        anchor_bank=trainer.anchor_bank.entries,
+    )
     atomic_torch_save(payload, path)
 
 
@@ -96,46 +84,20 @@ def resume_training(trainer, payload: dict) -> None:
         )
     if payload["data_fingerprint"] != trainer.data_fingerprint:
         raise ValueError("LR source images changed since the checkpoint.")
-    trainer.denoiser.load_state_dict(payload["model"])
-    trainer.ema_denoiser.load_state_dict(payload["ema"])
-    trainer.critics.load_state_dict(payload["critics"])
+    _restore_state(trainer, payload)
     trainer.connectivity_critic.load_state_dict(payload["connectivity"])
-    trainer.denoiser_optim.load_state_dict(payload["generator_optim"])
-    for key, opt in trainer.critic_optims.items():
-        opt.load_state_dict(payload["critic_optims"][key])
     trainer.connectivity_optim.load_state_dict(payload["connectivity_optim"])
-    trainer.scaler.load_state_dict(payload["scaler"])
-    trainer.updates = dict(payload["updates"])
-    trainer.completed_steps = payload["step"]
     trainer.use_multi_anchor_next = payload["use_multi_anchor_next"]
     trainer.anchor_bank.entries = payload["anchor_bank"]
-    trainer.path_maps = payload.get("path_maps", [])
 
 
-def save_sr_training(trainer, path):
-    atomic_torch_save(
-        {
-            "format": "diffusion-gan3d.sr.train",
-            "config": trainer.cfg,
-            "step": trainer.completed_steps,
-            "data_fingerprint": trainer.data_fingerprint,
-            "path_maps": getattr(trainer, "path_maps", []),
-            "updates": trainer.updates,
-            "model": trainer.denoiser.state_dict(),
-            "ema": trainer.ema_denoiser.state_dict(),
-            "critics": trainer.critics.state_dict(),
-            "generator_optim": trainer.denoiser_optim.state_dict(),
-            "critic_optims": {
-                name: optim.state_dict()
-                for name, optim in trainer.critic_optims.items()
-            },
-            "scaler": trainer.scaler.state_dict(),
-        },
-        path,
-    )
+def save_sr_training(trainer, path: str | Path) -> None:
+    payload = _capture_state(trainer)
+    payload["format"] = "diffusion-gan3d.sr.train"
+    atomic_torch_save(payload, path)
 
 
-def resume_sr_training(trainer, payload):
+def resume_sr_training(trainer, payload: dict) -> None:
     if payload.get("format") != "diffusion-gan3d.sr.train":
         raise ValueError("unsupported SR training checkpoint format.")
     if payload["data_fingerprint"] != trainer.data_fingerprint:
@@ -149,6 +111,28 @@ def resume_sr_training(trainer, payload):
     actual["train"].pop("total_steps")
     if expected != actual:
         raise ValueError("SR resume must use its saved resolved configuration.")
+    _restore_state(trainer, payload)
+
+
+def _capture_state(trainer) -> dict:
+    return {
+        "config": trainer.cfg,
+        "step": trainer.completed_steps,
+        "data_fingerprint": trainer.data_fingerprint,
+        "path_maps": getattr(trainer, "path_maps", []),
+        "updates": trainer.updates,
+        "model": trainer.denoiser.state_dict(),
+        "ema": trainer.ema_denoiser.state_dict(),
+        "critics": trainer.critics.state_dict(),
+        "generator_optim": trainer.denoiser_optim.state_dict(),
+        "critic_optims": {
+            name: optim.state_dict() for name, optim in trainer.critic_optims.items()
+        },
+        "scaler": trainer.scaler.state_dict(),
+    }
+
+
+def _restore_state(trainer, payload: dict) -> None:
     if set(payload["critic_optims"]) != set(trainer.critic_optims):
         raise ValueError("critic optimizer groups do not match the checkpoint.")
     if set(payload["updates"]) != set(trainer.updates):

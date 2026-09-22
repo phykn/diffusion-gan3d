@@ -110,6 +110,28 @@ def test_lr_resume_rejects_changed_images_or_training_contract(tmp_path):
         resume_training(build_trainer(cfg, torch.device("cpu")), payload)
 
 
+@pytest.mark.parametrize("field", ["critic_optims", "updates"])
+@pytest.mark.parametrize("change", ["missing", "extra"])
+def test_lr_resume_rejects_mismatched_groups_before_loading_weights(
+    tmp_path, field, change
+):
+    cfg = small_config(tmp_path)
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    path = tmp_path / "last.pt"
+    save_training(path, trainer)
+    payload = torch.load(path, weights_only=True)
+    if change == "missing":
+        payload[field].pop(next(iter(payload[field])))
+    else:
+        payload[field]["unexpected"] = next(iter(payload[field].values()))
+    restored = build_trainer(cfg, torch.device("cpu"))
+    before = copy.deepcopy(restored.denoiser.state_dict())
+    with pytest.raises(ValueError, match="optimizer.*(groups|counters)"):
+        resume_training(restored, payload)
+    torch.testing.assert_close(restored.denoiser.state_dict(), before, rtol=0, atol=0)
+    assert all(not opt.state for opt in restored.critic_optims.values())
+
+
 def test_lr_cli_resumes_progress_without_training_seed(tmp_path):
     cfg = small_config(tmp_path)
     cfg["train"]["weights_every_steps"] = 1
