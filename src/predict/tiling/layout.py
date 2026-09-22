@@ -1,7 +1,7 @@
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from itertools import product
+from itertools import pairwise, product
 
 import torch
 
@@ -32,6 +32,30 @@ class Tile:
     source: tuple[slice, slice, slice]
     target: tuple[slice, slice, slice]
     margins: tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
+
+
+def make_plan(
+    shape: tuple[int, int, int], tile_size: int, overlap: int
+) -> TilePlan:
+    """Build grid geometry from validated generation-space dimensions."""
+    stride = tile_size - 2 * overlap
+    lengths = tuple(min(size, tile_size) for size in shape)
+    starts = tuple(
+        axis_starts(size, length, stride) for size, length in zip(shape, lengths)
+    )
+    grid = tuple(len(axis) for axis in starts)
+    return TilePlan(
+        shape=shape,
+        tile_size=tile_size,
+        overlap=overlap,
+        stride=stride,
+        grid=grid,
+        tile_count=math.prod(grid),
+        seams=tuple(
+            tuple((left + length + right) // 2 for left, right in pairwise(axis))
+            for axis, length in zip(starts, lengths)
+        ),
+    )
 
 
 def output_plan(

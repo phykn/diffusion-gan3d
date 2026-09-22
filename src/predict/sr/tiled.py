@@ -1,11 +1,10 @@
-import math
-from itertools import pairwise
+from dataclasses import replace
 
 import torch
 import torch.nn.functional as F
 
 from src.predict.base import prepare_base
-from src.predict.tiling.layout import TilePlan, axis_starts, make_tiles
+from src.predict.tiling.layout import make_plan, make_tiles
 from src.predict.tiling.sampler import TiledGenerator
 from src.prepare.resize import coarse_region, resize_phases
 
@@ -28,24 +27,8 @@ def refine_tiled(
     # Include global context in the shared state. Each tile keeps its HR margin;
     # overlapping clean predictions are tapered before one posterior update.
     generation_shape = tuple(n + 2 * margin for n in shape)
-    expanded_size = tile_size + 2 * margin
-    stride = tile_size - 2 * overlap
-    lengths = tuple(min(expanded_size, n) for n in generation_shape)
-    starts = tuple(
-        axis_starts(n, length, stride) for n, length in zip(generation_shape, lengths)
-    )
-    grid = tuple(len(axis) for axis in starts)
-    plan = TilePlan(
-        shape=generation_shape,
-        tile_size=expanded_size,
-        overlap=overlap + margin,
-        stride=stride,
-        grid=grid,
-        tile_count=math.prod(grid),
-        seams=tuple(
-            tuple((left + length + right) // 2 for left, right in pairwise(axis))
-            for axis, length in zip(starts, lengths)
-        ),
+    plan = replace(
+        make_plan(generation_shape, tile_size + 2 * margin, overlap + margin),
         generation_shape=generation_shape,
         margin=margin,
     )

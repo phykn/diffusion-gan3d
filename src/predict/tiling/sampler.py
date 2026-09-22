@@ -1,7 +1,5 @@
-import math
 from collections.abc import Sequence
 from dataclasses import replace
-from itertools import pairwise
 
 import torch
 from tqdm import tqdm
@@ -14,7 +12,7 @@ from src.predict.tiling.fusion import Fusion, add_prediction, make_fusion
 from src.predict.tiling.layout import (
     Tile,
     TilePlan,
-    axis_starts,
+    make_plan,
     make_tiles,
     output_plan,
     parse_shape,
@@ -43,7 +41,6 @@ class TiledGenerator:
         tile_size = self.generator.patch_size
         if 2 * overlap >= tile_size:
             raise ValueError("twice overlap must be smaller than patch_size.")
-        stride = tile_size - 2 * overlap
         if tile_size % factor:
             raise ValueError(
                 "patch_size must be divisible by the denoiser "
@@ -51,21 +48,7 @@ class TiledGenerator:
             )
         if any(size < tile_size for size in shape):
             raise ValueError("shape must not be smaller than patch_size.")
-        starts = tuple(axis_starts(size, tile_size, stride) for size in shape)
-        grid = tuple(len(axis) for axis in starts)
-        seams = tuple(
-            tuple((left + tile_size + right) // 2 for left, right in pairwise(axis))
-            for axis in starts
-        )
-        return TilePlan(
-            shape=shape,
-            tile_size=tile_size,
-            overlap=overlap,
-            stride=stride,
-            grid=grid,
-            tile_count=math.prod(grid),
-            seams=seams,
-        )
+        return make_plan(shape, tile_size, overlap)
 
     @torch.no_grad()
     def generate_probs(

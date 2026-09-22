@@ -137,54 +137,21 @@ class SuperResolutionAPI:
         height_extent = self._validate_height(
             low_shape, domain, height_origin, height_extent
         )
-        check_sr_memory(
-            estimate_sr_memory(
-                low_shape,
-                shape,
-                self.num_phases,
-                tile_size=tile_size,
-                margin=margin,
-                label_input=low.ndim == 3,
-                input_element_size=low.element_size(),
-                input_on_cuda=low.device.type == "cuda",
-                output_kind=output_kind,
-                base_shape=volume_shape(base),
-            ),
-            self.generator,
-            input_device=low.device,
+        probs = self._prepare_probs(
+            low, shape, tile_size, margin, output_kind, volume_shape(base)
         )
-        if low.ndim == 3:
-            probs = phase_channels(low.cpu().unsqueeze(0), self.num_phases)
-        else:
-            if (
-                not low.dtype.is_floating_point
-                or low.shape[0] != self.num_phases
-                or not torch.isfinite(low).all()
-                or (low < 0).any()
-                or (low > 1).any()
-                or not torch.allclose(low.sum(0), torch.ones_like(low[0]), atol=1e-5)
-            ):
-                raise ValueError(
-                    "LR phase fractions must be finite, non-negative and sum to one."
-                )
-            probs = low.to(device="cpu", dtype=torch.float32).unsqueeze(0)
         with seeded_rng(seed, self.device):
             if not tiled and base is None:
-                coarse = resize_phases(probs, shape)
-                coarse = F.pad(coarse, (margin,) * 6, mode="replicate")
-                height = self._height(
-                    coarse.shape[-3:],
-                    (-margin,) * 3,
-                    domain,
+                return self._refine_block(
+                    probs,
+                    shape,
+                    margin,
+                    domain_ids,
                     height_origin,
                     height_extent,
+                    guidance,
+                    output_kind,
                 )
-                region = (slice(None), *(slice(margin, margin + n) for n in shape))
-                if output_kind == "labels":
-                    clean = self._sample_clean(coarse, domain_ids, height, guidance)
-                    return labels_from_channels(clean.squeeze(0)[region])
-                predicted = self._predict(coarse, domain_ids, height, guidance)
-                return predicted[region].contiguous()
             return refine_tiled(
                 self,
                 probs,
@@ -217,6 +184,65 @@ class SuperResolutionAPI:
             )
 
         return extent
+
+    def _prepare_probs(self, low, shape, tile_size, margin, output_kind, base_shape):
+        check_sr_memory(
+            estimate_sr_memory(
+                low.shape[-3:],
+                shape,
+                self.num_phases,
+                tile_size=tile_size,
+                margin=margin,
+                label_input=low.ndim == 3,
+                input_element_size=low.element_size(),
+                input_on_cuda=low.device.type == "cuda",
+                output_kind=output_kind,
+                base_shape=base_shape,
+            ),
+            self.generator,
+            input_device=low.device,
+        )
+        if low.ndim == 3:
+            return phase_channels(low.cpu().unsqueeze(0), self.num_phases)
+        if (
+            not low.dtype.is_floating_point
+            or low.shape[0] != self.num_phases
+            or not torch.isfinite(low).all()
+            or (low < 0).any()
+            or (low > 1).any()
+            or not torch.allclose(low.sum(0), torch.ones_like(low[0]), atol=1e-5)
+        ):
+            raise ValueError(
+                "LR phase fractions must be finite, non-negative and sum to one."
+            )
+        return low.to(device="cpu", dtype=torch.float32).unsqueeze(0)
+
+    def _refine_block(
+        self,
+        probs,
+        shape,
+        margin,
+        domain,
+        height_origin,
+        height_extent,
+        guidance,
+        output_kind,
+    ):
+        coarse = resize_phases(probs, shape)
+        coarse = F.pad(coarse, (margin,) * 6, mode="replicate")
+        height = self._height(
+            coarse.shape[-3:],
+            (-margin,) * 3,
+            int(domain.item()),
+            height_origin,
+            height_extent,
+        )
+        region = (slice(None), *(slice(margin, margin + n) for n in shape))
+        if output_kind == "labels":
+            clean = self._sample_clean(coarse, domain, height, guidance)
+            return labels_from_channels(clean.squeeze(0)[region])
+        predicted = self._predict(coarse, domain, height, guidance)
+        return predicted[region].contiguous()
 
     def _height(self, shape, start, domain, origin, extent=None):
         if not self.config["conditioning"]["height_enabled"]:
