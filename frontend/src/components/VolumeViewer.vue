@@ -2,14 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import '@kitware/vtk.js/Rendering/Profiles/Volume'
-import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray'
 import vtkColorTransferFunction from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction'
-import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData'
 import vtkPlane from '@kitware/vtk.js/Common/DataModel/Plane'
 import vtkPiecewiseFunction from '@kitware/vtk.js/Common/DataModel/PiecewiseFunction'
 import vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume'
 import vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper'
 import vtkGenericRenderWindow from '@kitware/vtk.js/Rendering/Misc/GenericRenderWindow'
+
+import { replaceVolumeData } from '../volume-data.js'
 
 const props = defineProps({ values: Uint8Array, shape: Array, busy: Boolean, numPhases: { type: Number, default: 2 } })
 const host = ref(null)
@@ -99,22 +99,12 @@ function updateAppearance() {
 }
 
 function setVolume(values, shape) {
+  imageData = replaceVolumeData(mapper, imageData, values, shape)
   if (!values || !shape) {
     actor?.setVisibility(false)
     renderWindow?.render()
     return
   }
-  const [depth, height, width] = shape
-  imageData?.delete()
-  imageData = vtkImageData.newInstance()
-  imageData.setDimensions(width, height, depth)
-  imageData.setSpacing(1, 1, 1)
-  imageData.getPointData().setScalars(vtkDataArray.newInstance({
-    name: 'phase',
-    numberOfComponents: 1,
-    values,
-  }))
-  mapper.setInputData(imageData)
   actor.setVisibility(true)
   resetClipDepth(shape)
   setDefaultView()
@@ -180,7 +170,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
-  imageData?.delete()
+  imageData = replaceVolumeData(mapper, imageData, null, null)
   mapper?.delete()
   clippingPlane?.delete()
   actor?.delete()

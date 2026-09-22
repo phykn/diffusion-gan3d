@@ -1,7 +1,11 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from src.predict import convert
+from src.predict.generator import Generator
+from src.predict.tiling.state import write_output
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
@@ -54,3 +58,31 @@ def test_labels_use_bounded_argmax_with_identical_ties_and_strided_input(
     assert len(shapes) == 6
     assert actual.device.type == "cpu" and actual.dtype == torch.uint8
     torch.testing.assert_close(actual, expected)
+
+
+def test_uint8_labels_preserve_phase_255_and_reject_phase_256():
+    channels = torch.arange(256.0).reshape(256, 1, 1, 1)
+    assert convert.labels_from_channels(channels).item() == 255
+    labels = torch.zeros(1, 1, 1, dtype=torch.uint8)
+    region = (slice(None),) * 3
+    write_output(labels, region, channels.unsqueeze(0))
+    assert labels.item() == 255
+    channels = torch.arange(257.0).reshape(257, 1, 1, 1)
+    with pytest.raises(ValueError, match="num_phases"):
+        convert.labels_from_channels(channels)
+    with pytest.raises(ValueError, match="num_phases"):
+        write_output(labels, region, channels.unsqueeze(0))
+    assert labels.item() == 255
+
+
+@pytest.mark.parametrize("shape", [(2, 2, 2), (0, 1, 1, 1), (2, 0, 1, 1)])
+def test_label_conversion_rejects_invalid_shapes(shape):
+    with pytest.raises(ValueError, match="C,D,H,W"):
+        convert.labels_from_channels(torch.empty(shape))
+
+
+@pytest.mark.parametrize("phases", [0, 257, True, 2.5])
+def test_generator_rejects_unsupported_phases_before_sampling(phases):
+    model = SimpleNamespace(num_domains=1, downsample_factor=1)
+    with pytest.raises(ValueError, match="num_phases"):
+        Generator(model, None, torch.device("cpu"), 4, phases, 4, False)

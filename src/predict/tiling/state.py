@@ -2,6 +2,7 @@ import math
 
 import torch
 
+from src.phase import validate_num_phases
 from src.predict.convert import owned_clean_to_probs_
 
 
@@ -115,6 +116,7 @@ def write_output(
     target: tuple[slice, slice, slice],
     clean: torch.Tensor,
 ) -> None:
+    validate_num_phases(clean.shape[1])
     values = clean.argmax(dim=1).squeeze(0).to(device="cpu", dtype=torch.uint8)
     labels[target].copy_(values)
 

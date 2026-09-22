@@ -1,9 +1,30 @@
+import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import tifffile
 import torch
 from torch import nn
+
+
+def atomic_torch_save(payload, path: str | Path) -> Path:
+    """Replace an artifact only after its complete serialization succeeds."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+    )
+    temporary_path = Path(temporary.name)
+    try:
+        with temporary:
+            torch.save(payload, temporary)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return path
 
 
 def load_volume(path: str | Path) -> torch.Tensor:
@@ -53,17 +74,11 @@ def validate_probabilities(probs: torch.Tensor) -> torch.Tensor:
 
 def save_probabilities(probs: torch.Tensor, path: str | Path) -> Path:
     probs = validate_probabilities(probs)
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(probs.detach().float().cpu(), path)
-    return path
+    return atomic_torch_save(probs.detach().float().cpu(), path)
 
 
 def save_model(path: str | Path, model: nn.Module) -> Path:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), path)
-    return path
+    return atomic_torch_save(model.state_dict(), path)
 
 
 def load_model(path: str | Path, model: nn.Module) -> nn.Module:

@@ -259,3 +259,89 @@ def test_saved_yaml_uses_inline_lists_and_separates_groups(tmp_path):
 def test_obsolete_and_unknown_config_keys_fail_with_full_path(section, key):
     with pytest.raises(ValueError, match=rf"{section}\.{key}"):
         normalize_train_config({section: {key: 1}})
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        ("data.num_phases", 257),
+        ("data.num_phases", 0),
+        ("data.num_phases", True),
+        ("data.num_phases", 2.5),
+        ("optim.ema_decay", 1.5),
+        ("optim.ema_decay", 1),
+        ("optim.ema_decay", -0.1),
+        ("optim.ema_decay", float("nan")),
+        ("optim.ema_decay", True),
+        ("optim.generator_lr", float("inf")),
+        ("optim.critic_lr", -0.1),
+        ("optim.adam_betas", [0.5, 1]),
+        ("optim.adam_betas", [0.5]),
+        ("optim.adam_betas", [True, 0.9]),
+        ("conditioning.domain_keep_probability", 1.1),
+        ("conditioning.domain_keep_probability", float("nan")),
+        ("loss.critic_local_weight", -1),
+        ("loss.r1_weight", float("inf")),
+        ("loss.r2_weight", True),
+        ("augmentation.probability", -0.1),
+        ("train.volume_batch_size", 0),
+        ("train.real_batch_size", True),
+        ("train.total_steps", 1.5),
+        ("train.weights_every_steps", 0),
+        ("train.archive_every_steps", -1),
+        ("train.num_workers", -1),
+    ],
+)
+def test_shared_training_values_fail_during_normalization(stage, path, value):
+    cfg = {}
+    target = cfg
+    *sections, key = path.split(".")
+    for section in sections:
+        target = target.setdefault(section, {})
+    target[key] = value
+    with pytest.raises(ValueError, match=key):
+        normalize_train_config(cfg, stage)
+
+
+@pytest.mark.parametrize(
+    "cfg,message",
+    [
+        ({"loss": {"volume_fraction_weight": -1}}, "volume_fraction_weight"),
+        ({"loss": {"anchor_pixel_weight": float("nan")}}, "anchor_pixel_weight"),
+        (
+            {"loss": {"connectivity": {"adversarial_weight": -1}}},
+            "adversarial_weight",
+        ),
+        (
+            {"conditioning": {"dropout_probability_per_case": 0.5}},
+            "dropout_probability_per_case",
+        ),
+        (
+            {"conditioning": {"anchor": {"borrowed_plane_probability": 2}}},
+            "borrowed_plane_probability",
+        ),
+    ],
+)
+def test_lr_rejects_invalid_loss_and_sampling_probabilities(cfg, message):
+    with pytest.raises(ValueError, match=message):
+        normalize_train_config(cfg)
+
+
+@pytest.mark.parametrize("phases", [1, 256])
+def test_supported_phase_and_probability_boundaries(phases):
+    cfg = normalize_train_config(
+        {
+            "data": {"num_phases": phases},
+            "optim": {"ema_decay": 0, "generator_lr": 0},
+            "conditioning": {
+                "domain_keep_probability": 1,
+                "dropout_probability_per_case": 1 / 3,
+                "anchor": {"probability": 0, "borrowed_plane_probability": 1},
+            },
+            "loss": {"volume_fraction_weight": 0},
+            "train": {"num_workers": 0, "archive_every_steps": None},
+        }
+    )
+    assert cfg["data"]["num_phases"] == phases
+    assert normalize_train_config(cfg) == cfg

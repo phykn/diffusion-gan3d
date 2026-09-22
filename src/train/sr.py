@@ -1,11 +1,10 @@
-from pathlib import Path
-
 import torch
 import torch.nn.functional as F
 
 from src.config.data import get_plane_groups
 from src.config.train import normalize_train_config
 from src.prepare.resize import phase_channels
+from src.storage import atomic_torch_save
 
 
 def corrupt_coarse(low, probability, strength):
@@ -32,10 +31,7 @@ def corrupt_coarse(low, probability, strength):
 
 
 def save_sr_training(trainer, path):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    torch.save(
+    atomic_torch_save(
         {
             "format": "diffusion-gan3d.sr.train",
             "config": trainer.cfg,
@@ -52,9 +48,8 @@ def save_sr_training(trainer, path):
             },
             "scaler": trainer.scaler.state_dict(),
         },
-        temporary,
+        path,
     )
-    temporary.replace(path)
 
 
 def resume_sr_training(trainer, payload):
@@ -87,7 +82,7 @@ def resume_sr_training(trainer, payload):
 
 
 def export_sr(trainer, path):
-    torch.save(
+    atomic_torch_save(
         {
             "format": "diffusion-gan3d.sr",
             "config": trainer.cfg,

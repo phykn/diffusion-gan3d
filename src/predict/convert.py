@@ -2,6 +2,8 @@ import math
 
 import torch
 
+from src.phase import validate_num_phases
+
 LABEL_CHUNK_VOXELS = 1024**2
 
 
@@ -11,6 +13,9 @@ def label_chunk_depth(shape) -> int:
 
 @torch.no_grad()
 def labels_from_channels(channels: torch.Tensor) -> torch.Tensor:
+    if channels.ndim != 4 or channels.numel() == 0:
+        raise ValueError("channels must be a non-empty C,D,H,W tensor.")
+    validate_num_phases(channels.shape[0])
     shape = channels.shape[1:]
     labels = torch.empty(shape, dtype=torch.uint8, device="cpu")
     depth = label_chunk_depth(shape)

@@ -1,9 +1,18 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 
-from src.storage import load_probabilities, load_volume, save_probabilities, save_volume
+from src.storage import (
+    atomic_torch_save,
+    load_probabilities,
+    load_volume,
+    save_model,
+    save_probabilities,
+    save_volume,
+)
+from src.train.sr import export_sr
 
 
 def test_label_volume_round_trip(tmp_path: Path) -> None:
@@ -49,3 +58,55 @@ def test_probability_save_rejects_label_tensors(tmp_path, probs):
     with pytest.raises(ValueError):
         save_probabilities(probs, path)
     assert not path.exists()
+
+
+@pytest.mark.parametrize("kind", ["model", "probabilities", "sr"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_failed_artifact_save_preserves_previous_file_and_cleans_up(
+    tmp_path, monkeypatch, kind, existing
+):
+    path = tmp_path / "artifact.pt"
+    previous = b"previous complete artifact"
+    if existing:
+        path.write_bytes(previous)
+
+    def interrupted_save(payload, file):
+        file.write(b"incomplete new artifact")
+        raise OSError("disk write failed")
+
+    monkeypatch.setattr(torch, "save", interrupted_save)
+    with pytest.raises(OSError, match="disk write failed"):
+        if kind == "model":
+            save_model(path, torch.nn.Linear(2, 2))
+        elif kind == "probabilities":
+            save_probabilities(torch.ones(2, 1, 1, 1) / 2, path)
+        else:
+            trainer = SimpleNamespace(
+                cfg={}, completed_steps=3, ema_denoiser=torch.nn.Linear(2, 2)
+            )
+            export_sr(trainer, path)
+    assert list(tmp_path.iterdir()) == ([path] if existing else [])
+    if existing:
+        assert path.read_bytes() == previous
+
+
+def test_atomic_save_cleans_up_when_replace_fails(tmp_path, monkeypatch):
+    path = tmp_path / "model.pt"
+    atomic_torch_save({"step": 1}, path)
+
+    def failed_replace(source, destination):
+        raise PermissionError("destination locked")
+
+    monkeypatch.setattr(Path, "replace", failed_replace)
+    with pytest.raises(PermissionError, match="destination locked"):
+        atomic_torch_save({"step": 2}, path)
+    assert torch.load(path, weights_only=True) == {"step": 1}
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_atomic_save_replaces_existing_artifact(tmp_path):
+    path = tmp_path / "nested" / "model.pt"
+    atomic_torch_save({"step": 1}, path)
+    assert atomic_torch_save({"step": 2}, path) == path
+    assert torch.load(path, weights_only=True) == {"step": 2}
+    assert list(path.parent.iterdir()) == [path]

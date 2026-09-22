@@ -7,7 +7,7 @@ Training uses real 2D sections without measured 3D targets.
 ## Setup
 
 Use Python 3.11+ and a PyTorch build suitable for your CUDA environment.
-Run commands from the project root in an activated virtual environment.
+Run commands from the project root in the activated project `.venv`.
 
 ```bash
 git clone https://github.com/phykn/diffusion-gan3d.git
@@ -17,11 +17,31 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
+In PowerShell, use the interpreter directly without activation:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+For development, install the test tools in the same environment. `httpx` is
+required by the backend tests:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pip install pytest ruff httpx
+& .\.venv\Scripts\python.exe -m pytest -q
+& .\.venv\Scripts\python.exe -m ruff check .
+```
+
+Frontend checks run from `frontend/`: `npm ci`, `npm test`, and `npm run build`.
+Tests use a fixed available-RAM probe; dedicated memory tests supply their own
+limits. CUDA tests are skipped when CUDA is unavailable.
+
 ## Train
 
 Set image folders, phase counts, and resolutions in
 [`config/data/default.yaml`](config/data/default.yaml). Inputs are 2D images
-containing integer phase IDs; plane names are `xy`, `xz`, and `yz`.
+containing integer phase IDs (0–255, with `num_phases` between 1 and 256);
+plane names are `xy`, `xz`, and `yz`.
 Edit the [LR](config/train/low_res.yaml) and [SR](config/train/sr.yaml) training
 presets as needed.
 

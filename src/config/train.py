@@ -6,6 +6,7 @@ from src.config.data import get_domains, get_plane_groups, get_sizes
 from src.config.defaults import STAGE_DEFAULTS, TRAIN_DEFAULTS
 from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml
 from src.config.schema import validate_config_keys
+from src.config.values import validate_training_values
 from src.data.split import resolve_split
 from src.plane import PLANE_DIRECTIONS, PLANES
 
@@ -122,15 +123,6 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
             raise ValueError("spatial_profile.enabled must be a boolean.")
         if type(profile["num_bins"]) is not int or profile["num_bins"] < 1:
             raise ValueError("spatial_profile.num_bins must be a positive integer.")
-        for name in ("spatial_profile_weight", "spatial_profile_gradient_weight"):
-            value = cfg["loss"][name]
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                or value < 0
-            ):
-                raise ValueError(f"loss.{name} must be finite and non-negative.")
         if profile["enabled"] and (
             not cfg["conditioning"]["height_enabled"]
             or cfg["data"].get("thickness_axis") != "z"
@@ -141,6 +133,7 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     optim = cfg["optim"]
     if "critic_lr" not in optim and "generator_lr" in optim:
         optim["critic_lr"] = optim["generator_lr"]
+    validate_training_values(cfg)
     return cfg
 
 
@@ -174,40 +167,12 @@ def validate_sr_config(cfg: dict) -> dict:
     refresh = cfg["lr_bank"]["refresh_every_steps"]
     if type(refresh) is not int or refresh < 0:
         raise ValueError("lr_bank.refresh_every_steps must be a non-negative integer.")
-    for name in ("coarse_corruption_probability", "coarse_corruption_strength"):
-        value = cfg["conditioning"][name]
-        if (
-            type(value) not in (int, float)
-            or not math.isfinite(value)
-            or not 0 <= value <= 1
-        ):
-            raise ValueError(f"conditioning.{name} must be between zero and one.")
     if (
         isinstance(guidance, bool)
         or not isinstance(guidance, (int, float))
         or not math.isfinite(guidance)
     ):
         raise ValueError("lr_bank.guidance must be finite.")
-    for name in (
-        "critic_local_weight",
-        "r1_weight",
-        "r2_weight",
-        "downsample_consistency_weight",
-        "downsample_mse_tolerance",
-    ):
-        value = cfg["loss"][name]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (float, int))
-            or not math.isfinite(value)
-            or value < 0
-        ):
-            raise ValueError(f"loss.{name} must be non-negative and finite.")
-    if not 0 <= cfg["optim"]["ema_decay"] < 1:
-        raise ValueError("optim.ema_decay must be in [0, 1).")
-    keep = cfg["conditioning"]["domain_keep_probability"]
-    if type(keep) not in (int, float) or not 0 <= keep <= 1:
-        raise ValueError("conditioning.domain_keep_probability must be in [0, 1].")
     return cfg
 
 

@@ -1,11 +1,11 @@
 import hashlib
 from pathlib import Path
 
-import torch
 from PIL import Image
 
 from src.config.train import normalize_train_config
 from src.plane import PLANES
+from src.storage import atomic_torch_save
 
 
 def fingerprint_data(streams: dict) -> dict:
@@ -77,11 +77,7 @@ def save_training(path: str | Path, trainer) -> None:
         "anchor_bank": trainer.anchor_bank.entries,
         "data_fingerprint": trainer.data_fingerprint,
     }
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    torch.save(payload, temporary)
-    temporary.replace(path)
+    atomic_torch_save(payload, path)
 
 
 def resume_training(trainer, payload: dict) -> None:

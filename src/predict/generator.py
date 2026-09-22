@@ -7,6 +7,7 @@ import torch
 from src.anchor import PlaneAnchor, encode_anchors
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
+from src.phase import validate_num_phases
 from src.predict.convert import owned_clean_to_probs_
 from src.predict.memory import estimate_memory, select_storage
 from src.prepare.height import height_field, resolve_extent
@@ -78,7 +79,7 @@ class Generator:
         self.diffusion = diffusion
         self.device = device
         self.patch_size = patch_size
-        self.num_phases = num_phases
+        self.num_phases = validate_num_phases(num_phases)
         self.latent_channels = latent_channels
         self.use_amp = use_amp
         factor = model.downsample_factor
