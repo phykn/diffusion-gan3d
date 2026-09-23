@@ -55,6 +55,8 @@ def test_lr_checkpoint_restores_training_state_without_rng(tmp_path):
     save_training(path, trainer)
     payload = torch.load(path, weights_only=True)
     assert payload["format"] == "diffusion-gan3d.lr.train"
+    # Historical pair checkpoints predate the explicit critic input mode.
+    payload["config"]["model"]["critic"].pop("input_mode")
     assert (
         not {"streams", "torch_rng", "cuda_rng", "numpy_rng", "python_rng"}
         & payload.keys()

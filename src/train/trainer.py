@@ -6,11 +6,10 @@ import torch
 from torch import nn
 
 from src.anchor import AnchorCondition, PlaneAnchor, encode_anchors
-from src.data.augment import CriticAugment, crop_images
+from src.data.augment import CriticAugment, augment_volumes, crop_images
 from src.data.loader import BatchStream
 from src.data.slice import AnchorTripletSampler, TripletBatch, sample_pairs
 from src.evaluate.anchor import anchor_boundary_metrics
-from src.evaluate.label import compute_vf
 from src.evaluate.profile import phase_profile
 from src.evaluate.structure import structure_metrics
 from src.model.denoiser import Denoiser3D
@@ -42,6 +41,7 @@ from src.train.loss.gan import (
 )
 from src.train.loss.spatial_profile import compute_profile_loss
 from src.train.loss.sr import consistency_loss
+from src.train.loss.transition import compute_real_transition_loss
 from src.train.loss.volume_fraction import compute_vf_loss
 from src.train.metrics import Metrics, materialize_metrics
 from src.train.step import (
@@ -95,6 +95,7 @@ class TrainerSettings:
     anchor_pixel_loss_weight: float
     anchor_shared_axis_probability: float
     connectivity_max_gap: int = 1
+    real_transition_weight: float = 0.0
     r2_gamma: float = 0.0
     connectivity_start_step: int = 0
     connectivity_ramp_steps: int = 20000
@@ -177,6 +178,8 @@ class Trainer:
         )
         self.connectivity_weight = settings.connectivity_weight
         self.normal_transition_weight = settings.normal_transition_weight
+        self.real_transition_weight = settings.real_transition_weight
+        self.connectivity_max_gap = settings.connectivity_max_gap
         self.connectivity_start_step = settings.connectivity_start_step
         self.connectivity_ramp_steps = settings.connectivity_ramp_steps
         self.anchor_triplets = AnchorTripletSampler(
@@ -443,7 +446,42 @@ class Trainer:
             fake_profiles=fake.profiles,
             profile=prepared.model_conditions.get("profile"),
             coarse_target=prepared.coarse_target,
+            real_transition_loss=self._real_transition_loss(prepared, clean_probs),
         )
+
+    def _real_transition_loss(self, prepared, clean_probs):
+        if self.real_transition_weight == 0.0 or prepared.transition != 0:
+            return None
+        real, fake, real_heights, fake_heights = {}, {}, {}, {}
+        height = prepared.model_conditions.get("height")
+        for axis in self.streams[prepared.domain]:
+            if height is not None and axis not in prepared.real.heights:
+                continue
+            real[axis] = prepared.real.images[axis]
+            # Sample before critic augmentation so directions retain physical meaning.
+            sampled = sample_pairs(
+                clean_probs,
+                clean_probs,
+                axis,
+                self.slice_pairs_per_axis,
+                tuple(real[axis].shape[-2:]),
+                height=height,
+            )
+            fake[axis] = sampled[0]
+            if height is not None:
+                real_heights[axis] = prepared.real.heights[axis]
+                fake_heights[axis] = sampled[2]
+        if not fake:
+            return clean_probs.sum(dtype=torch.float32) * 0.0
+        loss, diagnostics = compute_real_transition_loss(
+            real,
+            fake,
+            self.connectivity_max_gap,
+            real_heights if height is not None else None,
+            fake_heights if height is not None else None,
+        )
+        self.diagnostics.update(diagnostics)
+        return loss
 
     def prepare_step(
         self,
@@ -476,6 +514,7 @@ class Trainer:
         if self.bank is not None:
             indices = torch.randint(len(self.bank[domain]), (self.volume_batch_size,))
             low = self.bank[domain][indices].to(self.device)
+            low = augment_volumes(low, preserve_height=self.height_data is not None)
             coarse, level = corrupt_coarse(
                 low, self.coarse_corruption_probability, self.coarse_corruption_strength
             )
@@ -510,8 +549,6 @@ class Trainer:
                 connectivity_ramp=0.0,
                 coarse_target=low,
             )
-        target_vf = compute_vf(own_batches, self.num_phases)
-        target_vf = target_vf.unsqueeze(0).expand(self.volume_batch_size, -1)
         ramp = self.get_anchor_ramp(step)
         selection = (
             None
@@ -524,6 +561,7 @@ class Trainer:
             )
         )
         anchor = None if selection is None else selection.condition
+        target_vf = self.sample_vf(batches, selection, tuple(own_batches))
         presence = self.sample_condition_presence(selection is not None)
         model_conditions = self.make_model_conditions(
             anchor,
@@ -843,6 +881,26 @@ class Trainer:
             dtype=torch.long,
         )
 
+    def sample_vf(
+        self,
+        batches: RealBatch,
+        selection: AnchorSelection | None,
+        owned_axes: tuple[int, ...],
+    ) -> torch.Tensor:
+        if selection is not None and selection.measured is not None:
+            measured = selection.measured
+            mask = measured.mask[:, 0].float()
+            sums = torch.einsum("bcdhw,bdhw->bc", measured.image.float(), mask)
+            counts = mask.sum(dim=(1, 2, 3)).unsqueeze(1)
+            return (sums / counts + 1.0) * 0.5
+        if self.height_data is not None:
+            axis = next(axis for axis in owned_axes if axis in batches.origins)
+        else:
+            axis = owned_axes[int(torch.randint(len(owned_axes), ()).item())]
+        fractions = batches.images[axis].float().mean((2, 3))
+        indices = torch.arange(self.volume_batch_size, device=fractions.device)
+        return fractions[indices % len(fractions)]
+
     def sample_condition_presence(self, has_anchor: bool) -> ConditionPresence:
         batch = self.volume_batch_size
         anchor = torch.full(
@@ -1049,6 +1107,12 @@ class Trainer:
             )
         return previous, current, logits, prediction
 
+    @staticmethod
+    def score_plane(critic, previous, current, time, domain, **conditions):
+        if getattr(critic, "input_mode", "pair") == "single":
+            return critic(previous, time, domain, **conditions)
+        return critic(previous, current, time, domain, **conditions)
+
     def update_critics(
         self,
         transition: int,
@@ -1133,11 +1197,21 @@ class Trainer:
 
                 autocast = self.autocast(self.amp_enabled and not regularize)
                 with autocast:
-                    real_score = critic(
-                        real_prev, real_curr, real_time, real_domain, **real_conditions
+                    real_score = self.score_plane(
+                        critic,
+                        real_prev,
+                        real_curr,
+                        real_time,
+                        real_domain,
+                        **real_conditions,
                     )
-                    fake_score = critic(
-                        fake_prev, fake_curr, fake_time, fake_domain, **fake_conditions
+                    fake_score = self.score_plane(
+                        critic,
+                        fake_prev,
+                        fake_curr,
+                        fake_time,
+                        fake_domain,
+                        **fake_conditions,
                     )
                     losses = get_critic_loss(real_score, fake_score)
                     loss = losses.combine(local_weight)
@@ -1320,6 +1394,15 @@ class Trainer:
                     )
                     + self.vf_loss_weight * vf_loss
                 )
+                if batch.real_transition_loss is not None:
+                    total = total + (
+                        batch.connectivity_ramp
+                        * self.real_transition_weight
+                        * batch.real_transition_loss
+                    )
+                    self.diagnostics["loss/real_transition"] = (
+                        batch.real_transition_loss.detach()
+                    )
                 if batch.profile is not None:
                     total = total + self._profile_loss(batch)
                 if batch.coarse_target is not None:
@@ -1375,7 +1458,8 @@ class Trainer:
                 conditions["height"] = batch.fake_heights[axis]
                 if axis in batch.fake_profiles:
                     conditions["profile"] = batch.fake_profiles[axis]
-            scores = self.critics[self.axis_critics[axis]](
+            scores = self.score_plane(
+                self.critics[self.axis_critics[axis]],
                 fake_prev,
                 fake_curr,
                 time,

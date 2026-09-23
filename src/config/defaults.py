@@ -4,6 +4,7 @@ TRAIN_DEFAULTS = {
     "train.mixed_precision": True,
     "train.structure_every_steps": 100,
     "model.critic.pyramid_min_size": 16,
+    "model.critic.input_mode": "pair",
     "conditioning.height_enabled": False,
     "model.gradient_checkpointing": True,
     "model.generator.embedding_channels": 128,
@@ -37,6 +38,7 @@ STAGE_DEFAULTS = {
         "loss.connectivity.start_step": 0,
         "loss.connectivity.ramp_steps": 20000,
         "loss.connectivity.windows_per_plane": 4,
+        "loss.connectivity.real_transition_weight": 0.0,
         "train.initial_weights": None,
     },
     "sr": {

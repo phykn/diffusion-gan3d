@@ -15,6 +15,37 @@ from src.config.train import (
 from src.train.run.sr import run_sr_train
 
 
+def test_default_lr_uses_measured_transitions_and_disables_replay_losses():
+    cfg = load_train_config("config/train/low_res.yaml")
+    loss = cfg["loss"]["connectivity"]
+    assert loss["real_transition_weight"] > 0
+    assert loss["normal_transition_weight"] == loss["adversarial_weight"] == 0
+
+
+@pytest.mark.parametrize("weight", (-1, float("nan"), True))
+def test_real_transition_weight_is_validated(weight):
+    with pytest.raises(ValueError, match="real_transition_weight"):
+        normalize_train_config(
+            {"loss": {"connectivity": {"real_transition_weight": weight}}}
+        )
+
+
+@pytest.mark.parametrize("gap", (0, -1, 0.5, True))
+def test_transition_gap_is_validated(gap):
+    with pytest.raises(ValueError, match="max_slice_gap"):
+        normalize_train_config({"loss": {"connectivity": {"max_slice_gap": gap}}})
+
+
+def test_legacy_config_retains_replay_mode_and_sr_rejects_lr_transition_option():
+    cfg = load_train_config("tests/fixtures/config/train/low_res.yaml")
+    assert cfg["loss"]["connectivity"]["real_transition_weight"] == 0
+    assert cfg["loss"]["connectivity"]["normal_transition_weight"] > 0
+    with pytest.raises(ValueError, match="connectivity"):
+        normalize_train_config(
+            {"loss": {"connectivity": {"real_transition_weight": 0.1}}}, "sr"
+        )
+
+
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
 @pytest.mark.parametrize("height", [False, True])
 def test_default_presets_resolve_height_safe_augmentation(stage, height):

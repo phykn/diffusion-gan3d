@@ -100,8 +100,6 @@ class Generator:
     ) -> torch.Tensor:
         if anchor_strength == 0:
             anchor_image = anchor_mask = None
-        elif anchor_mask is not None:
-            anchor_mask = anchor_mask.float() * anchor_strength
         conditions = self.prepare_conditions(
             domain,
             vf,
@@ -112,10 +110,16 @@ class Generator:
             coarse,
             corruption_level,
         )
-        if guidance == 1.0:
+        partial_anchor = anchor_mask is not None and 0.0 < anchor_strength < 1.0
+        if guidance == 1.0 and not partial_anchor:
             return self.model(current, time, latent, **conditions)
         logits = self.compute_logits(
-            current, time, latent, guidance=guidance, **conditions
+            current,
+            time,
+            latent,
+            guidance=guidance,
+            **({"anchor_strength": anchor_strength} if partial_anchor else {}),
+            **conditions,
         )
         return Denoiser3D.decode(logits).to(current.dtype)
 
@@ -133,6 +137,7 @@ class Generator:
         profile: torch.Tensor | None = None,
         coarse: torch.Tensor | None = None,
         corruption_level: torch.Tensor | None = None,
+        anchor_strength: float = 1.0,
     ) -> torch.Tensor:
         conditions = self.prepare_conditions(
             domain,
@@ -144,13 +149,14 @@ class Generator:
             coarse,
             corruption_level,
         )
-        if guidance == 1.0:
+        if guidance == 1.0 and anchor_strength == 1.0:
             return self.model.compute_logits(current, time, latent, **conditions)
         return self.model.apply_guidance_logits(
             current,
             time,
             latent,
             guidance,
+            **({"anchor_strength": anchor_strength} if anchor_strength != 1.0 else {}),
             **conditions,
         )
 

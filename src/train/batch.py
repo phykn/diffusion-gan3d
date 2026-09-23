@@ -62,6 +62,7 @@ class DenoiserBatch:
     fake_profiles: dict[int, torch.Tensor] = field(default_factory=dict)
     profile: torch.Tensor | None = None
     coarse_target: torch.Tensor | None = None
+    real_transition_loss: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)

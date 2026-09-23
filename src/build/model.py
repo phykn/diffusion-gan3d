@@ -4,7 +4,7 @@ from torch import nn
 
 from src.config.data import get_domains, get_plane_groups, get_sr_plane_groups
 from src.config.train import get_sr_sizes, normalize_train_config
-from src.model.critic import ConnectivityCritic2D, PairCritic2D
+from src.model.critic import ConnectivityCritic2D, PairCritic2D, PlaneCritic2D
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 
@@ -95,9 +95,10 @@ def build_models(
         }
     else:
         groups = get_plane_groups(cfg)
+    critic_class = PlaneCritic2D if critic["input_mode"] == "single" else PairCritic2D
     critics = nn.ModuleDict(
         {
-            group: PairCritic2D(
+            group: critic_class(
                 num_phases=data["num_phases"],
                 channels=critic["channels"],
                 embedding_channels=generator["embedding_channels"],

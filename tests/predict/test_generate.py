@@ -597,16 +597,37 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
         assert right.current.shape == (1, 3, 4, 4, 4)
 
 
-def test_partial_anchor_strength_scales_mask_on_one_state() -> None:
-    model = _AnchorTraceModel()
+@pytest.mark.parametrize("tiled", (False, True))
+def test_partial_anchor_strength_uses_binary_paths_on_one_state(tiled) -> None:
+    model = Denoiser3D(
+        num_phases=3,
+        base_channels=4,
+        channel_multipliers=(1, 2),
+        embedding_channels=8,
+        latent_channels=4,
+        num_domains=1,
+    ).eval()
     diffusion = _TraceDiffusion(timesteps=2)
     gen = _generator(model, diffusion)
-    gen.generate_probs(
+    kwargs = dict(
         anchors=(PlaneAnchor(torch.zeros(4, 4, dtype=torch.long), 0, 1),),
         anchor_strength=0.5,
     )
-    assert len(model.calls) == len(diffusion.calls) == 2
-    assert all(call.anchor_mask.max() == 0.5 for call in model.calls)
+    with patch.object(model, "compute_logits", wraps=model.compute_logits) as logits:
+        if tiled:
+            TiledGenerator(gen).generate_probs(
+                shape=(4, 4, 6), overlap=0, progress=False, **kwargs
+            )
+        else:
+            gen.generate_probs(**kwargs)
+
+    assert logits.call_count > 0
+    for anchored, plain in zip(
+        logits.call_args_list[::2], logits.call_args_list[1::2], strict=True
+    ):
+        assert anchored.kwargs["anchor_mask"].max() == 1
+        assert plain.kwargs.get("anchor_mask") is None
+        assert all(a is b for a, b in zip(anchored.args[:3], plain.args[:3]))
 
 
 def test_anchor_never_overwrites_a_different_model_prediction() -> None:

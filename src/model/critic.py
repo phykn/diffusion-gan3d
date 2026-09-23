@@ -160,7 +160,9 @@ class CriticBase(nn.Module):
         return block(inputs, emb)
 
 
-class PairCritic2D(CriticBase):
+class PlaneCritic2D(CriticBase):
+    input_mode = "single"
+
     def __init__(
         self,
         num_phases: int,
@@ -171,7 +173,7 @@ class PairCritic2D(CriticBase):
         time_scale: float = 1.0,
     ) -> None:
         super().__init__(
-            input_channels=2 * num_phases,
+            input_channels=num_phases,
             channels=channels,
             embedding_channels=embedding_channels,
             num_domains=num_domains,
@@ -188,7 +190,6 @@ class PairCritic2D(CriticBase):
     def forward(
         self,
         x_previous: torch.Tensor,
-        x_current: torch.Tensor,
         time: torch.Tensor,
         domain: torch.Tensor,
         height: torch.Tensor | None = None,
@@ -200,11 +201,33 @@ class PairCritic2D(CriticBase):
             )
         )
         return self.score(
-            torch.cat((x_previous, x_current), dim=1),
+            x_previous,
             embedding,
             domain,
             height,
             profile,
+        )
+
+
+class PairCritic2D(PlaneCritic2D):
+    """Legacy joint critic for saved pair checkpoints and controlled comparisons."""
+
+    input_mode = "pair"
+
+    def __init__(self, num_phases: int, *args, **kwargs) -> None:
+        super().__init__(2 * num_phases, *args, **kwargs)
+
+    def forward(
+        self,
+        x_previous: torch.Tensor,
+        x_current: torch.Tensor,
+        time: torch.Tensor,
+        domain: torch.Tensor,
+        height: torch.Tensor | None = None,
+        profile: torch.Tensor | None = None,
+    ) -> CriticScores:
+        return super().forward(
+            torch.cat((x_previous, x_current), dim=1), time, domain, height, profile
         )
 
 

@@ -105,7 +105,14 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         raise ValueError(
             "model.critic.pyramid_min_size must be an integer of at least two."
         )
+    if cfg["model"]["critic"]["input_mode"] not in ("pair", "single"):
+        raise ValueError("model.critic.input_mode must be pair or single.")
     if stage == "low_res":
+        gap = cfg["loss"]["connectivity"].get("max_slice_gap", 1)
+        if type(gap) is not int or gap < 1:
+            raise ValueError(
+                "loss.connectivity.max_slice_gap must be a positive integer."
+            )
         profile = cfg["conditioning"]["spatial_profile"]
         if type(profile["critic_enabled"]) is not bool or (
             profile["critic_enabled"] and not profile["enabled"]

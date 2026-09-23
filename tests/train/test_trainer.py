@@ -710,12 +710,14 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     )
     vf_batch_ids = []
     critic_batch_ids = []
-    original_compute_vf = compute_vf
+    original_sample_vf = trainer.sample_vf
     original_update_critics = trainer.update_critics
+    measured = []
 
-    def track_vfs(batches, num_phases):
-        vf_batch_ids.extend(id(batches[axis]) for axis in (0, 1, 2))
-        return original_compute_vf(batches, num_phases)
+    def track_vfs(batches, selection, owned_axes):
+        vf_batch_ids.extend(id(batches.images[axis]) for axis in (0, 1, 2))
+        measured.append(selection.measured)
+        return original_sample_vf(batches, selection, owned_axes)
 
     def track_critics(transition, fake, batches, step, domain, **kwargs):
         critic_batch_ids.extend(id(batches.images[axis]) for axis in (0, 1, 2))
@@ -729,7 +731,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         )
 
     with (
-        patch("src.train.trainer.compute_vf", side_effect=track_vfs),
+        patch.object(trainer, "sample_vf", side_effect=track_vfs),
         patch.object(trainer, "update_critics", side_effect=track_critics),
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
@@ -750,10 +752,9 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     assert len(compute_logits.call_args_list) == 2
     assert all(vf is vfs[0] for vf in vfs)
     assert vfs[0].shape == (1, 3)
-    expected_vf = compute_vf(
-        {axis: streams[axis].images for axis in (0, 1, 2)},
-        num_phases=3,
-    )
+    region = measured[0].regions[0]
+    image = (measured[0].image.select(region.axis + 2, region.index) + 1) * 0.5
+    expected_vf = compute_vf({region.axis: image}, num_phases=3)
     assert torch.allclose(vfs[0][0], expected_vf)
     assert vf_batch_ids == critic_batch_ids
 
@@ -761,6 +762,107 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     assert gradient is not None
     assert bool(torch.isfinite(gradient).all())
     assert float(gradient.abs().sum()) > 0.0
+
+
+@pytest.mark.parametrize("anchored", (False, True))
+def test_vf_conditions_follow_individual_fractional_crops(anchored):
+    trainer, _, streams = _conditioning_trainer(anchored=anchored)
+    trainer.volume_batch_size = 2
+    fractions = torch.tensor([[0.8, 0.2, 0.0], [0.1, 0.3, 0.6]])
+    for stream in streams.values():
+        stream.images = fractions[:, :, None, None].expand(-1, -1, 4, 8)
+
+    prepared = trainer.prepare_step(0, 0)
+
+    expected = fractions[fractions[:, 0].argsort()]
+    observed = prepared.target_vf[prepared.target_vf[:, 0].argsort()]
+    torch.testing.assert_close(observed, expected)
+    assert prepared.model_conditions["vf"] is prepared.target_vf
+    if anchored:
+        measured = prepared.selection.measured
+        region = measured.regions[0]
+        image = measured.image.select(region.axis + 2, region.index)
+        crop = image[..., region.row : region.row + 4, region.col : region.col + 8]
+        torch.testing.assert_close(prepared.target_vf, ((crop + 1) * 0.5).mean((2, 3)))
+
+
+def test_replay_vf_uses_only_its_measured_root():
+    trainer, _, streams = _conditioning_trainer(anchored=True)
+    trainer.volume_batch_size = 2
+    fractions = torch.tensor([0.2, 0.3, 0.5])
+    measured = encode_anchors(
+        [PlaneAnchor(fractions[:, None, None].expand(-1, 4, 4), 0, 2)],
+        1,
+        3,
+        8,
+        torch.device("cpu"),
+        torch.float32,
+    )
+    prediction = torch.full((1, 3, 8, 8, 8), -1.0)
+    prediction[:, 0] = 1.0
+    trainer.anchor_bank.add(0, prediction, measured, torch.tensor([True]))
+    trainer.use_multi_anchor_next = True
+    for stream in streams.values():
+        stream.images.zero_()
+        stream.images[:, 1] = 1.0
+
+    prepared = trainer.prepare_step(0, 0)
+
+    assert prepared.selection.source == "multi"
+    torch.testing.assert_close(prepared.target_vf, fractions.expand(2, -1))
+
+
+def test_unanchored_vf_supports_more_volumes_than_real_crops():
+    trainer, _, streams = _conditioning_trainer(anchored=False)
+    trainer.volume_batch_size = 5
+    fractions = torch.tensor([[0.8, 0.2, 0.0], [0.1, 0.3, 0.6]])
+    for stream in streams.values():
+        stream.images = fractions[:, :, None, None].expand(-1, -1, 8, 8)
+
+    prepared = trainer.prepare_step(0, 0)
+
+    assert prepared.target_vf.shape == (5, 3)
+    for row in prepared.target_vf:
+        assert any(torch.allclose(row, crop) for crop in fractions)
+    torch.testing.assert_close(prepared.target_vf[:2], fractions)
+
+
+def test_unanchored_vf_and_height_use_the_same_owned_crops():
+    trainer, _, _ = _conditioning_trainer(anchored=False)
+    trainer.volume_batch_size = 2
+    trainer.height_data = {"crop_size": 8, "height_extents": {0: 32}}
+    fractions = torch.tensor([[0.8, 0.2, 0.0], [0.1, 0.3, 0.6]])
+    batches = RealBatch(
+        images={
+            0: torch.full((2, 3, 8, 8), 1 / 3),
+            1: fractions[:, :, None, None].expand(-1, -1, 8, 8),
+            2: torch.full((2, 3, 8, 8), 1 / 3),
+        },
+        origins={1: torch.tensor([0.0, 8.0])},
+        extents={1: torch.tensor([32.0, 32.0])},
+    )
+    with patch.object(trainer, "get_batches", return_value=batches):
+        prepared = trainer.prepare_step(0, 0)
+
+    torch.testing.assert_close(prepared.target_vf, fractions)
+    torch.testing.assert_close(
+        prepared.model_conditions["height"],
+        trainer.volume_height(batches.origins[1], 0, batches.extents[1]),
+    )
+
+
+def test_profile_keeps_priority_over_crop_vf():
+    trainer, _, _ = _conditioning_trainer(anchored=False)
+    trainer.profile_settings = {"enabled": True}
+    profile = torch.tensor([[[0.2, 0.4], [0.3, 0.2], [0.5, 0.4]]])
+    batches = RealBatch(
+        images={axis: torch.full((2, 3, 8, 8), 1 / 3) for axis in (0, 1, 2)},
+        profiles={1: profile},
+    )
+    with patch.object(trainer, "get_batches", return_value=batches):
+        prepared = trainer.prepare_step(0, 0)
+    torch.testing.assert_close(prepared.target_vf, profile.mean(-1))
+    assert prepared.model_conditions["vf"] is prepared.target_vf
 
 
 def test_generate_pair_keeps_initial_noise_and_posterior_unprojected() -> None:
@@ -1038,7 +1140,7 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
 
     with (
         patch.object(trainer, "sample_anchor", return_value=selection),
-        patch("src.train.trainer.compute_vf", return_value=target[0]),
+        patch.object(trainer, "sample_vf", return_value=target),
         patch.object(
             trainer,
             "generate_pair",
@@ -1064,6 +1166,9 @@ def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) 
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
     )
     trainer.connectivity_critic = nn.Linear(2, 1)
+    trainer.connectivity_weight = 0.0
+    trainer.normal_transition_weight = 0.0
+    trainer.real_transition_weight = 0.0
     trainer.step = Mock(side_effect=KeyboardInterrupt)
     checkpoint = tmp_path / "checkpoints" / "last.pt"
     checkpoint.parent.mkdir()
@@ -1097,6 +1202,9 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
     )
     trainer.connectivity_critic = nn.Linear(2, 1)
+    trainer.connectivity_weight = 0.0
+    trainer.normal_transition_weight = 0.0
+    trainer.real_transition_weight = 0.0
     trainer.step = Mock(
         return_value=Metrics(
             generator=1.0,

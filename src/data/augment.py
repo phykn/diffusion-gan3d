@@ -1,9 +1,33 @@
 import math
 from collections.abc import Mapping, Sequence
+from itertools import permutations
 
 import torch
 
 from src.plane import PLANE_DIRECTIONS, PLANES, get_axis
+
+
+def augment_volumes(
+    volumes: torch.Tensor, preserve_height: bool = False
+) -> torch.Tensor:
+    """Sample spatial symmetries independently, keeping phase fractions intact."""
+    shape = volumes.shape[-3:]
+    orders = [
+        order
+        for order in permutations(range(3))
+        if (not preserve_height or order[0] == 0)
+        and tuple(shape[axis] for axis in order) == shape
+    ]
+    axes = (2, 3) if preserve_height else (1, 2, 3)
+    flip_count = 2 ** len(axes)
+    choices = torch.randint(len(orders) * flip_count, (len(volumes),)).tolist()
+    result = []
+    for volume, choice in zip(volumes, choices, strict=True):
+        order = orders[choice // flip_count]
+        volume = volume.permute(0, *(axis + 1 for axis in order))
+        flips = [axis for bit, axis in enumerate(axes) if choice % flip_count & (1 << bit)]
+        result.append(volume.flip(flips) if flips else volume)
+    return torch.stack(result)
 
 
 class CriticAugment:

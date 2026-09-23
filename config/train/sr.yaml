@@ -10,6 +10,7 @@ model:
     channels: [16, 32, 64, 64]
 
   critic:
+    input_mode: single  # single: x_t only; pair: x_t and x_{t+1}
     plane_groups: [[xy, xz, yz]]
     channels: [32, 64, 128]
 

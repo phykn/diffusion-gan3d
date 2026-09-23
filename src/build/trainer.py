@@ -186,6 +186,7 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         structure_every_steps=train["structure_every_steps"],
         connectivity_weight=connectivity.get("adversarial_weight", 0.0),
         normal_transition_weight=connectivity.get("normal_transition_weight", 0.0),
+        real_transition_weight=connectivity.get("real_transition_weight", 0.0),
         connectivity_max_gap=connectivity.get("max_slice_gap", 1),
         connectivity_start_step=connectivity_start,
         connectivity_ramp_steps=connectivity_ramp,

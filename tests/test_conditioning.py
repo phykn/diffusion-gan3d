@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -24,7 +25,64 @@ from src.train.loss.anchor import SoftAnchorLoss
 from src.train.run.bank import file_hash, refresh_bank
 from src.train.run.low_res import run_low_res_train
 from src.train.run.sr import run_sr_train
-from src.train.state import export_sr, resume_training, save_training
+from src.train.state import (
+    describe_data,
+    export_sr,
+    resume_sr_training,
+    resume_training,
+    save_sr_training,
+    save_training,
+)
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("height", [False, True])
+def test_single_critic_trains_with_regularization_and_resumes(tmp_path, stage, height):
+    torch.set_num_threads(1)
+    cfg = configuration(tmp_path, stage, height)
+    cfg["model"]["critic"]["input_mode"] = "single"
+    cfg["loss"].update(r1_weight=0.1, r2_weight=0.1, r1_every_steps=1)
+    bank = {0: torch.randn(2, 2, 8, 8, 8).softmax(1)}
+
+    def build(config):
+        if stage == "low_res":
+            return build_trainer(config, torch.device("cpu"))
+        return build_sr_trainer(
+            config,
+            bank,
+            torch.device("cpu"),
+            {0: torch.tensor([0.0, 4.0])},
+            {0: torch.tensor([24.0, 24.0])},
+        )
+
+    trainer = build(cfg)
+    for step in (0, 1):
+        metrics = trainer.step(step, transition=step)
+        assert np.isfinite(metrics.generator_total)
+        gradients = {
+            key: value
+            for key, value in metrics.diagnostics.items()
+            if key.startswith("generator_input_gradient/")
+        }
+        assert gradients
+        assert all(v == 0 for k, v in gradients.items() if k.endswith("/current"))
+        assert any(v > 0 for k, v in gradients.items() if k.endswith("/previous"))
+    checkpoint = tmp_path / "single.pt"
+    if stage == "low_res":
+        save_training(checkpoint, trainer)
+        resume = resume_training
+    else:
+        save_sr_training(trainer, checkpoint)
+        resume = resume_sr_training
+    payload = torch.load(checkpoint, weights_only=True)
+    restored = build(cfg)
+    resume(restored, payload)
+    assert restored.completed_steps == 2
+    assert np.isfinite(restored.step(2, transition=0).generator_total)
+    incompatible = copy.deepcopy(cfg)
+    incompatible["model"]["critic"]["input_mode"] = "pair"
+    with pytest.raises(ValueError, match="saved"):
+        resume(build(incompatible), payload)
 
 
 def test_subpixel_phase_fraction_reaches_anchor_and_soft_loss():
@@ -627,6 +685,85 @@ def test_replay_training_never_generates_reference_and_survives_resume(tmp_path)
     assert not any("rng" in key for key in payload)
 
 
+@pytest.mark.parametrize("height", (False, True))
+def test_measured_transition_training_keeps_replay_but_never_scores_it(
+    tmp_path, height
+):
+    cfg = configuration(tmp_path, height=height)
+    cfg["loss"]["connectivity"].update(
+        adversarial_weight=0,
+        normal_transition_weight=0,
+        real_transition_weight=1,
+    )
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    with patch.object(
+        trainer.anchor_triplets,
+        "sample",
+        side_effect=AssertionError("replay target used"),
+    ):
+        first = trainer.step(0, transition=0)
+        second = trainer.step(1, transition=0)
+    assert first.anchor_planes == 1 and second.anchor_planes > 1
+    assert first.diagnostics["loss/real_transition"] > 0
+    assert second.diagnostics["loss/real_transition"] > 0
+    assert second.generator_connectivity == second.normal_transition_loss == 0
+    assert trainer.updates["connectivity"] == 0
+    assert all(p.grad is None for p in trainer.connectivity_critic.parameters())
+    metadata = describe_data(trainer)
+    assert metadata["connectivity_reference"] is None
+    assert metadata["real_transition_reference"] == "measured_2d"
+    save_training(tmp_path / "last.pt", trainer)
+    restored = build_trainer(cfg, torch.device("cpu"))
+    resume_training(restored, torch.load(tmp_path / "last.pt", weights_only=True))
+    assert restored.real_transition_weight == 1
+    assert len(restored.anchor_bank.entries[0]) == len(trainer.anchor_bank.entries[0])
+
+
+def test_real_transition_loss_is_independent_of_replay_volume(tmp_path):
+    cfg = configuration(tmp_path)
+    cfg["loss"]["connectivity"].update(
+        adversarial_weight=0,
+        normal_transition_weight=0,
+        real_transition_weight=1,
+    )
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    trainer.step(0, transition=0)
+    prepared = trainer.prepare_step(1, transition=0)
+    assert prepared.selection.source == "multi"
+    changed = replace(
+        prepared,
+        selection=replace(
+            prepared.selection,
+            reference=-prepared.selection.reference,
+        ),
+    )
+    probs = torch.randn(1, 2, 8, 8, 8, requires_grad=True).softmax(1)
+    with torch.random.fork_rng():
+        torch.manual_seed(2)
+        first = trainer._real_transition_loss(prepared, probs)
+        torch.manual_seed(2)
+        second = trainer._real_transition_loss(changed, probs)
+    torch.testing.assert_close(first, second)
+
+
+def test_measured_transition_loss_trains_without_anchor_and_only_at_final_step(
+    tmp_path,
+):
+    cfg = configuration(tmp_path)
+    cfg["conditioning"]["anchor"]["probability"] = 0
+    cfg["loss"]["connectivity"].update(
+        adversarial_weight=0,
+        normal_transition_weight=0,
+        real_transition_weight=1,
+    )
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    final = trainer.step(0, transition=0)
+    assert final.anchor_planes == 0
+    assert final.diagnostics["loss/real_transition"] > 0
+    intermediate = trainer.step(1, transition=1)
+    assert "loss/real_transition" not in intermediate.diagnostics
+
+
 def test_height_origin_survives_loader_training_export_and_tiles(tmp_path):
     cfg = configuration(tmp_path, height=True)
     original = copy.deepcopy(cfg)
@@ -706,7 +843,9 @@ def test_dataset_dict_geometry_is_independent_of_height_conditioning(
         assert batch["height_extent"].tolist() == ([24.0] if axis else [-1.0]) * 2
 
 
-@pytest.mark.parametrize("invalid", ["bank_domains", "missing_extents", "extra_extents"])
+@pytest.mark.parametrize(
+    "invalid", ["bank_domains", "missing_extents", "extra_extents"]
+)
 def test_height_conditioned_sr_rejects_mismatched_bank_domains(tmp_path, invalid):
     cfg = configuration(tmp_path, stage="sr", height=True)
     bank = {0: torch.full((2, 2, 8, 8, 8), 0.5)}
@@ -774,4 +913,5 @@ def test_partial_anchor_with_cfg_uses_two_forwards_per_transition(tmp_path):
         for call in logits.call_args_list
         if call.kwargs.get("anchor_mask") is not None
     ]
-    assert all(mask.max() == 0.8 for mask in masks)
+    assert masks
+    assert all(mask.max() == 1 for mask in masks)

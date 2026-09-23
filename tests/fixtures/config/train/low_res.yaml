@@ -50,6 +50,7 @@ loss:
     max_slice_gap: 8
     adversarial_weight: 0.25
     normal_transition_weight: 0.1
+    real_transition_weight: 0.0
     ramp_steps: 5000
 
 optim:

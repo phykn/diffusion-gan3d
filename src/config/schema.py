@@ -32,7 +32,9 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
             "generator": dict.fromkeys(
                 ("channels", "embedding_channels", "latent_channels")
             ),
-            "critic": dict.fromkeys(("channels", "plane_groups", "pyramid_min_size")),
+            "critic": dict.fromkeys(
+                ("channels", "plane_groups", "pyramid_min_size", "input_mode")
+            ),
             "diffusion": dict.fromkeys(
                 ("num_steps", "beta_min", "beta_max", "time_embedding")
             ),
@@ -92,6 +94,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                             "max_slice_gap",
                             "adversarial_weight",
                             "normal_transition_weight",
+                            "real_transition_weight",
                             "start_step",
                             "ramp_steps",
                             "windows_per_plane",

@@ -389,7 +389,10 @@ class Denoiser3D(nn.Module):
         profile_present: torch.Tensor | None = None,
         coarse: torch.Tensor | None = None,
         corruption_level: torch.Tensor | None = None,
+        anchor_strength: float = 1.0,
     ) -> torch.Tensor:
+        if anchor_strength == 0.0:
+            anchor_image = anchor_mask = None
         conditions = dict(
             vf=vf,
             vf_present=vf_present,
@@ -416,14 +419,38 @@ class Denoiser3D(nn.Module):
             unconditional_domain = domain
             unconditional_conditions = dict(height=height)
 
-        if guidance == 1.0:
+        partial_anchor = anchor_mask is not None and 0.0 < anchor_strength < 1.0
+        if guidance == 1.0 and not partial_anchor:
             return self.compute_logits(x_current, time, latent, domain, **conditions)
-        unconditional = self.compute_logits(
-            x_current, time, latent, unconditional_domain, **unconditional_conditions
-        )
+        unconditional = None
+        if guidance != 1.0:
+            unconditional = self.compute_logits(
+                x_current,
+                time,
+                latent,
+                unconditional_domain,
+                **unconditional_conditions,
+            )
         if guidance == 0.0:
             return unconditional
         conditional = self.compute_logits(x_current, time, latent, domain, **conditions)
+        if partial_anchor:
+            if unconditional is not None and vf is None and profile is None:
+                plain = unconditional
+            else:
+                plain = self.compute_logits(
+                    x_current,
+                    time,
+                    latent,
+                    domain,
+                    **dict(conditions, anchor_image=None, anchor_mask=None),
+                )
+            # Interpolate trained binary-anchor paths, never the input mask.
+            conditional = torch.lerp(
+                plain.float(), conditional.float(), anchor_strength
+            )
+        if guidance == 1.0:
+            return conditional
         baseline = unconditional.float()
         return baseline + guidance * (conditional.float() - baseline)
 

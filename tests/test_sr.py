@@ -24,6 +24,7 @@ from src.prepare.resize import (
     phase_channels,
     resize_crop,
     resize_labels,
+    resize_phases,
     scaled_size,
 )
 from src.train.coarse import corrupt_coarse
@@ -73,6 +74,45 @@ def export_model(path, cfg):
         path,
     )
     return model
+
+
+@pytest.mark.parametrize("height", [False, True])
+def test_sr_augments_clean_target_before_corruption_and_preserves_bank(tmp_path, height):
+    cfg = sr_config(tmp_path)
+    cfg["conditioning"]["height_enabled"] = height
+    cfg["augmentation"]["planes"] = {
+        "xy": {"flip_axes": ["x", "y"], "rotate_90": True},
+        "yz": {"flip_axes": ["y"], "rotate_90": False},
+    }
+    bank = {0: torch.rand(1, 3, 8, 8, 8).softmax(1)}
+    before = bank[0].clone()
+    origins = {0: torch.tensor([4.0])}
+    extents = {0: torch.tensor([24.0])}
+    trainer = build_sr_trainer(cfg, bank, torch.device("cpu"), origins, extents)
+    with (
+        patch(
+            "src.train.trainer.augment_volumes",
+            side_effect=lambda low, **kw: low.flip(-1),
+        ) as augment,
+        patch(
+            "src.train.trainer.corrupt_coarse",
+            side_effect=lambda low, *args: (low.flip(1), low.new_ones(len(low))),
+        ) as corrupt,
+    ):
+        prepared = trainer.prepare_step(0, transition=0)
+    expected = before.flip(-1)
+    assert augment.call_args.kwargs["preserve_height"] is height
+    torch.testing.assert_close(corrupt.call_args.args[0], expected)
+    torch.testing.assert_close(prepared.coarse_target, expected)
+    torch.testing.assert_close(
+        prepared.model_conditions["coarse"], resize_phases(expected.flip(1), (12,) * 3)
+    )
+    torch.testing.assert_close(bank[0], before)
+    if height:
+        torch.testing.assert_close(
+            prepared.model_conditions["height"],
+            trainer.volume_height(origins[0], 0, extents[0]),
+        )
 
 
 @pytest.mark.parametrize("scale,tiled", [(1.5, False), (2, False), (2, True)])
