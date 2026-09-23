@@ -1,10 +1,77 @@
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
 import torch
 
-from src.anchor import PlaneAnchor, encode_anchors
+from src.anchor import AnchorRegion, PlaneAnchor, encode_anchors
 from src.data.slice import AnchorTripletSampler, sample_pairs
+
+
+def test_focused_pairs_use_active_anchor_batches():
+    volume = torch.zeros(2, 2, 8, 8, 8)
+    volume[1, 0, :, 5, 6] = 1
+    condition = encode_anchors(
+        [PlaneAnchor(torch.zeros(8, 8, dtype=torch.long), 1, 5)],
+        2,
+        2,
+        8,
+        torch.device("cpu"),
+        torch.float32,
+    )
+    condition = replace(condition, active_batches=(1,))
+
+    def choose(high, size, *args, **kwargs):
+        if high == 16 and size == (4,):
+            return torch.tensor([0, 8, 8, 8])
+        if high == 8 and size == ():
+            return torch.tensor(6)
+        return torch.zeros(size, dtype=torch.long)
+
+    with patch("src.data.slice.torch.randint", side_effect=choose):
+        selected, _ = sample_pairs(volume, volume, 0, 4, 3, anchor=condition)
+
+    assert torch.equal(selected[:2, 0].amax((-2, -1)), torch.ones(2))
+    assert torch.equal(selected[2:, 0], torch.zeros_like(selected[2:, 0]))
+
+
+def test_focused_pairs_skip_measured_plane_and_empty_anchor_region():
+    volume = torch.zeros(2, 2, 8, 8, 8)
+    volume[1, 0, 3, 5, 6] = 1
+    volume[1, 0, 2] = 2
+    volume.requires_grad_()
+    anchor = encode_anchors(
+        [PlaneAnchor(torch.zeros(8, 8, dtype=torch.long), 1, 5)],
+        2, 2, 8, torch.device("cpu"), torch.float32,
+    )
+    anchor = replace(
+        anchor,
+        regions=(
+            AnchorRegion(1, 1, 2, 4, 1, 1),
+            AnchorRegion(1, 5, 3, 6, 1, 1),
+        ),
+        active_batches=(1,),
+    )
+    measured = encode_anchors(
+        [PlaneAnchor(torch.zeros(8, 8, dtype=torch.long), 0, 2)],
+        2, 2, 8, torch.device("cpu"), torch.float32,
+    )
+    measured = replace(measured, active_batches=(1,))
+
+    def choose(high, size, *args, **kwargs):
+        if high == 15 and size == (4,):
+            return torch.tensor([0, 8, 8, 8])
+        return torch.zeros(size, dtype=torch.long)
+
+    with patch("src.data.slice.torch.randint", side_effect=choose):
+        selected, _ = sample_pairs(
+            volume, volume, 0, 4, 3, anchor=anchor, measured=measured,
+        )
+
+    assert torch.equal(selected[:2, 0].amax((-2, -1)), torch.ones(2))
+    assert selected.max() == 1
+    selected.sum().backward()
+    assert volume.grad[1, :, 2].count_nonzero() == 0
 
 
 def test_connectivity_samples_every_parallel_anchor_and_includes_adjacent_gap():

@@ -44,8 +44,8 @@ def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> InferenceAPI:
     )
     monkeypatch.setattr(
         inference_module,
-        "load_generator",
-        lambda _weights, device: generator,
+        "build_generator",
+        lambda _weights, cfg, device: generator,
     )
     monkeypatch.setattr(inference_module, "find_train_config", lambda _weights: weights)
     monkeypatch.setattr(

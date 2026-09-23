@@ -17,6 +17,15 @@ def load_generator(
     path = Path(weights).resolve()
     config = find_train_config(path)
     cfg = load_train_config(config)
+    return build_generator(path, cfg, device)
+
+
+def build_generator(
+    weights: str | Path,
+    cfg: dict,
+    device: torch.device,
+) -> Generator:
+    path = Path(weights).resolve()
     denoiser = build_denoiser(cfg, checkpointing=False).to(device)
     try:
         load_model(path, denoiser)

@@ -15,8 +15,9 @@ from src.build.trainer import build_trainer
 from src.config.files import load_yaml, save_yaml
 from src.config.train import load_train_config
 from src.storage import load_volume
-from src.train.run.bank import file_hash, publish_bank, refresh_bank, save_bank
+from src.train.run.bank import publish_bank, refresh_bank, save_bank
 from src.train.run.loop import run_train
+from src.train.run.source import file_hash
 
 
 @pytest.mark.parametrize(
@@ -216,7 +217,9 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
     source = source_dir / "generator.pt"
     source.write_bytes(b"frozen weights")
     source_config = source_dir / "train.yaml"
-    source_config.write_text("stage: low_res\n", encoding="utf-8")
+    save_yaml(
+        source_config, load_yaml("tests/fixtures/config/train/low_res.yaml")
+    )
     old_bank = tmp_path / "lr_bank/step_00000000.pt"
     old_bank.parent.mkdir()
     old_bank.write_bytes(b"original bank")
@@ -228,6 +231,7 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
             "weights_sha256": file_hash(source),
             "config_sha256": file_hash(source_config),
             "bank": str(old_bank),
+            "bank_sha256": file_hash(old_bank),
         },
         "lr_bank": {"refresh_every_steps": 2, "guidance": 1},
     }
@@ -239,7 +243,7 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
         "conditions": None,
     }
     monkeypatch.setattr(
-        "src.train.run.bank.load_generator",
+        "src.train.run.bank.build_generator",
         lambda *args: SimpleNamespace(
             generate_probs=lambda **kwargs: torch.stack(
                 (torch.ones(8, 8, 8), torch.zeros(8, 8, 8))
@@ -251,6 +255,12 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
     assert cfg["source"] == original_source
     assert not (tmp_path / "lr_bank/step_00000002.pt").exists()
     publish_bank(bank, cfg, tmp_path, 2)
+    published = torch.load(cfg["source"]["bank"], weights_only=True)
+    assert published["source"] == {
+        key: value
+        for key, value in original_source.items()
+        if key not in {"bank", "bank_sha256"}
+    }
     assert old_bank.read_bytes() == b"original bank"
     assert bank["volumes"][0][0, 0].eq(1).all()
     assert bank["volumes"][0][1].eq(0.5).all()

@@ -17,11 +17,15 @@ from src.data.source import infer_height_extents
 from src.train.relocate import relocate_checkpoint
 from src.train.run.bank import (
     create_bank,
-    file_hash,
     publish_bank,
     refresh_bank,
 )
 from src.train.run.loop import make_run_dir, run_train
+from src.train.run.source import (
+    file_hash,
+    read_source_config,
+    validate_frozen_source,
+)
 from src.train.state import resume_sr_training
 
 
@@ -59,6 +63,11 @@ def run_sr_train(
         bank_path = Path(cfg["source"]["bank"])
         if file_hash(bank_path) != cfg["source"]["bank_sha256"]:
             raise ValueError("LR bank changed since the checkpoint was saved.")
+        validate_frozen_source(
+            Path(cfg["source"]["weights"]),
+            cfg["source"],
+            payload.get("path_maps"),
+        )
         bank_payload = load_bank(bank_path)
     else:
         cfg = load_train_config(
@@ -66,7 +75,7 @@ def run_sr_train(
             "sr",
             data=data,
         )
-        base_cfg = prepare_source(cfg, base_weights)
+        prepare_source(cfg, base_weights)
         if bank_size is not None:
             cfg["lr_bank"]["samples_per_domain"] = bank_size
     if steps is not None:
@@ -77,7 +86,7 @@ def run_sr_train(
         raise ValueError("--steps must exceed the completed checkpoint step.")
     run_dir = make_run_dir(PROJECT_ROOT / "run", "sr", run_dir, cfg["nickname"])
     if payload is None:
-        bank_payload = create_bank(cfg, base_cfg, device)
+        bank_payload = create_bank(cfg, device)
         publish_bank(bank_payload, cfg, run_dir, 0)
     trainer = build_sr_trainer(
         cfg,
@@ -111,7 +120,7 @@ def run_sr_train(
     return run_dir
 
 
-def prepare_source(cfg: dict, base_weights: Path | None) -> dict:
+def prepare_source(cfg: dict, base_weights: Path | None) -> None:
     if base_weights is None:
         configured = cfg.get("source", {}).get("weights")
         if not isinstance(configured, str) or not configured.strip():
@@ -124,7 +133,7 @@ def prepare_source(cfg: dict, base_weights: Path | None) -> dict:
     base_path = base_path.resolve()
     if base_path.is_dir():
         base_path = base_path / "generator.pt"
-    base_cfg = load_train_config(find_train_config(base_path))
+    base_cfg, data_sha256 = read_source_config(find_train_config(base_path))
     if cfg["conditioning"]["height_enabled"]:
         cfg["data"]["height_extents"] = infer_height_extents(cfg["data"])
     cfg["data"] = validate_sr_source(cfg["data"], base_cfg["data"])
@@ -138,4 +147,5 @@ def prepare_source(cfg: dict, base_weights: Path | None) -> dict:
         "weights_sha256": file_hash(base_path),
         "config_sha256": file_hash(find_train_config(base_path)),
     }
-    return base_cfg
+    if data_sha256 is not None:
+        cfg["source"]["data_sha256"] = data_sha256

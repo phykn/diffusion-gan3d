@@ -19,6 +19,21 @@ class TilePlan:
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
     generation_shape: tuple[int, int, int] | None = None
     margin: int = 0
+    starts: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None
+
+    def __post_init__(self) -> None:
+        # Preserve direct construction while keeping starts in generation space,
+        # including when output_plan replaces shape/seams for reporting.
+        if self.starts is None:
+            shape = self.generation_shape or self.shape
+            object.__setattr__(
+                self,
+                "starts",
+                tuple(
+                    axis_starts(size, min(size, self.tile_size), self.stride)
+                    for size in shape
+                ),
+            )
 
     @property
     def base_shell(self) -> int:
@@ -51,6 +66,7 @@ def make_plan(
         stride=stride,
         grid=grid,
         tile_count=math.prod(grid),
+        starts=starts,
         seams=tuple(
             tuple((left + length + right) // 2 for left, right in pairwise(axis))
             for axis, length in zip(starts, lengths)
@@ -74,6 +90,7 @@ def output_plan(
         plan,
         shape=output_shape,
         seams=seams,
+        generation_shape=plan.generation_shape or plan.shape,
     )
 
 
@@ -116,11 +133,9 @@ def parse_shape(value: int | Sequence[int]) -> tuple[int, int, int]:
 def make_tiles(
     plan: TilePlan,
 ) -> tuple[Tile, ...]:
+    if plan.generation_shape is not None and plan.shape != plan.generation_shape:
+        raise ValueError("output-space statistics cannot be used as a generation plan.")
     lengths = tuple(min(size, plan.tile_size) for size in plan.shape)
-    starts = tuple(
-        axis_starts(size, length, plan.stride)
-        for size, length in zip(plan.shape, lengths)
-    )
     tiles = []
     for idx in product(
         range(plan.grid[0]),
@@ -131,7 +146,7 @@ def make_tiles(
         target = []
         margins = []
         for axis, tile_idx in enumerate(idx):
-            source_start = starts[axis][tile_idx]
+            source_start = plan.starts[axis][tile_idx]
             source_stop = source_start + lengths[axis]
             target_start = 0 if tile_idx == 0 else plan.seams[axis][tile_idx - 1]
             target_stop = (

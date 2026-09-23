@@ -17,7 +17,7 @@ from src.predict.inference import InferenceAPI
 from src.predict.sr.inference import SuperResolutionAPI
 from src.prepare.resize import downsample, phase_channels
 from src.storage import load_probabilities, load_volume, save_probabilities, save_volume
-from src.train.run.bank import validate_frozen_source
+from src.train.run.source import validate_frozen_source
 
 
 def latest_sr():

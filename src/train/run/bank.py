@@ -1,51 +1,39 @@
-import hashlib
 from pathlib import Path
 
 import torch
 from tqdm import trange
 
 from src.build.data import build_datasets
-from src.build.predict import load_generator
+from src.build.predict import build_generator
 from src.config.data import get_domains
-from src.config.files import find_train_config, load_yaml, save_yaml
-from src.config.train import normalize_train_config
+from src.config.files import save_yaml
 from src.prepare.profile import image_profile
 from src.storage import atomic_torch_save
-from src.train.relocate import PathRemapper
-
-
-def file_hash(path: Path) -> str:
-    with path.open("rb") as file:
-        return hashlib.file_digest(file, "sha256").hexdigest()
-
-
-def validate_frozen_source(source: Path, recorded: dict) -> None:
-    for key, path, label in (
-        ("weights_sha256", source, "weights"),
-        ("config_sha256", find_train_config(source), "configuration"),
-    ):
-        if not recorded.get(key):
-            raise ValueError(f"frozen LR source has no saved {label} hash.")
-        if file_hash(path) != recorded[key]:
-            raise ValueError(f"frozen LR source {label} changed since SR training.")
+from src.train.run import source as _source
 
 
 def save_bank(run_dir: Path, step: int, payload: dict) -> dict:
     path = run_dir / "lr_bank" / f"step_{step:08d}.pt"
     # Published banks may be referenced by older runs; never overwrite them.
     atomic_torch_save(payload, path, overwrite=False)
-    return {"bank": str(path), "bank_sha256": file_hash(path)}
+    return {"bank": str(path), "bank_sha256": _source.file_hash(path)}
 
 
 def publish_bank(payload: dict, cfg: dict, run_dir: Path, step: int) -> None:
     payload["data"] = cfg["data"]
-    payload["source"] = dict(cfg["source"])
+    payload["source"] = {
+        key: value
+        for key, value in cfg["source"].items()
+        if key not in {"bank", "bank_sha256"}
+    }
     cfg["source"].update(save_bank(run_dir, step, payload))
     save_yaml(run_dir / "train.yaml", cfg)
 
 
-def create_bank(cfg: dict, base_cfg: dict, device: torch.device) -> dict:
-    generator = load_generator(Path(cfg["source"]["weights"]), device)
+def create_bank(cfg: dict, device: torch.device) -> dict:
+    source = Path(cfg["source"]["weights"])
+    base_cfg = _source.load_frozen_source(cfg["source"])
+    generator = build_generator(source, base_cfg, device)
     height_enabled = cfg["conditioning"]["height_enabled"]
     datasets = build_datasets(base_cfg) if height_enabled else None
     bank, origins, extents, conditions = {}, {}, {}, {}
@@ -95,16 +83,9 @@ def refresh_bank(
     path_maps: list | None = None,
 ) -> None:
     source = Path(cfg["source"]["weights"])
-    validate_frozen_source(source, cfg["source"])
-    generator = load_generator(source, device)
+    base_cfg = _source.load_frozen_source(cfg["source"], path_maps)
     height_enabled = cfg["conditioning"]["height_enabled"]
-    base_cfg = (
-        normalize_train_config(
-            PathRemapper(path_maps or []).config(load_yaml(find_train_config(source)))
-        )
-        if height_enabled
-        else None
-    )
+    generator = build_generator(source, base_cfg, device)
     datasets = build_datasets(base_cfg) if height_enabled else None
     interval = cfg["lr_bank"]["refresh_every_steps"]
     for domain, volumes in payload["volumes"].items():
@@ -145,7 +126,7 @@ def sample_bank_condition(cfg, domain, datasets):
     paths = [p for group in dataset.path_groups for p in group]
     item = dataset[paths[int(torch.randint(len(paths), ()))]]
     record = {key: item[key] for key in ("image_id", "height_origin", "height_extent")}
-    record["image_sha256"] = file_hash(Path(item["image_id"]))
+    record["image_sha256"] = _source.file_hash(Path(item["image_id"]))
     record["crop_origin"] = item["crop_origin"].tolist()
     record["source_shape"] = item["source_shape"].tolist()
     settings = cfg["conditioning"].get("spatial_profile", {})

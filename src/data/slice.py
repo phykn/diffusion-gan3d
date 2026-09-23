@@ -75,28 +75,26 @@ def sample_pairs(
     centers = []
     if anchor is not None:
         axes = [normal for normal in AXES if normal != axis]
-        for slot, (batch, index) in enumerate(selected[: max(1, count // 2)]):
-            regions = [
-                r
-                for r in anchor.regions
-                if r.axis != axis
-                and (anchor.active_batches is None or batch in anchor.active_batches)
-            ]
-            if not regions:
-                break
-            region = regions[int(torch.randint(len(regions), ()))]
+        focused = []
+        for region in anchor.regions:
+            if region.axis == axis:
+                continue
+            other = [normal for normal in AXES if normal != region.axis]
+            start = region.row if other[0] == axis else region.col
+            length = region.height if other[0] == axis else region.width
+            focused.extend(
+                (batch, index, region)
+                for batch, index in candidates
+                if (anchor.active_batches is None or batch in anchor.active_batches)
+                and start <= index < start + length
+            )
+        for slot in range(max(1, count // 2) if focused else 0):
+            batch, index, region = focused[int(torch.randint(len(focused), ()))]
             coordinates = {region.axis: region.index}
             other = [normal for normal in AXES if normal != region.axis]
             coordinates[other[0]] = region.row + int(torch.randint(region.height, ()))
             coordinates[other[1]] = region.col + int(torch.randint(region.width, ()))
-            start = region.row if other[0] == axis else region.col
-            length = region.height if other[0] == axis else region.width
-            allowed = [
-                i for b, i in candidates if b == batch and start <= i < start + length
-            ]
-            if not allowed:
-                break
-            selected[slot] = (batch, allowed[int(torch.randint(len(allowed), ()))])
+            selected[slot] = (batch, index)
             centers.append(tuple(coordinates[normal] for normal in axes))
     batch_indices, plane_indices = zip(*selected)
     batch_indices = torch.tensor(batch_indices, device=previous.device)

@@ -16,6 +16,20 @@ class HeadLoss:
         return self.global_loss + local_weight * self.local_loss
 
 
+def score_plane(critic, previous, current, time, domain, **conditions):
+    if getattr(critic, "input_mode", "pair") == "single":
+        return critic(previous, time, domain, **conditions)
+    return critic(previous, current, time, domain, **conditions)
+
+
+def active_groups(fake, groups):
+    active = {
+        group: tuple(axis for axis in axes if len(fake[axis][0]))
+        for group, axes in groups.items()
+    }
+    return {group: axes for group, axes in active.items() if axes}
+
+
 def get_critic_loss(
     real_scores: CriticScores,
     fake_scores: CriticScores,

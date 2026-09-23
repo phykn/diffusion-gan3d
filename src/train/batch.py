@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Literal
 
 import torch
@@ -38,6 +38,11 @@ class DenoiserUpdate:
     anchor_pixel: torch.Tensor
     anchor_accuracy: torch.Tensor
     vf: torch.Tensor
+
+    def detach(self) -> "DenoiserUpdate":
+        return DenoiserUpdate(
+            **{item.name: getattr(self, item.name).detach() for item in fields(self)}
+        )
 
 
 @dataclass(frozen=True)

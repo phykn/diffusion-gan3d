@@ -10,7 +10,6 @@ from src.data.augment import CriticAugment, augment_volumes, crop_images
 from src.data.loader import BatchStream
 from src.data.slice import AnchorTripletSampler, TripletBatch, sample_pairs
 from src.evaluate.anchor import anchor_boundary_metrics
-from src.evaluate.profile import phase_profile
 from src.evaluate.structure import structure_metrics
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
@@ -32,17 +31,14 @@ from src.train.batch import (
 from src.train.coarse import corrupt_coarse
 from src.train.ema import update_ema
 from src.train.loss.anchor import SoftAnchorLoss
-from src.train.loss.connectivity import compute_transition_loss
+from src.train.loss.denoiser import DenoiserLossSettings, denoiser_objective
 from src.train.loss.gan import (
-    HeadLoss,
+    active_groups,
     get_critic_loss,
     get_critic_r1,
-    get_generator_loss,
+    score_plane,
 )
-from src.train.loss.spatial_profile import compute_profile_loss
-from src.train.loss.sr import consistency_loss
 from src.train.loss.transition import compute_real_transition_loss
-from src.train.loss.volume_fraction import compute_vf_loss
 from src.train.metrics import Metrics, materialize_metrics
 from src.train.step import (
     input_gradient_norms,
@@ -505,50 +501,75 @@ class Trainer:
         model_domain = self.sample_domain_condition(domain)
         batch_domains = self.select_batch_domains(domain)
         batches = self.get_batches(domain, batch_domains)
-        own_batches = {axis: batches.images[axis] for axis in self.streams[domain]}
         critic_domains = self.make_critic_domains(
             domain,
             model_domain,
             batch_domains,
         )
         if self.bank is not None:
-            indices = torch.randint(len(self.bank[domain]), (self.volume_batch_size,))
-            low = self.bank[domain][indices].to(self.device)
-            low = augment_volumes(low, preserve_height=self.height_data is not None)
-            coarse, level = corrupt_coarse(
-                low, self.coarse_corruption_probability, self.coarse_corruption_strength
+            return self.prepare_sr_step(
+                domain, model_domain, critic_domains, batches, transition
             )
-            conditions = {
-                "domain": self.make_domain(model_domain, self.volume_batch_size),
-                "coarse": resize_phases(coarse, (self.patch_size,) * 3),
-                "corruption_level": level,
-            }
-            if self.height_data is not None:
-                conditions["height"] = self.volume_height(
-                    self.bank_origins[domain][indices],
-                    domain,
-                    None
-                    if self.bank_extents is None
-                    else self.bank_extents[domain][indices],
-                )
-            self.diagnostics["coarse_corruption_mse"] = (coarse - low).square().mean()
-            self.diagnostics["coarse_corruption_level"] = level.mean()
-            absent = torch.zeros(self.volume_batch_size, dtype=torch.bool)
-            return StepPreparation(
-                transition=self.sample_transition(False)
-                if transition is None
-                else transition,
-                domain=domain,
-                critic_domains=critic_domains,
-                real=batches,
-                selection=None,
-                target_vf=low.new_zeros((self.volume_batch_size, self.num_phases)),
-                presence=ConditionPresence(absent, absent),
-                model_conditions=conditions,
-                anchor_ramp=0.0,
-                connectivity_ramp=0.0,
-                coarse_target=low,
+        return self.prepare_lr_step(
+            step, domain, model_domain, critic_domains, batches, transition
+        )
+
+    def prepare_sr_step(
+        self,
+        domain: int,
+        model_domain: int,
+        critic_domains: dict[int, int],
+        batches: RealBatch,
+        transition: int | None,
+    ) -> StepPreparation:
+        indices = torch.randint(len(self.bank[domain]), (self.volume_batch_size,))
+        low = self.bank[domain][indices].to(self.device)
+        low = augment_volumes(low, preserve_height=self.height_data is not None)
+        coarse, level = corrupt_coarse(
+            low, self.coarse_corruption_probability, self.coarse_corruption_strength
+        )
+        conditions = {
+            "domain": self.make_domain(model_domain, self.volume_batch_size),
+            "coarse": resize_phases(coarse, (self.patch_size,) * 3),
+            "corruption_level": level,
+        }
+        if self.height_data is not None:
+            conditions["height"] = self.volume_height(
+                self.bank_origins[domain][indices],
+                domain,
+                None
+                if self.bank_extents is None
+                else self.bank_extents[domain][indices],
             )
+        self.diagnostics["coarse_corruption_mse"] = (coarse - low).square().mean()
+        self.diagnostics["coarse_corruption_level"] = level.mean()
+        absent = torch.zeros(self.volume_batch_size, dtype=torch.bool)
+        return StepPreparation(
+            transition=self.sample_transition(False)
+            if transition is None
+            else transition,
+            domain=domain,
+            critic_domains=critic_domains,
+            real=batches,
+            selection=None,
+            target_vf=low.new_zeros((self.volume_batch_size, self.num_phases)),
+            presence=ConditionPresence(absent, absent),
+            model_conditions=conditions,
+            anchor_ramp=0.0,
+            connectivity_ramp=0.0,
+            coarse_target=low,
+        )
+
+    def prepare_lr_step(
+        self,
+        step: int,
+        domain: int,
+        model_domain: int,
+        critic_domains: dict[int, int],
+        batches: RealBatch,
+        transition: int | None,
+    ) -> StepPreparation:
+        own_batches = {axis: batches.images[axis] for axis in self.streams[domain]}
         ramp = self.get_anchor_ramp(step)
         selection = (
             None
@@ -1107,12 +1128,6 @@ class Trainer:
             )
         return previous, current, logits, prediction
 
-    @staticmethod
-    def score_plane(critic, previous, current, time, domain, **conditions):
-        if getattr(critic, "input_mode", "pair") == "single":
-            return critic(previous, time, domain, **conditions)
-        return critic(previous, current, time, domain, **conditions)
-
     def update_critics(
         self,
         transition: int,
@@ -1127,7 +1142,7 @@ class Trainer:
         global_sum = 0.0
         local_sum = 0.0
         local_weight = self.critic_local_weight
-        groups = self.active_groups(fake.pairs)
+        groups = active_groups(fake.pairs, self.critic_groups)
         for group, axes in groups.items():
             count = self.updates[group]
             regularize = (count + 1) % self.r1_interval == 0
@@ -1197,7 +1212,7 @@ class Trainer:
 
                 autocast = self.autocast(self.amp_enabled and not regularize)
                 with autocast:
-                    real_score = self.score_plane(
+                    real_score = score_plane(
                         critic,
                         real_prev,
                         real_curr,
@@ -1205,7 +1220,7 @@ class Trainer:
                         real_domain,
                         **real_conditions,
                     )
-                    fake_score = self.score_plane(
+                    fake_score = score_plane(
                         critic,
                         fake_prev,
                         fake_curr,
@@ -1250,13 +1265,6 @@ class Trainer:
             if step_optimizer(optimizer, self.scaler, self.diagnostics, group):
                 self.updates[group] += 1
         return critic_losses, r1_sum, global_sum, local_sum
-
-    def active_groups(self, fake):
-        groups = {
-            group: tuple(axis for axis in axes if len(fake[axis][0]))
-            for group, axes in self.critic_groups.items()
-        }
-        return {group: axes for group, axes in groups.items() if axes}
 
     def update_connectivity_critic(
         self,
@@ -1320,96 +1328,38 @@ class Trainer:
             self.updates["connectivity"] += 1
         return adversarial, r1_value
 
-    def update_denoiser(
-        self,
-        batch: DenoiserBatch,
-    ) -> DenoiserUpdate:
+    def update_denoiser(self, batch: DenoiserBatch) -> DenoiserUpdate:
         self.denoiser_optim.zero_grad(set_to_none=True)
         for critic in self.critics.values():
             critic.requires_grad_(False)
         if self.connectivity_critic is not None:
             self.connectivity_critic.requires_grad_(False)
         try:
-            local_weight = self.critic_local_weight
+            settings = DenoiserLossSettings(
+                local_weight=self.critic_local_weight,
+                connectivity_weight=self.connectivity_weight,
+                normal_transition_weight=self.normal_transition_weight,
+                vf_weight=self.vf_loss_weight,
+                real_transition_weight=self.real_transition_weight,
+                profile_bins=self.profile_settings.get("num_bins", 16),
+                profile_weight=self.profile_weight,
+                profile_gradient_weight=self.profile_gradient_weight,
+                consistency_weight=self.consistency_weight,
+                consistency_tolerance=self.consistency_tolerance,
+                num_phases=self.num_phases,
+            )
             with self.autocast():
-                head = self._adversarial_loss(batch)
-                global_loss, local_loss = head.global_loss, head.local_loss
-                adversarial_loss = global_loss + local_weight * local_loss
-                connectivity_loss = adversarial_loss.new_zeros(())
-                if len(batch.connectivity_fake) and self.connectivity_weight > 0.0:
-                    connectivity_scores = self.connectivity_critic(
-                        batch.connectivity_fake.values,
-                        batch.connectivity_fake.axes,
-                        batch.connectivity_fake.gaps,
-                        batch.connectivity_domains,
-                        **(
-                            {"height": batch.connectivity_fake.height}
-                            if batch.connectivity_fake.height is not None
-                            else {}
-                        ),
-                        **(
-                            {"profile": batch.connectivity_fake.profile}
-                            if batch.connectivity_fake.profile is not None
-                            else {}
-                        ),
-                    )
-                    connectivity_head = get_generator_loss(
-                        connectivity_scores,
-                    )
-                    connectivity_loss = connectivity_head.combine(local_weight)
-                normal_loss = adversarial_loss.new_zeros(())
-                if len(batch.connectivity_fake) and self.normal_transition_weight > 0.0:
-                    normal_loss = compute_transition_loss(
-                        batch.connectivity_real,
-                        batch.connectivity_fake,
-                    )
-                anchor_loss = adversarial_loss.new_zeros(())
-                anchor_coarse = adversarial_loss.new_zeros(())
-                anchor_pixel = adversarial_loss.new_zeros(())
-                anchor_accuracy = adversarial_loss.new_zeros(())
-                if batch.anchor is not None:
-                    anchor_result = self.anchor_loss(
-                        batch.logits,
-                        batch.anchor,
-                        batch.anchor_present,
-                        batch.anchor_observed_mask,
-                        batch.anchor_observed_axis_masks,
-                    )
-                    anchor_loss = anchor_result.total
-                    anchor_coarse = anchor_result.coarse
-                    anchor_pixel = anchor_result.pixel
-                    anchor_accuracy = anchor_result.accuracy
-                vf_loss = compute_vf_loss(
-                    batch.clean_probs,
-                    batch.target_vf,
-                    batch.vf_present,
+                losses, diagnostics = denoiser_objective(
+                    batch,
+                    self.critics,
+                    self.connectivity_critic,
+                    self.critic_groups,
+                    self.anchor_loss,
+                    settings,
+                    diagnose=(self.updates["generator"] + 1) % self.r1_interval == 0,
                 )
-                total = (
-                    adversarial_loss
-                    + batch.anchor_ramp * anchor_loss
-                    + batch.connectivity_ramp
-                    * (
-                        self.connectivity_weight * connectivity_loss
-                        + self.normal_transition_weight * normal_loss
-                    )
-                    + self.vf_loss_weight * vf_loss
-                )
-                if batch.real_transition_loss is not None:
-                    total = total + (
-                        batch.connectivity_ramp
-                        * self.real_transition_weight
-                        * batch.real_transition_loss
-                    )
-                    self.diagnostics["loss/real_transition"] = (
-                        batch.real_transition_loss.detach()
-                    )
-                if batch.profile is not None:
-                    total = total + self._profile_loss(batch)
-                if batch.coarse_target is not None:
-                    total = total + self.consistency_weight * self._consistency_loss(
-                        batch
-                    )
-            total = validate_loss(total, "generator")
+            self.diagnostics.update(diagnostics)
+            total = validate_loss(losses.total, "generator")
             self.scaler.scale(total).backward()
             self.generator_updated = step_optimizer(
                 self.denoiser_optim, self.scaler, self.diagnostics, "generator"
@@ -1421,122 +1371,7 @@ class Trainer:
                 critic.requires_grad_(True)
             if self.connectivity_critic is not None:
                 self.connectivity_critic.requires_grad_(True)
-        return DenoiserUpdate(
-            adversarial=adversarial_loss.detach(),
-            total=total.detach(),
-            global_loss=global_loss.detach(),
-            local_loss=local_loss.detach(),
-            connectivity=connectivity_loss.detach(),
-            normal_transition=normal_loss.detach(),
-            anchor=anchor_loss.detach(),
-            anchor_coarse=anchor_coarse.detach(),
-            anchor_pixel=anchor_pixel.detach(),
-            anchor_accuracy=anchor_accuracy.detach(),
-            vf=vf_loss.detach(),
-        )
-
-    def _adversarial_loss(self, batch: DenoiserBatch) -> HeadLoss:
-        heads = []
-        local_weight = self.critic_local_weight
-        groups = self.active_groups(batch.fake)
-        diagnose = (self.updates["generator"] + 1) % self.r1_interval == 0
-        for axis in self.active_axes:
-            fake_prev, fake_curr = batch.fake[axis]
-            if not len(fake_prev):
-                continue
-            if diagnose:
-                # A separate leaf measures conditional sensitivity without
-                # reconnecting the preceding reverse chain to the generator.
-                fake_curr = fake_curr.detach().requires_grad_(True)
-            time = self.make_time(batch.transition, fake_prev.shape[0])
-            domains = self.make_domain(
-                batch.critic_domains[axis],
-                fake_prev.shape[0],
-            )
-            conditions = {}
-            if axis in batch.fake_heights:
-                conditions["height"] = batch.fake_heights[axis]
-                if axis in batch.fake_profiles:
-                    conditions["profile"] = batch.fake_profiles[axis]
-            scores = self.score_plane(
-                self.critics[self.axis_critics[axis]],
-                fake_prev,
-                fake_curr,
-                time,
-                domains,
-                **conditions,
-            )
-            head = get_generator_loss(scores)
-            if diagnose:
-                # Undo only the batch mean, retaining local-head weights
-                # and pyramid averaging from the actual generator loss.
-                norms = input_gradient_norms(
-                    head.combine(local_weight) * len(fake_prev),
-                    (fake_prev, fake_curr),
-                )
-                prefix = (
-                    f"generator_input_gradient/{self.axis_critics[axis]}"
-                    f"/{axis}/t{batch.transition}"
-                )
-                for name, norm in zip(("previous", "current"), norms):
-                    self.diagnostics[f"{prefix}/{name}"] = norm
-            count = len(groups[self.axis_critics[axis]]) * len(groups)
-            heads.append(HeadLoss(head.global_loss / count, head.local_loss / count))
-        global_loss = (
-            torch.stack([loss.global_loss for loss in heads]).sum()
-            if heads
-            else batch.logits.sum() * 0
-        )
-        local_loss = (
-            torch.stack([loss.local_loss for loss in heads]).sum()
-            if heads
-            else batch.logits.sum() * 0
-        )
-        return HeadLoss(global_loss, local_loss)
-
-    def _profile_loss(self, batch: DenoiserBatch) -> torch.Tensor:
-        profile_loss = compute_profile_loss(
-            batch.clean_probs,
-            batch.profile,
-            batch.vf_present,
-            self.profile_settings["num_bins"],
-            self.profile_gradient_weight,
-            self.profile_weight,
-        )
-        self.diagnostics["profile/loss"] = profile_loss.detach()
-        soft = batch.clean_probs.detach().mean((-1, -2))
-        labels = phase_profile(batch.clean_probs.detach().argmax(1), self.num_phases)
-        active = batch.vf_present.to(soft).reshape(-1, 1, 1)
-        denom = active.sum().clamp_min(1) * soft.shape[1] * soft.shape[2]
-        self.diagnostics["profile/soft_mae"] = (
-            (soft - batch.profile).abs() * active
-        ).sum() / denom
-        self.diagnostics["profile/label_mae"] = (
-            (labels - batch.profile).abs() * active
-        ).sum() / denom
-        return profile_loss
-
-    def _consistency_loss(self, batch: DenoiserBatch) -> torch.Tensor:
-        consistency, error = consistency_loss(
-            batch.clean_probs,
-            batch.coarse_target,
-            self.consistency_tolerance,
-        )
-        self.diagnostics["consistency"] = consistency.detach()
-        self.diagnostics["lr_mse"] = error.detach()
-        depth = batch.coarse_target.shape[-3]
-        target_profile = phase_profile(batch.coarse_target.detach(), self.num_phases)
-        soft_profile = phase_profile(batch.clean_probs.detach(), self.num_phases, depth)
-        label_profile = phase_profile(
-            batch.clean_probs.detach().argmax(1), self.num_phases, depth
-        )
-        self.diagnostics["profile/sr_coarse_soft_mae"] = (
-            (soft_profile - target_profile).abs().mean()
-        )
-        self.diagnostics["profile/sr_coarse_label_mae"] = (
-            (label_profile - target_profile).abs().mean()
-        )
-        return consistency
+        return losses.detach()
 
     def make_time(self, transition: int, batch: int) -> torch.Tensor:
         return torch.full(

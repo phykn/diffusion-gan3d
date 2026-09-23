@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 
 from src.anchor import PlaneAnchor
-from src.build.predict import load_generator
+from src.build.predict import build_generator
 from src.config.data import get_sizes
 from src.config.files import find_train_config
 from src.config.generation import load_generation_settings
@@ -25,8 +25,9 @@ class InferenceAPI:
         self.device = _resolve_device(device)
         self.weights = _resolve_weights(weights)
         self.settings = load_generation_settings()
-        self.generator = load_generator(self.weights, device=self.device)
-        data = load_train_config(find_train_config(self.weights))["data"]
+        cfg = load_train_config(find_train_config(self.weights))
+        self.generator = build_generator(self.weights, cfg, device=self.device)
+        data = cfg["data"]
         self.data = data
         self._crop_size = data["crop_size"]
         self.scaled = TiledGenerator(self.generator)

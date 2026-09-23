@@ -239,11 +239,17 @@ Anchors start at the output origin, including when generating multiple blocks.
 Training commands enter `src/train/run/`, which uses `src/build/` to assemble the
 trainer with its settings and data metadata. Each real batch carries its images,
 domains, height coordinates, profiles, and source geometry through the training
-step. SR bank creation and refresh live in `src/train/run/bank.py`; the runner
-publishes a snapshot after preparation succeeds.
+step. `Trainer` separates LR/SR batch preparation and owns optimizer updates;
+`src/train/loss/denoiser.py` computes the differentiable generator objective.
+SR bank creation and refresh live in `src/train/run/bank.py`; shared frozen-source
+validation and configuration loading live in `src/train/run/source.py`. The
+runner publishes a snapshot after preparation succeeds.
 
 The web UI calls the backend, which delegates generation to the inference APIs.
 Model weights and training checkpoints have separate formats; keep
 `generator.pt` for inference and `checkpoints/last.pt` for resume.
+
+[Refactoring decisions and verification](docs/refactoring.md) records the module
+boundaries, corrected defects and remaining validation limits.
 
 [Method and recorded experiments](PAPER.md) · [MIT License](LICENSE)

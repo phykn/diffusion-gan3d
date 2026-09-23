@@ -22,8 +22,9 @@ from src.predict.sr.inference import SuperResolutionAPI
 from src.predict.tiling.sampler import TiledGenerator
 from src.prepare.resize import resize_crop
 from src.train.loss.anchor import SoftAnchorLoss
-from src.train.run.bank import file_hash, refresh_bank
+from src.train.run.bank import refresh_bank
 from src.train.run.low_res import run_low_res_train
+from src.train.run.source import file_hash
 from src.train.run.sr import run_sr_train
 from src.train.state import (
     describe_data,
@@ -404,7 +405,7 @@ def test_failed_bank_generation_preserves_volume_and_its_conditions(tmp_path):
     generator = Mock()
     generator.generate_probs.side_effect = RuntimeError("generation failed")
     with (
-        patch("src.train.run.bank.load_generator", return_value=generator),
+        patch("src.train.run.bank.build_generator", return_value=generator),
         pytest.raises(RuntimeError, match="generation failed"),
     ):
         refresh_bank(bank, cfg, 1, torch.device("cpu"))
@@ -685,9 +686,12 @@ def test_replay_training_never_generates_reference_and_survives_resume(tmp_path)
     assert not any("rng" in key for key in payload)
 
 
-@pytest.mark.parametrize("height", (False, True))
+@pytest.mark.parametrize(
+    "height,seed,has_matches",
+    ((False, 0, True), (True, 0, True), (True, 1, False)),
+)
 def test_measured_transition_training_keeps_replay_but_never_scores_it(
-    tmp_path, height
+    tmp_path, height, seed, has_matches
 ):
     cfg = configuration(tmp_path, height=height)
     cfg["loss"]["connectivity"].update(
@@ -695,17 +699,33 @@ def test_measured_transition_training_keeps_replay_but_never_scores_it(
         normal_transition_weight=0,
         real_transition_weight=1,
     )
-    trainer = build_trainer(cfg, torch.device("cpu"))
-    with patch.object(
-        trainer.anchor_triplets,
-        "sample",
-        side_effect=AssertionError("replay target used"),
-    ):
-        first = trainer.step(0, transition=0)
-        second = trainer.step(1, transition=0)
+    numpy_state = np.random.get_state()
+    try:
+        with torch.random.fork_rng():
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            trainer = build_trainer(cfg, torch.device("cpu"))
+            with patch.object(
+                trainer.anchor_triplets,
+                "sample",
+                side_effect=AssertionError("replay target used"),
+            ):
+                first = trainer.step(0, transition=0)
+                second = trainer.step(1, transition=0)
+    finally:
+        np.random.set_state(numpy_state)
     assert first.anchor_planes == 1 and second.anchor_planes > 1
     assert first.diagnostics["loss/real_transition"] > 0
-    assert second.diagnostics["loss/real_transition"] > 0
+    matches = sum(
+        int(value)
+        for key, value in second.diagnostics.items()
+        if key.startswith("real_transition/") and key.endswith("/matches")
+    )
+    assert bool(matches) is has_matches
+    if has_matches:
+        assert second.diagnostics["loss/real_transition"] > 0
+    else:
+        assert second.diagnostics["loss/real_transition"] == 0
     assert second.generator_connectivity == second.normal_transition_loss == 0
     assert trainer.updates["connectivity"] == 0
     assert all(p.grad is None for p in trainer.connectivity_critic.parameters())

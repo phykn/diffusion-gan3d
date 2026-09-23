@@ -17,18 +17,34 @@ def load_train_config(
     cfg = load_yaml(path)
     if data is not None:
         cfg["data"] = str(data)
+    cfg, external_data = load_external_data(cfg)
+    return normalize_loaded_train_config(cfg, stage, external_data)
+
+
+def load_external_data(cfg: dict) -> tuple[dict, bool]:
+    cfg = dict(cfg)
+    external_data = isinstance(cfg.get("data"), str)
+    if external_data:
+        cfg["data"] = load_yaml(resolve_external_data_path(cfg["data"]))
+    return cfg, external_data
+
+
+def resolve_external_data_path(path: str | Path) -> Path:
+    data_path = Path(path).expanduser()
+    if not data_path.is_absolute():
+        data_path = PROJECT_ROOT / data_path
+    return data_path
+
+
+def normalize_loaded_train_config(
+    cfg: dict, stage: str = "low_res", external_data: bool = False
+) -> dict:
     if "data" not in cfg:
         raise ValueError(
             "training config must select a data file or embed data settings."
         )
     if stage == "sr" and "guidance" not in cfg.get("lr_bank", {}):
         raise ValueError("SR config must set lr_bank.guidance explicitly.")
-    external_data = isinstance(cfg.get("data"), str)
-    if external_data:
-        data_path = Path(cfg["data"]).expanduser()
-        if not data_path.is_absolute():
-            data_path = PROJECT_ROOT / data_path
-        cfg["data"] = load_yaml(data_path)
     cfg = normalize_train_config(cfg, stage)
     if external_data:
         for folders in get_domains(cfg["data"]).values():
@@ -135,6 +151,13 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
 
 def validate_sr_config(cfg: dict) -> dict:
     cfg = normalize_train_config(cfg, "sr")
+    data_sha256 = cfg.get("source", {}).get("data_sha256")
+    if data_sha256 is not None and (
+        not isinstance(data_sha256, str)
+        or len(data_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in data_sha256)
+    ):
+        raise ValueError("source.data_sha256 must be a SHA-256 hex digest.")
     data = cfg["data"]
     data["crop_size"], data["lo_res_size"], data["hi_res_size"] = get_sr_sizes(cfg)
     groups = get_plane_groups(cfg)

@@ -587,7 +587,7 @@ def test_sr_loss_targets_clean_coarse_while_model_receives_corrupted_input(tmp_p
             trainer.denoiser, "compute_logits", wraps=trainer.denoiser.compute_logits
         ) as forward,
         patch(
-            "src.train.trainer.consistency_loss", wraps=consistency_loss
+            "src.train.loss.denoiser.consistency_loss", wraps=consistency_loss
         ) as consistency,
     ):
         trainer.step(0)

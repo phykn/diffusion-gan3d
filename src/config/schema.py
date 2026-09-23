@@ -122,7 +122,14 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                 ("samples_per_domain", "guidance", "refresh_every_steps")
             ),
             "source": dict.fromkeys(
-                ("weights", "weights_sha256", "config_sha256", "bank", "bank_sha256")
+                (
+                    "weights",
+                    "weights_sha256",
+                    "config_sha256",
+                    "data_sha256",
+                    "bank",
+                    "bank_sha256",
+                )
             ),
         }
 
