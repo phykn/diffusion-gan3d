@@ -11,10 +11,10 @@ from src.build.data import (
 from src.build.model import build_diffusion, build_models
 from src.config.data import get_sizes, get_sr_plane_groups
 from src.config.train import get_schedule_steps, get_sr_sizes, normalize_train_config
+from src.data.provenance import fingerprint_data
 from src.data.source import infer_height_extents
 from src.storage import load_model
 from src.train.ema import build_ema
-from src.train.state import fingerprint_data
 from src.train.trainer import Trainer, TrainerComponents, TrainerSettings
 
 

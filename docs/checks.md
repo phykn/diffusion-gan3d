@@ -57,10 +57,13 @@ hashes. An explicit `--lr-weight` selects a different source and is recorded as
 unverified in `report.json`. Use `--height-extent` with `06` when source images
 have different heights; it is forwarded to both LR and SR in source-pixel units.
 
-Training connectivity losses compare against generated replay volumes. They
-measure consistency with previous generations, not agreement with measured 3D
-connectivity. `data_manifest.json` records this reference type. Assess generated
-connectivity separately with the volume connectivity/percolation metrics.
+The default LR continuity loss compares phase-pair statistics with measured 2D
+sections; matching those statistics does not establish measured 3D connectivity.
+The opt-in legacy connectivity losses compare against generated replay volumes
+and measure consistency with previous generations. `data_manifest.json` records
+these separately as `real_transition_reference` and `connectivity_reference`.
+Assess generated connectivity separately with the volume connectivity/percolation
+metrics.
 
 The default training presets resolve `augmentation.auto_planes` to explicit
 plane policies. Height conditioning preserves z order in xz/yz; xy can still

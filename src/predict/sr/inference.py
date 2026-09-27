@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from src.build.model import build_diffusion, build_sr_model
+from src.build.predict import resolve_weights
 from src.config.train import get_sr_sizes, normalize_train_config
 from src.predict.base import resolve_offset, volume_shape
 from src.predict.convert import labels_from_channels, owned_clean_to_probs_
@@ -19,9 +20,7 @@ from src.prepare.resize import phase_channels, resize_phases, scaled_size
 class SuperResolutionAPI:
     def __init__(self, weights: str | Path, device: str | torch.device = "cpu"):
         self.device = torch.device(device)
-        self.weights = Path(weights).resolve()
-        if self.weights.is_dir():
-            self.weights = self.weights / "generator.pt"
+        self.weights = resolve_weights(weights)
         payload = torch.load(self.weights, map_location="cpu", weights_only=True)
         if payload.get("format") != "diffusion-gan3d.sr":
             raise ValueError(

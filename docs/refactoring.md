@@ -66,6 +66,11 @@ the class into mixins with implicit shared state.
 - `src/train/run/source.py` owns frozen LR source hashes and source configuration
   loading. Bank generation and refresh use the same source validation policy.
   Configuration parsing stays in `src/config`; relocation stays in training.
+- `src/data/provenance.py` owns image fingerprints and source records from data
+  streams. `src/train/run/loop.py` assembles the training manifest's reference
+  semantics; `src/train/state.py` owns checkpoint capture and restoration.
+  Resolved-path SHA-256 fingerprints, source record ordering, image dimensions,
+  split metadata and manifest reference fields retain their existing format.
 
 ## Confirmed defects
 
@@ -298,3 +303,49 @@ no experiment configuration, weights or run outputs were replaced.
 
 The refactoring goal is complete. Remaining items are documented limits
 and future capability/quality work, not unimplemented fixes from this review.
+
+## 2026-09-27 follow-up
+
+The follow-up assessed the current project across these boundaries:
+
+| Area | Result |
+| --- | --- |
+| Data, preparation, coordinates and provenance | Keep crop/phase/height contracts; move image hashing and source records to `src/data/provenance.py`. |
+| Configuration, model, trainer and run lifecycle | Retain LR/SR preparation and model math; assemble the manifest in the run loop and keep checkpoint state focused on capture/restore. |
+| Inference, tiling, SR and memory | Retain sampling, fusion and storage policies; share API weight-path resolution in `src/build/predict.py`. |
+| Backend and frontend | Retain request validation, raw protocol, transfer cleanup and stale-response ownership. |
+| Evaluation, simulations, checks and experiments | Retain metric/export/reproduction boundaries; correct the check guide's outdated description of continuity references. |
+
+SR previously interpreted `~/sr` and `~/sr/generator.pt` as paths beneath the
+working directory, while LR expanded the home directory. Both APIs now use the
+same resolver, including run-directory lookup and missing-file validation.
+Both SR regression cases failed before the fix; all four LR/SR home-path cases
+pass afterward. API signatures and checkpoint formats are unchanged.
+
+The provenance characterization runs the same four cases against the original
+and refactored implementations. Both preserve sorted, deduplicated SHA-256
+fingerprints, per-domain/plane record ordering, repeated source records, H/W
+dimensions, validation regions and replay/measured-reference fields exactly.
+
+Chat MCP identified the SR path defect. Its suggestion to lazily export
+`create_app` was not adopted: the public facade intentionally includes the
+bundled backend and FastAPI is a required dependency. No core-only packaging
+contract or import failure was demonstrated.
+
+The final Chat MCP review of provenance, checkpoint/run ownership and shared SR
+weight resolution completed with no actionable findings. Local reference checks
+confirm that callers use the new owners and no old internal imports remain.
+
+Baseline validation passed 1,048 Python tests with 16 CUDA skips and 9 subtests.
+All 29 frontend tests and the production build passed. The repository `.venv`
+contains CPU-only PyTorch, so CUDA/AMP and trained reconstruction quality remain
+unverified. Pre-existing `src/storage.py` and `tests/test_storage.py` changes are
+preserved and excluded from this refactor's commit.
+
+The post-change full suite passed 1,054 tests and 9 subtests with the same 16
+CUDA skips. Two run-loop tests failed because they construct `Trainer` with
+`object.__new__` and omitted `data_fingerprint`, which the real constructor
+always initializes. Their fixtures now supply the empty fingerprint mapping;
+their interruption and checkpoint assertions are unchanged. All 106 affected
+checkpoint, trainer, conditioning and run-loop tests then passed. Repository-wide
+Ruff and final changed-test Ruff passed. No unresolved test failure remains.

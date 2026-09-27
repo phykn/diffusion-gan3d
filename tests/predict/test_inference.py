@@ -62,6 +62,16 @@ def test_crop_and_input_sizes_are_loaded_independently(api: InferenceAPI) -> Non
     assert api.input_size == 8
 
 
+@pytest.mark.parametrize("weights", ["~", "~/generator.pt"])
+def test_inference_expands_home_in_weight_paths(api, monkeypatch, weights):
+    monkeypatch.setenv("HOME", str(api.weights.parent))
+    monkeypatch.setenv("USERPROFILE", str(api.weights.parent))
+
+    loaded = InferenceAPI(weights, device="cpu")
+
+    assert loaded.weights == api.weights
+
+
 def test_generate_without_geometry_uses_direct_generator(api: InferenceAPI) -> None:
     result = api.generate(domain=0, seed=4)
 

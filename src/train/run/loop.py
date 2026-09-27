@@ -11,10 +11,30 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from src.config.files import save_yaml
+from src.data.provenance import describe_sources
 from src.storage import save_model
 from src.train.metrics import write_metrics
-from src.train.state import describe_data, export_sr, save_sr_training, save_training
+from src.train.state import export_sr, save_sr_training, save_training
 from src.train.trainer import Trainer
+
+
+def describe_data(trainer):
+    split = trainer.cfg["data"].get("split", {})
+    return {
+        "has_measured_3d_reference": False,
+        "connectivity_reference": "generated_replay"
+        if trainer.connectivity_weight > 0 or trainer.normal_transition_weight > 0
+        else None,
+        "real_transition_reference": "measured_2d"
+        if trainer.real_transition_weight > 0
+        else None,
+        "coordinate_units": "source pixels",
+        "height_coordinate": "2 * cell_center / full_source_extent - 1",
+        "training_sources": describe_sources(
+            trainer.streams, trainer.data_fingerprint, split
+        ),
+        "split": split,
+    }
 
 
 def make_run_dir(

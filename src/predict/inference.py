@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 
 from src.anchor import PlaneAnchor
-from src.build.predict import build_generator
+from src.build.predict import build_generator, resolve_weights
 from src.config.data import get_sizes
 from src.config.files import find_train_config
 from src.config.generation import load_generation_settings
@@ -23,7 +23,7 @@ class InferenceAPI:
         device: str | torch.device | None = None,
     ) -> None:
         self.device = _resolve_device(device)
-        self.weights = _resolve_weights(weights)
+        self.weights = resolve_weights(weights)
         self.settings = load_generation_settings()
         cfg = load_train_config(find_train_config(self.weights))
         self.generator = build_generator(self.weights, cfg, device=self.device)
@@ -241,15 +241,6 @@ def _resolve_device(device: str | torch.device | None) -> torch.device:
     if resolved.type not in {"cpu", "cuda"}:
         raise ValueError("device must be CPU or CUDA.")
     return resolved
-
-
-def _resolve_weights(weights: str | Path) -> Path:
-    path = Path(weights).expanduser().resolve()
-    if path.is_dir():
-        path = path / "generator.pt"
-    if not path.is_file():
-        raise FileNotFoundError(f"generator weights do not exist: {path}")
-    return path
 
 
 def _validate_anchors(anchors: Sequence[PlaneAnchor]) -> tuple[PlaneAnchor, ...]:

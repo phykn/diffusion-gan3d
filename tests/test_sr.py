@@ -76,6 +76,21 @@ def export_model(path, cfg):
     return model
 
 
+@pytest.mark.parametrize("weights", ["~/sr", "~/sr/generator.pt"])
+def test_sr_expands_home_in_weight_paths(tmp_path, monkeypatch, weights):
+    cfg = sr_config(tmp_path)
+    path = tmp_path / "sr" / "generator.pt"
+    path.parent.mkdir()
+    export_model(path, cfg)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    api = SuperResolutionAPI(weights)
+
+    assert api.weights == path.resolve()
+    assert api.num_phases == cfg["data"]["num_phases"]
+
+
 @pytest.mark.parametrize("height", [False, True])
 def test_sr_augments_clean_target_before_corruption_and_preserves_bank(tmp_path, height):
     cfg = sr_config(tmp_path)

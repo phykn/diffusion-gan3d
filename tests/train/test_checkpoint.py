@@ -1,11 +1,17 @@
+import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import torch
+from PIL import Image
 from torch import nn
 
+from src.data.provenance import fingerprint_data
 from src.model.denoiser import Denoiser3D
 from src.storage import load_model, save_model
 from src.train.ema import build_ema, update_ema
+from src.train.run.loop import describe_data
 
 
 class _BufferedModel(nn.Module):
@@ -87,3 +93,66 @@ def _assert_same_state(actual: nn.Module, expected: nn.Module) -> None:
         torch.equal(actual.state_dict()[name], value)
         for name, value in expected.state_dict().items()
     )
+
+
+@pytest.mark.parametrize(
+    "connectivity,transition,measured,replay",
+    [(0, 0, 0, False), (1, 0, 0, True), (0, 1, 0, True), (0, 0, 1, False)],
+)
+def test_data_manifest_preserves_source_records_and_references(
+    tmp_path, connectivity, transition, measured, replay
+):
+    first, second = tmp_path / "a.png", tmp_path / "b.png"
+    Image.new("L", (5, 3), 0).save(first)
+    Image.new("L", (4, 7), 1).save(second)
+
+    def stream(groups):
+        return SimpleNamespace(
+            loader=SimpleNamespace(dataset=SimpleNamespace(path_groups=groups))
+        )
+
+    streams = {
+        1: {2: stream(((second, first),))},
+        0: {0: stream(((first,),))},
+    }
+    fingerprints = fingerprint_data(streams)
+    expected_hashes = {
+        str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (first, second)
+    }
+    assert list(fingerprints) == list(expected_hashes)
+    assert fingerprints == expected_hashes
+    region = [0, 0, 1, 2]
+    split = {"validation_regions": {str(first.resolve()): region}}
+    trainer = SimpleNamespace(
+        cfg={"data": {"split": split}},
+        streams=streams,
+        data_fingerprint=fingerprints,
+        connectivity_weight=connectivity,
+        normal_transition_weight=transition,
+        real_transition_weight=measured,
+    )
+    expected_records = [
+        {
+            "image_id": str(path.resolve()),
+            "domain": domain,
+            "plane": plane,
+            "source_shape": shape,
+            "sha256": expected_hashes[str(path.resolve())],
+            "validation_region": region if path == first else None,
+        }
+        for path, domain, plane, shape in (
+            (second, 1, "yz", [7, 4]),
+            (first, 1, "yz", [3, 5]),
+            (first, 0, "xy", [3, 5]),
+        )
+    ]
+    assert describe_data(trainer) == {
+        "has_measured_3d_reference": False,
+        "connectivity_reference": "generated_replay" if replay else None,
+        "real_transition_reference": "measured_2d" if measured else None,
+        "coordinate_units": "source pixels",
+        "height_coordinate": "2 * cell_center / full_source_extent - 1",
+        "training_sources": expected_records,
+        "split": split,
+    }

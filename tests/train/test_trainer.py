@@ -1161,6 +1161,7 @@ def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) 
     trainer.device = torch.device("cpu")
     trainer.cfg = {"stage": "low_res", "data": {}}
     trainer.streams = {}
+    trainer.data_fingerprint = {}
     trainer.ema_denoiser = nn.Linear(2, 2)
     trainer.critics = nn.ModuleDict(
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
@@ -1197,6 +1198,7 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
     trainer.device = torch.device("cpu")
     trainer.cfg = {"stage": "low_res", "data": {}}
     trainer.streams = {}
+    trainer.data_fingerprint = {}
     trainer.ema_denoiser = nn.Linear(2, 2)
     trainer.critics = nn.ModuleDict(
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}

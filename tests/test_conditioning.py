@@ -23,11 +23,11 @@ from src.predict.tiling.sampler import TiledGenerator
 from src.prepare.resize import resize_crop
 from src.train.loss.anchor import SoftAnchorLoss
 from src.train.run.bank import refresh_bank
+from src.train.run.loop import describe_data
 from src.train.run.low_res import run_low_res_train
 from src.train.run.source import file_hash
 from src.train.run.sr import run_sr_train
 from src.train.state import (
-    describe_data,
     export_sr,
     resume_sr_training,
     resume_training,

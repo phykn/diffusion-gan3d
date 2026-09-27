@@ -10,6 +10,15 @@ from src.predict.generator import Generator
 from src.storage import load_model
 
 
+def resolve_weights(weights: str | Path) -> Path:
+    path = Path(weights).expanduser().resolve()
+    if path.is_dir():
+        path = path / "generator.pt"
+    if not path.is_file():
+        raise FileNotFoundError(f"generator weights do not exist: {path}")
+    return path
+
+
 def load_generator(
     weights: str | Path,
     device: torch.device,
