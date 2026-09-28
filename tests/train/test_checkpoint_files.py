@@ -6,7 +6,7 @@ import torch
 
 from src.storage import torch_save
 from src.train.checkpoint import complete_checkpoint, resolve_checkpoint
-from src.train.run.loop import save_checkpoint
+from src.train.run.loop import save_checkpoint, save_weights
 
 
 def trainer():
@@ -56,7 +56,7 @@ def test_training_keeps_checkpoints_without_rename_or_temporary_files(
     # A second save at the same boundary also preserves all previous checkpoints.
     save_checkpoint(model, tmp_path, stage)
     assert len(list((tmp_path / "checkpoints").glob("step_*.pt"))) == 3
-    assert (tmp_path / "generator.pt").is_file()
+    assert not (tmp_path / "generator.pt").exists()
     assert not list(tmp_path.rglob("*.tmp"))
 
 
@@ -101,8 +101,9 @@ def test_checkpoint_is_available_even_if_generator_export_fails(tmp_path, monkey
         original(payload, file)
 
     monkeypatch.setattr(torch, "save", fail_export)
+    save_checkpoint(model, tmp_path, "low_res")
     with pytest.raises(OSError, match="export failed"):
-        save_checkpoint(model, tmp_path, "low_res")
+        save_weights(model, tmp_path, "low_res")
     assert torch.load(resolve_checkpoint(tmp_path), weights_only=True)["step"] == 2
 
 

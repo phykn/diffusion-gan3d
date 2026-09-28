@@ -106,8 +106,13 @@ python run_train_2nd.py --base-weights "run/my-lr-run" --device cuda
 SR trains from a frozen LR model and real HR sections. Weights, resolved settings,
 and metrics are saved under `run/`.
 
-Every save keeps a new `checkpoints/step_<step>_<timestamp>.pt` training checkpoint.
-These files are written directly, without temporary files or renaming, and are
+`weights_every_steps` overwrites `generator.pt` and critic exports only.
+`archive_every_steps` saves a new
+`checkpoints/step_<step>_<timestamp>.pt` training checkpoint, including optimizer
+state for resuming; `null` disables periodic checkpoints. Normal completion and
+Ctrl+C at a completed step also save the final checkpoint and update the exports.
+Numbered copies of generator/critic exports are no longer created.
+Training checkpoints are written directly, without temporary files or renaming, and are
 never overwritten or automatically deleted. Keep the matching `.complete` files:
 they identify completed writes. Pass the run directory or its `checkpoints/`
 directory to `--resume` to select the latest completed step, skipping interrupted
@@ -118,6 +123,12 @@ to a new run directory.
 `generator.pt` and critic exports are overwritten directly. An interrupted export
 may be incomplete; the separate completed training checkpoints remain available
 for recovery. Do not load exports while training is writing them.
+
+`structure_every_steps` controls diagnostic measurements (connectivity,
+two-point correlations, and chord-length distributions) recorded in TensorBoard
+and `metrics.jsonl`. It does not save models or set the loss-update frequency.
+Set it to `0` to disable these measurements; smaller intervals add CPU overhead.
+
 If files moved to another computer, copy the original images and run artifacts,
 then map their old path prefixes to their new locations:
 

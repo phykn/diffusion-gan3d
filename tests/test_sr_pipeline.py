@@ -125,9 +125,9 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
         assert list(directory.glob("critic_*.pt"))
         events = EventAccumulator(str(directory / "tensorboard")).Reload()
         assert events.Scalars("loss/generator")[0].step == 1
-    archive = sr_dir / "checkpoints/step_00000001/generator.pt"
+    archive = resolve_checkpoint(sr_dir)
     archived = torch.load(archive, weights_only=True)
-    assert archived["format"] == "diffusion-gan3d.sr"
+    assert archived["format"] == "diffusion-gan3d.sr.train"
     assert archived["step"] == 1
     stored = load_yaml(sr_dir / "train.yaml")
     assert stored["source"]["weights"] == str((base_dir / "generator.pt").resolve())
@@ -194,7 +194,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
             "--input",
             str(out / "lr_probs.pt"),
             "--weight",
-            str(resumed / "checkpoints/step_00000002"),
+            str(resumed / "generator.pt"),
             "--out",
             str(out2),
             "--no-view",

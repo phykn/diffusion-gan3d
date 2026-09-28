@@ -1188,9 +1188,22 @@ def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) 
     assert checkpoint.read_bytes() == b"previous complete training state"
 
 
-def test_fit_keeps_all_training_checkpoints_and_sparse_weight_archives(
+@pytest.mark.parametrize(
+    "save_every,checkpoint_every,expected_weights,expected_checkpoints",
+    [
+        (1, 2, [1, 2, 3], [2, 3]),
+        (2, 1, [2, 3], [1, 2, 3]),
+        (1, None, [1, 2, 3], [3]),
+        (10, 10, [3], [3]),
+    ],
+)
+def test_fit_separates_weight_updates_and_checkpoint_archives(
     tmp_path: Path,
     monkeypatch,
+    save_every,
+    checkpoint_every,
+    expected_weights,
+    expected_checkpoints,
 ) -> None:
     monkeypatch.setattr(
         "src.train.run.loop.save_training",
@@ -1234,22 +1247,33 @@ def test_fit_keeps_all_training_checkpoints_and_sparse_weight_archives(
         )
 
     trainer.step = step
+    from src.train.run.loop import save_weights
+
+    weight_steps = []
+
+    def record_weights(trainer, root, stage):
+        weight_steps.append(trainer.completed_steps)
+        save_weights(trainer, root, stage)
+
+    monkeypatch.setattr("src.train.run.loop.save_weights", record_weights)
 
     weights = run_train(
         trainer,
         steps=3,
-        save_every=1,
-        checkpoint_every=2,
+        save_every=save_every,
+        checkpoint_every=checkpoint_every,
         run_dir=tmp_path,
     )
 
     assert weights == tmp_path / "generator.pt"
     assert weights.is_file()
     checkpoints = tuple(p for p in (tmp_path / "checkpoints").iterdir() if p.is_dir())
-    assert tuple(path.name for path in checkpoints) == ("step_00000002",)
-    assert (checkpoints[0] / "generator.pt").is_file()
+    assert not checkpoints
+    assert weight_steps == expected_weights
     states = sorted((tmp_path / "checkpoints").glob("step_*.pt"))
-    assert [torch.load(p, weights_only=True)["step"] for p in states] == [1, 2, 3]
+    assert [
+        torch.load(p, weights_only=True)["step"] for p in states
+    ] == expected_checkpoints
     assert all(p.with_suffix(".complete").is_file() for p in states)
 
 

@@ -89,7 +89,6 @@ def save_checkpoint(trainer, root, stage):
         else:
             break
     complete_checkpoint(path)
-    save_weights(trainer, root, stage)
 
 
 @contextmanager
@@ -146,6 +145,7 @@ def run_train(
         ) as bar,
     ):
         at_boundary = True
+        checkpoint_step = None
         try:
             for step in bar:
                 if stop.is_set():
@@ -162,17 +162,21 @@ def run_train(
                     + "\n"
                 )
                 log.flush()
-                if done % save_every == 0 or done == steps:
+                if done == steps or (
+                    checkpoint_every is not None and done % checkpoint_every == 0
+                ):
                     save_checkpoint(trainer, root, stage)
-                if checkpoint_every is not None and done % checkpoint_every == 0:
-                    checkpoint_root = root / "checkpoints" / f"step_{done:08d}"
-                    save_weights(trainer, checkpoint_root, stage)
+                    checkpoint_step = trainer.completed_steps
+                if done % save_every == 0 or done == steps:
+                    save_weights(trainer, root, stage)
                 if stop.is_set():
                     raise KeyboardInterrupt
         except KeyboardInterrupt:
             # A direct exception inside a step may leave partially updated
             # optimizers. Never overwrite a safe checkpoint with that state.
             if at_boundary:
-                save_checkpoint(trainer, root, stage)
+                if checkpoint_step != trainer.completed_steps:
+                    save_checkpoint(trainer, root, stage)
+                save_weights(trainer, root, stage)
             raise
     return weights

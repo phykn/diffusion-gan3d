@@ -64,12 +64,8 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
         ),
     )
     monkeypatch.setattr(
-        "src.train.run.loop.save_training",
-        lambda path, trainer: checkpoints.append(("low_res", trainer.completed_steps)),
-    )
-    monkeypatch.setattr(
-        "src.train.run.loop.save_sr_training",
-        lambda trainer, path: checkpoints.append(("sr", trainer.completed_steps)),
+        "src.train.run.loop.save_checkpoint",
+        lambda trainer, path, stage: checkpoints.append((stage, trainer.completed_steps)),
     )
     with pytest.raises(KeyboardInterrupt) if interrupt else nullcontext():
         run_train(
@@ -94,18 +90,10 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
     assert [value.step for value in events.Scalars("loss/generator")] == expected_steps
     assert load_yaml(tmp_path / "train.yaml") == trainer.cfg
     assert json.loads((tmp_path / "data_manifest.json").read_text()) == {"sources": []}
-    assert checkpoints == [(stage, 3), (stage, 4 if interrupt else 5)]
+    assert checkpoints == [(stage, step) for step in ([2, 4] if interrupt else [2, 4, 5])]
     assert exports == [
-        (2, "checkpoints/step_00000002", stage),
         (3, ".", stage),
-        *(
-            [(4, "checkpoints/step_00000004", stage), (4, ".", stage)]
-            if interrupt
-            else [
-                (4, "checkpoints/step_00000004", stage),
-                (5, ".", stage),
-            ]
-        ),
+        (4 if interrupt else 5, ".", stage),
     ]
 
 
@@ -367,12 +355,15 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
         == expected_critics
     )
     assert (run_dirs[0] / "train.yaml").is_file()
-    checkpoint = run_dirs[0] / "checkpoints" / "step_00000001"
-    assert (checkpoint / "generator.pt").is_file()
-    assert (
-        tuple(path.name for path in sorted(checkpoint.glob("critic_*.pt")))
-        == expected_critics
-    )
+    checkpoints = sorted((run_dirs[0] / "checkpoints").glob("step_*.pt"))
+    assert len(checkpoints) == 2
+    for step, checkpoint in enumerate(checkpoints, start=1):
+        payload = __import__("torch").load(checkpoint, weights_only=True)
+        assert payload["step"] == step
+        assert payload["format"] == "diffusion-gan3d.lr.train"
+        assert payload["generator_optim"]["state"]
+        assert checkpoint.with_suffix(".complete").is_file()
+    assert not list((run_dirs[0] / "checkpoints").glob("*/generator.pt"))
     values = __import__("torch").load(weights, weights_only=True)
     assert values
     assert all(

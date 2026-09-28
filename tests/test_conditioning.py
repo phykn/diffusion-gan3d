@@ -583,8 +583,9 @@ def test_sr_bank_records_2d_profile_and_per_image_extent(tmp_path):
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("checkpoint_every", [None, 1])
 def test_interrupt_during_optimizer_step_saves_a_resumable_completed_step(
-    tmp_path, stage
+    tmp_path, stage, checkpoint_every
 ):
     import signal
 
@@ -613,9 +614,16 @@ def test_interrupt_during_optimizer_step_saves_a_resumable_completed_step(
     run = tmp_path / "interrupted"
     with patch.object(trainer.denoiser_optim, "step", interrupt_after_optimizer):
         with pytest.raises(KeyboardInterrupt):
-            run_train(trainer, steps=3, save_every=10, run_dir=run)
+            run_train(
+                trainer,
+                steps=3,
+                save_every=10,
+                run_dir=run,
+                checkpoint_every=checkpoint_every,
+            )
     assert signal.getsignal(signal.SIGINT) == original_handler
     payload = torch.load(resolve_checkpoint(run), weights_only=True)
+    assert len(list((run / "checkpoints").glob("step_*.pt"))) == 1
     assert payload["step"] == trainer.completed_steps == 1
     assert payload["generator_optim"]["state"]
     assert (run / "generator.pt").is_file()
