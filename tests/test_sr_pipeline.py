@@ -15,6 +15,7 @@ from src.build.trainer import build_trainer
 from src.config.files import load_yaml, save_yaml
 from src.config.train import load_train_config
 from src.storage import load_volume
+from src.train.checkpoint import resolve_checkpoint
 from src.train.run.bank import publish_bank, refresh_bank, save_bank
 from src.train.run.loop import run_train
 from src.train.run.source import file_hash
@@ -120,7 +121,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     }
     for directory in (base_dir, sr_dir):
         assert common_files <= {path.name for path in directory.iterdir()}
-        assert (directory / "checkpoints/last.pt").is_file()
+        assert resolve_checkpoint(directory).is_file()
         assert list(directory.glob("critic_*.pt"))
         events = EventAccumulator(str(directory / "tensorboard")).Reload()
         assert events.Scalars("loss/generator")[0].step == 1
@@ -138,13 +139,13 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     assert stored["data"]["hi_res_size"] == int(8 * scale)
     assert stored["data"]["crop_size"] == 16
     assert stored["data"]["lo_res_size"] == 8
-    first = torch.load(sr_dir / "checkpoints/last.pt", weights_only=True)
+    first = torch.load(resolve_checkpoint(sr_dir), weights_only=True)
     assert first["step"] == 1
     resumed = tmp_path / "resumed"
     run_train_2nd.main(
         [
             "--resume",
-            str(sr_dir / "checkpoints/last.pt"),
+            str(sr_dir),
             "--steps",
             "2",
             "--run-dir",
@@ -153,7 +154,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
             "cpu",
         ]
     )
-    second = torch.load(resumed / "checkpoints/last.pt", weights_only=True)
+    second = torch.load(resolve_checkpoint(resumed), weights_only=True)
     assert second["step"] == 2
     assert (
         second["config"]["source"]["weights_sha256"]

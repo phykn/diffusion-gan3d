@@ -24,6 +24,7 @@ from src.config.files import save_yaml
 from src.config.train import load_train_config
 from src.prepare.resize import resize_labels
 from src.storage import save_volume
+from src.train.checkpoint import resolve_checkpoint
 from src.train.run.loop import run_train
 from src.train.run.sr import run_sr_train
 from src.train.state import resume_training
@@ -152,8 +153,13 @@ def main():
         out = root / name
         out.mkdir(exist_ok=args.continue_run)
         trainer = build_trainer(cfg, torch.device(args.device))
-        checkpoint = out / "checkpoints/last.pt"
-        reused = args.continue_run and checkpoint.is_file()
+        checkpoint = None
+        if args.continue_run:
+            try:
+                checkpoint = resolve_checkpoint(out)
+            except FileNotFoundError:
+                pass
+        reused = checkpoint is not None
         if reused:
             resume_training(
                 trainer, torch.load(checkpoint, map_location="cpu", weights_only=True)
@@ -167,7 +173,7 @@ def main():
             )
         elapsed = None if reused else time.monotonic() - started
         payload = torch.load(
-            out / "checkpoints/last.pt", map_location="cpu", weights_only=True
+            resolve_checkpoint(out), map_location="cpu", weights_only=True
         )
         del trainer
         restored = build_trainer(cfg, torch.device(args.device))

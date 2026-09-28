@@ -6,6 +6,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from threading import Event, current_thread, main_thread
+from time import time_ns
 
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -13,6 +14,7 @@ from tqdm import tqdm
 from src.config.files import save_yaml
 from src.data.provenance import describe_sources
 from src.storage import save_model
+from src.train.checkpoint import complete_checkpoint
 from src.train.metrics import write_metrics
 from src.train.state import export_sr, save_sr_training, save_training
 from src.train.trainer import Trainer
@@ -73,10 +75,20 @@ def save_weights(trainer: Trainer, root: Path, stage: str = "low_res") -> None:
 
 
 def save_checkpoint(trainer, root, stage):
-    if stage == "sr":
-        save_sr_training(trainer, root / "checkpoints" / "last.pt")
-    else:
-        save_training(root / "checkpoints" / "last.pt", trainer)
+    sequence = time_ns()
+    while True:
+        path = root / "checkpoints" / f"step_{trainer.completed_steps:08d}_{sequence}.pt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if stage == "sr":
+                save_sr_training(trainer, path)
+            else:
+                save_training(path, trainer)
+        except FileExistsError:
+            sequence += 1
+        else:
+            break
+    complete_checkpoint(path)
     save_weights(trainer, root, stage)
 
 

@@ -344,7 +344,7 @@ def test_sr_training_restores_state_without_rng(tmp_path):
     saved_bytes = checkpoint.read_bytes()
     with patch("src.storage.torch.save", side_effect=OSError("write failed")):
         with pytest.raises(OSError, match="write failed"):
-            save_sr_training(trainer, checkpoint)
+            save_sr_training(trainer, tmp_path / "next.pt")
     assert checkpoint.read_bytes() == saved_bytes
     expected = copy.deepcopy(trainer.denoiser.state_dict())
     expected_critics = copy.deepcopy(trainer.critics.state_dict())

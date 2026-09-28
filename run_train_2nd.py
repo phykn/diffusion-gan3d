@@ -16,7 +16,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     source.add_argument(
         "--base-weights", type=Path, help="Override source.weights in the SR config."
     )
-    source.add_argument("--resume", type=Path)
+    source.add_argument(
+        "--resume",
+        type=Path,
+        help="Checkpoint file or run/checkpoints directory (latest completed step).",
+    )
     parser.add_argument(
         "--path-map",
         nargs=2,

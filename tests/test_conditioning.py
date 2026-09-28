@@ -21,6 +21,7 @@ from src.predict.generator import Generator
 from src.predict.sr.inference import SuperResolutionAPI
 from src.predict.tiling.sampler import TiledGenerator
 from src.prepare.resize import resize_crop
+from src.train.checkpoint import resolve_checkpoint
 from src.train.loss.anchor import SoftAnchorLoss
 from src.train.run.bank import refresh_bank
 from src.train.run.loop import describe_data
@@ -275,7 +276,7 @@ def test_height_conditioned_sr_refresh_survives_repeated_directory_moves(tmp_pat
         run_dir=original / "sr",
     )
     source_hash = file_hash(original / "lr/train.yaml")
-    checkpoint = original / "sr/checkpoints/last.pt"
+    checkpoint = resolve_checkpoint(original / "sr")
     for step, name in ((2, "moved"), (3, "moved_again")):
         destination = tmp_path / name
         relative_checkpoint = checkpoint.relative_to(original)
@@ -291,7 +292,7 @@ def test_height_conditioned_sr_refresh_survives_repeated_directory_moves(tmp_pat
             run_dir=output,
             path_map=[(str(previous), str(original))],
         )
-        checkpoint = output / "checkpoints/last.pt"
+        checkpoint = resolve_checkpoint(output)
         saved = torch.load(checkpoint, weights_only=True)
         assert saved["step"] == step
         assert len(saved["path_maps"]) == step - 1
@@ -614,7 +615,7 @@ def test_interrupt_during_optimizer_step_saves_a_resumable_completed_step(
         with pytest.raises(KeyboardInterrupt):
             run_train(trainer, steps=3, save_every=10, run_dir=run)
     assert signal.getsignal(signal.SIGINT) == original_handler
-    payload = torch.load(run / "checkpoints/last.pt", weights_only=True)
+    payload = torch.load(resolve_checkpoint(run), weights_only=True)
     assert payload["step"] == trainer.completed_steps == 1
     assert payload["generator_optim"]["state"]
     assert (run / "generator.pt").is_file()
@@ -659,7 +660,7 @@ def test_profile_sr_training_refresh_and_geometry_artifacts(tmp_path):
         saved = torch.load(path, weights_only=True)
         assert saved["conditions"][0][0]["vf_profile"]["axis"] == "z"
         assert saved["height_extents"][0][0] in (24, 32)
-    payload = torch.load(run / "checkpoints/last.pt", weights_only=True)
+    payload = torch.load(resolve_checkpoint(run), weights_only=True)
     assert payload["step"] == 2
     assert payload["data_fingerprint"]
 

@@ -106,13 +106,23 @@ python run_train_2nd.py --base-weights "run/my-lr-run" --device cuda
 SR trains from a frozen LR model and real HR sections. Weights, resolved settings,
 and metrics are saved under `run/`.
 
-Resume from `checkpoints/last.pt` with `--resume`; `--steps` is the total target,
-including completed steps. Each resume writes to a new run directory.
+Every save keeps a new `checkpoints/step_<step>_<timestamp>.pt` training checkpoint.
+These files are written directly, without temporary files or renaming, and are
+never overwritten or automatically deleted. Keep the matching `.complete` files:
+they identify completed writes. Pass the run directory or its `checkpoints/`
+directory to `--resume` to select the latest completed step, skipping interrupted
+writes. Explicit checkpoint files, including legacy `checkpoints/last.pt`, still
+work. `--steps` is the total target, including completed steps. Each resume writes
+to a new run directory.
+
+`generator.pt` and critic exports are overwritten directly. An interrupted export
+may be incomplete; the separate completed training checkpoints remain available
+for recovery. Do not load exports while training is writing them.
 If files moved to another computer, copy the original images and run artifacts,
 then map their old path prefixes to their new locations:
 
 ```powershell
-& .\.venv\Scripts\python.exe run_train_1st.py --resume "D:/project/run/my-lr-run/checkpoints/last.pt" --path-map "C:/project" "D:/project" --steps 20000 --device cuda
+& .\.venv\Scripts\python.exe run_train_1st.py --resume "D:/project/run/my-lr-run" --path-map "C:/project" "D:/project" --steps 20000 --device cuda
 ```
 
 The same `--path-map OLD NEW` option works for `run_train_2nd.py`; repeat it for
@@ -122,8 +132,8 @@ image, bank, and source hashes and all training settings. Mappings persist in
 new checkpoints, including for height-conditioned bank refreshes; provide new
 mappings only when paths move again.
 
-SR bank snapshots publish atomically and never replace an existing step. Store
-runs on a filesystem with hard-link support (such as NTFS or ext4).
+SR banks are written directly to new step files and never replace an existing
+step. Training settings reference a bank only after its write completes.
 
 ### Critic input comparison
 
@@ -247,7 +257,7 @@ runner publishes a snapshot after preparation succeeds.
 
 The web UI calls the backend, which delegates generation to the inference APIs.
 Model weights and training checkpoints have separate formats; keep
-`generator.pt` for inference and `checkpoints/last.pt` for resume.
+`generator.pt` for inference and `checkpoints/step_<step>_<timestamp>.pt` for resume.
 
 [Refactoring decisions and verification](docs/refactoring.md) records the module
 boundaries, corrected defects and remaining validation limits.

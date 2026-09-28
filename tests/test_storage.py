@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import src.storage as storage
 from src.storage import (
     atomic_torch_save,
     load_probabilities,
@@ -61,10 +62,9 @@ def test_probability_save_rejects_label_tensors(tmp_path, probs):
     assert not path.exists()
 
 
-@pytest.mark.parametrize("kind", ["model", "probabilities", "sr"])
 @pytest.mark.parametrize("existing", [False, True])
-def test_failed_artifact_save_preserves_previous_file_and_cleans_up(
-    tmp_path, monkeypatch, kind, existing
+def test_failed_probability_save_preserves_previous_file_and_cleans_up(
+    tmp_path, monkeypatch, existing
 ):
     path = tmp_path / "artifact.pt"
     previous = b"previous complete artifact"
@@ -77,18 +77,40 @@ def test_failed_artifact_save_preserves_previous_file_and_cleans_up(
 
     monkeypatch.setattr(torch, "save", interrupted_save)
     with pytest.raises(OSError, match="disk write failed"):
-        if kind == "model":
-            save_model(path, torch.nn.Linear(2, 2))
-        elif kind == "probabilities":
-            save_probabilities(torch.ones(2, 1, 1, 1) / 2, path)
-        else:
-            trainer = SimpleNamespace(
-                cfg={}, completed_steps=3, ema_denoiser=torch.nn.Linear(2, 2)
-            )
-            export_sr(trainer, path)
+        save_probabilities(torch.ones(2, 1, 1, 1) / 2, path)
     assert list(tmp_path.iterdir()) == ([path] if existing else [])
     if existing:
         assert path.read_bytes() == previous
+
+
+@pytest.mark.parametrize("kind", ["model", "sr"])
+def test_exports_overwrite_directly_without_temporary_files(
+    tmp_path, monkeypatch, kind
+):
+    path = tmp_path / "generator.pt"
+    path.write_bytes(b"previous export")
+
+    def no_temporary(*args, **kwargs):
+        pytest.fail("Direct exports must not create temporary files")
+
+    monkeypatch.setattr(storage.tempfile, "NamedTemporaryFile", no_temporary)
+    model = torch.nn.Linear(2, 2)
+    if kind == "model":
+        save_model(path, model)
+        expected = model.state_dict()
+    else:
+        export_sr(SimpleNamespace(cfg={}, completed_steps=3, ema_denoiser=model), path)
+        expected = {
+            "format": "diffusion-gan3d.sr",
+            "config": {},
+            "step": 3,
+            "model": model.state_dict(),
+        }
+    actual = torch.load(path, weights_only=True)
+    if kind == "sr":
+        assert actual.pop("format") == expected.pop("format")
+    torch.testing.assert_close(actual, expected)
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_atomic_save_cleans_up_when_replace_fails(tmp_path, monkeypatch):

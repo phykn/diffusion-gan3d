@@ -69,7 +69,9 @@ The default training presets resolve `augmentation.auto_planes` to explicit
 plane policies. Height conditioning preserves z order in xz/yz; xy can still
 rotate and flip. Custom `augmentation.planes` policies remain explicit and are
 validated. Ctrl+C finishes the current training step and saves both inference
-weights and `checkpoints/last.pt` for resuming.
+weights and completed `checkpoints/step_<step>_<timestamp>.pt` files for resuming
+(keep their `.complete` files). `--resume` also accepts a run directory and selects
+the latest completed checkpoint; legacy `checkpoints/last.pt` files still work.
 
 Shared helpers live in `scripts/common/`, experiment drivers in
 `scripts/experiments/`, and paper reproduction tools in `scripts/paper/`.

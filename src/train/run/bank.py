@@ -8,14 +8,14 @@ from src.build.predict import build_generator
 from src.config.data import get_domains
 from src.config.files import save_yaml
 from src.prepare.profile import image_profile
-from src.storage import atomic_torch_save
+from src.storage import torch_save
 from src.train.run import source as _source
 
 
 def save_bank(run_dir: Path, step: int, payload: dict) -> dict:
     path = run_dir / "lr_bank" / f"step_{step:08d}.pt"
     # Published banks may be referenced by older runs; never overwrite them.
-    atomic_torch_save(payload, path, overwrite=False)
+    torch_save(payload, path, overwrite=False)
     return {"bank": str(path), "bank_sha256": _source.file_hash(path)}
 
 

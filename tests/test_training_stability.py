@@ -14,6 +14,7 @@ from src.config.files import save_yaml
 from src.config.train import load_train_config
 from src.data.slice import TripletBatch
 from src.model.critic import ConnectivityCritic2D
+from src.train.checkpoint import resolve_checkpoint
 from src.train.run.low_res import run_low_res_train
 from src.train.state import resume_training, save_training
 from src.train.step import step_optimizer
@@ -158,13 +159,13 @@ def test_lr_cli_resumes_progress_without_training_seed(tmp_path):
     run("--config", preset, "--steps", 2, "--run-dir", tmp_path / "first")
     run(
         "--resume",
-        tmp_path / "first/checkpoints/last.pt",
+        tmp_path / "first",
         "--steps",
         4,
         "--run-dir",
         tmp_path / "resumed",
     )
-    resumed = torch.load(tmp_path / "resumed/checkpoints/last.pt", weights_only=True)
+    resumed = torch.load(resolve_checkpoint(tmp_path / "resumed"), weights_only=True)
     assert resumed["step"] == 4
     assert "seed" not in resumed["config"]["train"]
     assert "torch_rng" not in resumed
@@ -185,14 +186,14 @@ def test_lr_resume_after_moving_files_preserves_holdouts_and_hash_checks(tmp_pat
     run_low_res_train(config=preset, steps=1, run_dir=original / "run")
     moved = tmp_path / "moved"
     original.rename(moved)
-    checkpoint = moved / "run/checkpoints/last.pt"
+    checkpoint = resolve_checkpoint(moved / "run")
     run_low_res_train(
         resume=checkpoint,
         steps=2,
         run_dir=moved / "resumed",
         path_map=[(str(original), str(moved))],
     )
-    saved = torch.load(moved / "resumed/checkpoints/last.pt", weights_only=True)
+    saved = torch.load(resolve_checkpoint(moved / "resumed"), weights_only=True)
     assert saved["step"] == 2
     assert len(saved["data_fingerprint"]) == 3
     assert saved["config"]["data"]["split"]["validation_files"] == [
@@ -203,7 +204,7 @@ def test_lr_resume_after_moving_files_preserves_holdouts_and_hash_checks(tmp_pat
     ]
     assert saved["path_maps"]
     run_low_res_train(
-        resume=moved / "resumed/checkpoints/last.pt", steps=3, run_dir=moved / "again"
+        resume=moved / "resumed", steps=3, run_dir=moved / "again"
     )
     Image.fromarray(np.zeros((12, 12), dtype=np.uint8)).save(moved / "images/0.png")
     with pytest.raises(ValueError, match="images changed"):

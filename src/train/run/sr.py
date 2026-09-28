@@ -14,6 +14,7 @@ from src.config.train import (
 )
 from src.data.bank import load_bank
 from src.data.source import infer_height_extents
+from src.train.checkpoint import resolve_checkpoint
 from src.train.relocate import relocate_checkpoint
 from src.train.run.bank import (
     create_bank,
@@ -55,7 +56,9 @@ def run_sr_train(
             )
         if bank_size is not None:
             raise ValueError("--bank-size cannot change on resume.")
-        payload = torch.load(resume, map_location="cpu", weights_only=True)
+        payload = torch.load(
+            resolve_checkpoint(resume), map_location="cpu", weights_only=True
+        )
         if payload.get("format") != "diffusion-gan3d.sr.train":
             raise ValueError("resume requires an SR training checkpoint.")
         payload = relocate_checkpoint(payload, path_map)

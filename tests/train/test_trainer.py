@@ -1188,11 +1188,14 @@ def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) 
     assert checkpoint.read_bytes() == b"previous complete training state"
 
 
-def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
+def test_fit_keeps_all_training_checkpoints_and_sparse_weight_archives(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("src.train.run.loop.save_training", lambda *args: None)
+    monkeypatch.setattr(
+        "src.train.run.loop.save_training",
+        lambda path, trainer: torch.save({"step": trainer.completed_steps}, path),
+    )
     trainer = object.__new__(Trainer)
     trainer.profile_settings = {"enabled": False}
     trainer.device = torch.device("cpu")
@@ -1207,8 +1210,11 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
     trainer.connectivity_weight = 0.0
     trainer.normal_transition_weight = 0.0
     trainer.real_transition_weight = 0.0
-    trainer.step = Mock(
-        return_value=Metrics(
+    trainer.completed_steps = 0
+
+    def step(index):
+        trainer.completed_steps = index + 1
+        return Metrics(
             generator=1.0,
             generator_total=1.0,
             critic=1.0,
@@ -1226,7 +1232,8 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
             connectivity_r1=0.0,
             anchor_ramp=0.0,
         )
-    )
+
+    trainer.step = step
 
     weights = run_train(
         trainer,
@@ -1238,9 +1245,12 @@ def test_fit_keeps_latest_weights_and_sparse_numbered_checkpoints(
 
     assert weights == tmp_path / "generator.pt"
     assert weights.is_file()
-    checkpoints = tuple((tmp_path / "checkpoints").iterdir())
+    checkpoints = tuple(p for p in (tmp_path / "checkpoints").iterdir() if p.is_dir())
     assert tuple(path.name for path in checkpoints) == ("step_00000002",)
     assert (checkpoints[0] / "generator.pt").is_file()
+    states = sorted((tmp_path / "checkpoints").glob("step_*.pt"))
+    assert [torch.load(p, weights_only=True)["step"] for p in states] == [1, 2, 3]
+    assert all(p.with_suffix(".complete").is_file() for p in states)
 
 
 def _parameters(model: nn.Module) -> tuple[torch.Tensor, ...]:

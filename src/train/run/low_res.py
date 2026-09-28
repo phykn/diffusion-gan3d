@@ -6,6 +6,7 @@ import torch
 from src.build.trainer import build_trainer
 from src.config.files import PROJECT_ROOT
 from src.config.train import load_train_config, normalize_train_config
+from src.train.checkpoint import resolve_checkpoint
 from src.train.relocate import relocate_checkpoint
 from src.train.run.loop import make_run_dir, run_train
 from src.train.state import resume_training
@@ -31,7 +32,9 @@ def run_low_res_train(
             raise ValueError(
                 "--resume uses saved settings; only --steps may override them."
             )
-        payload = torch.load(resume, map_location="cpu", weights_only=True)
+        payload = torch.load(
+            resolve_checkpoint(resume), map_location="cpu", weights_only=True
+        )
         if payload.get("format") != "diffusion-gan3d.lr.train":
             raise ValueError("--resume requires an LR training checkpoint.")
         payload = relocate_checkpoint(payload, path_map)

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from src.config.data import get_plane_groups
 from src.config.train import normalize_train_config
-from src.storage import atomic_torch_save
+from src.storage import torch_save
 
 
 def save_training(path: str | Path, trainer) -> None:
@@ -14,7 +14,7 @@ def save_training(path: str | Path, trainer) -> None:
         use_multi_anchor_next=trainer.use_multi_anchor_next,
         anchor_bank=trainer.anchor_bank.entries,
     )
-    atomic_torch_save(payload, path)
+    torch_save(payload, path, overwrite=False)
 
 
 def resume_training(trainer, payload: dict) -> None:
@@ -41,7 +41,7 @@ def resume_training(trainer, payload: dict) -> None:
 def save_sr_training(trainer, path: str | Path) -> None:
     payload = _capture_state(trainer)
     payload["format"] = "diffusion-gan3d.sr.train"
-    atomic_torch_save(payload, path)
+    torch_save(payload, path, overwrite=False)
 
 
 def resume_sr_training(trainer, payload: dict) -> None:
@@ -97,7 +97,7 @@ def _restore_state(trainer, payload: dict) -> None:
 
 
 def export_sr(trainer, path):
-    atomic_torch_save(
+    torch_save(
         {
             "format": "diffusion-gan3d.sr",
             "config": trainer.cfg,

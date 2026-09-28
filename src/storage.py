@@ -1,3 +1,4 @@
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -31,6 +32,28 @@ def atomic_torch_save(payload, path: str | Path, *, overwrite: bool = True) -> P
             os.link(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
+    return path
+
+
+def torch_save(payload, path: str | Path, *, overwrite: bool = True) -> Path:
+    """Write directly; callers publishing new files must track completion."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file = path.open("wb" if overwrite else "xb")
+    try:
+        with file:
+            torch.save(payload, file)
+            file.flush()
+            os.fsync(file.fileno())
+    except BaseException:
+        if not overwrite:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logging.getLogger(__name__).warning(
+                    "Could not remove incomplete checkpoint %s", path, exc_info=True
+                )
+        raise
     return path
 
 
@@ -85,7 +108,7 @@ def save_probabilities(probs: torch.Tensor, path: str | Path) -> Path:
 
 
 def save_model(path: str | Path, model: nn.Module) -> Path:
-    return atomic_torch_save(model.state_dict(), path)
+    return torch_save(model.state_dict(), path)
 
 
 def load_model(path: str | Path, model: nn.Module) -> nn.Module:
