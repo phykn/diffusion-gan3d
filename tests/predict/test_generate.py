@@ -58,9 +58,9 @@ def test_build_models_uses_boolean_anchor_multiscale(
 ) -> None:
     cfg = _config(tmp_path)
 
-    single, _ = build_models(cfg)
+    single, _, _ = build_models(cfg)
     cfg["model"]["generator"]["anchor_multiscale_input"] = True
-    multiscale, _ = build_models(cfg)
+    multiscale, _, _ = build_models(cfg)
 
     assert not single.anchor_multiscale
     assert len(single.anchor_pyramid) == 0
@@ -83,7 +83,7 @@ def test_ema_weights_generate_categorical_volume(
     run_dir = tmp_path / "run" / "sample"
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
-    denoiser, _ = build_models(cfg)
+    denoiser, _, _ = build_models(cfg)
     ema = build_ema(denoiser)
     weights = save_model(run_dir / "generator.pt", ema)
 
@@ -110,7 +110,7 @@ def test_generator_loads_numbered_checkpoint_with_run_config(tmp_path: Path) -> 
     run_dir = tmp_path / "run" / "sample"
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
-    denoiser, _ = build_models(cfg)
+    denoiser, _, _ = build_models(cfg)
     weights = save_model(
         run_dir / "checkpoints" / "step_00000010" / "generator.pt",
         build_ema(denoiser),
@@ -130,7 +130,7 @@ def test_anchor_aware_weights_accept_soft_plane_condition(
     run_dir = tmp_path / "run" / "anchored"
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
-    denoiser, _ = build_models(cfg)
+    denoiser, _, _ = build_models(cfg)
     ema = build_ema(denoiser)
     with torch.no_grad():
         ema.anchor_input.weight.fill_(0.01)
@@ -166,7 +166,7 @@ def test_generator_accepts_anchors_when_training_never_reaches_start(
     run_dir = tmp_path / "run" / "unanchored"
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
-    denoiser, _ = build_models(cfg)
+    denoiser, _, _ = build_models(cfg)
     weights = save_model(run_dir / "generator.pt", build_ema(denoiser))
 
     generator = load_generator(weights, device=torch.device("cpu"))
@@ -2256,7 +2256,10 @@ def _config(root: Path) -> dict:
         },
         "loss": {
             "anchor_pixel_weight": 0.05,
-            "connectivity": {},
+            "connectivity": {
+                "adversarial_weight": 0.0,
+                "normal_transition_weight": 0.0,
+            },
             "volume_fraction_weight": 1.0,
             "critic_local_weight": 0.5,
             "r1_weight": 0.0,

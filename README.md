@@ -159,15 +159,38 @@ mappings only when paths move again.
 SR banks are written directly to new step files and never replace an existing
 step. Training settings reference a bank only after its write completes.
 
-### Plane critic
+### Plane critic and continuity losses
 
-The LR and SR plane critics receive only x_t, with time, domain, height, and
-profile conditions. Their input has num_phases channels; the generator still
-receives x_{t+1}. Posterior sampling links adjacent states algebraically, but
-marginal plane critics do not score the joint diffusion transition. This is a
-marginal critic design, not a reproduction of the Diffusion-GAN training algorithm
-or a demonstrated quality improvement. Evaluate held-out directional statistics,
-diversity, and condition compliance, and validate SR consistency separately.
+LR and SR default to `model.critic.input_mode: single`: the plane critic receives
+x_t with time, domain, height, and profile conditions. Select `pair` to score
+x_t and x_{t+1} jointly. The generator receives x_{t+1} in both modes. Single
+critics score marginal planes; they do not score the joint diffusion transition.
+Neither mode has a demonstrated quality advantage here. Changing modes requires
+fresh critic weights and optimizers; saved training settings cannot change on
+resume.
+
+For a controlled LR comparison, use `train.num_workers: 0` and no
+`train.initial_weights`:
+
+```powershell
+& .\.venv\Scripts\python.exe scripts/experiments/critic_inputs.py --config config/train/low_res.yaml --run-dir run/critic-input-comparison --seeds 11 22 33 --steps 10000 --device cuda
+```
+
+The runner checks identical generator initialization, seeds sampling per step,
+saves configurations and metrics, and reports timing, CUDA memory, and input
+gradients. These are training diagnostics. Evaluate held-out directional
+statistics, diversity, VF/height/anchor compliance, and SR consistency separately.
+
+LR also supports `loss.connectivity.adversarial_weight` and
+`normal_transition_weight`, both defaulting to `0.0`. A positive adversarial
+weight trains a connectivity critic on changes between nearby slices; a positive
+normal-transition weight matches their phase changes and discrete bend. These
+optional losses compare against generated replay volumes, so they encourage
+consistency with previous generations without establishing measured 3D
+connectivity. `max_slice_gap`, `windows_per_plane`, `start_step`, and `ramp_steps`
+control their sampling and schedule. The default `real_transition_weight: 0.1`
+uses measured 2D phase-pair statistics; `data_manifest.json` identifies measured
+and generated references separately. These replay options apply to LR only.
 
 ## Generate and inspect
 

@@ -50,6 +50,8 @@ loss:
     weight: 0.0
   connectivity:
     max_slice_gap: 8
+    adversarial_weight: 0.0
+    normal_transition_weight: 0.0
     real_transition_weight: 0.1
     ramp_steps: 5000
 

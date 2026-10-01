@@ -48,6 +48,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     cfg["model"]["gradient_checkpointing"] = False
     cfg["model"]["diffusion"]["num_steps"] = 2
     cfg["conditioning"]["anchor"].update(probability=0.0, start_step=0)
+    cfg["loss"]["connectivity"]["adversarial_weight"] = 0.0
     cfg["train"].update(
         total_steps=1, mixed_precision=False, slice_pairs_per_plane=2, real_batch_size=2
     )
@@ -217,7 +218,9 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
     source = source_dir / "generator.pt"
     source.write_bytes(b"frozen weights")
     source_config = source_dir / "train.yaml"
-    save_yaml(source_config, load_yaml("tests/fixtures/config/train/low_res.yaml"))
+    save_yaml(
+        source_config, load_yaml("tests/fixtures/config/train/low_res.yaml")
+    )
     old_bank = tmp_path / "lr_bank/step_00000000.pt"
     old_bank.parent.mkdir()
     old_bank.write_bytes(b"original bank")

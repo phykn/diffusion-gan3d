@@ -39,6 +39,9 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
         anchor_conflict_rate=0.0,
         anchor_loss=0.0,
         anchor_accuracy=0.0,
+        generator_connectivity=0.0,
+        critic_connectivity=0.0,
+        connectivity_r1=0.0,
         anchor_ramp=0.0,
     )
     trainer = SimpleNamespace(cfg={"stage": stage}, completed_steps=1)
@@ -62,9 +65,7 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
     )
     monkeypatch.setattr(
         "src.train.run.loop.save_checkpoint",
-        lambda trainer, path, stage: checkpoints.append(
-            (stage, trainer.completed_steps)
-        ),
+        lambda trainer, path, stage: checkpoints.append((stage, trainer.completed_steps)),
     )
     with pytest.raises(KeyboardInterrupt) if interrupt else nullcontext():
         run_train(
@@ -89,9 +90,7 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
     assert [value.step for value in events.Scalars("loss/generator")] == expected_steps
     assert load_yaml(tmp_path / "train.yaml") == trainer.cfg
     assert json.loads((tmp_path / "data_manifest.json").read_text()) == {"sources": []}
-    assert checkpoints == [
-        (stage, step) for step in ([2, 4] if interrupt else [2, 4, 5])
-    ]
+    assert checkpoints == [(stage, step) for step in ([2, 4] if interrupt else [2, 4, 5])]
     assert exports == [
         (3, ".", stage),
         (4 if interrupt else 5, ".", stage),
@@ -167,6 +166,9 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         anchor_conflict_rate=0.02,
         anchor_loss=0.2,
         anchor_accuracy=0.95,
+        generator_connectivity=0.3,
+        critic_connectivity=0.4,
+        connectivity_r1=0.05,
         anchor_ramp=0.5,
         generator_global=0.6,
         generator_local=0.8,
@@ -184,6 +186,10 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         "loss/generator_total",
         "loss/critic",
         "loss/r1",
+        "loss/generator_connectivity",
+        "loss/critic_connectivity",
+        "loss/connectivity_r1",
+        "loss/normal_transition",
         "loss/anchor",
         "loss/vf",
         "conditioning/anchor_fraction",
@@ -293,7 +299,10 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
             },
             "loss": {
                 "anchor_pixel_weight": 0.05,
-                "connectivity": {},
+                "connectivity": {
+                    "adversarial_weight": 0.25,
+                    "normal_transition_weight": 0.1,
+                },
                 "volume_fraction_weight": 1.0,
                 "critic_local_weight": 0.5,
                 "r1_weight": 0.0,
@@ -338,7 +347,9 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     assert stage == "low_res_coarse"
     weights = run_dirs[0] / "generator.pt"
     assert weights.is_file()
-    expected_critics = tuple(f"critic_{PLANES[axis]}.pt" for axis in axes)
+    expected_critics = ("critic_c.pt",) + tuple(
+        f"critic_{PLANES[axis]}.pt" for axis in axes
+    )
     assert (
         tuple(path.name for path in sorted(run_dirs[0].glob("critic_*.pt")))
         == expected_critics

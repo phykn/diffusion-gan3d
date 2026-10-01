@@ -8,7 +8,7 @@ from torch import nn
 from src.anchor import AnchorCondition, PlaneAnchor, encode_anchors
 from src.data.augment import CriticAugment, augment_volumes, crop_images
 from src.data.loader import BatchStream
-from src.data.slice import sample_pairs
+from src.data.slice import AnchorTripletSampler, TripletBatch, sample_pairs
 from src.evaluate.anchor import anchor_boundary_metrics
 from src.evaluate.structure import structure_metrics
 from src.model.denoiser import Denoiser3D
@@ -36,6 +36,7 @@ from src.train.loss.gan import (
     active_groups,
     get_critic_loss,
     get_critic_r1,
+    score_plane,
 )
 from src.train.loss.transition import compute_real_transition_loss
 from src.train.metrics import Metrics, materialize_metrics
@@ -51,10 +52,12 @@ class TrainerComponents:
     denoiser: Denoiser3D
     ema_denoiser: Denoiser3D
     critics: nn.ModuleDict
+    connectivity_critic: nn.Module | None
     streams: dict[int, dict[int, BatchStream]]
     diffusion: Diffusion
     denoiser_optim: torch.optim.Optimizer
     critic_optims: dict[str, torch.optim.Optimizer]
+    connectivity_optim: torch.optim.Optimizer | None
     scaler: torch.amp.GradScaler
     device: torch.device
     critic_augment: CriticAugment | None = None
@@ -78,6 +81,8 @@ class TrainerSettings:
     anchor_training_probability: float
     anchor_start_step: int
     anchor_ramp_steps: int
+    connectivity_weight: float
+    normal_transition_weight: float
     vf_loss_weight: float
     cfg_drop_each_probability: float
     latent_channels: int
@@ -95,6 +100,7 @@ class TrainerSettings:
     r2_gamma: float = 0.0
     connectivity_start_step: int = 0
     connectivity_ramp_steps: int = 20000
+    connectivity_windows_per_plane: int = 4
     anchor_bank_capacity: int = 4
     anchor_plane_spacing: int = 16
     structure_every_steps: int = 100
@@ -120,6 +126,7 @@ class Trainer:
         self.denoiser = components.denoiser
         self.ema_denoiser = components.ema_denoiser
         self.critics = components.critics
+        self.connectivity_critic = components.connectivity_critic
         self.streams = components.streams
         self.bank = components.coarse_bank
         self.bank_origins = components.bank_origins
@@ -148,6 +155,7 @@ class Trainer:
         self.diffusion = components.diffusion
         self.denoiser_optim = components.denoiser_optim
         self.critic_optims = components.critic_optims
+        self.connectivity_optim = components.connectivity_optim
         self.scaler = components.scaler
         self.device = components.device
         self.volume_batch_size = settings.volume_batch_size
@@ -169,6 +177,8 @@ class Trainer:
             pool_size=2**pool_exponent,
             pixel_weight=settings.anchor_pixel_loss_weight,
         )
+        self.connectivity_weight = settings.connectivity_weight
+        self.normal_transition_weight = settings.normal_transition_weight
         self.real_transition_weight = settings.real_transition_weight
         self.group_statistics_weight = settings.group_statistics_weight
         self.group_statistics_max_gap = settings.group_statistics_max_gap
@@ -178,6 +188,10 @@ class Trainer:
         self.connectivity_max_gap = settings.connectivity_max_gap
         self.connectivity_start_step = settings.connectivity_start_step
         self.connectivity_ramp_steps = settings.connectivity_ramp_steps
+        self.anchor_triplets = AnchorTripletSampler(
+            max_gap=settings.connectivity_max_gap,
+            windows_per_plane=settings.connectivity_windows_per_plane,
+        )
         self.anchor_bank = (
             None
             if self.bank is not None
@@ -208,7 +222,9 @@ class Trainer:
                 "regularization interval must be positive and R2 weight finite/non-negative."
             )
         self.r2_gamma = settings.r2_gamma
-        self.updates = {name: 0 for name in (*self.critics, "generator")}
+        self.updates = {
+            name: 0 for name in (*self.critics, "connectivity", "generator")
+        }
         self.completed_steps = 0
         self.path_maps = []
         self.height_data = settings.height_data
@@ -247,16 +263,39 @@ class Trainer:
             prepared.model_conditions,
             volume_size,
         )
+        anchor = None if selection is None else selection.condition
         clean_probs = (prediction + 1.0) * 0.5
         measured = None if selection is None else selection.measured
+        profile = (
+            prepared.model_conditions.get("profile")
+            if self.profile_settings.get("critic_enabled", False)
+            else None
+        )
         profile_present = presence.vf.to(self.device)
         fake = self._sample_fake_pairs(previous, current, prepared)
+        connectivity_real, connectivity_fake = self.make_connectivity_triplets(
+            prediction,
+            None if selection is None else selection.reference,
+            anchor,
+            transition,
+            presence.anchor & presence.vf
+            if self.profile_settings["enabled"]
+            else presence.anchor,
+            None if selection is None else selection.source,
+            height=prepared.model_conditions.get("height"),
+            profile=profile,
+            profile_present=profile_present,
+        )
         if measured is not None and transition == 0:
             self.diagnostics.update(
                 anchor_boundary_metrics(
                     prediction, self.visible_anchor(measured, presence.anchor)
                 )
             )
+        connectivity_domains = self.get_connectivity_domains(
+            prepared.critic_domains,
+            connectivity_fake,
+        )
 
         (
             critic_vals,
@@ -271,10 +310,22 @@ class Trainer:
             critic_domains,
             profile_present=profile_present,
         )
+        if self.connectivity_weight > 0.0:
+            critic_connectivity, connectivity_r1 = self.update_connectivity_critic(
+                connectivity_real.values,
+                connectivity_fake,
+                step,
+                connectivity_domains,
+            )
+        else:
+            critic_connectivity, connectivity_r1 = 0.0, 0.0
         denoiser_update = self.update_denoiser(
             self._make_denoiser_batch(
                 prepared=prepared,
+                connectivity_domains=connectivity_domains,
                 fake=fake,
+                connectivity_real=connectivity_real,
+                connectivity_fake=connectivity_fake,
                 logits=logits,
                 clean_probs=clean_probs,
             )
@@ -311,6 +362,8 @@ class Trainer:
             r1=r1,
             critic_global=critic_global,
             critic_local=critic_local,
+            critic_connectivity=critic_connectivity,
+            connectivity_r1=connectivity_r1,
         )
 
     def _sample_fake_pairs(
@@ -366,15 +419,21 @@ class Trainer:
     def _make_denoiser_batch(
         self,
         prepared: StepPreparation,
+        connectivity_domains: torch.Tensor,
         fake: SampledPairs,
+        connectivity_real: TripletBatch,
+        connectivity_fake: TripletBatch,
         logits: torch.Tensor,
         clean_probs: torch.Tensor,
     ) -> DenoiserBatch:
         selection = prepared.selection
         return DenoiserBatch(
             transition=prepared.transition,
+            connectivity_domains=connectivity_domains,
             critic_domains=prepared.critic_domains,
             fake=fake.pairs,
+            connectivity_real=connectivity_real,
+            connectivity_fake=connectivity_fake,
             logits=logits,
             clean_probs=clean_probs,
             anchor=None if selection is None else selection.condition,
@@ -439,6 +498,8 @@ class Trainer:
     ) -> StepPreparation:
         self.denoiser.train()
         self.critics.train()
+        if self.connectivity_critic is not None:
+            self.connectivity_critic.train()
 
         domain = self.sample_target_domain()
         if self.critic_groups_by_domain is not None:
@@ -595,6 +656,8 @@ class Trainer:
         r1: float,
         critic_global: float,
         critic_local: float,
+        critic_connectivity: float,
+        connectivity_r1: float,
     ) -> Metrics:
         if self.generator_updated:
             update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
@@ -615,6 +678,9 @@ class Trainer:
                 anchor_conflict_rate=0.0 if anchor is None else anchor.conflict_rate,
                 anchor_loss=denoiser_update.anchor,
                 anchor_accuracy=denoiser_update.anchor_accuracy,
+                generator_connectivity=denoiser_update.connectivity,
+                critic_connectivity=critic_connectivity,
+                connectivity_r1=connectivity_r1,
                 anchor_ramp=prepared.anchor_ramp,
                 connectivity_ramp=prepared.connectivity_ramp,
                 anchor_neighbor_agreement=self.diagnostics.get(
@@ -631,6 +697,7 @@ class Trainer:
                 vf_active=presence.vf.any(),
                 anchor_input_active_fraction=presence.anchor.to(torch.float32).mean(),
                 vf_active_fraction=presence.vf.to(torch.float32).mean(),
+                normal_transition_loss=denoiser_update.normal_transition,
                 anchor_coarse_loss=denoiser_update.anchor_coarse,
                 anchor_pixel_loss=denoiser_update.anchor_pixel,
                 anchor_shared=(
@@ -651,6 +718,84 @@ class Trainer:
                 anchor_neighbor_excess_jump=None,
             )
         return metrics
+
+    def make_connectivity_triplets(
+        self,
+        prediction: torch.Tensor,
+        reference_prediction: torch.Tensor | None,
+        anchor: AnchorCondition | None,
+        transition: int,
+        visible: torch.Tensor | None = None,
+        source: str | None = None,
+        height: torch.Tensor | None = None,
+        profile: torch.Tensor | None = None,
+        profile_present: torch.Tensor | None = None,
+    ) -> tuple[TripletBatch, TripletBatch]:
+        empty = TripletBatch(
+            values=prediction.new_empty(
+                (0, 3, self.num_phases, prediction.shape[-2], prediction.shape[-1])
+            ),
+            axes=torch.empty(0, device=self.device, dtype=torch.long),
+            gaps=torch.empty(0, device=self.device, dtype=torch.long),
+            center_slots=torch.empty(0, device=self.device, dtype=torch.long),
+        )
+        enabled = self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
+        if (
+            not enabled
+            or transition != 0
+            or anchor is None
+            or source != "multi"
+            or reference_prediction is None
+        ):
+            return empty, empty
+        anchor = self.visible_anchor(anchor, visible)
+
+        if profile is not None:
+            field = profile_field(
+                profile * 2 - 1, prediction.shape[-3:]
+            ) * profile_present.reshape(-1, 1, 1, 1, 1)
+            height = torch.cat((height, field), 1)
+        real, fake = self.anchor_triplets.sample(
+            prediction,
+            reference_prediction,
+            anchor,
+            height=height,
+        )
+        augmented = self.critic_augment.apply_together(
+            (real.values, fake.values)
+            if real.height is None
+            else (real.values, fake.values, real.height),
+            plane=real.axes,
+        )
+        return (
+            TripletBatch(
+                values=augmented[0],
+                height=None if real.height is None else augmented[2][:, :, :1],
+                profile=augmented[2][:, :, 1:] if profile is not None else None,
+                axes=real.axes,
+                gaps=real.gaps,
+                center_slots=real.center_slots,
+            ),
+            TripletBatch(
+                values=augmented[1],
+                height=None if real.height is None else augmented[2][:, :, :1],
+                profile=augmented[2][:, :, 1:] if profile is not None else None,
+                axes=fake.axes,
+                gaps=fake.gaps,
+                center_slots=fake.center_slots,
+            ),
+        )
+
+    @staticmethod
+    def get_connectivity_domains(
+        critic_domains: dict[int, int],
+        triplets: TripletBatch,
+    ) -> torch.Tensor:
+        return torch.tensor(
+            [critic_domains.get(axis, NULL_DOMAIN) for axis in AXES],
+            device=triplets.values.device,
+            dtype=torch.long,
+        )[triplets.axes]
 
     @staticmethod
     def visible_anchor(
@@ -1087,14 +1232,18 @@ class Trainer:
 
                 autocast = self.autocast(self.amp_enabled and not regularize)
                 with autocast:
-                    real_score = critic(
+                    real_score = score_plane(
+                        critic,
                         real_prev,
+                        real_curr,
                         real_time,
                         real_domain,
                         **real_conditions,
                     )
-                    fake_score = critic(
+                    fake_score = score_plane(
+                        critic,
                         fake_prev,
+                        fake_curr,
                         fake_time,
                         fake_domain,
                         **fake_conditions,
@@ -1137,13 +1286,79 @@ class Trainer:
                 self.updates[group] += 1
         return critic_losses, r1_sum, global_sum, local_sum
 
+    def update_connectivity_critic(
+        self,
+        real: torch.Tensor,
+        fake: TripletBatch,
+        step: int,
+        domains: torch.Tensor,
+    ) -> tuple[float, float]:
+        if not len(fake):
+            return 0.0, 0.0
+
+        count = self.updates["connectivity"]
+        regularize = (count + 1) % self.r1_interval == 0
+        apply_r1 = self.r1_gamma > 0.0 and regularize
+        apply_r2 = self.r2_gamma > 0.0 and regularize
+        self.connectivity_optim.zero_grad(set_to_none=True)
+        real = real.detach().float().requires_grad_(apply_r1)
+        fake_values = fake.values.detach().float().requires_grad_(apply_r2)
+        autocast = self.autocast(self.amp_enabled and not regularize)
+        with autocast:
+            real_score = self.connectivity_critic(
+                real,
+                fake.axes,
+                fake.gaps,
+                domains,
+                **({"height": fake.height} if fake.height is not None else {}),
+                **({"profile": fake.profile} if fake.profile is not None else {}),
+            )
+            fake_score = self.connectivity_critic(
+                fake_values,
+                fake.axes,
+                fake.gaps,
+                domains,
+                **({"height": fake.height} if fake.height is not None else {}),
+                **({"profile": fake.profile} if fake.profile is not None else {}),
+            )
+            losses = get_critic_loss(
+                real_score,
+                fake_score,
+            )
+            loss = losses.combine(self.critic_local_weight)
+        adversarial = loss.detach()
+        r1_value = 0.0
+        if apply_r1:
+            r1 = get_critic_r1(real_score, (real,))
+            penalty = r1.combine(self.critic_local_weight)
+            r1_value = penalty.detach()
+            loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
+        if apply_r2:
+            penalty = get_critic_r1(fake_score, (fake_values,)).combine(
+                self.critic_local_weight
+            )
+            self.diagnostics["r2/connectivity"] = penalty.detach()
+            loss = loss + 0.5 * self.r2_gamma * self.r1_interval * penalty
+        self.diagnostics["regularization/connectivity"] = int(regularize)
+        loss = validate_loss(loss, "connectivity")
+        self.scaler.scale(loss).backward()
+        if step_optimizer(
+            self.connectivity_optim, self.scaler, self.diagnostics, "connectivity"
+        ):
+            self.updates["connectivity"] += 1
+        return adversarial, r1_value
+
     def update_denoiser(self, batch: DenoiserBatch) -> DenoiserUpdate:
         self.denoiser_optim.zero_grad(set_to_none=True)
         for critic in self.critics.values():
             critic.requires_grad_(False)
+        if self.connectivity_critic is not None:
+            self.connectivity_critic.requires_grad_(False)
         try:
             settings = DenoiserLossSettings(
                 local_weight=self.critic_local_weight,
+                connectivity_weight=self.connectivity_weight,
+                normal_transition_weight=self.normal_transition_weight,
                 vf_weight=self.vf_loss_weight,
                 real_transition_weight=self.real_transition_weight,
                 profile_bins=self.profile_settings.get("num_bins", 16),
@@ -1161,6 +1376,7 @@ class Trainer:
                 losses, diagnostics = denoiser_objective(
                     batch,
                     self.critics,
+                    self.connectivity_critic,
                     self.critic_groups,
                     self.anchor_loss,
                     settings,
@@ -1177,6 +1393,8 @@ class Trainer:
         finally:
             for critic in self.critics.values():
                 critic.requires_grad_(True)
+            if self.connectivity_critic is not None:
+                self.connectivity_critic.requires_grad_(True)
         return losses.detach()
 
     def make_time(self, transition: int, batch: int) -> torch.Tensor:

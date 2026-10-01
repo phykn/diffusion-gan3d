@@ -20,6 +20,9 @@ class Metrics:
     anchor_conflict_rate: float
     anchor_loss: float
     anchor_accuracy: float
+    generator_connectivity: float
+    critic_connectivity: float
+    connectivity_r1: float
     anchor_ramp: float
     generator_global: float = 0.0
     generator_local: float = 0.0
@@ -29,6 +32,7 @@ class Metrics:
     vf_active: bool = False
     anchor_input_active_fraction: float = 0.0
     vf_active_fraction: float = 0.0
+    normal_transition_loss: float = 0.0
     anchor_coarse_loss: float = 0.0
     anchor_pixel_loss: float = 0.0
     anchor_shared: bool = False
@@ -92,6 +96,10 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "loss/generator_total": metrics.generator_total,
         "loss/critic": metrics.critic,
         "loss/r1": metrics.r1,
+        "loss/generator_connectivity": metrics.generator_connectivity,
+        "loss/critic_connectivity": metrics.critic_connectivity,
+        "loss/connectivity_r1": metrics.connectivity_r1,
+        "loss/normal_transition": metrics.normal_transition_loss,
         "loss/anchor": metrics.anchor_loss,
         "loss/vf": metrics.vf_loss,
         "conditioning/anchor_fraction": metrics.anchor_input_active_fraction,

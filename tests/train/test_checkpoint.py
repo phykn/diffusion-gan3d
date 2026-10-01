@@ -96,10 +96,12 @@ def _assert_same_state(actual: nn.Module, expected: nn.Module) -> None:
 
 
 @pytest.mark.parametrize(
-    "measured",
-    [0, 1],
+    "connectivity,transition,measured,replay",
+    [(0, 0, 0, False), (1, 0, 0, True), (0, 1, 0, True), (0, 0, 1, False)],
 )
-def test_data_manifest_preserves_source_records_and_references(tmp_path, measured):
+def test_data_manifest_preserves_source_records_and_references(
+    tmp_path, connectivity, transition, measured, replay
+):
     first, second = tmp_path / "a.png", tmp_path / "b.png"
     Image.new("L", (5, 3), 0).save(first)
     Image.new("L", (4, 7), 1).save(second)
@@ -126,6 +128,8 @@ def test_data_manifest_preserves_source_records_and_references(tmp_path, measure
         cfg={"data": {"split": split}},
         streams=streams,
         data_fingerprint=fingerprints,
+        connectivity_weight=connectivity,
+        normal_transition_weight=transition,
         real_transition_weight=measured,
     )
     expected_records = [
@@ -145,6 +149,7 @@ def test_data_manifest_preserves_source_records_and_references(tmp_path, measure
     ]
     assert describe_data(trainer) == {
         "has_measured_3d_reference": False,
+        "connectivity_reference": "generated_replay" if replay else None,
         "real_transition_reference": "measured_2d" if measured else None,
         "coordinate_units": "source pixels",
         "height_coordinate": "2 * cell_center / full_source_extent - 1",

@@ -83,7 +83,7 @@ def test_single_critic_trains_with_regularization_and_resumes(tmp_path, stage, h
     assert np.isfinite(restored.step(2, transition=0).generator_total)
     incompatible = copy.deepcopy(cfg)
     incompatible["model"]["critic"]["input_mode"] = "pair"
-    with pytest.raises(ValueError, match="input_mode"):
+    with pytest.raises(ValueError, match="saved"):
         resume(build(incompatible), payload)
 
 
@@ -242,7 +242,9 @@ def configuration(tmp_path, stage="low_res", height=False):
         cfg["conditioning"]["dropout_probability_per_case"] = 0
         cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2, num_workers=0)
         cfg["loss"]["r1_weight"] = 0
-        cfg["loss"]["connectivity"].update(real_transition_weight=0.1, ramp_steps=0)
+        cfg["loss"]["connectivity"].update(
+            adversarial_weight=0.1, normal_transition_weight=0.1, ramp_steps=0
+        )
     else:
         cfg["model"]["generator"].update(
             channels=[4, 8], embedding_channels=8, latent_channels=4
@@ -336,17 +338,9 @@ def test_profile_training_replay_and_conditional_critics(tmp_path):
     assert original["geometry"]["height_extent"] in (24, 32)
     assert Path(original["geometry"]["image_id"]).is_file()
     second = trainer.step(1, transition=0)
-    assert np.isfinite(second.generator_total)
-    assert any(
-        critic.height_input.weight.grad is not None
-        and critic.height_input.weight.grad.abs().sum() > 0
-        for critic in trainer.critics.values()
-    )
-    assert any(
-        critic.profile_input.weight.grad is not None
-        and critic.profile_input.weight.grad.abs().sum() > 0
-        for critic in trainer.critics.values()
-    )
+    assert second.generator_connectivity > 0
+    assert trainer.connectivity_critic.height_input.weight.grad.abs().sum() > 0
+    assert trainer.connectivity_critic.profile_input.weight.grad.abs().sum() > 0
     assert "profile/label_mae" in second.diagnostics
     save_training(tmp_path / "training.pt", trainer)
     restored = build_trainer(cfg, torch.device("cpu"))
@@ -689,7 +683,7 @@ def test_replay_training_never_generates_reference_and_survives_resume(tmp_path)
         second = trainer.step(1, transition=0)
     assert generate.call_count == 2
     assert first.anchor_planes == 1 and second.anchor_planes == 4
-    assert second.anchor_loss > 0 and np.isfinite(second.generator_total)
+    assert second.anchor_loss > 0 and second.generator_connectivity > 0
     assert second.diagnostics["sampling/reference_passes"] == 0
     assert first.anchor_neighbor_agreement is not None
     assert any("two_point_mae" in key for key in second.diagnostics)
@@ -703,13 +697,15 @@ def test_replay_training_never_generates_reference_and_survives_resume(tmp_path)
 
 @pytest.mark.parametrize(
     "height,seed,has_matches",
-    ((False, 0, True), (True, 0, True), (True, 14, False)),
+    ((False, 0, True), (True, 0, True), (True, 1, False)),
 )
-def test_measured_transition_training_and_multi_anchor_resume(
+def test_measured_transition_training_keeps_replay_but_never_scores_it(
     tmp_path, height, seed, has_matches
 ):
     cfg = configuration(tmp_path, height=height)
     cfg["loss"]["connectivity"].update(
+        adversarial_weight=0,
+        normal_transition_weight=0,
         real_transition_weight=1,
     )
     numpy_state = np.random.get_state()
@@ -718,8 +714,13 @@ def test_measured_transition_training_and_multi_anchor_resume(
             torch.manual_seed(seed)
             np.random.seed(seed)
             trainer = build_trainer(cfg, torch.device("cpu"))
-            first = trainer.step(0, transition=0)
-            second = trainer.step(1, transition=0)
+            with patch.object(
+                trainer.anchor_triplets,
+                "sample",
+                side_effect=AssertionError("replay target used"),
+            ):
+                first = trainer.step(0, transition=0)
+                second = trainer.step(1, transition=0)
     finally:
         np.random.set_state(numpy_state)
     assert first.anchor_planes == 1 and second.anchor_planes > 1
@@ -734,8 +735,11 @@ def test_measured_transition_training_and_multi_anchor_resume(
         assert second.diagnostics["loss/real_transition"] > 0
     else:
         assert second.diagnostics["loss/real_transition"] == 0
-    assert set(trainer.updates) == {*trainer.critics, "generator"}
+    assert second.generator_connectivity == second.normal_transition_loss == 0
+    assert trainer.updates["connectivity"] == 0
+    assert all(p.grad is None for p in trainer.connectivity_critic.parameters())
     metadata = describe_data(trainer)
+    assert metadata["connectivity_reference"] is None
     assert metadata["real_transition_reference"] == "measured_2d"
     save_training(tmp_path / "training.pt", trainer)
     restored = build_trainer(cfg, torch.device("cpu"))
@@ -747,6 +751,8 @@ def test_measured_transition_training_and_multi_anchor_resume(
 def test_real_transition_loss_is_independent_of_replay_volume(tmp_path):
     cfg = configuration(tmp_path)
     cfg["loss"]["connectivity"].update(
+        adversarial_weight=0,
+        normal_transition_weight=0,
         real_transition_weight=1,
     )
     trainer = build_trainer(cfg, torch.device("cpu"))
@@ -775,6 +781,8 @@ def test_measured_transition_loss_trains_without_anchor_and_only_at_final_step(
     cfg = configuration(tmp_path)
     cfg["conditioning"]["anchor"]["probability"] = 0
     cfg["loss"]["connectivity"].update(
+        adversarial_weight=0,
+        normal_transition_weight=0,
         real_transition_weight=1,
     )
     trainer = build_trainer(cfg, torch.device("cpu"))

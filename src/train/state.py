@@ -9,6 +9,8 @@ def save_training(path: str | Path, trainer) -> None:
     payload = _capture_state(trainer)
     payload.update(
         format="diffusion-gan3d.lr.train",
+        connectivity=trainer.connectivity_critic.state_dict(),
+        connectivity_optim=trainer.connectivity_optim.state_dict(),
         use_multi_anchor_next=trainer.use_multi_anchor_next,
         anchor_bank=trainer.anchor_bank.entries,
     )
@@ -29,7 +31,24 @@ def resume_training(trainer, payload: dict) -> None:
         )
     if payload["data_fingerprint"] != trainer.data_fingerprint:
         raise ValueError("LR source images changed since the checkpoint.")
+    connectivity_fields = (
+        "connectivity" in payload,
+        "connectivity_optim" in payload,
+        "connectivity" in payload["updates"],
+    )
+    if not any(connectivity_fields):
+        if trainer.connectivity_weight > 0 or trainer.normal_transition_weight > 0:
+            raise ValueError("Active replay losses require saved connectivity state.")
+        # Checkpoints saved while replay support was absent have no auxiliary state.
+        payload = {**payload, "updates": {**payload["updates"], "connectivity": 0}}
+    elif not all(connectivity_fields):
+        raise ValueError(
+            "Connectivity optimizer state and update counters are incomplete."
+        )
     _restore_state(trainer, payload)
+    if all(connectivity_fields):
+        trainer.connectivity_critic.load_state_dict(payload["connectivity"])
+        trainer.connectivity_optim.load_state_dict(payload["connectivity_optim"])
     trainer.use_multi_anchor_next = payload["use_multi_anchor_next"]
     trainer.anchor_bank.entries = payload["anchor_bank"]
 

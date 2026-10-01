@@ -15,16 +15,13 @@ from src.config.train import (
 from src.train.run.sr import run_sr_train
 
 
-def test_default_lr_uses_measured_transitions():
+def test_default_lr_uses_measured_transitions_and_disables_replay_losses():
     cfg = load_train_config("config/train/low_res.yaml")
     loss = cfg["loss"]["connectivity"]
     assert loss["real_transition_weight"] > 0
-    assert set(loss) == {
-        "max_slice_gap",
-        "real_transition_weight",
-        "start_step",
-        "ramp_steps",
-    }
+    assert loss["normal_transition_weight"] == loss["adversarial_weight"] == 0
+    defaults = normalize_train_config({})["loss"]["connectivity"]
+    assert defaults["normal_transition_weight"] == defaults["adversarial_weight"] == 0
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
@@ -88,13 +85,25 @@ def test_lr_transition_defaults_and_sr_rejects_lr_transition_option():
 
 
 @pytest.mark.parametrize(
-    "key", ["adversarial_weight", "normal_transition_weight", "windows_per_plane"]
+    "key,value",
+    [
+        ("adversarial_weight", 0.25),
+        ("normal_transition_weight", 0.1),
+        ("windows_per_plane", 4),
+    ],
 )
-def test_removed_replay_settings_are_rejected(key):
-    with pytest.raises(
-        ValueError, match=f"unknown training setting: loss.connectivity.{key}"
-    ):
-        normalize_train_config({"loss": {"connectivity": {key: 0}}})
+def test_lr_replay_settings_are_selectable_and_sr_rejects_them(key, value):
+    raw = {"loss": {"connectivity": {key: value}}}
+    assert normalize_train_config(raw)["loss"]["connectivity"][key] == value
+    with pytest.raises(ValueError, match="connectivity"):
+        normalize_train_config(raw, "sr")
+
+
+@pytest.mark.parametrize("key", ["adversarial_weight", "normal_transition_weight"])
+@pytest.mark.parametrize("value", [-1, True, float("nan")])
+def test_replay_weights_are_validated(key, value):
+    with pytest.raises(ValueError, match=key):
+        normalize_train_config({"loss": {"connectivity": {key: value}}})
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])

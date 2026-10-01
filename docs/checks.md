@@ -59,7 +59,10 @@ have different heights; it is forwarded to both LR and SR in source-pixel units.
 
 The default LR continuity loss compares phase-pair statistics with measured 2D
 sections; matching those statistics does not establish measured 3D connectivity.
-`data_manifest.json` records this target as `real_transition_reference`.
+Optional replay losses (`adversarial_weight` and `normal_transition_weight`)
+compare against previous generated volumes. `data_manifest.json` records the
+measured target as `real_transition_reference` and the generated target as
+`connectivity_reference`. Both replay weights default to zero.
 Assess generated connectivity separately with the volume connectivity/percolation
 metrics.
 

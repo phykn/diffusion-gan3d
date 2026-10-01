@@ -21,10 +21,12 @@ from src.train.trainer import Trainer, TrainerComponents, TrainerSettings
 def build_optimizers(
     denoiser: nn.Module,
     critics: nn.ModuleDict,
+    connectivity_critic: nn.Module | None,
     cfg: dict,
 ) -> tuple[
     torch.optim.Optimizer,
     dict[str, torch.optim.Optimizer],
+    torch.optim.Optimizer | None,
 ]:
     cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
     optim = cfg["optim"]
@@ -42,7 +44,16 @@ def build_optimizers(
         )
         for plane in critics
     }
-    return denoiser_optim, critic_optims
+    connectivity_optim = (
+        None
+        if connectivity_critic is None
+        else torch.optim.Adam(
+            connectivity_critic.parameters(),
+            lr=optim["critic_lr"],
+            betas=betas,
+        )
+    )
+    return denoiser_optim, critic_optims, connectivity_optim
 
 
 def build_trainer(
@@ -58,9 +69,11 @@ def build_trainer(
         data["height_extents"] = infer_height_extents(data)
     settings = _build_settings(cfg, device)
     critic_augment = build_augmentation(cfg)
-    denoiser, critics = build_models(cfg)
+    denoiser, critics, connectivity_critic = build_models(cfg)
     denoiser = denoiser.to(device)
     critics = critics.to(device)
+    if connectivity_critic is not None:
+        connectivity_critic = connectivity_critic.to(device)
     ema = build_ema(denoiser)
     initial_weights = train.get("initial_weights")
     if initial_weights is not None:
@@ -70,9 +83,11 @@ def build_trainer(
         for plane, critic_model in critics.items():
             path = root / f"critic_{plane}.pt"
             load_model(path, critic_model)
-    denoiser_optim, critic_optims = build_optimizers(
+        load_model(root / "critic_c.pt", connectivity_critic)
+    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
         denoiser,
         critics,
+        connectivity_critic,
         cfg,
     )
     datasets = build_datasets(cfg, high=sr)
@@ -94,10 +109,12 @@ def build_trainer(
             denoiser=denoiser,
             ema_denoiser=ema,
             critics=critics,
+            connectivity_critic=connectivity_critic,
             streams=streams,
             diffusion=build_diffusion(cfg).to(device),
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,
+            connectivity_optim=connectivity_optim,
             scaler=torch.amp.GradScaler("cuda", enabled=settings.amp_enabled),
             device=device,
             critic_augment=critic_augment,
@@ -168,6 +185,8 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         anchor_bank_capacity=anchor.get("bank_capacity", 0),
         anchor_plane_spacing=anchor.get("plane_spacing", 1),
         structure_every_steps=train["structure_every_steps"],
+        connectivity_weight=connectivity.get("adversarial_weight", 0.0),
+        normal_transition_weight=connectivity.get("normal_transition_weight", 0.0),
         real_transition_weight=connectivity.get("real_transition_weight", 0.0),
         group_statistics_weight=statistics["weight"],
         group_statistics_max_gap=statistics["max_gap"],
@@ -177,6 +196,7 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         connectivity_max_gap=connectivity.get("max_slice_gap", 1),
         connectivity_start_step=connectivity_start,
         connectivity_ramp_steps=connectivity_ramp,
+        connectivity_windows_per_plane=connectivity.get("windows_per_plane", 1),
         vf_loss_weight=loss.get("volume_fraction_weight", 0.0),
         domain_dropout=1.0 - conditioning["domain_keep_probability"],
         cfg_drop_each_probability=conditioning.get("dropout_probability_per_case", 0.0),

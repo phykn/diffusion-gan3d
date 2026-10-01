@@ -13,6 +13,7 @@ from src.anchor import PlaneAnchor, encode_anchors
 from src.build.model import build_models
 from src.build.trainer import build_optimizers
 from src.data.augment import CriticAugment
+from src.data.slice import TripletBatch
 from src.data.slice import sample_pairs as sample_volume_pairs
 from src.evaluate.label import compute_vf
 from src.model.diffusion import Diffusion
@@ -45,6 +46,15 @@ def _anchor_config(**values):
         ramp_steps=0,
         cross_domain_prob=0.0,
         pixel_weight=0.05,
+    )
+    cfg.update(values)
+    return cfg
+
+
+def _connectivity_config(**values):
+    cfg = Config(
+        weight=0.0,
+        phase_transition_weight=0.0,
     )
     cfg.update(values)
     return cfg
@@ -95,6 +105,62 @@ def sample_pairs(
         patch_size if crop_shape is None else crop_shape,
         anchor=condition,
     )
+
+
+def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.profile_settings = {"enabled": False}
+    trainer.num_phases = 2
+    trainer.patch_size = 1
+    trainer.device = torch.device("cpu")
+    trainer.connectivity_weight = 1.0
+    trainer.normal_transition_weight = 1.0
+    trainer.diagnostics = {}
+    real_centers = torch.tensor((1, 1))
+    fake_centers = torch.tensor((0, 2))
+    axes = torch.tensor((0, 0))
+    real = TripletBatch(
+        values=torch.zeros(2, 3, 2, 1, 1),
+        axes=axes,
+        gaps=torch.ones(2, dtype=torch.long),
+        center_slots=real_centers,
+    )
+    fake = TripletBatch(
+        values=torch.ones(2, 3, 2, 1, 1),
+        axes=axes,
+        gaps=torch.ones(2, dtype=torch.long),
+        center_slots=fake_centers,
+    )
+    anchor = encode_anchors(
+        (PlaneAnchor(torch.zeros(3, 3, dtype=torch.uint8), axis=0, index=1),),
+        batch_size=1,
+        num_phases=2,
+        volume_size=3,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        reconcile=False,
+    )
+    assert anchor is not None
+    trainer.anchor_triplets = Mock()
+    trainer.anchor_triplets.sample.return_value = (real, fake)
+    trainer.critic_augment = Mock()
+    trainer.critic_augment.apply_together.return_value = (
+        real.values + 2.0,
+        fake.values + 3.0,
+    )
+
+    augmented_real, augmented_fake = trainer.make_connectivity_triplets(
+        torch.zeros(1, 2, 3, 3, 3),
+        torch.zeros(1, 2, 3, 3, 3),
+        anchor,
+        transition=0,
+        source="multi",
+    )
+
+    assert augmented_real.center_slots.tolist() == [1, 1]
+    assert augmented_fake.center_slots.tolist() == [0, 2]
+    assert torch.equal(augmented_real.values, real.values + 2.0)
+    assert torch.equal(augmented_fake.values, fake.values + 3.0)
 
 
 def test_anchor_transitions_prioritize_the_final_step() -> None:
@@ -244,6 +310,22 @@ def test_missing_axes_borrow_from_axis_providers() -> None:
     assert critic_domains == {0: 0, 1: NULL_DOMAIN, 2: NULL_DOMAIN}
 
 
+def test_connectivity_uses_axis_critic_domain_for_shared_context() -> None:
+    triplets = TripletBatch(
+        values=torch.zeros(3, 3, 2, 4, 4),
+        axes=torch.tensor((0, 1, 2)),
+        gaps=torch.ones(3, dtype=torch.long),
+        center_slots=torch.ones(3, dtype=torch.long),
+    )
+
+    domains = Trainer.get_connectivity_domains(
+        critic_domains={0: 0, 1: NULL_DOMAIN, 2: NULL_DOMAIN},
+        triplets=triplets,
+    )
+
+    assert domains.tolist() == [0, NULL_DOMAIN, NULL_DOMAIN]
+
+
 def test_domain_dropout_masks_every_axis_critic() -> None:
     sources = {0: 0, 1: 1, 2: 1}
 
@@ -323,11 +405,12 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
             cross_domain_prob=1.0,
         ),
     )
-    denoiser, critics = build_models(cfg)
+    denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims = build_optimizers(
+    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
         denoiser,
         critics,
+        connectivity_critic,
         cfg,
     )
     images = (
@@ -349,18 +432,20 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         denoiser=denoiser,
         ema_denoiser=ema,
         critics=critics,
+        connectivity_critic=connectivity_critic,
         streams=streams,
         streams_by_domain=True,
         diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
         denoiser_optim=denoiser_optim,
         critic_optims=critic_optims,
+        connectivity_optim=connectivity_optim,
         device=torch.device("cpu"),
     )
     observed_domains = {axis: [] for axis in (0, 1, 2)}
     hooks = [
         critics[PLANES[axis]].register_forward_pre_hook(
             lambda _module, args, axis=axis: observed_domains[axis].append(
-                args[2].tolist()
+                args[-1].tolist()
             )
         )
         for axis in (0, 1, 2)
@@ -409,11 +494,12 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
         local_loss_weight=0.5,
     )
     cfg = _config(data, model, optim)
-    denoiser, critics = build_models(cfg)
+    denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims = build_optimizers(
+    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
         denoiser,
         critics,
+        connectivity_critic,
         cfg,
     )
     images = torch.randint(0, data.num_phases, (data.batch_size, 8, 8))
@@ -426,10 +512,12 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
         denoiser=denoiser,
         ema_denoiser=ema,
         critics=critics,
+        connectivity_critic=connectivity_critic,
         streams=streams,
         diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
         denoiser_optim=denoiser_optim,
         critic_optims=critic_optims,
+        connectivity_optim=connectivity_optim,
         device=torch.device("cpu"),
     )
     trainer.critic_augment = Mock(
@@ -464,7 +552,8 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     assert math.isfinite(metrics.generator_local)
     assert math.isfinite(metrics.critic_global)
     assert math.isfinite(metrics.critic_local)
-
+    assert metrics.generator_connectivity == 0.0
+    assert metrics.critic_connectivity == 0.0
     assert len(r1_values) == 3
     assert trainer.critic_augment.apply_together.call_count == 6
     assert math.isclose(metrics.r1, sum(r1_values) / len(r1_values), rel_tol=1e-6)
@@ -549,11 +638,12 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
             train_prob=1.0,
         ),
     )
-    denoiser, critics = build_models(cfg)
+    denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims = build_optimizers(
+    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
         denoiser,
         critics,
+        connectivity_critic,
         cfg,
     )
     images = torch.randint(0, data.num_phases, (data.batch_size, 8, 8))
@@ -562,6 +652,7 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
         denoiser=denoiser,
         ema_denoiser=ema,
         critics=critics,
+        connectivity_critic=connectivity_critic,
         streams={
             axis: _ConstantStream(phase_channels(images, data.num_phases))
             for axis in (0, 1, 2)
@@ -569,6 +660,7 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
         diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
         denoiser_optim=denoiser_optim,
         critic_optims=critic_optims,
+        connectivity_optim=connectivity_optim,
         device=torch.device("cpu"),
     )
     adapter_before = denoiser.anchor_input.weight.detach().clone()
@@ -596,7 +688,8 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
         for call in compute_logits.call_args_list
     )
     assert math.isfinite(metrics.anchor_loss)
-
+    assert metrics.generator_connectivity == 0.0
+    assert metrics.critic_connectivity == 0.0
     assert 0.0 <= metrics.anchor_accuracy <= 1.0
     assert math.isclose(
         metrics.generator,
@@ -977,6 +1070,7 @@ def test_single_condition_dropout_matches_joint_marginal_visibility() -> None:
 def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
+        connectivity_weight=0.25,
     )
     observed = encode_anchors(
         (PlaneAnchor(torch.zeros(8, 8, dtype=torch.uint8), axis=0, index=4),),
@@ -1019,6 +1113,8 @@ def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
     assert metrics.anchor_loss == 0.0
     assert metrics.anchor_coarse_loss == 0.0
     assert metrics.anchor_pixel_loss == 0.0
+    assert metrics.generator_connectivity == 0.0
+    assert metrics.normal_transition_loss == 0.0
 
 
 def test_vf_total_variation_uses_raw_prediction() -> None:
@@ -1068,10 +1164,12 @@ def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) 
     trainer.critics = nn.ModuleDict(
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
     )
-
+    trainer.connectivity_critic = nn.Linear(2, 1)
+    trainer.connectivity_weight = 0.0
+    trainer.normal_transition_weight = 0.0
     trainer.real_transition_weight = 0.0
     trainer.step = Mock(side_effect=KeyboardInterrupt)
-    checkpoint = tmp_path / "checkpoints" / "training.pt"
+    checkpoint = tmp_path / "checkpoints" / "last.pt"
     checkpoint.parent.mkdir()
     checkpoint.write_bytes(b"previous complete training state")
 
@@ -1119,7 +1217,9 @@ def test_fit_separates_weight_updates_and_checkpoint_archives(
     trainer.critics = nn.ModuleDict(
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
     )
-
+    trainer.connectivity_critic = nn.Linear(2, 1)
+    trainer.connectivity_weight = 0.0
+    trainer.normal_transition_weight = 0.0
     trainer.real_transition_weight = 0.0
     trainer.completed_steps = 0
 
@@ -1138,6 +1238,9 @@ def test_fit_separates_weight_updates_and_checkpoint_archives(
             anchor_conflict_rate=0.0,
             anchor_loss=0.0,
             anchor_accuracy=0.0,
+            generator_connectivity=0.0,
+            critic_connectivity=0.0,
+            connectivity_r1=0.0,
             anchor_ramp=0.0,
         )
 
@@ -1190,8 +1293,11 @@ def _conditioning_trainer(
     patch_size: int = 8,
     anchor_start_step: int = 0,
     anchor_ramp_steps: int = 0,
+    connectivity_weight: float = 0.0,
+    normal_transition_weight: float = 0.0,
     cfg_drop_each_probability: float = 0.0,
     axes: tuple[int, ...] = (0, 1, 2),
+    critic_mode: str = "single",
 ) -> tuple[Trainer, nn.Module, dict[int, _ConstantStream]]:
     data = Config(
         domains={0: {axis: "." for axis in axes}},
@@ -1226,15 +1332,21 @@ def _conditioning_trainer(
             start_step=anchor_start_step,
             ramp_steps=anchor_ramp_steps,
         ),
+        connectivity=_connectivity_config(
+            weight=connectivity_weight,
+            phase_transition_weight=normal_transition_weight,
+        ),
         conditioning=_conditioning_config(
             joint_each_prob=cfg_drop_each_probability,
         ),
     )
-    denoiser, critics = build_models(cfg)
+    cfg["model"]["critic"]["input_mode"] = critic_mode
+    denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims = build_optimizers(
+    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
         denoiser,
         critics,
+        connectivity_critic,
         cfg,
     )
     base = torch.arange(2 * crop_size * crop_size).reshape(
@@ -1251,10 +1363,12 @@ def _conditioning_trainer(
         denoiser=denoiser,
         ema_denoiser=ema,
         critics=critics,
+        connectivity_critic=connectivity_critic,
         streams=streams,
         diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
         denoiser_optim=denoiser_optim,
         critic_optims=critic_optims,
+        connectivity_optim=connectivity_optim,
         device=torch.device("cpu"),
     )
     return trainer, denoiser, streams
@@ -1266,11 +1380,13 @@ def _make_trainer(
     denoiser,
     ema_denoiser,
     critics,
+    connectivity_critic,
     streams,
     streams_by_domain=False,
     diffusion,
     denoiser_optim,
     critic_optims,
+    connectivity_optim,
     device,
 ) -> Trainer:
     use_amp = cfg.train.mixed_precision and device.type == "cuda"
@@ -1279,10 +1395,12 @@ def _make_trainer(
             denoiser=denoiser,
             ema_denoiser=ema_denoiser,
             critics=critics,
+            connectivity_critic=connectivity_critic,
             streams=streams if streams_by_domain else {0: streams},
             diffusion=diffusion,
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,
+            connectivity_optim=connectivity_optim,
             scaler=torch.amp.GradScaler("cuda", enabled=use_amp),
             device=device,
         ),
@@ -1300,12 +1418,15 @@ def _make_trainer(
             anchor_ramp_steps=cfg.conditioning.anchor.ramp_steps,
             anchor_shared_axis_probability=cfg.conditioning.anchor.borrowed_plane_probability,
             anchor_pixel_loss_weight=cfg.loss.anchor_pixel_weight,
+            connectivity_weight=cfg.loss.connectivity.adversarial_weight,
+            normal_transition_weight=(cfg.loss.connectivity.normal_transition_weight),
             vf_loss_weight=cfg.loss.volume_fraction_weight,
             domain_dropout=1.0 - cfg.conditioning.domain_keep_probability,
             cfg_drop_each_probability=cfg.conditioning.dropout_probability_per_case,
             latent_channels=cfg.model.generator.latent_channels,
             amp_enabled=use_amp,
             connectivity_ramp_steps=0,
+            connectivity_windows_per_plane=1,
         ),
     )
 
@@ -1316,11 +1437,16 @@ def _config(
     optim: Config,
     *,
     anchor: Config | None = None,
+    connectivity: Config | None = None,
     vf: Config | None = None,
     conditioning: Config | None = None,
 ) -> Config:
     anchor = _anchor_config() if anchor is None else anchor
+    anchor["connectivity"] = (
+        _connectivity_config() if connectivity is None else connectivity
+    )
     conditioning = _conditioning_config() if conditioning is None else conditioning
+    connectivity = anchor["connectivity"]
     vf = Config(weight=1.0) if vf is None else vf
     return Config(
         data=Config(
@@ -1369,7 +1495,10 @@ def _config(
             r1_every_steps=optim.r1_interval,
             anchor_pixel_weight=anchor.pixel_weight,
             volume_fraction_weight=vf.weight,
-            connectivity=Config(real_transition_weight=0.0),
+            connectivity=Config(
+                adversarial_weight=connectivity.weight,
+                normal_transition_weight=connectivity.phase_transition_weight,
+            ),
         ),
         optim=Config(
             generator_lr=optim.denoiser_lr,
@@ -1412,8 +1541,35 @@ def test_replay_keeps_measurement_and_plane_density(size, count):
     assert bank.sample(1, 1, torch.device("cpu")) is None
 
 
-def test_generator_input_diagnostics_preserve_training_updates_and_rng():
-    trainer, _, _ = _conditioning_trainer(anchored=False, axes=(0,))
+def test_replay_continuity_reference_excludes_pasted_measurement_jump():
+    from src.data.slice import AnchorTripletSampler
+    from src.train.loss.connectivity import compute_transition_loss
+
+    size = 5
+    prediction = torch.empty(1, 2, size, size, size)
+    prediction[:, 0], prediction[:, 1] = -0.6, 0.6
+    image = torch.stack((torch.full((size, size), 0.8), torch.full((size, size), 0.2)))
+    measured = encode_anchors(
+        [PlaneAnchor(image, 0, 2)], 1, 2, size, torch.device("cpu"), torch.float32
+    )
+    bank = AnchorBank(capacity=1)
+    bank.add(0, prediction, measured, torch.tensor([True]))
+    replay = bank.sample(0, 1, torch.device("cpu"))
+    condition, target, reference = replay.condition, replay.measured, replay.reference
+    torch.testing.assert_close(reference, prediction)
+    torch.testing.assert_close(condition.image[:, :, 2], measured.image[:, :, 2])
+    sampler = AnchorTripletSampler(max_gap=1, windows_per_plane=1)
+    adapted = -prediction
+    real, fake = sampler.sample(adapted, reference, target)
+    assert compute_transition_loss(real, fake) == 0
+    pasted = torch.where(target.mask, target.image, reference)
+    real, fake = sampler.sample(pasted, reference, target)
+    assert compute_transition_loss(real, fake) > 0
+
+
+@pytest.mark.parametrize("mode", ["single", "pair"])
+def test_generator_input_diagnostics_preserve_training_updates_and_rng(mode):
+    trainer, _, _ = _conditioning_trainer(anchored=False, axes=(0,), critic_mode=mode)
     trainer.r1_interval = 1
     control = copy.deepcopy(trainer)
     control.r1_interval = 3  # R1/R2 weights are zero; only diagnostics differ.
@@ -1426,7 +1582,10 @@ def test_generator_input_diagnostics_preserve_training_updates_and_rng():
         assert torch.equal(after, torch.get_rng_state())
     prefix = "generator_input_gradient/xy/0/t0/"
     assert actual.diagnostics[prefix + "previous"] > 0
-    assert actual.diagnostics[prefix + "current"] == 0
+    if mode == "pair":
+        assert actual.diagnostics[prefix + "current"] > 0
+    else:
+        assert actual.diagnostics[prefix + "current"] == 0
     assert actual.generator_total == expected.generator_total
     assert not any(
         key.startswith("generator_input_gradient/") for key in expected.diagnostics

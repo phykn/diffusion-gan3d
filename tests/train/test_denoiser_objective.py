@@ -9,9 +9,9 @@ from src.model.critic import CriticScores
 from src.train.loss.denoiser import adversarial_loss
 
 
-class PlaneCritic(nn.Module):
-    def forward(self, previous, time, domain):
-        score = previous.flatten(1).mean(1)
+class PairCritic(nn.Module):
+    def forward(self, previous, current, time, domain):
+        score = previous.flatten(1).mean(1) + 0.25 * current.flatten(1).mean(1)
         return CriticScores(score, 2 * score[:, None, None])
 
 
@@ -34,15 +34,15 @@ def test_grouped_objective_preserves_weighting_and_generator_gradient(diagnose):
     )
     head, diagnostics = adversarial_loss(
         batch,
-        {"xy": PlaneCritic(), "xz_yz": PlaneCritic()},
+        {"xy": PairCritic(), "xz_yz": PairCritic()},
         {"xy": (0,), "xz_yz": (1, 2)},
         local_weight=0.3,
         diagnose=diagnose,
     )
     expected = sum(
         (
-            F.softplus(-(weight * factors[axis]))
-            + 0.3 * F.softplus(-2 * (weight * factors[axis]))
+            F.softplus(-(weight * factors[axis] + 0.25))
+            + 0.3 * F.softplus(-2 * (weight * factors[axis] + 0.25))
         )
         / divisor
         for axis, divisor in ((0, 2), (1, 4), (2, 4))
@@ -55,12 +55,7 @@ def test_grouped_objective_preserves_weighting_and_generator_gradient(diagnose):
     torch.testing.assert_close(actual_grad, expected_grad)
     assert len(diagnostics) == (6 if diagnose else 0)
     assert all(not value.requires_grad for value in diagnostics.values())
-    assert all(
-        value > 0 for key, value in diagnostics.items() if key.endswith("/previous")
-    )
-    assert all(
-        value == 0 for key, value in diagnostics.items() if key.endswith("/current")
-    )
+    assert all(value > 0 for value in diagnostics.values())
 
 
 def test_empty_adversarial_batch_returns_differentiable_zero():

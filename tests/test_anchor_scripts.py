@@ -34,7 +34,7 @@ def test_boundary_continuation_defaults_to_an_unconditioned_reference(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
-    model, _ = build_models(cfg)
+    model, _, _ = build_models(cfg)
     weights = save_model(run_dir / "generator.pt", model)
     output_path = tmp_path / "continuation.tiff"
 
@@ -75,7 +75,7 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
-    model, _ = build_models(cfg)
+    model, _, _ = build_models(cfg)
     weights = save_model(run_dir / "generator.pt", model)
     source = np.indices((18, 20)).sum(axis=0) % cfg["data"]["num_phases"]
     anchor_path = tmp_path / "anchor.png"
@@ -208,7 +208,7 @@ def test_anchor_check_script_runs_with_generated_reference(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
-    model, _ = build_models(cfg)
+    model, _, _ = build_models(cfg)
     with torch.no_grad():
         model.anchor_input.weight.fill_(0.01)
     weights = save_model(run_dir / "generator.pt", model)
@@ -642,7 +642,10 @@ def _config(root: Path) -> dict:
         },
         "loss": {
             "anchor_pixel_weight": 0.05,
-            "connectivity": {},
+            "connectivity": {
+                "adversarial_weight": 0.0,
+                "normal_transition_weight": 0.0,
+            },
             "volume_fraction_weight": 1.0,
             "critic_local_weight": 0.5,
             "r1_weight": 0.0,
@@ -672,7 +675,7 @@ def test_weight_directory_alone_saves_manual_check_results(
     run_dir = tmp_path / "trained"
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
-    model, _ = build_models(cfg)
+    model, _, _ = build_models(cfg)
     save_model(run_dir / "generator.pt", model)
     module = _load_script(filename)
     monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
@@ -722,7 +725,7 @@ def test_inspection_scripts_support_mixed_source_heights(
     run = tmp_path / "run"
     run.mkdir()
     save_yaml(run / "train.yaml", cfg)
-    model, _ = build_models(cfg)
+    model, _, _ = build_models(cfg)
     weights = save_model(run / "generator.pt", model)
     output = tmp_path / "volume.tiff"
     module = _load_script(filename)

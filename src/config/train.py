@@ -121,8 +121,8 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         raise ValueError(
             "model.critic.pyramid_min_size must be an integer of at least two."
         )
-    if cfg["model"]["critic"]["input_mode"] != "single":
-        raise ValueError("model.critic.input_mode must be single.")
+    if cfg["model"]["critic"]["input_mode"] not in ("pair", "single"):
+        raise ValueError("model.critic.input_mode must be pair or single.")
     statistics = cfg["loss"]["group_statistics"]
     if type(statistics["max_gap"]) is not int or statistics["max_gap"] < 1:
         raise ValueError("loss.group_statistics.max_gap must be a positive integer.")
