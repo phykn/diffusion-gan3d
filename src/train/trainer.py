@@ -92,6 +92,11 @@ class TrainerSettings:
     anchor_shared_axis_probability: float
     connectivity_max_gap: int = 1
     real_transition_weight: float = 0.0
+    group_statistics_weight: float = 0.0
+    group_statistics_max_gap: int = 8
+    group_statistics_tolerance: float = 0.01
+    group_statistics_start_step: int = 0
+    group_statistics_ramp_steps: int = 5000
     r2_gamma: float = 0.0
     connectivity_start_step: int = 0
     connectivity_ramp_steps: int = 20000
@@ -175,6 +180,11 @@ class Trainer:
         self.connectivity_weight = settings.connectivity_weight
         self.normal_transition_weight = settings.normal_transition_weight
         self.real_transition_weight = settings.real_transition_weight
+        self.group_statistics_weight = settings.group_statistics_weight
+        self.group_statistics_max_gap = settings.group_statistics_max_gap
+        self.group_statistics_tolerance = settings.group_statistics_tolerance
+        self.group_statistics_start_step = settings.group_statistics_start_step
+        self.group_statistics_ramp_steps = settings.group_statistics_ramp_steps
         self.connectivity_max_gap = settings.connectivity_max_gap
         self.connectivity_start_step = settings.connectivity_start_step
         self.connectivity_ramp_steps = settings.connectivity_ramp_steps
@@ -443,6 +453,8 @@ class Trainer:
             profile=prepared.model_conditions.get("profile"),
             coarse_target=prepared.coarse_target,
             real_transition_loss=self._real_transition_loss(prepared, clean_probs),
+            observed_axes=tuple(self.streams[prepared.domain]),
+            group_statistics_ramp=prepared.group_statistics_ramp,
         )
 
     def _real_transition_loss(self, prepared, clean_probs):
@@ -507,12 +519,20 @@ class Trainer:
             batch_domains,
         )
         if self.bank is not None:
-            return self.prepare_sr_step(
+            prepared = self.prepare_sr_step(
                 domain, model_domain, critic_domains, batches, transition
             )
-        return self.prepare_lr_step(
-            step, domain, model_domain, critic_domains, batches, transition
+        else:
+            prepared = self.prepare_lr_step(
+                step, domain, model_domain, critic_domains, batches, transition
+            )
+        elapsed = step - self.group_statistics_start_step
+        ramp = (
+            0.0
+            if elapsed < 0
+            else min(1.0, (elapsed + 1) / max(self.group_statistics_ramp_steps, 1))
         )
+        return replace(prepared, group_statistics_ramp=ramp)
 
     def prepare_sr_step(
         self,
@@ -1347,6 +1367,10 @@ class Trainer:
                 consistency_weight=self.consistency_weight,
                 consistency_tolerance=self.consistency_tolerance,
                 num_phases=self.num_phases,
+                group_statistics_weight=self.group_statistics_weight,
+                group_statistics_max_gap=self.group_statistics_max_gap,
+                group_statistics_tolerance=self.group_statistics_tolerance,
+                preserve_height=self.height_data is not None,
             )
             with self.autocast():
                 losses, diagnostics = denoiser_objective(

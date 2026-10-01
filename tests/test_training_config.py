@@ -22,6 +22,38 @@ def test_default_lr_uses_measured_transitions_and_disables_replay_losses():
     assert loss["normal_transition_weight"] == loss["adversarial_weight"] == 0
 
 
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+def test_group_statistics_presets_are_enabled_but_legacy_configs_stay_disabled(stage):
+    cfg = load_train_config(f"config/train/{stage}.yaml", stage)
+    assert cfg["loss"]["group_statistics"]["weight"] == 0.1
+    legacy = load_train_config(f"tests/fixtures/config/train/{stage}.yaml", stage)
+    assert legacy["loss"]["group_statistics"]["weight"] == 0
+    assert normalize_train_config(cfg, stage) == cfg
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("weight", -1),
+        ("weight", True),
+        ("weight", float("nan")),
+        ("tolerance", -1),
+        ("tolerance", 1.1),
+        ("tolerance", float("inf")),
+        ("max_gap", 0),
+        ("max_gap", True),
+        ("max_gap", 1.5),
+        ("start_step", -1),
+        ("ramp_steps", -1),
+        ("ramp_steps", True),
+    ],
+)
+def test_group_statistics_settings_are_validated(stage, key, value):
+    with pytest.raises(ValueError, match=f"group_statistics.{key}"):
+        normalize_train_config({"loss": {"group_statistics": {key: value}}}, stage)
+
+
 @pytest.mark.parametrize("weight", (-1, float("nan"), True))
 def test_real_transition_weight_is_validated(weight):
     with pytest.raises(ValueError, match="real_transition_weight"):

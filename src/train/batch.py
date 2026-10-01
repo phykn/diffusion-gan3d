@@ -68,6 +68,8 @@ class DenoiserBatch:
     profile: torch.Tensor | None = None
     coarse_target: torch.Tensor | None = None
     real_transition_loss: torch.Tensor | None = None
+    observed_axes: tuple[int, ...] | None = None
+    group_statistics_ramp: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,7 @@ class StepPreparation:
     anchor_ramp: float
     connectivity_ramp: float = 1.0
     coarse_target: torch.Tensor | None = None
+    group_statistics_ramp: float = 1.0
 
 
 @dataclass(frozen=True)

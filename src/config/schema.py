@@ -54,7 +54,12 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
         ),
         "loss": dict.fromkeys(
             ("critic_local_weight", "r1_weight", "r1_every_steps", "r2_weight")
-        ),
+        )
+        | {
+            "group_statistics": dict.fromkeys(
+                ("weight", "max_gap", "tolerance", "start_step", "ramp_steps")
+            )
+        },
     }
     common["data"]["split"] = dict.fromkeys(("validation_files", "validation_regions"))
     if stage == "low_res":

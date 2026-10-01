@@ -11,6 +11,7 @@ from src.train.loss.gan import (
     get_generator_loss,
     score_plane,
 )
+from src.train.loss.group_statistics import compute_group_statistics_loss
 from src.train.loss.spatial_profile import compute_profile_loss
 from src.train.loss.sr import consistency_loss
 from src.train.loss.volume_fraction import compute_vf_loss
@@ -30,6 +31,10 @@ class DenoiserLossSettings:
     consistency_weight: float
     consistency_tolerance: float
     num_phases: int
+    group_statistics_weight: float = 0.0
+    group_statistics_max_gap: int = 8
+    group_statistics_tolerance: float = 0.01
+    preserve_height: bool = False
 
 
 def denoiser_objective(
@@ -98,6 +103,42 @@ def denoiser_objective(
             * batch.real_transition_loss
         )
         diagnostics["loss/real_transition"] = batch.real_transition_loss.detach()
+    if (
+        settings.group_statistics_weight > 0
+        and batch.transition == 0
+        and batch.group_statistics_ramp > 0
+    ):
+        observed = (
+            groups
+            if batch.observed_axes is None
+            else {
+                name: tuple(axis for axis in axes if axis in batch.observed_axes)
+                for name, axes in groups.items()
+            }
+        )
+        active = None if batch.anchor is None else ~batch.anchor_present.bool()
+        statistics, values = compute_group_statistics_loss(
+            batch.clean_probs,
+            observed,
+            settings.group_statistics_max_gap,
+            settings.group_statistics_tolerance,
+            settings.preserve_height,
+            active,
+            batch.coarse_target,
+        )
+        total = total + (
+            settings.group_statistics_weight * batch.group_statistics_ramp * statistics
+        )
+        diagnostics.update(values)
+        diagnostics["loss/group_statistics"] = statistics.detach()
+        diagnostics["group_statistics/ramp"] = statistics.new_tensor(
+            batch.group_statistics_ramp
+        )
+        diagnostics["group_statistics/active_fraction"] = (
+            statistics.new_tensor(1)
+            if active is None
+            else active.float().mean().to(statistics)
+        )
     if batch.profile is not None:
         profile, values = profile_loss(batch, settings)
         total = total + profile

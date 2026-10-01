@@ -22,6 +22,32 @@ xy observations without known height are excluded. Missing directions or height
 overlap provide no target. Logs under `real_transition/` report errors and matched
 observations; `loss/real_transition` reports their averaged loss.
 
+New LR/SR presets also enable `loss.group_statistics` as a weak symmetry prior:
+`weight: 0.1`, `max_gap: 8`, `tolerance: 0.01`, and `ramp_steps: 5000`.
+Omitted settings resolve to weight zero, preserving historical training objectives.
+At the final reverse step, it compares symmetrized soft joint phase probabilities
+along the plane-normal axes in each critic group, separately for each volume.
+The penalty is the excess total-variation distance above the tolerance, averaged
+over eligible axis pairs, distances, and groups. Distances use the current stage's
+grid cells. Opposite directional biases in different samples cannot cancel.
+`[[xy, xz, yz]]` compares z/y/x; `[[xy], [xz, yz]]` compares only y/x.
+Singleton groups and planes borrowed from other domains supply no comparison.
+
+Sharing a critic does not itself imply physical symmetry. Set this prior's weight
+to zero when a shared group represents genuinely different directions. Height or
+profile conditioning compares only x/y, separately at each z row. Samples with an
+active anchor are excluded to preserve their measured condition. SR additionally
+allows the directional difference of its clean coarse target, resized to the HR
+grid, so the prior penalizes only additional anisotropy beyond that condition and
+the tolerance. All comparisons precede critic augmentation and remain differentiable.
+Existing adversarial, measured-transition, VF, anchor, and SR consistency losses
+remain active. `loss/group_statistics` and `group_statistics/` log the loss,
+schedule, differences, and penalties. Matching these axial second-order statistics
+does not prove full rotational isotropy or 3D connectivity. Compare held-out data
+fit, directional chord/percolation statistics, and diversity before claiming a
+quality improvement; the preset weight and tolerance are initial choices, not
+measured optima. Saved settings are retained on resume.
+
 Anchor replay still supplies multi-anchor conditions. Its outputs are not targets
 for the default continuity loss, and its connectivity critic is inactive. The
 legacy replay losses remain opt-in for controlled comparisons:

@@ -58,6 +58,9 @@ def validate_training_values(cfg):
         for name, value in values.items():
             if name.endswith("_weight") or name == "downsample_mse_tolerance":
                 _number(value, f"{section}.{name}")
+    statistics = cfg["loss"]["group_statistics"]
+    _number(statistics["weight"], "loss.group_statistics.weight")
+    _number(statistics["tolerance"], "loss.group_statistics.tolerance", 1)
 
     for name in (
         "total_steps",

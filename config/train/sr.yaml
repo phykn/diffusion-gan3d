@@ -28,6 +28,12 @@ loss:
 
   downsample_consistency_weight: 10.0
 
+  group_statistics:
+    weight: 0.1
+    max_gap: 8
+    tolerance: 0.01
+    ramp_steps: 5000
+
 optim:
   generator_lr: 0.0001
   critic_lr: 0.00005

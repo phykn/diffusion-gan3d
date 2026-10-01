@@ -16,6 +16,11 @@ TRAIN_DEFAULTS = {
     "loss.critic_local_weight": 0.5,
     "loss.r1_every_steps": 16,
     "loss.r2_weight": 0.0,
+    "loss.group_statistics.weight": 0.0,
+    "loss.group_statistics.max_gap": 8,
+    "loss.group_statistics.tolerance": 0.01,
+    "loss.group_statistics.start_step": 0,
+    "loss.group_statistics.ramp_steps": 5000,
     "optim.adam_betas": [0.5, 0.9],
     "train.num_workers": 0,
 }

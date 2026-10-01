@@ -123,6 +123,10 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         )
     if cfg["model"]["critic"]["input_mode"] not in ("pair", "single"):
         raise ValueError("model.critic.input_mode must be pair or single.")
+    statistics = cfg["loss"]["group_statistics"]
+    if type(statistics["max_gap"]) is not int or statistics["max_gap"] < 1:
+        raise ValueError("loss.group_statistics.max_gap must be a positive integer.")
+    get_schedule_steps(statistics, "loss.group_statistics")
     if stage == "low_res":
         gap = cfg["loss"]["connectivity"].get("max_slice_gap", 1)
         if type(gap) is not int or gap < 1:

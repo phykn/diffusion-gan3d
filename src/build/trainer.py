@@ -137,6 +137,7 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
     conditioning = cfg["conditioning"]
     anchor = conditioning.get("anchor", {})
     connectivity = loss.get("connectivity", {})
+    statistics = loss["group_statistics"]
     optim = cfg["optim"]
     anchor_start_step, anchor_ramp_steps = (
         (0, 0) if sr else get_schedule_steps(anchor, "conditioning.anchor")
@@ -187,6 +188,11 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         connectivity_weight=connectivity.get("adversarial_weight", 0.0),
         normal_transition_weight=connectivity.get("normal_transition_weight", 0.0),
         real_transition_weight=connectivity.get("real_transition_weight", 0.0),
+        group_statistics_weight=statistics["weight"],
+        group_statistics_max_gap=statistics["max_gap"],
+        group_statistics_tolerance=statistics["tolerance"],
+        group_statistics_start_step=statistics["start_step"],
+        group_statistics_ramp_steps=statistics["ramp_steps"],
         connectivity_max_gap=connectivity.get("max_slice_gap", 1),
         connectivity_start_step=connectivity_start,
         connectivity_ramp_steps=connectivity_ramp,
