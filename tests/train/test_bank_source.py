@@ -7,6 +7,7 @@ import torch
 from src.build.model import build_denoiser
 from src.config.files import load_yaml, save_yaml
 from src.config.train import load_train_config, validate_sr_config
+from src.train.checkpoint import complete_checkpoint
 from src.train.run.bank import create_bank, refresh_bank
 from src.train.run.source import (
     file_hash,
@@ -72,10 +73,7 @@ def test_source_loader_remaps_external_data_reference_before_reading(tmp_path):
     old_data_file = old_root / "data.yaml"
     source_data = train_config["data"]
     source_data["domains"] = {
-        0: {
-            plane: [str(old_root / "images")]
-            for plane in ("xy", "xz", "yz")
-        }
+        0: {plane: [str(old_root / "images")] for plane in ("xy", "xz", "yz")}
     }
     save_yaml(old_data_file, source_data)
     train_config["data"] = str(old_data_file)
@@ -98,10 +96,7 @@ def test_source_loader_maps_foreign_external_data_paths(tmp_path, old_root):
     train_config = load_yaml("tests/fixtures/config/train/low_res.yaml")
     source_data = train_config["data"]
     source_data["domains"] = {
-        0: {
-            plane: [f"{old_root}/images"]
-            for plane in ("xy", "xz", "yz")
-        }
+        0: {plane: [f"{old_root}/images"] for plane in ("xy", "xz", "yz")}
     }
     data_file = tmp_path / "data.yaml"
     save_yaml(data_file, source_data)
@@ -126,9 +121,7 @@ def test_refresh_bank_loads_external_source_data_before_path_remapping(
     weights.write_bytes(b"weights")
     source_data = load_yaml("tests/fixtures/config/train/low_res.yaml")["data"]
     old_root = "C:/old/images"
-    source_data["domains"] = {
-        0: {plane: [old_root] for plane in ("xy", "xz", "yz")}
-    }
+    source_data["domains"] = {0: {plane: [old_root] for plane in ("xy", "xz", "yz")}}
     source_data["split"] = {
         "validation_files": [f"{old_root}/heldout.png"],
         "validation_regions": {},
@@ -147,6 +140,7 @@ def test_refresh_bank_loads_external_source_data_before_path_remapping(
             "weights": str(weights),
             "weights_sha256": file_hash(weights),
             "config_sha256": file_hash(config_file),
+            "data_sha256": file_hash(data_file),
         },
         "lr_bank": {"refresh_every_steps": 1, "guidance": 1},
     }
@@ -249,11 +243,11 @@ def test_initial_and_refresh_use_verified_moved_external_source(tmp_path):
         refresh_bank(bank, cfg, 2, torch.device("cpu"), path_maps)
 
 
-def test_legacy_external_source_without_data_digest_still_loads(tmp_path):
+def test_external_source_without_data_digest_is_rejected(tmp_path):
     _, _, cfg = _write_external_source(tmp_path)
     cfg["source"].pop("data_sha256")
-    base_cfg = load_frozen_source(cfg["source"])
-    assert base_cfg["data"]["crop_size"] == 8
+    with pytest.raises(ValueError, match="no saved data configuration hash"):
+        load_frozen_source(cfg["source"])
 
 
 def test_source_data_digest_requires_sha256_format():
@@ -297,6 +291,7 @@ def _write_resume_checkpoint(tmp_path):
     }
     checkpoint = tmp_path / "resume.pt"
     torch.save(payload, checkpoint)
+    complete_checkpoint(checkpoint)
     return checkpoint, weights, config_file, data_file
 
 
@@ -334,22 +329,20 @@ def test_resume_rejects_changed_frozen_source_before_loading_bank(
     assert reached_bank == []
 
 
-def test_resume_passes_cumulative_path_maps_to_source_validation(
-    tmp_path, monkeypatch
-):
+def test_resume_passes_cumulative_path_maps_to_source_validation(tmp_path, monkeypatch):
     checkpoint, _, _, _ = _write_resume_checkpoint(tmp_path)
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
     old_weight = Path("/middle/source/generator.pt")
     old_bank = Path("/middle/sr/bank.pt")
-    payload["config"]["source"].update(
-        weights=str(old_weight), bank=str(old_bank)
-    )
+    payload["config"]["source"].update(weights=str(old_weight), bank=str(old_bank))
     remapped_bank = tmp_path / "current/sr/bank.pt"
     remapped_bank.parent.mkdir(parents=True)
     remapped_bank.write_bytes(b"bank")
     history = [[("/old", "/middle")]]
     payload["path_maps"] = history
+    checkpoint.with_suffix(".complete").unlink()
     torch.save(payload, checkpoint)
+    complete_checkpoint(checkpoint)
     new_map = [("/middle", str(tmp_path / "current"))]
     seen = {}
 

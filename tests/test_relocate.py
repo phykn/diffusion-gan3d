@@ -117,7 +117,7 @@ def test_cli_accepts_multiple_path_maps(cli):
     args = cli.parse_args(
         [
             "--resume",
-            "last.pt",
+            "training.pt",
             "--path-map",
             "C:/old",
             "/new",
@@ -126,5 +126,5 @@ def test_cli_accepts_multiple_path_maps(cli):
             "/images",
         ]
     )
-    assert args.resume == Path("last.pt")
+    assert args.resume == Path("training.pt")
     assert args.path_map == [["C:/old", "/new"], ["D:/images", "/images"]]

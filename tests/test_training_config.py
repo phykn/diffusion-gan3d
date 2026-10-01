@@ -15,19 +15,29 @@ from src.config.train import (
 from src.train.run.sr import run_sr_train
 
 
-def test_default_lr_uses_measured_transitions_and_disables_replay_losses():
+def test_default_lr_uses_measured_transitions():
     cfg = load_train_config("config/train/low_res.yaml")
     loss = cfg["loss"]["connectivity"]
     assert loss["real_transition_weight"] > 0
-    assert loss["normal_transition_weight"] == loss["adversarial_weight"] == 0
+    assert set(loss) == {
+        "max_slice_gap",
+        "real_transition_weight",
+        "start_step",
+        "ramp_steps",
+    }
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
-def test_group_statistics_presets_are_enabled_but_legacy_configs_stay_disabled(stage):
+def test_group_statistics_defaults_are_enabled_and_explicit_opt_out_is_preserved(stage):
     cfg = load_train_config(f"config/train/{stage}.yaml", stage)
     assert cfg["loss"]["group_statistics"]["weight"] == 0.1
-    legacy = load_train_config(f"tests/fixtures/config/train/{stage}.yaml", stage)
-    assert legacy["loss"]["group_statistics"]["weight"] == 0
+    assert (
+        normalize_train_config({}, stage)["loss"]["group_statistics"]["weight"] == 0.1
+    )
+    disabled = normalize_train_config(
+        {"loss": {"group_statistics": {"weight": 0}}}, stage
+    )
+    assert disabled["loss"]["group_statistics"]["weight"] == 0
     assert normalize_train_config(cfg, stage) == cfg
 
 
@@ -68,14 +78,23 @@ def test_transition_gap_is_validated(gap):
         normalize_train_config({"loss": {"connectivity": {"max_slice_gap": gap}}})
 
 
-def test_legacy_config_retains_replay_mode_and_sr_rejects_lr_transition_option():
+def test_lr_transition_defaults_and_sr_rejects_lr_transition_option():
     cfg = load_train_config("tests/fixtures/config/train/low_res.yaml")
-    assert cfg["loss"]["connectivity"]["real_transition_weight"] == 0
-    assert cfg["loss"]["connectivity"]["normal_transition_weight"] > 0
+    assert cfg["loss"]["connectivity"]["real_transition_weight"] == 0.1
     with pytest.raises(ValueError, match="connectivity"):
         normalize_train_config(
             {"loss": {"connectivity": {"real_transition_weight": 0.1}}}, "sr"
         )
+
+
+@pytest.mark.parametrize(
+    "key", ["adversarial_weight", "normal_transition_weight", "windows_per_plane"]
+)
+def test_removed_replay_settings_are_rejected(key):
+    with pytest.raises(
+        ValueError, match=f"unknown training setting: loss.connectivity.{key}"
+    ):
+        normalize_train_config({"loss": {"connectivity": {key: 0}}})
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
@@ -259,7 +278,7 @@ def test_sr_requires_source_weights_before_creating_a_run(tmp_path, weights):
 def test_sr_resume_rejects_an_explicit_lr_source_override(tmp_path):
     with pytest.raises(ValueError, match="base_weights cannot change on resume"):
         run_sr_train(
-            base_weights=tmp_path / "generator.pt", resume=tmp_path / "last.pt"
+            base_weights=tmp_path / "generator.pt", resume=tmp_path / "training.pt"
         )
 
 

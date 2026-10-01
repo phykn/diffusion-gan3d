@@ -23,7 +23,7 @@ def _is_complete(path: Path) -> bool:
 
 
 def resolve_checkpoint(value: str | Path) -> Path:
-    """Find the latest completed step, or accept an explicit legacy checkpoint."""
+    """Find the latest completed step, or validate an explicit completed file."""
     path = Path(value).expanduser().resolve()
     if path.is_dir():
         root = path / "checkpoints" if (path / "checkpoints").is_dir() else path
@@ -35,9 +35,9 @@ def resolve_checkpoint(value: str | Path) -> Path:
         for _, candidate in sorted(candidates, reverse=True):
             if _is_complete(candidate):
                 return candidate
-        path = root / "last.pt"
+        raise FileNotFoundError(f"No completed training checkpoint found: {value}")
     if not path.is_file():
         raise FileNotFoundError(f"No completed training checkpoint found: {value}")
-    if _NAME.fullmatch(path.name) and not _is_complete(path):
+    if not _is_complete(path):
         raise ValueError(f"Training checkpoint is incomplete: {path}")
     return path

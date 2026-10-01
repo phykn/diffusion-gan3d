@@ -39,6 +39,8 @@ augmentation:
       rotate_90: true
 
 loss:
+  group_statistics:
+    weight: 0.0
   r1_weight: 0.5
   r2_weight: 0.1
   r1_every_steps: 8

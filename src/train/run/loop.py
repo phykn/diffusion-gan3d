@@ -24,9 +24,6 @@ def describe_data(trainer):
     split = trainer.cfg["data"].get("split", {})
     return {
         "has_measured_3d_reference": False,
-        "connectivity_reference": "generated_replay"
-        if trainer.connectivity_weight > 0 or trainer.normal_transition_weight > 0
-        else None,
         "real_transition_reference": "measured_2d"
         if trainer.real_transition_weight > 0
         else None,
@@ -70,14 +67,14 @@ def save_weights(trainer: Trainer, root: Path, stage: str = "low_res") -> None:
         save_model(root / "generator.pt", trainer.ema_denoiser)
     for group, critic in trainer.critics.items():
         save_model(root / f"critic_{group}.pt", critic)
-    if trainer.connectivity_critic is not None:
-        save_model(root / "critic_c.pt", trainer.connectivity_critic)
 
 
 def save_checkpoint(trainer, root, stage):
     sequence = time_ns()
     while True:
-        path = root / "checkpoints" / f"step_{trainer.completed_steps:08d}_{sequence}.pt"
+        path = (
+            root / "checkpoints" / f"step_{trainer.completed_steps:08d}_{sequence}.pt"
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             if stage == "sr":

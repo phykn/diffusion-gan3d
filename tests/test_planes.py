@@ -59,7 +59,6 @@ def test_initial_weights_load_by_plane(tmp_path):
     assert tuple(source.critic_optims) == PLANES
     weights = tmp_path / "weights"
     save_model(weights / "generator.pt", source.denoiser)
-    save_model(weights / "critic_c.pt", source.connectivity_critic)
     for axis, plane in enumerate(PLANES):
         with torch.no_grad():
             source.critics[plane].input.bias.fill_(axis + 1)

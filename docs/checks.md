@@ -59,9 +59,7 @@ have different heights; it is forwarded to both LR and SR in source-pixel units.
 
 The default LR continuity loss compares phase-pair statistics with measured 2D
 sections; matching those statistics does not establish measured 3D connectivity.
-The opt-in legacy connectivity losses compare against generated replay volumes
-and measure consistency with previous generations. `data_manifest.json` records
-these separately as `real_transition_reference` and `connectivity_reference`.
+`data_manifest.json` records this target as `real_transition_reference`.
 Assess generated connectivity separately with the volume connectivity/percolation
 metrics.
 
@@ -71,7 +69,7 @@ rotate and flip. Custom `augmentation.planes` policies remain explicit and are
 validated. Ctrl+C finishes the current training step and saves both inference
 weights and completed `checkpoints/step_<step>_<timestamp>.pt` files for resuming
 (keep their `.complete` files). `--resume` also accepts a run directory and selects
-the latest completed checkpoint; legacy `checkpoints/last.pt` files still work.
+the latest completed checkpoint.
 
 Shared helpers live in `scripts/common/`, experiment drivers in
 `scripts/experiments/`, and paper reproduction tools in `scripts/paper/`.

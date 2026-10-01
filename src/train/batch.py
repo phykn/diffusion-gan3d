@@ -4,7 +4,6 @@ from typing import Literal
 import torch
 
 from src.anchor import AnchorCondition
-from src.data.slice import TripletBatch
 
 
 @dataclass(frozen=True)
@@ -31,8 +30,6 @@ class DenoiserUpdate:
     total: torch.Tensor
     global_loss: torch.Tensor
     local_loss: torch.Tensor
-    connectivity: torch.Tensor
-    normal_transition: torch.Tensor
     anchor: torch.Tensor
     anchor_coarse: torch.Tensor
     anchor_pixel: torch.Tensor
@@ -48,11 +45,8 @@ class DenoiserUpdate:
 @dataclass(frozen=True)
 class DenoiserBatch:
     transition: int
-    connectivity_domains: torch.Tensor
     critic_domains: dict[int, int]
     fake: dict[int, tuple[torch.Tensor, torch.Tensor]]
-    connectivity_real: TripletBatch
-    connectivity_fake: TripletBatch
     logits: torch.Tensor
     clean_probs: torch.Tensor
     anchor: AnchorCondition | None

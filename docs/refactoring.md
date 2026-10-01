@@ -135,13 +135,13 @@ that `load_generator` reopened the original config after the relocation-aware
 loader, undoing external-YAML relocation. Earlier isolated tests mocked that
 loader, so they did not cover this failure. Follow-up work uses one resolved
 config to build the generator and conditioning datasets, and adds real-builder
-regressions plus an optional external-data digest without rewriting legacy
-checkpoints. This follow-up is not covered by the 1,038-test result above.
+regressions plus an external-data digest. This follow-up is not covered by the
+1,038-test result above.
 
 Source-snapshot implementation and regression checks are now complete. Both
 creation and refresh use `load_frozen_source` and pass its resolved config to
-the real generator builder. New external-YAML sources record `data_sha256`;
-legacy sources without that optional field remain readable. The combined
+the real generator builder. External-YAML sources require a saved `data_sha256`
+for source validation. The combined
 source/configuration/inference selection passed 413 tests, skipped 8, and failed
 one stochastic measured-transition assertion; that test passed when rerun alone.
 This is not reported as an entirely passing combined run. Ruff and diff checks

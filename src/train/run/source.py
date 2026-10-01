@@ -28,13 +28,7 @@ def _validate_source_files(weights: Path, recorded: dict) -> None:
 def validate_frozen_source(
     weights: Path, recorded: dict, path_maps: list | None = None
 ) -> None:
-    _validate_source_files(weights, recorded)
-    if "data_sha256" in recorded:
-        _, data_sha256 = read_source_config(find_train_config(weights), path_maps)
-        if data_sha256 != recorded["data_sha256"]:
-            raise ValueError(
-                "frozen LR source data configuration changed since SR training."
-            )
+    load_frozen_source({**recorded, "weights": str(weights)}, path_maps)
 
 
 def read_source_config(
@@ -66,7 +60,9 @@ def load_frozen_source(source: dict, path_maps: list | None = None) -> dict:
     weights = Path(source["weights"])
     _validate_source_files(weights, source)
     cfg, data_sha256 = read_source_config(find_train_config(weights), path_maps)
-    if "data_sha256" in source and data_sha256 != source["data_sha256"]:
+    if data_sha256 is not None and not source.get("data_sha256"):
+        raise ValueError("frozen LR source has no saved data configuration hash.")
+    if data_sha256 != source.get("data_sha256"):
         raise ValueError(
             "frozen LR source data configuration changed since SR training."
         )

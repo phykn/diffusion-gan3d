@@ -4,7 +4,7 @@ import torch
 
 from src.build.model import build_denoiser
 from src.config.train import load_train_config
-from src.model.critic import CriticScores, GroupNorm, PairCritic2D
+from src.model.critic import CriticScores, GroupNorm, PlaneCritic2D
 from src.model.denoiser import ChannelNorm3D, Denoiser3D
 from src.model.layers import AdaptiveNorm
 
@@ -26,8 +26,8 @@ def _denoiser(
     )
 
 
-def _critic(*, checkpointing: bool = False) -> PairCritic2D:
-    return PairCritic2D(
+def _critic(*, checkpointing: bool = False) -> PlaneCritic2D:
+    return PlaneCritic2D(
         num_phases=3,
         channels=(4, 8),
         embedding_channels=8,
@@ -617,7 +617,7 @@ class Denoiser3DTest(unittest.TestCase):
         self.assertTrue(torch.equal(plain, learned_plain))
 
 
-class PairCritic2DTest(unittest.TestCase):
+class PlaneCritic2DTest(unittest.TestCase):
     def test_2d_critic_keeps_spatial_group_norm(self):
         model = _critic()
 
@@ -632,9 +632,9 @@ class PairCritic2DTest(unittest.TestCase):
         current = torch.randn(2, 3, 6, 8, requires_grad=True)
         domain = _domain(previous)
 
-        first = model(previous, current, torch.zeros(2), domain)
-        scores = model(previous, current, torch.ones(2), domain)
-        other = model(previous, current, torch.zeros(2), _domain(previous, 1))
+        first = model(previous, torch.zeros(2), domain)
+        scores = model(previous, torch.ones(2), domain)
+        other = model(previous, torch.zeros(2), _domain(previous, 1))
 
         self.assertIsInstance(scores, CriticScores)
         self.assertEqual(scores.logits_global.shape, torch.Size([2]))
@@ -646,19 +646,18 @@ class PairCritic2DTest(unittest.TestCase):
         (scores.logits_global.mean() + scores.logits_local.mean()).backward()
 
         self.assertIsNotNone(previous.grad)
-        self.assertIsNotNone(current.grad)
+        self.assertIsNone(current.grad)
         self.assertIsNotNone(model.output.weight.grad)
         self.assertIsNotNone(model.local_output.weight.grad)
         self.assertTrue(bool(torch.isfinite(previous.grad).all()))
-        self.assertTrue(bool(torch.isfinite(current.grad).all()))
         self.assertGreater(float(previous.grad.abs().sum()), 0.0)
-        self.assertGreater(float(current.grad.abs().sum()), 0.0)
+        self.assertIsNone(current.grad)
         self.assertGreater(float(model.output.weight.grad.abs().sum()), 0.0)
         self.assertGreater(float(model.local_output.weight.grad.abs().sum()), 0.0)
 
     def test_requires_two_feature_levels(self):
         with self.assertRaisesRegex(ValueError, "at least two levels"):
-            PairCritic2D(
+            PlaneCritic2D(
                 num_phases=3,
                 channels=(4,),
                 embedding_channels=8,
@@ -681,14 +680,14 @@ class GradientCheckpointingTest(unittest.TestCase):
         critic = _critic(checkpointing=True).train()
         previous = torch.randn(1, 3, 4, 4, requires_grad=True)
         current = torch.randn(1, 3, 4, 4, requires_grad=True)
-        scores = critic(previous, current, torch.zeros(1), _domain(previous))
+        scores = critic(previous, torch.zeros(1), _domain(previous))
         loss = scores.logits_global.mean() + scores.logits_local.mean()
         loss.backward()
 
         self.assertEqual(scores.logits_global.shape, torch.Size([1]))
         self.assertEqual(scores.logits_local.shape, torch.Size([1, 2, 2]))
         self.assertGreater(float(previous.grad.abs().sum()), 0.0)
-        self.assertGreater(float(current.grad.abs().sum()), 0.0)
+        self.assertIsNone(current.grad)
         self.assertGreater(float(critic.output.weight.grad.abs().sum()), 0.0)
         self.assertGreater(float(critic.local_output.weight.grad.abs().sum()), 0.0)
 

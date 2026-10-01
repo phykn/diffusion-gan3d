@@ -92,7 +92,9 @@ def test_sr_expands_home_in_weight_paths(tmp_path, monkeypatch, weights):
 
 
 @pytest.mark.parametrize("height", [False, True])
-def test_sr_augments_clean_target_before_corruption_and_preserves_bank(tmp_path, height):
+def test_sr_augments_clean_target_before_corruption_and_preserves_bank(
+    tmp_path, height
+):
     cfg = sr_config(tmp_path)
     cfg["conditioning"]["height_enabled"] = height
     cfg["augmentation"]["planes"] = {
@@ -339,7 +341,7 @@ def test_sr_training_restores_state_without_rng(tmp_path):
         not torch.equal(critic_before[k], v)
         for k, v in trainer.critics.state_dict().items()
     )
-    checkpoint = tmp_path / "last.pt"
+    checkpoint = tmp_path / "training.pt"
     save_sr_training(trainer, checkpoint)
     saved_bytes = checkpoint.read_bytes()
     with patch("src.storage.torch.save", side_effect=OSError("write failed")):

@@ -20,10 +20,8 @@ def trainer():
         denoiser=model,
         ema_denoiser=model,
         critics=torch.nn.ModuleDict({"xy": model}),
-        connectivity_critic=model,
         denoiser_optim=optim,
         critic_optims={"xy": optim},
-        connectivity_optim=optim,
         scaler=optim,
         use_multi_anchor_next=False,
         anchor_bank=SimpleNamespace(entries=[]),
@@ -123,15 +121,26 @@ def test_directory_resume_skips_unfinished_checkpoint(tmp_path, damage):
         resolve_checkpoint(latest)
 
 
-def test_latest_checkpoint_orders_steps_numerically_and_supports_legacy(tmp_path):
+def test_latest_checkpoint_orders_steps_numerically(tmp_path):
     root = tmp_path / "checkpoints"
-    legacy = torch_save({"step": 1}, root / "last.pt")
-    assert resolve_checkpoint(tmp_path) == legacy.resolve()
-    assert resolve_checkpoint(legacy) == legacy.resolve()
     for step, timestamp in ((9, 900), (10, 100), (10, 200)):
         path = torch_save({}, root / f"step_{step}_{timestamp}.pt", overwrite=False)
         complete_checkpoint(path)
     assert resolve_checkpoint(tmp_path).name == "step_10_200.pt"
+
+
+def test_unmarked_checkpoint_is_rejected_as_a_file_and_directory_fallback(tmp_path):
+    path = torch_save({"step": 1}, tmp_path / "checkpoints" / "last.pt")
+    with pytest.raises(FileNotFoundError, match="No completed"):
+        resolve_checkpoint(tmp_path)
+    with pytest.raises(ValueError, match="incomplete"):
+        resolve_checkpoint(path)
+
+
+def test_renamed_completed_checkpoint_can_be_selected_explicitly(tmp_path):
+    path = torch_save({"step": 1}, tmp_path / "training.pt")
+    complete_checkpoint(path)
+    assert resolve_checkpoint(path) == path.resolve()
 
 
 def test_exclusive_write_cannot_damage_existing_checkpoint(tmp_path):

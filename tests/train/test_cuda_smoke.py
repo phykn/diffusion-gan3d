@@ -79,10 +79,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
         },
         "loss": {
             "anchor_pixel_weight": 0.05,
-            "connectivity": {
-                "adversarial_weight": 0.0,
-                "normal_transition_weight": 0.0,
-            },
+            "connectivity": {},
             "volume_fraction_weight": 1.0,
             "critic_local_weight": 0.5,
             "r1_weight": 0.05,
@@ -93,15 +90,13 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
     model = cfg["model"]
     optim = cfg["optim"]
     train = cfg["train"]
-    denoiser, critics, connectivity_critic = build_models(cfg)
+    denoiser, critics = build_models(cfg)
     denoiser = denoiser.to(device)
     critics = critics.to(device)
-    connectivity_critic = connectivity_critic.to(device)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
+    denoiser_optim, critic_optims = build_optimizers(
         denoiser,
         critics,
-        connectivity_critic,
         cfg,
     )
     images = torch.randint(
@@ -114,7 +109,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             denoiser=denoiser,
             ema_denoiser=ema,
             critics=critics,
-            connectivity_critic=connectivity_critic,
             streams={
                 0: {
                     axis: CudaStream(phase_channels(images, data["num_phases"]))
@@ -124,7 +118,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             diffusion=Diffusion(11, beta_min=0.1, beta_max=20.0).to(device),
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,
-            connectivity_optim=connectivity_optim,
             scaler=torch.amp.GradScaler("cuda", enabled=True),
             device=device,
         ),
@@ -143,10 +136,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             anchor_pixel_loss_weight=cfg["loss"]["anchor_pixel_weight"],
             anchor_shared_axis_probability=cfg["conditioning"]["anchor"][
                 "borrowed_plane_probability"
-            ],
-            connectivity_weight=cfg["loss"]["connectivity"]["adversarial_weight"],
-            normal_transition_weight=cfg["loss"]["connectivity"][
-                "normal_transition_weight"
             ],
             vf_loss_weight=cfg["loss"]["volume_fraction_weight"],
             domain_dropout=1.0 - cfg["conditioning"]["domain_keep_probability"],

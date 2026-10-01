@@ -9,8 +9,6 @@ def save_training(path: str | Path, trainer) -> None:
     payload = _capture_state(trainer)
     payload.update(
         format="diffusion-gan3d.lr.train",
-        connectivity=trainer.connectivity_critic.state_dict(),
-        connectivity_optim=trainer.connectivity_optim.state_dict(),
         use_multi_anchor_next=trainer.use_multi_anchor_next,
         anchor_bank=trainer.anchor_bank.entries,
     )
@@ -32,8 +30,6 @@ def resume_training(trainer, payload: dict) -> None:
     if payload["data_fingerprint"] != trainer.data_fingerprint:
         raise ValueError("LR source images changed since the checkpoint.")
     _restore_state(trainer, payload)
-    trainer.connectivity_critic.load_state_dict(payload["connectivity"])
-    trainer.connectivity_optim.load_state_dict(payload["connectivity_optim"])
     trainer.use_multi_anchor_next = payload["use_multi_anchor_next"]
     trainer.anchor_bank.entries = payload["anchor_bank"]
 

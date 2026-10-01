@@ -4,7 +4,7 @@ from torch import nn
 
 from src.config.data import get_domains, get_plane_groups, get_sr_plane_groups
 from src.config.train import get_sr_sizes, normalize_train_config
-from src.model.critic import ConnectivityCritic2D, PairCritic2D, PlaneCritic2D
+from src.model.critic import PlaneCritic2D
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 
@@ -78,7 +78,7 @@ def build_denoiser(
 
 def build_models(
     cfg: dict,
-) -> tuple[Denoiser3D, nn.ModuleDict, ConnectivityCritic2D | None]:
+) -> tuple[Denoiser3D, nn.ModuleDict]:
     cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
     data = cfg["data"]
     model = cfg["model"]
@@ -95,10 +95,9 @@ def build_models(
         }
     else:
         groups = get_plane_groups(cfg)
-    critic_class = PlaneCritic2D if critic["input_mode"] == "single" else PairCritic2D
     critics = nn.ModuleDict(
         {
-            group: critic_class(
+            group: PlaneCritic2D(
                 num_phases=data["num_phases"],
                 channels=critic["channels"],
                 embedding_channels=generator["embedding_channels"],
@@ -109,39 +108,19 @@ def build_models(
             for group in groups
         }
     )
-    connectivity_critic = (
-        None
-        if cfg["stage"] == "sr"
-        else ConnectivityCritic2D(
-            num_phases=data["num_phases"],
-            channels=critic["channels"],
-            embedding_channels=generator["embedding_channels"],
-            num_domains=num_domains,
-            gradient_checkpointing=model["gradient_checkpointing"],
-            directed_axis=0 if cfg["conditioning"]["height_enabled"] else None,
-        )
-    )
     if cfg["conditioning"]["height_enabled"]:
         for network in critics.values():
             network.height_input = nn.Conv2d(
                 1, critic["channels"][0], 3, padding=1, bias=False
             )
-    if cfg["conditioning"]["height_enabled"] and connectivity_critic is not None:
-        connectivity_critic.height_input = nn.Conv2d(
-            3, critic["channels"][0], 3, padding=1, bias=False
-        )
     if cfg["conditioning"].get("spatial_profile", {}).get("critic_enabled", False):
         for network in critics.values():
             network.profile_input = nn.Conv2d(
                 data["num_phases"], critic["channels"][0], 3, padding=1, bias=False
             )
-        connectivity_critic.profile_input = nn.Conv2d(
-            3 * data["num_phases"], critic["channels"][0], 3, padding=1, bias=False
-        )
-    for network in (*critics.values(), connectivity_critic):
-        if network is not None:
-            network.pyramid_min_size = critic["pyramid_min_size"]
-    return denoiser, critics, connectivity_critic
+    for network in critics.values():
+        network.pyramid_min_size = critic["pyramid_min_size"]
+    return denoiser, critics
 
 
 def build_diffusion(cfg: dict) -> Diffusion:

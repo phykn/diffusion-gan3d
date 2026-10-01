@@ -4,12 +4,10 @@ import torch
 
 from src.evaluate.profile import phase_profile
 from src.train.batch import DenoiserBatch, DenoiserUpdate
-from src.train.loss.connectivity import compute_transition_loss
 from src.train.loss.gan import (
     HeadLoss,
     active_groups,
     get_generator_loss,
-    score_plane,
 )
 from src.train.loss.group_statistics import compute_group_statistics_loss
 from src.train.loss.spatial_profile import compute_profile_loss
@@ -21,8 +19,6 @@ from src.train.step import input_gradient_norms
 @dataclass(frozen=True)
 class DenoiserLossSettings:
     local_weight: float
-    connectivity_weight: float
-    normal_transition_weight: float
     vf_weight: float
     real_transition_weight: float
     profile_bins: int
@@ -40,7 +36,6 @@ class DenoiserLossSettings:
 def denoiser_objective(
     batch: DenoiserBatch,
     critics,
-    connectivity_critic,
     groups: dict[str, tuple[int, ...]],
     anchor_loss,
     settings: DenoiserLossSettings,
@@ -52,23 +47,6 @@ def denoiser_objective(
     )
     global_loss, local_loss = head.global_loss, head.local_loss
     adversarial = head.combine(settings.local_weight)
-    connectivity = adversarial.new_zeros(())
-    if len(batch.connectivity_fake) and settings.connectivity_weight > 0.0:
-        fake = batch.connectivity_fake
-        scores = connectivity_critic(
-            fake.values,
-            fake.axes,
-            fake.gaps,
-            batch.connectivity_domains,
-            **({"height": fake.height} if fake.height is not None else {}),
-            **({"profile": fake.profile} if fake.profile is not None else {}),
-        )
-        connectivity = get_generator_loss(scores).combine(settings.local_weight)
-    normal = adversarial.new_zeros(())
-    if len(batch.connectivity_fake) and settings.normal_transition_weight > 0.0:
-        normal = compute_transition_loss(
-            batch.connectivity_real, batch.connectivity_fake
-        )
     anchor = adversarial.new_zeros(())
     anchor_coarse = adversarial.new_zeros(())
     anchor_pixel = adversarial.new_zeros(())
@@ -86,16 +64,7 @@ def denoiser_objective(
         anchor_pixel = result.pixel
         anchor_accuracy = result.accuracy
     vf = compute_vf_loss(batch.clean_probs, batch.target_vf, batch.vf_present)
-    total = (
-        adversarial
-        + batch.anchor_ramp * anchor
-        + batch.connectivity_ramp
-        * (
-            settings.connectivity_weight * connectivity
-            + settings.normal_transition_weight * normal
-        )
-        + settings.vf_weight * vf
-    )
+    total = adversarial + batch.anchor_ramp * anchor + settings.vf_weight * vf
     if batch.real_transition_loss is not None:
         total = total + (
             batch.connectivity_ramp
@@ -152,8 +121,6 @@ def denoiser_objective(
         total=total,
         global_loss=global_loss,
         local_loss=local_loss,
-        connectivity=connectivity,
-        normal_transition=normal,
         anchor=anchor,
         anchor_coarse=anchor_coarse,
         anchor_pixel=anchor_pixel,
@@ -189,10 +156,8 @@ def adversarial_loss(batch, critics, groups, local_weight, diagnose):
             conditions["height"] = batch.fake_heights[axis]
             if axis in batch.fake_profiles:
                 conditions["profile"] = batch.fake_profiles[axis]
-        scores = score_plane(
-            critics[axis_critics[axis]],
+        scores = critics[axis_critics[axis]](
             fake_prev,
-            fake_curr,
             time,
             domains,
             **conditions,

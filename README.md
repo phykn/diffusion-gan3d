@@ -22,9 +22,8 @@ xy observations without known height are excluded. Missing directions or height
 overlap provide no target. Logs under `real_transition/` report errors and matched
 observations; `loss/real_transition` reports their averaged loss.
 
-New LR/SR presets also enable `loss.group_statistics` as a weak symmetry prior:
+LR/SR training enables `loss.group_statistics` as a weak symmetry prior:
 `weight: 0.1`, `max_gap: 8`, `tolerance: 0.01`, and `ramp_steps: 5000`.
-Omitted settings resolve to weight zero, preserving historical training objectives.
 At the final reverse step, it compares symmetrized soft joint phase probabilities
 along the plane-normal axes in each critic group, separately for each volume.
 The penalty is the excess total-variation distance above the tolerance, averaged
@@ -48,21 +47,10 @@ fit, directional chord/percolation statistics, and diversity before claiming a
 quality improvement; the preset weight and tolerance are initial choices, not
 measured optima. Saved settings are retained on resume.
 
-Anchor replay still supplies multi-anchor conditions. Its outputs are not targets
-for the default continuity loss, and its connectivity critic is inactive. The
-legacy replay losses remain opt-in for controlled comparisons:
-
-| Mode | `adversarial_weight` | `normal_transition_weight` | `real_transition_weight` |
-| --- | ---: | ---: | ---: |
-| Legacy replay | 0.25 | 0.1 | 0 |
-| No continuity loss | 0 | 0 | 0 |
-| Measured transitions (default) | 0 | 0 | 0.1 |
-
-These keys are under `loss.connectivity`. Compare separate runs with the same
-data, initialization, anchor/VF settings, and schedule. Check anchor-boundary
-jumps, held-out 2D transition statistics, and sample diversity. Matching these
-statistics does not establish 3D connectivity. Saved configurations retain their
-loss settings on resume; changing the objective requires a separate training run.
+Anchor replay supplies multi-anchor conditions. Its generated volumes are not
+continuity targets. `loss.connectivity.real_transition_weight` controls the measured
+2D transition loss (default `0.1`); set it to zero to disable that loss. Saved
+configurations retain their loss settings on resume.
 
 SR samples a spatial rotation/reflection independently for each LR bank volume
 before coarse-input corruption and resizing. Cubic volumes use all 48 cube
@@ -118,9 +106,9 @@ presets as needed.
 
 Datasets always return a dict containing `image` and source/crop metadata.
 With `conditioning.height_enabled: true`, height is fixed to z: the vertical
-direction of `xz`/`yz` section images in source pixels. Augmentation and the
-connectivity critic automatically preserve this height direction when height
-conditioning is enabled, so there is no separate axis setting. Source-image
+direction of `xz`/`yz` section images in source pixels. Augmentation preserves
+this direction and plane critics receive the same height coordinates, so there
+is no separate axis setting. Source-image
 heights are saved for inference. `xy` sections have no measured z coordinate
 (`height_origin` and `height_extent` are -1).
 
@@ -137,13 +125,12 @@ and metrics are saved under `run/`.
 `checkpoints/step_<step>_<timestamp>.pt` training checkpoint, including optimizer
 state for resuming; `null` disables periodic checkpoints. Normal completion and
 Ctrl+C at a completed step also save the final checkpoint and update the exports.
-Numbered copies of generator/critic exports are no longer created.
 Training checkpoints are written directly, without temporary files or renaming, and are
 never overwritten or automatically deleted. Keep the matching `.complete` files:
 they identify completed writes. Pass the run directory or its `checkpoints/`
 directory to `--resume` to select the latest completed step, skipping interrupted
-writes. Explicit checkpoint files, including legacy `checkpoints/last.pt`, still
-work. `--steps` is the total target, including completed steps. Each resume writes
+writes. Explicit checkpoint files must also have matching `.complete` files.
+`--steps` is the total target, including completed steps. Each resume writes
 to a new run directory.
 
 `generator.pt` and critic exports are overwritten directly. An interrupted export
@@ -172,43 +159,15 @@ mappings only when paths move again.
 SR banks are written directly to new step files and never replace an existing
 step. Training settings reference a bank only after its write completes.
 
-### Critic input comparison
+### Plane critic
 
-New LR and SR training presets use `model.critic.input_mode: single`: only x_t
-enters the plane critic, retaining time/domain/height/profile conditions. Its
-input has num_phases channels and its forward method has no x_{t+1} argument.
-`pair` remains available for legacy checkpoints and controlled comparisons.
-Historical configurations without input_mode still resolve to pair for resume
-compatibility; use the updated presets or explicitly set single for new training.
-The new preset removes a discrimination path through a detached state whose
-real/fake distributions can differ. This is a design choice, not a demonstrated
-quality improvement. Posterior sampling links adjacent states algebraically;
-it does not by itself guarantee the learned reverse conditional is correct.
-The generator still receives x_{t+1} in both modes. Single-input critics remove
-the detached-current-state discrimination path but no longer score the joint
-diffusion transition. This is a marginal critic ablation, not a reproduction of
-the Diffusion-GAN training algorithm. LR and SR both support the setting;
-switching modes requires a fresh critic and optimizer, not checkpoint resume.
-
-For paired LR experiments, use a resolved training configuration with
-`train.num_workers: 0` and no `train.initial_weights`:
-
-```powershell
-& .\.venv\Scripts\python.exe scripts/experiments/critic_inputs.py --config config/train/low_res.yaml --run-dir run/critic-input-comparison --seeds 11 22 33 --steps 10000 --device cuda
-```
-
-The runner refuses an existing output directory, checks identical generator
-initialization hashes, seeds sampling per step, and trains fresh critics for
-both modes. It retains all other settings, saves each run's configuration,
-checkpoints and metrics, and summarizes time, CUDA peak allocation and per-time
-input-gradient diagnostics in `report.json`. Timings include checkpoint writes.
-Large current-input sensitivity alone does not prove a shortcut. On held-out
-data, a separately trained current-only probe and within-condition pair
-shuffling can provide additional evidence; this runner does not perform those
-probe experiments or claim a quality ranking. Compare held-out directional
-statistics, diversity, VF/height/anchor compliance and boundary discontinuities
-before selecting a default, then validate SR consistency separately. Split by
-source image or volume rather than neighboring patches to avoid leakage.
+The LR and SR plane critics receive only x_t, with time, domain, height, and
+profile conditions. Their input has num_phases channels; the generator still
+receives x_{t+1}. Posterior sampling links adjacent states algebraically, but
+marginal plane critics do not score the joint diffusion transition. This is a
+marginal critic design, not a reproduction of the Diffusion-GAN training algorithm
+or a demonstrated quality improvement. Evaluate held-out directional statistics,
+diversity, and condition compliance, and validate SR consistency separately.
 
 ## Generate and inspect
 
@@ -230,9 +189,9 @@ anchor-absent paths at the same diffusion state and latent, retaining VF, profil
 domain, and height conditions. The model always receives a binary anchor mask.
 CFG is applied to the interpolated logits. Intermediate strength requires two
 model evaluations per transition, or three when non-unit CFG also conditions on
-VF or a profile; zero CFG needs only its unconditional path. Existing weights
-remain loadable, but the updated per-sample VF training requires further training
-to affect existing models. Strength does not specify an exact pixel-match rate.
+VF or a profile; zero CFG needs only its unconditional path. Per-sample VF targets
+affect model behavior through training. Strength does not specify an exact
+pixel-match rate.
 
 Height-conditioned inference uses the saved side-image height and starts at
 `height_origin=0` by default. If source heights differ within a domain, pass the

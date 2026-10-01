@@ -12,8 +12,6 @@ from src.build.model import build_models
 from src.build.trainer import build_trainer
 from src.config.files import save_yaml
 from src.config.train import load_train_config
-from src.data.slice import TripletBatch
-from src.model.critic import ConnectivityCritic2D
 from src.train.checkpoint import resolve_checkpoint
 from src.train.run.low_res import run_low_res_train
 from src.train.state import resume_training, save_training
@@ -52,12 +50,12 @@ def test_lr_checkpoint_restores_training_state_without_rng(tmp_path):
     cfg = small_config(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
     trainer.step(0, transition=0)
-    path = tmp_path / "last.pt"
+    path = tmp_path / "training.pt"
     save_training(path, trainer)
     payload = torch.load(path, weights_only=True)
     assert payload["format"] == "diffusion-gan3d.lr.train"
-    # Historical pair checkpoints predate the explicit critic input mode.
-    payload["config"]["model"]["critic"].pop("input_mode")
+    assert not {"connectivity", "connectivity_optim"} & payload.keys()
+    assert set(payload["updates"]) == {*trainer.critics, "generator"}
     assert (
         not {"streams", "torch_rng", "cuda_rng", "numpy_rng", "python_rng"}
         & payload.keys()
@@ -99,7 +97,7 @@ def test_lr_checkpoint_restores_training_state_without_rng(tmp_path):
 def test_lr_resume_rejects_changed_images_or_training_contract(tmp_path):
     cfg = small_config(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
-    path = tmp_path / "last.pt"
+    path = tmp_path / "training.pt"
     save_training(path, trainer)
     payload = torch.load(path, weights_only=True)
     changed = copy.deepcopy(cfg)
@@ -120,7 +118,7 @@ def test_lr_resume_rejects_mismatched_groups_before_loading_weights(
 ):
     cfg = small_config(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
-    path = tmp_path / "last.pt"
+    path = tmp_path / "training.pt"
     save_training(path, trainer)
     payload = torch.load(path, weights_only=True)
     if change == "missing":
@@ -203,9 +201,7 @@ def test_lr_resume_after_moving_files_preserves_holdouts_and_hash_checks(tmp_pat
         str(moved / "images/0.png")
     ]
     assert saved["path_maps"]
-    run_low_res_train(
-        resume=moved / "resumed", steps=3, run_dir=moved / "again"
-    )
+    run_low_res_train(resume=moved / "resumed", steps=3, run_dir=moved / "again")
     Image.fromarray(np.zeros((12, 12), dtype=np.uint8)).save(moved / "images/0.png")
     with pytest.raises(ValueError, match="images changed"):
         run_low_res_train(
@@ -216,34 +212,15 @@ def test_lr_resume_after_moving_files_preserves_holdouts_and_hash_checks(tmp_pat
         )
 
 
-def test_connectivity_preserves_height_order():
-    torch.manual_seed(3)
-    old = ConnectivityCritic2D(2, [4, 8], 8, 1)
-    directed = ConnectivityCritic2D(2, [4, 8], 8, 1, directed_axis=0)
-    directed.load_state_dict(old.state_dict(), strict=True)
-    x = torch.randn(3, 3, 2, 8, 8)
-    axes = torch.tensor([0, 1, 2])
-    gaps, domains = torch.ones(3, dtype=torch.long), torch.zeros(3, dtype=torch.long)
-    a, b = directed(x, axes, gaps, domains), directed(x.flip(1), axes, gaps, domains)
-    assert a.logits_local.shape == (3, 4, 4)
-    assert not torch.equal(a.logits_local[0], b.logits_local[0])
-    assert torch.equal(a.logits_local[1:], b.logits_local[1:])
-    assert torch.equal(
-        old(x, axes, gaps, domains).logits_local,
-        old(x.flip(1), axes, gaps, domains).logits_local,
-    )
-
-
 @pytest.mark.parametrize("height", [False, True])
 def test_time_scaling_is_shared_without_changing_weight_shapes(tmp_path, height):
     cfg = small_config(tmp_path)
     cfg["conditioning"]["height_enabled"] = height
-    generator, critics, connectivity = build_models(cfg)
+    generator, critics = build_models(cfg)
     assert generator.time_scale == 500
     assert all(critic.time_scale == 500 for critic in critics.values())
-    assert connectivity.directed_axis == (0 if height else None)
     cfg["model"]["diffusion"]["time_embedding"] = "index"
-    unscaled, _, _ = build_models(cfg)
+    unscaled, _ = build_models(cfg)
     unscaled.load_state_dict(generator.state_dict(), strict=True)
     assert unscaled.time_scale == 1
 
@@ -257,23 +234,6 @@ def test_nonfinite_gradient_does_not_update_fp32_parameters():
         step_optimizer(optimizer, None, diagnostics, "generator")
     assert parameter.item() == 1
     assert diagnostics["skipped/generator"] == 1
-
-
-def test_connectivity_regularization_counts_its_own_updates(tmp_path):
-    trainer = build_trainer(small_config(tmp_path), torch.device("cpu"))
-    values = torch.randn(2, 3, 3, 8, 8)
-    fake = TripletBatch(
-        values,
-        torch.tensor([0, 1]),
-        torch.ones(2, dtype=torch.long),
-        torch.ones(2, dtype=torch.long),
-    )
-    domains = torch.zeros(2, dtype=torch.long)
-    trainer.update_connectivity_critic(values + 0.1, fake, 15, domains)
-    assert trainer.diagnostics["regularization/connectivity"] == 0
-    trainer.update_connectivity_critic(values + 0.1, fake, 101, domains)
-    assert trainer.diagnostics["regularization/connectivity"] == 1
-    assert trainer.updates["connectivity"] == 2
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

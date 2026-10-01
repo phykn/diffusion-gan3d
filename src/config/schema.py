@@ -97,12 +97,9 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                     "connectivity": dict.fromkeys(
                         (
                             "max_slice_gap",
-                            "adversarial_weight",
-                            "normal_transition_weight",
                             "real_transition_weight",
                             "start_step",
                             "ramp_steps",
-                            "windows_per_plane",
                         )
                     )
                 }
