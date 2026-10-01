@@ -1,7 +1,7 @@
 from torch.utils.data import DataLoader
 
-from src.config.data import get_domains, get_sizes
-from src.config.train import get_sr_sizes, normalize_train_config
+from src.config.data import get_domains, get_resolution
+from src.config.train import get_sr_resolution, normalize_train_config
 from src.data.augment import CriticAugment
 from src.data.dataset import RealDataset
 from src.data.loader import BatchStream, FolderBatchSampler
@@ -23,21 +23,25 @@ def build_augmentation(cfg: dict) -> CriticAugment:
     return augment
 
 
-def build_datasets(cfg: dict, high: bool = False) -> dict[int, dict[int, RealDataset]]:
-    cfg = normalize_train_config(cfg, cfg.get("stage", "sr" if high else "low_res"))
+def build_datasets(
+    cfg: dict, high_resolution: bool = False
+) -> dict[int, dict[int, RealDataset]]:
+    cfg = normalize_train_config(
+        cfg, cfg.get("stage", "sr" if high_resolution else "low_res")
+    )
     data = cfg["data"]
-    if high:
-        crop, low, high_size = get_sr_sizes(cfg)
-    else:
-        crop, low, high_size = get_sizes(data)
+    resolution = get_sr_resolution(cfg) if high_resolution else get_resolution(data)
+    output_size = (
+        resolution.high_res_voxels if high_resolution else resolution.low_res_voxels
+    )
     datasets = {}
     for domain_id, grouped in collect_image_groups(data).items():
         datasets[domain_id] = {
             axis: RealDataset(
                 path_groups,
-                crop,
-                high_size if high else low,
-                data["num_phases"],
+                crop_size=resolution.crop_pixels,
+                patch_size=output_size,
+                num_phases=data["num_phases"],
                 plane=axis,
                 validation_regions=data.get("split", {}).get("validation_regions"),
             )

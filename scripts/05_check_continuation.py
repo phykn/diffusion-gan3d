@@ -25,7 +25,7 @@ from scripts.common.diagnostic import (
 )
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
-from src.config.files import find_train_config
+from src.config.files import find_saved_config
 from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
 from src.evaluate.anchor import (
@@ -110,7 +110,7 @@ def main() -> None:
             )
             anchor_image = reference.movedim(args.axis, 0)[index]
         else:
-            train_config = load_train_config(find_train_config(args.weight))
+            train_config = load_train_config(find_saved_config(args.weight))
             data_config = train_config["data"]
             crop_size = int(data_config["crop_size"])
             anchor_image, crop = load_anchor_image(

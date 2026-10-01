@@ -3,7 +3,7 @@ from collections.abc import Mapping, Sequence
 from torch import nn
 
 from src.config.data import get_domains, get_plane_groups, get_sr_plane_groups
-from src.config.train import get_sr_sizes, normalize_train_config
+from src.config.train import get_sr_resolution, normalize_train_config
 from src.model.critic import ConnectivityCritic2D, PairCritic2D, PlaneCritic2D
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
@@ -157,5 +157,5 @@ def build_diffusion(cfg: dict) -> Diffusion:
 def build_sr_model(cfg: dict) -> Denoiser3D:
     cfg = normalize_train_config(cfg, "sr")
     data = cfg["data"]
-    data["crop_size"], data["lo_res_size"], data["hi_res_size"] = get_sr_sizes(cfg)
+    data["crop_size"], data["lo_res_size"], data["hi_res_size"] = get_sr_resolution(cfg)
     return build_denoiser(cfg, checkpointing=False)

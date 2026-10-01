@@ -13,7 +13,7 @@ from scripts.common.cli import check_parser, resolve_weight, result_directory
 from src.config.data import validate_sr_source
 from src.config.files import load_yaml
 from src.config.train import normalize_train_config
-from src.predict.inference import InferenceAPI
+from src.predict.inference import LowResolutionAPI
 from src.predict.sr.inference import SuperResolutionAPI
 from src.prepare.resize import downsample, phase_channels
 from src.storage import load_probabilities, load_volume, save_probabilities, save_volume
@@ -157,7 +157,7 @@ def main(argv=None):
         if not args.lr_weight:
             validate_frozen_source(lr_weight, cfg["source"])
         print(f"LR weights: {lr_weight}\nGenerating LR...", flush=True)
-        lr = InferenceAPI(lr_weight, args.device)
+        lr = LowResolutionAPI(lr_weight, args.device)
         validate_sr_source(cfg["data"], lr.data)
         low = lr.generate_probs(guidance=args.lr_guidance, **common)
         del lr

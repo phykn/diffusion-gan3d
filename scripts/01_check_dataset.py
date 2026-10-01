@@ -10,7 +10,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import check_parser, resolve_weight, result_directory
 from src.build.data import build_datasets
-from src.config.files import find_train_config, load_yaml
+from src.config.files import find_saved_config, load_yaml
 from src.config.train import load_train_config
 from src.plane import PLANES
 
@@ -51,7 +51,7 @@ def main() -> None:
     if args.no_view:
         plt.switch_backend("Agg")
     config = (
-        find_train_config(resolve_weight(args.weight))
+        find_saved_config(resolve_weight(args.weight))
         if args.weight
         else args.config or DEFAULT_CONFIG
     )
@@ -59,7 +59,7 @@ def main() -> None:
     cfg = load_train_config(config, stage)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    datasets = build_datasets(cfg, high=stage == "sr")
+    datasets = build_datasets(cfg, high_resolution=stage == "sr")
     if args.domain not in datasets:
         parser.error(f"--domain must be one of {list(datasets)}")
     print(f"Config  : {config.resolve()}")

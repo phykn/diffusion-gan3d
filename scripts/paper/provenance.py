@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from itertools import combinations
 from pathlib import Path
 
-from src.config.files import find_train_config
+from src.config.files import find_saved_config
 
 
 def sha256_file(path: str | Path) -> str:
@@ -27,7 +27,7 @@ def build_provenance(
     additional_inputs: Mapping[str, str | Path] | None = None,
 ) -> dict[str, object]:
     weight_path = Path(weights).resolve()
-    config_path = find_train_config(weight_path)
+    config_path = find_saved_config(weight_path)
     reference_path = None if reference is None else Path(reference).resolve()
     inputs = {
         name: file_record(path)

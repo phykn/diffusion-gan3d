@@ -9,14 +9,14 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from backend.src.app import create_app
-from backend.src.config import load_config
+from backend.src.config import load_server_config
 from src.build.data import build_datasets
 from src.build.model import build_sr_model
 from src.build.sr import build_sr_trainer
-from src.config.data import get_sizes
-from src.config.train import get_sr_sizes, load_train_config
+from src.config.data import get_resolution
+from src.config.train import get_sr_resolution, load_train_config
 from src.data.slice import sample_slices
-from src.predict.inference import InferenceAPI
+from src.predict.inference import LowResolutionAPI
 from src.predict.sr.extension import coarsen_volume, extend_hr
 from src.predict.sr.inference import SuperResolutionAPI
 from src.prepare.resize import (
@@ -185,7 +185,7 @@ def test_hr_extension_rejects_misaligned_geometry_before_lr_sampling(tmp_path):
     "crop,low,scale,high", [(256, 64, 1.5, 96), (128, 64, 2, 128), (256, 64, 4, 256)]
 )
 def test_independent_crop_and_fractional_scale(crop, low, scale, high):
-    assert get_sizes({"crop_size": crop, "lo_res_size": low, "hi_res_size": high}) == (
+    assert get_resolution({"crop_size": crop, "lo_res_size": low, "hi_res_size": high}) == (
         crop,
         low,
         high,
@@ -202,7 +202,7 @@ def test_invalid_scale_never_silently_rounds(size, scale):
 
 def test_old_resolution_keys_are_rejected():
     with pytest.raises(ValueError, match="lo_res_size"):
-        get_sizes({"crop_size": 16, "input_size": 8, "allow_part": True})
+        get_resolution({"crop_size": 16, "input_size": 8, "allow_part": True})
 
 
 @pytest.mark.parametrize("scale", [1.5, 2, 4])
@@ -218,7 +218,7 @@ def test_sr_scale_changes_hr_without_changing_lr_data_or_preparation(tmp_path, s
         domains={0: {"xy": [str(tmp_path)]}},
     )
     assert "scale_factor" not in cfg["data"]
-    assert get_sizes(cfg["data"]) == (16, 8, 8)
+    assert get_resolution(cfg["data"]) == (16, 8, 8)
     dataset = build_datasets(cfg)[0][0]
     expected_lr = resize_crop(labels, 8, 3)
     assert torch.equal(dataset[tmp_path / "sample.png"]["image"], expected_lr)
@@ -227,15 +227,15 @@ def test_sr_scale_changes_hr_without_changing_lr_data_or_preparation(tmp_path, s
     sr_cfg["data"] = copy.deepcopy(cfg["data"])
     sr_cfg["data"]["hi_res_size"] = int(8 * scale)
     high_size = int(8 * scale)
-    assert get_sr_sizes(sr_cfg) == (16, 8, high_size)
-    high_ds = build_datasets(sr_cfg, high=True)[0][0]
+    assert get_sr_resolution(sr_cfg) == (16, 8, high_size)
+    high_ds = build_datasets(sr_cfg, high_resolution=True)[0][0]
     assert torch.equal(
         high_ds[tmp_path / "sample.png"]["image"], resize_crop(labels, high_size, 3)
     )
     assert torch.equal(dataset[tmp_path / "sample.png"]["image"], expected_lr)
     assert sr_cfg["data"]["lo_res_size"] == cfg["data"]["lo_res_size"]
 
-    api = object.__new__(InferenceAPI)
+    api = object.__new__(LowResolutionAPI)
     api.data = cfg["data"]
     api._crop_size = 16
     api.generator = SimpleNamespace(num_phases=3, patch_size=8)
@@ -260,7 +260,7 @@ def test_sr_requires_its_own_grid(tmp_path):
 def test_crop_hr_lr_pipeline_and_phase_ids(tmp_path):
     cfg = sr_config(tmp_path)
     low_ds = build_datasets(cfg)[0][0]
-    high_ds = build_datasets(cfg, high=True)[0][0]
+    high_ds = build_datasets(cfg, high_resolution=True)[0][0]
     path = low_ds.path_groups[0][0]
     np.random.seed(12)
     low = low_ds[path]["image"]
@@ -282,7 +282,7 @@ def test_crop_hr_lr_pipeline_and_phase_ids(tmp_path):
 
 def test_web_anchor_preparation_matches_new_dataset(tmp_path):
     cfg = sr_config(tmp_path)
-    api = object.__new__(InferenceAPI)
+    api = object.__new__(LowResolutionAPI)
     api.data = cfg["data"]
     api._crop_size = 16
     api.generator = SimpleNamespace(num_phases=3, patch_size=8)
@@ -290,7 +290,7 @@ def test_web_anchor_preparation_matches_new_dataset(tmp_path):
     expected = resize_crop(crop, 8, 3)
     with TestClient(
         create_app(
-            inference=api, config=load_config("tests/fixtures/config/backend.yaml")
+            inference=api, config=load_server_config("tests/fixtures/config/backend.yaml")
         )
     ) as client:
         response = client.post("/prepare", json={"image": crop.tolist()})

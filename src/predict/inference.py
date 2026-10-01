@@ -5,8 +5,8 @@ import torch
 
 from src.anchor import PlaneAnchor
 from src.build.predict import build_generator, resolve_weights
-from src.config.data import get_sizes
-from src.config.files import find_train_config
+from src.config.data import get_resolution
+from src.config.files import find_saved_config
 from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
 from src.predict.memory import estimate_memory, select_storage
@@ -16,7 +16,14 @@ from src.predict.tiling.sampler import TiledGenerator
 from src.prepare.resize import resize_crop
 
 
-class InferenceAPI:
+class LowResolutionAPI:
+    """Generate LR label volumes (z, y, x), directly or with overlapping tiles.
+
+    blocks counts tiles along (z, y, x); shape and overlap use LR voxels.
+    Height coordinates use source pixels.
+    Refinement to HR is a separate SuperResolutionAPI operation.
+    """
+
     def __init__(
         self,
         weights: str | Path,
@@ -25,7 +32,7 @@ class InferenceAPI:
         self.device = _resolve_device(device)
         self.weights = resolve_weights(weights)
         self.settings = load_generation_settings()
-        cfg = load_train_config(find_train_config(self.weights))
+        cfg = load_train_config(find_saved_config(self.weights))
         self.generator = build_generator(self.weights, cfg, device=self.device)
         data = cfg["data"]
         self.data = data
@@ -34,6 +41,7 @@ class InferenceAPI:
 
     @property
     def input_size(self) -> int:
+        """Model grid edge in LR voxels; crop_size is measured in source pixels."""
         return self.generator.patch_size
 
     @property
@@ -49,7 +57,9 @@ class InferenceAPI:
             raise ValueError(
                 f"image must be a {self.crop_size} x {self.crop_size} original crop."
             )
-        return resize_crop(image, get_sizes(self.data)[1], self.num_phases)
+        return resize_crop(
+            image, get_resolution(self.data).low_res_voxels, self.num_phases
+        )
 
     def estimate_memory(
         self,

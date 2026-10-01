@@ -11,7 +11,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Train the LR model; defaults come from config/train/low_res.yaml.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--config", type=Path)
+    parser.add_argument(
+        "--config", type=Path, help="Training YAML; defaults to config/train/low_res.yaml."
+    )
     parser.add_argument(
         "--resume",
         type=Path,

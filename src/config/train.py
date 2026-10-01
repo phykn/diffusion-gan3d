@@ -1,8 +1,15 @@
+"""Resolve presets or saved run settings; the resolved dict is saved as train.yaml."""
+
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from src.config.data import get_domains, get_plane_groups, get_sizes
+from src.config.data import (
+    DataResolution,
+    get_domains,
+    get_plane_groups,
+    get_resolution,
+)
 from src.config.defaults import STAGE_DEFAULTS, TRAIN_DEFAULTS
 from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml
 from src.config.schema import validate_config_keys
@@ -163,7 +170,7 @@ def validate_sr_config(cfg: dict) -> dict:
     ):
         raise ValueError("source.data_sha256 must be a SHA-256 hex digest.")
     data = cfg["data"]
-    data["crop_size"], data["lo_res_size"], data["hi_res_size"] = get_sr_sizes(cfg)
+    data["crop_size"], data["lo_res_size"], data["hi_res_size"] = get_sr_resolution(cfg)
     groups = get_plane_groups(cfg)
     cfg["model"]["critic"]["plane_groups"] = [
         [PLANES[axis] for axis in axes] for axes in groups.values()
@@ -199,11 +206,11 @@ def validate_sr_config(cfg: dict) -> dict:
     return cfg
 
 
-def get_sr_sizes(cfg: Mapping) -> tuple[int, int, int]:
+def get_sr_resolution(cfg: Mapping) -> DataResolution:
     cfg = normalize_train_config(cfg, "sr")
     if "hi_res_size" not in cfg["data"]:
         raise ValueError("SR requires data.hi_res_size.")
-    return get_sizes(cfg["data"])
+    return get_resolution(cfg["data"])
 
 
 def get_schedule_steps(

@@ -1,230 +1,64 @@
 # Diffusion-GAN 3D
 
-Generate 3D microstructures from 2D label images, with optional anchor planes,
-overlapping-tile generation, and a separate super-resolution stage.
-Training uses real 2D sections without measured 3D targets.
+Generate 3D microstructures from **2D label images**, without measured 3D training targets.
+Learn the appearance of real sections, guide generation with known planes,
+and build larger or higher-resolution volumes.
 
-LR volume-fraction conditions are computed per generated sample from its measured
-anchor, including the measured root of an anchor replay, or from one real crop
-when no anchor is selected. Height-conditioned crops share their VF and height
-coordinates; an enabled spatial profile supplies the VF through its mean.
-These 2D fractions are conditioning targets, not measured 3D volume fractions.
+[Quick start](#quick-start) · [Run and inspect](docs/checks.md) · [Development](docs/development.md) · [Method & experiments](PAPER.md)
 
-The default LR preset matches phase-pair statistics measured in real 2D sections
-at the final reverse step. For each observed physical direction and separation
-of 1 through `loss.connectivity.max_slice_gap` LR cells, it compares the joint
-phase probabilities; their diagonal measures same-phase persistence. Phase
-fractions remain continuous and gradients flow through generated samples.
-One LR cell corresponds to `crop_size / lo_res_size` source pixels. Only the
-target domain's own planes supply these statistics, before critic augmentation.
-With height conditioning, comparisons use overlapping normalized height intervals;
-xy observations without known height are excluded. Missing directions or height
-overlap provide no target. Logs under `real_transition/` report errors and matched
-observations; `loss/real_transition` reports their averaged loss.
+| 2D training image and example crops | Generated 3D volume |
+| :---: | :---: |
+| <img src="assets/paper/01-training-data.png" alt="Labeled 2D microstructure with example training crops" width="360"> | <img src="assets/paper/02-generated-volume.png" alt="Generated 3D microstructure with a cutaway view" width="320"> |
 
-LR/SR training enables `loss.group_statistics` as a weak symmetry prior:
-`weight: 0.1`, `max_gap: 8`, `tolerance: 0.01`, and `ramp_steps: 5000`.
-At the final reverse step, it compares symmetrized soft joint phase probabilities
-along the plane-normal axes in each critic group, separately for each volume.
-The penalty is the excess total-variation distance above the tolerance, averaged
-over eligible axis pairs, distances, and groups. Distances use the current stage's
-grid cells. Opposite directional biases in different samples cannot cancel.
-`[[xy, xz, yz]]` compares z/y/x; `[[xy], [xz, yz]]` compares only y/x.
-Singleton groups and planes borrowed from other domains supply no comparison.
+Examples from the [recorded experiments](PAPER.md); their settings differ from current defaults.
 
-Sharing a critic does not itself imply physical symmetry. Set this prior's weight
-to zero when a shared group represents genuinely different directions. Height or
-profile conditioning compares only x/y, separately at each z row. Samples with an
-active anchor are excluded to preserve their measured condition. SR additionally
-allows the directional difference of its clean coarse target, resized to the HR
-grid, so the prior penalizes only additional anisotropy beyond that condition and
-the tolerance. All comparisons precede critic augmentation and remain differentiable.
-Existing adversarial, measured-transition, VF, anchor, and SR consistency losses
-remain active. `loss/group_statistics` and `group_statistics/` log the loss,
-schedule, differences, and penalties. Matching these axial second-order statistics
-does not prove full rotational isotropy or 3D connectivity. Compare held-out data
-fit, directional chord/percolation statistics, and diversity before claiming a
-quality improvement; the preset weight and tolerance are initial choices, not
-measured optima. Saved settings are retained on resume.
+- **2D → 3D:** train from categorical sections in the `xy`, `xz`, and `yz` planes.
+- **Plane conditions:** guide generation with known sections, called anchors.
+- **Larger outputs:** combine overlapping tiles; refine with a separate super-resolution model.
 
-Anchor replay supplies multi-anchor conditions. Its generated volumes are not
-continuity targets. `loss.connectivity.real_transition_weight` controls the measured
-2D transition loss (default `0.1`); set it to zero to disable that loss. Saved
-configurations retain their loss settings on resume.
+## Quick start
 
-SR samples a spatial rotation/reflection independently for each LR bank volume
-before coarse-input corruption and resizing. Cubic volumes use all 48 cube
-symmetries, including identity; height-conditioned volumes use only the eight
-xy symmetries that preserve z coordinates. The transformed clean volume supplies
-the consistency target, while its corrupted version supplies the model condition.
-Phase fractions and bank snapshots are preserved. This volume augmentation is
-separate from the configured 2D critic augmentation.
-
-## Setup
-
-Use Python 3.11+ and a PyTorch build suitable for your CUDA environment.
-Run commands from the project root in the activated project `.venv`.
+Use Python 3.11+ and a PyTorch build suited to your CUDA environment.
+Run commands from the project root in the activated environment.
 
 ```bash
 git clone https://github.com/phykn/diffusion-gan3d.git
 cd diffusion-gan3d
 python -m venv .venv
-# Activate .venv, then install dependencies:
+# Activate: source .venv/bin/activate (Linux/macOS)
+# PowerShell: .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
-In PowerShell, use the interpreter directly without activation:
-
-```powershell
-& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-For development, install the test tools in the same environment. `httpx` is
-required by the backend tests:
-
-```powershell
-& .\.venv\Scripts\python.exe -m pip install pytest ruff httpx
-& .\.venv\Scripts\python.exe -m pytest -q
-& .\.venv\Scripts\python.exe -m ruff check .
-```
-
-Frontend checks run from `frontend/`: `npm ci`, `npm test`, and `npm run build`.
-Tests use a fixed available-RAM probe; dedicated memory tests supply their own
-limits. CUDA tests are skipped when CUDA is unavailable.
-
-## Train
-
-Set image folders, phase counts, and resolutions in
-[`config/data/default.yaml`](config/data/default.yaml). Inputs are 2D images
-containing integer phase IDs (0–255, with `num_phases` between 1 and 256);
-plane names are `xy`, `xz`, and `yz`.
-Each training image must contain exactly one 2D frame; split multi-page TIFF
-stacks into individual sections first. Generator channel widths must be at least
-2 because single-channel normalization discards the input signal.
-Edit the [LR](config/train/low_res.yaml) and [SR](config/train/sr.yaml) training
-presets as needed.
-
-Datasets always return a dict containing `image` and source/crop metadata.
-With `conditioning.height_enabled: true`, height is fixed to z: the vertical
-direction of `xz`/`yz` section images in source pixels. Augmentation preserves
-this direction and plane critics receive the same height coordinates, so there
-is no separate axis setting. Source-image
-heights are saved for inference. `xy` sections have no measured z coordinate
-(`height_origin` and `height_extent` are -1).
+The default data preset includes `data/sample.png`. To use your own images, edit
+[config/data/default.yaml](config/data/default.yaml): each input must be a single
+2D uint8 frame containing phase IDs from `0` to `num_phases - 1`.
+`crop_size` is measured in source pixels; `lo_res_size` and `hi_res_size` are voxel grid sizes.
 
 ```bash
-python run_train_1st.py --device cuda
-python run_train_2nd.py --base-weights "run/my-lr-run" --device cuda
+python scripts/01_check_dataset.py --no-view
+python run_train_1st.py --run-dir "run/my-lr-run" --device cuda
+python scripts/02_check_generated.py --weight "run/my-lr-run" --no-view
 ```
 
-SR trains from a frozen LR model and real HR sections. Weights, resolved settings,
-and metrics are saved under `run/`.
+Use a new `--run-dir` for each training run, then pass that directory to `--weight`.
+The [LR (low-resolution) preset](config/train/low_res.yaml) controls training; weights and resolved settings
+are saved in the run directory, and inspection images/TIFF volumes in `run/checks/`.
+Use `--device cpu` for training or generation without CUDA.
 
-`weights_every_steps` overwrites `generator.pt` and critic exports only.
-`archive_every_steps` saves a new
-`checkpoints/step_<step>_<timestamp>.pt` training checkpoint, including optimizer
-state for resuming; `null` disables periodic checkpoints. Normal completion and
-Ctrl+C at a completed step also save the final checkpoint and update the exports.
-Training checkpoints are written directly, without temporary files or renaming, and are
-never overwritten or automatically deleted. Keep the matching `.complete` files:
-they identify completed writes. Pass the run directory or its `checkpoints/`
-directory to `--resume` to select the latest completed step, skipping interrupted
-writes. Explicit checkpoint files must also have matching `.complete` files.
-`--steps` is the total target, including completed steps. Each resume writes
-to a new run directory.
+## Super-resolution (optional)
 
-`generator.pt` and critic exports are overwritten directly. An interrupted export
-may be incomplete; the separate completed training checkpoints remain available
-for recovery. Do not load exports while training is writing them.
-
-`structure_every_steps` controls diagnostic measurements (connectivity,
-two-point correlations, and chord-length distributions) recorded in TensorBoard
-and `metrics.jsonl`. It does not save models or set the loss-update frequency.
-Set it to `0` to disable these measurements; smaller intervals add CPU overhead.
-
-If files moved to another computer, copy the original images and run artifacts,
-then map their old path prefixes to their new locations:
-
-```powershell
-& .\.venv\Scripts\python.exe run_train_1st.py --resume "D:/project/run/my-lr-run" --path-map "C:/project" "D:/project" --steps 20000 --device cuda
-```
-
-The same `--path-map OLD NEW` option works for `run_train_2nd.py`; repeat it for
-separate image and run roots. SR also needs its saved LR bank and frozen LR
-`generator.pt`/`train.yaml`. Keep those files unchanged: path mapping preserves
-image, bank, and source hashes and all training settings. Mappings persist in
-new checkpoints, including for height-conditioned bank refreshes; provide new
-mappings only when paths move again.
-
-SR banks are written directly to new step files and never replace an existing
-step. Training settings reference a bank only after its write completes.
-
-### Plane critic and continuity losses
-
-LR and SR default to `model.critic.input_mode: single`: the plane critic receives
-x_t with time, domain, height, and profile conditions. Select `pair` to score
-x_t and x_{t+1} jointly. The generator receives x_{t+1} in both modes. Single
-critics score marginal planes; they do not score the joint diffusion transition.
-Neither mode has a demonstrated quality advantage here. Changing modes requires
-fresh critic weights and optimizers; saved training settings cannot change on
-resume.
-
-For a controlled LR comparison, use `train.num_workers: 0` and no
-`train.initial_weights`:
-
-```powershell
-& .\.venv\Scripts\python.exe scripts/experiments/critic_inputs.py --config config/train/low_res.yaml --run-dir run/critic-input-comparison --seeds 11 22 33 --steps 10000 --device cuda
-```
-
-The runner checks identical generator initialization, seeds sampling per step,
-saves configurations and metrics, and reports timing, CUDA memory, and input
-gradients. These are training diagnostics. Evaluate held-out directional
-statistics, diversity, VF/height/anchor compliance, and SR consistency separately.
-
-LR also supports `loss.connectivity.adversarial_weight` and
-`normal_transition_weight`, both defaulting to `0.0`. A positive adversarial
-weight trains a connectivity critic on changes between nearby slices; a positive
-normal-transition weight matches their phase changes and discrete bend. These
-optional losses compare against generated replay volumes, so they encourage
-consistency with previous generations without establishing measured 3D
-connectivity. `max_slice_gap`, `windows_per_plane`, `start_step`, and `ramp_steps`
-control their sampling and schedule. The default `real_transition_weight: 0.1`
-uses measured 2D phase-pair statistics; `data_manifest.json` identifies measured
-and generated references separately. These replay options apply to LR only.
-
-## Generate and inspect
-
-Pass a run directory or a `generator.pt` file:
+Stage 2 trains a separate model using frozen stage-1 volumes and real high-resolution sections.
+Configure the [SR preset](config/train/sr.yaml), then run:
 
 ```bash
-python scripts/02_check_generated.py --weight "run/my-lr-run"
-python scripts/03_check_anchor.py --weight "run/my-lr-run"
-python scripts/04_check_scale_up.py --weight "run/my-lr-run"
-python scripts/06_check_hr.py --weight "run/my-sr-run"
+python run_train_2nd.py --base-weights "run/my-lr-run" --run-dir "run/my-sr-run" --device cuda
+python scripts/06_check_hr.py --weight "run/my-sr-run" --no-view
 ```
-
-Results are saved under `run/checks/`. Add `--no-view` to save without opening a
-viewer. See the [manual-check guide](docs/checks.md) for all six scripts.
-
-`anchor_strength` ranges from 0 (no anchor) to 1 (full anchor conditioning).
-Intermediate values interpolate the logits of the anchor-present and
-anchor-absent paths at the same diffusion state and latent, retaining VF, profile,
-domain, and height conditions. The model always receives a binary anchor mask.
-CFG is applied to the interpolated logits. Intermediate strength requires two
-model evaluations per transition, or three when non-unit CFG also conditions on
-VF or a profile; zero CFG needs only its unconditional path. Per-sample VF targets
-affect model behavior through training. Strength does not specify an exact
-pixel-match rate.
-
-Height-conditioned inference uses the saved side-image height and starts at
-`height_origin=0` by default. If source heights differ within a domain, pass the
-intended source's `height_extent`; use `height_origin` for an offset crop.
-Both values use original image pixels, and the requested volume must fit inside
-that height.
 
 ## Web interface
 
-Start the backend, then run the frontend in another terminal (Node.js required):
+Use an LR run. Start the backend, then the frontend in another terminal (Node.js required):
 
 ```bash
 python backend/run.py --weight "run/my-lr-run"
@@ -236,49 +70,17 @@ npm ci
 npm run dev
 ```
 
-Server limits are configured in [`backend/config.yaml`](backend/config.yaml).
-Select the section plane and, for multi-domain models, the domain in the sidebar.
-Height-conditioned xz/yz inputs use the crop row as their Z origin and the full
-uploaded image height as their extent. XY inputs require separate Z coordinates.
-Anchors start at the output origin, including when generating multiple blocks.
+Open the URL printed by Vite to select a section, crop an anchor, and generate a volume.
+[backend/config.yaml](backend/config.yaml) controls HTTP resource limits.
 
-## Project layout
+## Working with the code
 
-| Path | Purpose |
-| --- | --- |
-| `src/api.py` | Public inference APIs, plane anchors, HR extension, and app factory |
-| `src/config/`, `config/` | Configuration loading, validation, defaults, and presets |
-| `src/data/` | Image sources, datasets, batch streams, augmentation, and slice sampling |
-| `src/prepare/` | Phase-fraction resizing and physical height/profile coordinates |
-| `src/model/`, `src/build/` | Neural networks and diffusion; model/data/trainer assembly |
-| `src/train/trainer.py`, `src/train/loss/` | Training steps, optimizer updates, and losses |
-| `src/train/batch.py` | Explicit step inputs, sampled pairs, and their coordinates/conditions |
-| `src/train/state.py`, `src/train/coarse.py` | LR/SR checkpoint state; coarse-input corruption |
-| `src/train/run/` | Run setup, LR bank generation, logging, and checkpoint scheduling |
-| `src/predict/` | Inference, volume conversion, and memory estimates |
-| `src/predict/tiling/`, `src/predict/sr/` | Overlapping-tile sampling and super-resolution |
-| `src/evaluate/` | Label, slice, volume, connectivity, and structure measurements |
-| `src/anchor.py`, `src/plane.py`, `src/storage.py` | Anchor encoding, plane conventions, and artifact I/O |
-| `scripts/` | Numbered inspections, shared CLI/display helpers, experiments, and paper tools |
-| `backend/`, `frontend/` | HTTP service and web UI |
-| `simul/` | Synthetic data generation; run `python simul/run.py` |
-| `tests/`, `frontend/test/` | Python and frontend regression tests |
-| `run/` | Local weights and generated outputs |
+- Training starts at [run_train_1st.py](run_train_1st.py) and [run_train_2nd.py](run_train_2nd.py).
+- Python generation starts at [src/api.py](src/api.py): `LowResolutionAPI`, `PlaneAnchor`, and `SuperResolutionAPI`.
+- See the [code map and checks](docs/development.md) for implementation locations and test commands.
+- See [run and inspection notes](docs/checks.md) for anchors, tiled generation, saved outputs, and resume.
 
-Training commands enter `src/train/run/`, which uses `src/build/` to assemble the
-trainer with its settings and data metadata. Each real batch carries its images,
-domains, height coordinates, profiles, and source geometry through the training
-step. `Trainer` separates LR/SR batch preparation and owns optimizer updates;
-`src/train/loss/denoiser.py` computes the differentiable generator objective.
-SR bank creation and refresh live in `src/train/run/bank.py`; shared frozen-source
-validation and configuration loading live in `src/train/run/source.py`. The
-runner publishes a snapshot after preparation succeeds.
+Current behavior is defined by the code and presets; [PAPER.md](PAPER.md) records specific experiments.
+Generated volumes are plausible samples, not measurements of an unknown 3D specimen.
 
-The web UI calls the backend, which delegates generation to the inference APIs.
-Model weights and training checkpoints have separate formats; keep
-`generator.pt` for inference and `checkpoints/step_<step>_<timestamp>.pt` for resume.
-
-[Refactoring decisions and verification](docs/refactoring.md) records the module
-boundaries, corrected defects and remaining validation limits.
-
-[Method and recorded experiments](PAPER.md) · [MIT License](LICENSE)
+[MIT License](LICENSE)

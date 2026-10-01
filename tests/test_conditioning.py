@@ -461,14 +461,14 @@ def test_profile_cfg_removes_profile_and_keeps_height(tmp_path):
 
 
 def test_profile_public_api_responds_to_equal_mean_profiles_with_same_seed(tmp_path):
-    from src.api import InferenceAPI
+    from src.api import LowResolutionAPI
 
     cfg = configuration(tmp_path, height=True)
     cfg["conditioning"]["spatial_profile"]["enabled"] = True
     trainer = build_trainer(cfg, torch.device("cpu"))
     save_yaml(tmp_path / "train.yaml", trainer.cfg)
     torch.save(trainer.denoiser.state_dict(), tmp_path / "generator.pt")
-    api = InferenceAPI(tmp_path / "generator.pt", device="cpu")
+    api = LowResolutionAPI(tmp_path / "generator.pt", device="cpu")
     first = {
         "axis": "z",
         "points": [[0, [0.2, 0.8]], [1, [0.8, 0.2]]],
@@ -849,7 +849,7 @@ def test_dataset_dict_geometry_is_independent_of_height_conditioning(
     cfg = configuration(tmp_path, stage=stage, height=height)
     path = tmp_path / "images/sample.png"
     Image.fromarray(np.zeros((24, 32), dtype=np.uint8)).save(path)
-    datasets = build_datasets(cfg, high=stage == "sr")[0]
+    datasets = build_datasets(cfg, high_resolution=stage == "sr")[0]
     keys = {
         "image",
         "image_id",

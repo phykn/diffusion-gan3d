@@ -1,3 +1,5 @@
+"""HTTP resource limits, independent of the model's saved train.yaml."""
+
 from pathlib import Path
 from typing import Annotated
 
@@ -20,6 +22,6 @@ class ServerConfig(BaseModel):
     max_inflight_downloads: PositiveInt
 
 
-def load_config(path: str | Path = DEFAULT_CONFIG) -> ServerConfig:
+def load_server_config(path: str | Path = DEFAULT_CONFIG) -> ServerConfig:
     with Path(path).open(encoding="utf-8") as file:
         return ServerConfig.model_validate(yaml.safe_load(file))

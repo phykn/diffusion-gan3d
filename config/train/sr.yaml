@@ -3,7 +3,7 @@ nickname: ""
 data: config/data/default.yaml
 
 source:
-  weights: run/09180815/generator.pt
+  weights: null  # Set an LR run directory or pass --base-weights.
 
 model:
   generator:

@@ -8,11 +8,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.src.config import ServerConfig, load_config
+from backend.src.config import ServerConfig, load_server_config
 from backend.src.middleware import RequestSizeLimit
 from backend.src.response import DownloadResponse, volume_response
 from backend.src.schema import GenerateRequest, PrepareRequest
-from src.predict.inference import InferenceAPI
+from src.predict.inference import LowResolutionAPI
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
@@ -20,12 +20,12 @@ FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 def create_app(
     weights: str | Path | None = None,
     device: str | torch.device | None = None,
-    inference: InferenceAPI | None = None,
+    inference: LowResolutionAPI | None = None,
     *,
     config: ServerConfig | None = None,
     max_inflight_downloads: int | None = None,
 ) -> FastAPI:
-    config = load_config() if config is None else config
+    config = load_server_config() if config is None else config
     if max_inflight_downloads is not None:
         config = ServerConfig.model_validate(
             {**config.model_dump(), "max_inflight_downloads": max_inflight_downloads}
@@ -33,7 +33,7 @@ def create_app(
     if inference is None:
         if weights is None:
             raise ValueError("weights are required when inference is not provided.")
-        inference = InferenceAPI(weights, device=device)
+        inference = LowResolutionAPI(weights, device=device)
     elif weights is not None:
         raise ValueError("weights and inference cannot be provided together.")
 
@@ -128,7 +128,7 @@ def create_app(
 
 
 def _generate_volume(
-    inference: InferenceAPI, request: GenerateRequest, config: ServerConfig
+    inference: LowResolutionAPI, request: GenerateRequest, config: ServerConfig
 ) -> torch.Tensor:
     estimate = inference.estimate_memory(
         blocks=request.blocks,

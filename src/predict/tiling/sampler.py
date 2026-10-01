@@ -5,7 +5,6 @@ import torch
 from tqdm import tqdm
 
 from src.anchor import PlaneAnchor, encode_anchors
-from src.predict.base import Base, prepare_base, validate_base_anchors, volume_shape
 from src.predict.generator import Generator
 from src.predict.memory import MemoryEstimate, estimate_memory, select_storage
 from src.predict.tiling.fusion import Fusion, add_prediction, make_fusion
@@ -21,6 +20,12 @@ from src.predict.tiling.state import (
     TileBuffer,
     VolumeState,
     write_output,
+)
+from src.predict.volume_condition import (
+    VolumeCondition,
+    prepare_base,
+    validate_base_anchors,
+    volume_shape,
 )
 
 
@@ -380,7 +385,7 @@ class TiledGenerator:
             margin=margin,
         )
 
-    def prepare_base(self, base, plan, offset=None, preserve=False) -> Base | None:
+    def prepare_base(self, base, plan, offset=None, preserve=False) -> VolumeCondition | None:
         shape = tuple(n - 2 * plan.margin for n in plan.shape)
         return prepare_base(
             base,
@@ -433,7 +438,7 @@ class TiledGenerator:
         next_state: VolumeState,
         tiles: tuple[Tile, ...],
         plan: TilePlan,
-        base: Base | None,
+        base: VolumeCondition | None,
         vf: torch.Tensor | None,
         domain: torch.Tensor,
         output: torch.Tensor | None,
@@ -529,7 +534,7 @@ class TiledGenerator:
         vf_profile: dict | None = None,
         height_domain: int | None = None,
         tile_conditions=None,
-        base: Base | None = None,
+        base: VolumeCondition | None = None,
     ) -> None:
         generator = self.generator
         if tile_buffer is None:
@@ -637,7 +642,7 @@ class TiledGenerator:
         transition: int,
         output: torch.Tensor | None,
         stop: int,
-        base: Base | None = None,
+        base: VolumeCondition | None = None,
         margin: int = 0,
     ) -> None:
         generator = self.generator
@@ -671,7 +676,7 @@ class TiledGenerator:
     @staticmethod
     def condition_base(
         state: VolumeState,
-        base: Base,
+        base: VolumeCondition,
         values: torch.Tensor,
     ) -> None:
         current = state.read(base.region).to(

@@ -2,7 +2,7 @@ import torch
 
 from src.build.trainer import build_trainer
 from src.config.data import get_domains
-from src.config.train import get_sr_sizes, validate_sr_config
+from src.config.train import get_sr_resolution, validate_sr_config
 from src.data.bank import validate_bank
 from src.data.source import infer_height_extents
 from src.train.trainer import Trainer
@@ -14,8 +14,8 @@ def build_sr_trainer(
     cfg = validate_sr_config(cfg)
     data = cfg["data"]
     domains = get_domains(data)
-    _, low_size, _ = get_sr_sizes(cfg)
-    bank = validate_bank(bank, domains, low_size, data["num_phases"])
+    resolution = get_sr_resolution(cfg)
+    bank = validate_bank(bank, domains, resolution.low_res_voxels, data["num_phases"])
     if cfg["conditioning"]["height_enabled"]:
         data["height_extents"] = infer_height_extents(data)
         _validate_bank_height(data, bank, bank_origins, bank_extents)

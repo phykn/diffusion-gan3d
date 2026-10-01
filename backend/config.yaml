@@ -1,3 +1,4 @@
+# HTTP request/output limits. Model settings come from the selected run's train.yaml.
 max_size: 1024
 max_voxels: 134217728
 max_blocks: 64

@@ -3,9 +3,9 @@ from dataclasses import replace
 import torch
 import torch.nn.functional as F
 
-from src.predict.base import prepare_base
 from src.predict.tiling.layout import make_plan, make_tiles
 from src.predict.tiling.sampler import TiledGenerator
+from src.predict.volume_condition import prepare_base
 from src.prepare.resize import coarse_region, resize_phases
 
 

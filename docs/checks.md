@@ -1,79 +1,57 @@
-# Manual inspection scripts
+# Run and inspect
 
-Run from the project root. Usually, only `--weight` is needed.
-Both a `generator.pt` file and its run directory are accepted.
+Run from the project root with the environment activated. `--weight` accepts a run
+directory or its `generator.pt`. Each inspection saves results in `run/checks/`
+and opens a viewer; add `--no-view` for files only.
 
-| Script | Inspect | Weights |
+| Script | Purpose | Weights |
 | --- | --- | --- |
-| 01 | Crops from the training data | LR or SR; defaults to the current LR training preset if omitted |
-| 02 | Basic LR generation | LR |
-| 03 | The effect of multiple anchor planes | LR |
-| 04 | Tiled generation and seams | LR |
-| 05 | Continuation from a boundary plane | LR |
-| 06 | LR, nearest-neighbor upsampling, and SR | SR; the LR source is read from the saved training settings |
+| [01_check_dataset.py](../scripts/01_check_dataset.py) | Preview training crops | Optional; uses the LR preset when omitted |
+| [02_check_generated.py](../scripts/02_check_generated.py) | Generate an LR volume | LR |
+| [03_check_anchor.py](../scripts/03_check_anchor.py) | Compare multiple anchor conditions | LR |
+| [04_check_scale_up.py](../scripts/04_check_scale_up.py) | Inspect tiled generation and seams | LR |
+| [05_check_continuation.py](../scripts/05_check_continuation.py) | Grow a volume from a boundary section | LR |
+| [06_check_hr.py](../scripts/06_check_hr.py) | Compare LR, upsampling, and SR | SR; reads the saved LR source |
 
-```powershell
-.venv\Scripts\python.exe scripts/01_check_dataset.py --weight "run/my-lr-run"
-.venv\Scripts\python.exe scripts/02_check_generated.py --weight "run/my-lr-run"
-.venv\Scripts\python.exe scripts/03_check_anchor.py --weight "run/my-lr-run"
-.venv\Scripts\python.exe scripts/04_check_scale_up.py --weight "run/my-lr-run"
-.venv\Scripts\python.exe scripts/05_check_continuation.py --weight "run/my-lr-run"
-.venv\Scripts\python.exe scripts/06_check_hr.py --weight "run/my-sr-run"
+```bash
+python scripts/04_check_scale_up.py --weight "run/my-lr-run" --blocks 2 2 2 --no-view
+python scripts/05_check_continuation.py --weight "run/my-lr-run" --anchor image.png --axis 0
 ```
 
-Each run saves its results and opens a viewer. The output directory is printed
-in the terminal: `run/checks/<timestamp>_<script-name>/`.
+`--blocks D H W` counts tiles along `(z, y, x)`. `--axis 0/1/2` selects `xy/xz/yz`.
+Anchor demos use generated references by default; supply `--anchor` to script 05
+for a measured boundary image. These comparisons do not establish measured 3D accuracy.
 
-- `01`: training-crop preview PNG.
-- `02–05`: `volume.tiff`, central xy/xz/yz previews in `volume.png`, and execution options in `volume.json`.
-  `05` also saves a comparison of sections at increasing distances from the boundary.
-- `06`: `lr.tiff`, `lr_probs.pt` when using phase fractions, `hr.tiff`, `comparison.png`, and `report.json`.
+## Options and outputs
 
-Add options only when needed:
+- `--device cpu`, `--seed`, `--domain`: device, repeatable sample, and dataset ID (`02–06`).
+- `--napari`: open a 3D viewer (`02–06`). `--help` lists each script's full options.
+- `--height-origin`, `--height-extent`: Z origin and full source height in **source pixels**.
+  Height is the row direction in xz/yz images. Script 05 infers it from its input crop;
+  set the extent explicitly when source heights differ.
+- `01` saves a crop PNG; `02–05` save `volume.tiff`, `volume.png`, and `volume.json`.
+  `06` saves LR/HR volumes, `comparison.png`, `report.json`, and optional LR fractions.
 
-| Option | Purpose |
-| --- | --- |
-| `--no-view` | Save without opening a viewer |
-| `--napari` | Use a 3D viewer instead of 2D comparisons; scripts `02–06` |
-| `--device cpu` | Run without a GPU; scripts `02–06` |
-| `--seed 1` | Generate a different sample; default: `0` |
-| `--domain 1` | Select another training domain; default: `0` |
-| `--height-origin`, `--height-extent` | Output Z origin and full source height in pixels; scripts `02–06` |
-| `--out PATH` | PNG for `01`, TIFF for `02–05`, output directory for `06` |
-| `--help` | Show all options and an example command |
+LR guidance, anchor strength, and overlap default to [config/gen.yaml](../config/gen.yaml).
+Anchor strength is a 0–1 logit interpolation, not a pixel-match percentage.
+Script 06 uses SR guidance `1.0` unless overridden. Its saved LR source is hash-checked;
+`--lr-weight` selects an alternative and records it as unverified in `report.json`.
 
-`03` and `05` take anchors from generated reference volumes, not measured 3D
-truth. To use a real boundary image, add `--anchor image.png` to `05`.
-Use `--axis 1` for xz or `--axis 2` for yz. For height-conditioned models,
-`05` infers the centered crop's Z origin and full image height unless overridden.
-Its anchor preparation preserves the same phase fractions as training and the web UI.
-`04` defaults to 2 × 2 × 2 tiles; use `--blocks D H W` to change the layout.
+## Save and resume
 
-`02–05` read guidance defaults from `config/gen.yaml`. In `06`, SR guidance
-defaults to `1.0` and LR guidance follows `config/gen.yaml`.
-If the saved LR source has moved, add `--lr-weight "new/LR/path"` to `06`.
-The default stored source is checked against its saved weight and configuration
-hashes. An explicit `--lr-weight` selects a different source and is recorded as
-unverified in `report.json`. Use `--height-extent` with `06` when source images
-have different heights; it is forwarded to both LR and SR in source-pixel units.
+`generator.pt` is for inference. Training checkpoints under `checkpoints/` include
+optimizer state; keep their matching `.complete` files. `weights_every_steps`
+overwrites exports, `archive_every_steps` creates checkpoints, and `structure_every_steps`
+controls diagnostics. Completion and Ctrl+C at a completed step also save progress.
+Load exports after writing has finished.
 
-The default LR continuity loss compares phase-pair statistics with measured 2D
-sections; matching those statistics does not establish measured 3D connectivity.
-Optional replay losses (`adversarial_weight` and `normal_transition_weight`)
-compare against previous generated volumes. `data_manifest.json` records the
-measured target as `real_transition_reference` and the generated target as
-`connectivity_reference`. Both replay weights default to zero.
-Assess generated connectivity separately with the volume connectivity/percolation
-metrics.
+```bash
+python run_train_1st.py --resume "run/my-lr-run" --steps 20000 --device cuda
+```
 
-The default training presets resolve `augmentation.auto_planes` to explicit
-plane policies. Height conditioning preserves z order in xz/yz; xy can still
-rotate and flip. Custom `augmentation.planes` policies remain explicit and are
-validated. Ctrl+C finishes the current training step and saves both inference
-weights and completed `checkpoints/step_<step>_<timestamp>.pt` files for resuming
-(keep their `.complete` files). `--resume` also accepts a run directory and selects
-the latest completed checkpoint.
+`--steps` is the total target, including completed steps. Resume uses saved settings
+and creates a new run directory. Both training commands accept `--path-map OLD NEW`
+when files move; repeat it for separate data/run roots. Copy the original data and
+completed artifacts. SR also needs its unchanged frozen LR weights/config and saved bank.
 
-Shared helpers live in `scripts/common/`, experiment drivers in
-`scripts/experiments/`, and paper reproduction tools in `scripts/paper/`.
-Use the numbered scripts for routine inspection.
+[Back to README](../README.md)

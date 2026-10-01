@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from backend.src import app as server_module
 from backend.src import response as response_module
 from backend.src.app import create_app
-from backend.src.config import load_config
+from backend.src.config import load_server_config
 from backend.src.schema import GenerateRequest
 from src.evaluate.volume import VolumeMetrics
 from src.predict.memory import estimate_memory, select_storage
@@ -84,7 +84,7 @@ def client(
         "measure_volume",
         lambda _volume, device: VolumeMetrics(porosity=0.25, tortuosity=1.5),
     )
-    return TestClient(create_app(inference=service, config=load_config(SERVER_CONFIG)))
+    return TestClient(create_app(inference=service, config=load_server_config(SERVER_CONFIG)))
 
 
 def test_health_reports_loaded_device(client: TestClient) -> None:
@@ -305,9 +305,9 @@ def test_generate_reports_planned_memory_limit(
 
 def test_create_app_requires_one_inference_source(service: FakeInference) -> None:
     with pytest.raises(ValueError, match="weights are required"):
-        create_app(config=load_config(SERVER_CONFIG))
+        create_app(config=load_server_config(SERVER_CONFIG))
     with pytest.raises(ValueError, match="cannot be provided together"):
-        create_app("generator.pt", inference=service, config=load_config(SERVER_CONFIG))
+        create_app("generator.pt", inference=service, config=load_server_config(SERVER_CONFIG))
 
 
 @pytest.mark.parametrize("exception", [MemoryError, torch.OutOfMemoryError])
@@ -364,7 +364,7 @@ def test_memory_preflight_rejects_before_inference(client, service, monkeypatch)
 
 
 def test_oversized_body_is_rejected_before_json_decoding(service):
-    config = load_config(SERVER_CONFIG).model_copy(update={"max_request_bytes": 32})
+    config = load_server_config(SERVER_CONFIG).model_copy(update={"max_request_bytes": 32})
     client = TestClient(create_app(inference=service, config=config))
     assert client.post("/generate", content=b" " * 33).status_code == 413
     assert not service.calls
@@ -375,7 +375,7 @@ def test_slow_downloads_bound_retained_results_without_holding_generation(
     service, format
 ):
     app = create_app(
-        inference=service, config=load_config(SERVER_CONFIG), max_inflight_downloads=2
+        inference=service, config=load_server_config(SERVER_CONFIG), max_inflight_downloads=2
     )
     generate = next(route.endpoint for route in app.routes if route.path == "/generate")
     scope = {"type": "http", "method": "POST", "headers": []}
@@ -432,7 +432,7 @@ def test_slow_downloads_bound_retained_results_without_holding_generation(
 )
 def test_failed_generation_returns_download_slot(service, monkeypatch, failure):
     app = create_app(
-        inference=service, config=load_config(SERVER_CONFIG), max_inflight_downloads=1
+        inference=service, config=load_server_config(SERVER_CONFIG), max_inflight_downloads=1
     )
     client = TestClient(app)
 
@@ -451,7 +451,7 @@ def test_download_capacity_must_be_positive_integer(service, limit):
     with pytest.raises(ValueError, match="max_inflight_downloads"):
         create_app(
             inference=service,
-            config=load_config(SERVER_CONFIG),
+            config=load_server_config(SERVER_CONFIG),
             max_inflight_downloads=limit,
         )
 
@@ -470,14 +470,14 @@ def test_download_capacity_must_be_positive_integer(service, limit):
     ],
 )
 def test_configured_limits_reject_before_generation(service, settings, payload):
-    cfg = load_config(SERVER_CONFIG).model_copy(update=settings)
+    cfg = load_server_config(SERVER_CONFIG).model_copy(update=settings)
     with TestClient(create_app(inference=service, config=cfg)) as client:
         assert client.post("/generate", json=payload).status_code == 422
     assert not service.calls
 
 
 def test_prepare_uses_configured_image_limit(service):
-    cfg = load_config(SERVER_CONFIG).model_copy(update={"max_size": 2})
+    cfg = load_server_config(SERVER_CONFIG).model_copy(update={"max_size": 2})
     with TestClient(create_app(inference=service, config=cfg)) as client:
         response = client.post("/prepare", json={"image": [[0, 1, 0]]})
     assert response.status_code == 422
@@ -485,9 +485,9 @@ def test_prepare_uses_configured_image_limit(service):
 
 
 def test_apps_keep_independent_download_limits(service):
-    cfg = load_config(SERVER_CONFIG).model_copy(update={"max_inflight_downloads": 1})
+    cfg = load_server_config(SERVER_CONFIG).model_copy(update={"max_inflight_downloads": 1})
     first = create_app(inference=service, config=cfg)
-    second = create_app(inference=service, config=load_config(SERVER_CONFIG))
+    second = create_app(inference=service, config=load_server_config(SERVER_CONFIG))
     assert first.state.download_slots.acquire(blocking=False)
     assert not first.state.download_slots.acquire(blocking=False)
     assert second.state.download_slots.acquire(blocking=False)

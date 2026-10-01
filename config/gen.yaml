@@ -1,3 +1,4 @@
+# LR inference defaults; explicit API arguments override these values.
 guidance: 0.9
-anchor_strength: 0.8
-overlap: 8
+anchor_strength: 0.8  # Logit interpolation from no anchor (0) to full condition (1).
+overlap: 8  # LR voxels shared by neighboring output tiles.

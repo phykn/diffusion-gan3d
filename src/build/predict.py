@@ -3,8 +3,8 @@ from pathlib import Path
 import torch
 
 from src.build.model import build_denoiser, build_diffusion
-from src.config.data import get_sizes
-from src.config.files import find_train_config
+from src.config.data import get_resolution
+from src.config.files import find_saved_config
 from src.config.train import load_train_config
 from src.predict.generator import Generator
 from src.storage import load_model
@@ -24,7 +24,7 @@ def load_generator(
     device: torch.device,
 ) -> Generator:
     path = Path(weights).resolve()
-    config = find_train_config(path)
+    config = find_saved_config(path)
     cfg = load_train_config(config)
     return build_generator(path, cfg, device)
 
@@ -51,7 +51,7 @@ def build_generator(
         denoiser,
         build_diffusion(cfg).to(device),
         device=device,
-        patch_size=get_sizes(data)[1],
+        patch_size=get_resolution(data).low_res_voxels,
         num_phases=data["num_phases"],
         latent_channels=model["generator"]["latent_channels"],
         use_amp=use_amp,

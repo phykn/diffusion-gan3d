@@ -9,8 +9,12 @@ from src.build.data import (
     build_stream,
 )
 from src.build.model import build_diffusion, build_models
-from src.config.data import get_sizes, get_sr_plane_groups
-from src.config.train import get_schedule_steps, get_sr_sizes, normalize_train_config
+from src.config.data import get_resolution, get_sr_plane_groups
+from src.config.train import (
+    get_schedule_steps,
+    get_sr_resolution,
+    normalize_train_config,
+)
 from src.data.provenance import fingerprint_data
 from src.data.source import infer_height_extents
 from src.storage import load_model
@@ -90,7 +94,7 @@ def build_trainer(
         connectivity_critic,
         cfg,
     )
-    datasets = build_datasets(cfg, high=sr)
+    datasets = build_datasets(cfg, high_resolution=sr)
     streams = {
         domain_id: {
             axis: build_stream(
@@ -171,7 +175,9 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         profile_gradient_weight=loss.get("spatial_profile_gradient_weight", 0.0),
         volume_batch_size=train["volume_batch_size"],
         num_phases=data["num_phases"],
-        patch_size=get_sr_sizes(cfg)[2] if sr else get_sizes(data)[1],
+        patch_size=get_sr_resolution(cfg).high_res_voxels
+        if sr
+        else get_resolution(data).low_res_voxels,
         slice_pairs_per_axis=train["slice_pairs_per_plane"],
         ema_decay=optim["ema_decay"],
         r1_gamma=loss["r1_weight"],

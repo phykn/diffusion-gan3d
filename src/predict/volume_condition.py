@@ -60,7 +60,9 @@ def phase_fractions(volume, num_phases):
 
 
 @dataclass(frozen=True)
-class Base:
+class VolumeCondition:
+    """An existing volume positioned inside the output, with optional preservation."""
+
     clean: torch.Tensor
     noise: torch.Tensor
     region: tuple[slice, slice, slice]
@@ -151,10 +153,10 @@ def prepare_base(volume, num_phases, shape, margin, offset, shell, preserve):
                 weights[-width:] = ramp.flip(0)
         axes.append(weights)
     weight = axes[0][:, None, None] * axes[1][None, :, None] * axes[2][None, None, :]
-    return Base(clean, torch.randn_like(clean), region, weight[None, None], preserve)
+    return VolumeCondition(clean, torch.randn_like(clean), region, weight[None, None], preserve)
 
 
-def validate_base_anchors(base, anchors, shape, margin) -> Base | None:
+def validate_base_anchors(base, anchors, shape, margin) -> VolumeCondition | None:
     if base is None or not base.preserve:
         return base
     for anchor in anchors:

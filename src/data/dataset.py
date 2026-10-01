@@ -12,7 +12,10 @@ from src.prepare.resize import resize_crop
 
 
 class RealDataset(Dataset[dict]):
-    """Image and source geometry; z is the row direction of xz/yz images."""
+    """Crop crop_size source pixels and resample to patch_size grid cells per edge.
+
+    Records retain source geometry; z is the row direction of xz/yz images.
+    """
 
     def __init__(
         self,

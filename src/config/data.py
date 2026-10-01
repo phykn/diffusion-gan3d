@@ -1,7 +1,14 @@
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 from src.plane import PLANES, get_axis
+
+
+class DataResolution(NamedTuple):
+    crop_pixels: int
+    low_res_voxels: int
+    high_res_voxels: int
 
 
 def validate_sr_source(data: Mapping, base_data: Mapping) -> Mapping:
@@ -21,7 +28,7 @@ def validate_sr_source(data: Mapping, base_data: Mapping) -> Mapping:
     return data
 
 
-def get_sizes(data: Mapping[str, object]) -> tuple[int, int, int]:
+def get_resolution(data: Mapping[str, object]) -> DataResolution:
     if any(
         key in data
         for key in (
@@ -41,7 +48,7 @@ def get_sizes(data: Mapping[str, object]) -> tuple[int, int, int]:
     high = data.get("hi_res_size", low)
     if type(high) is not int or high < low:
         raise ValueError("hi_res_size must be an integer at least lo_res_size.")
-    return crop, low, high
+    return DataResolution(crop, low, high)
 
 
 def get_plane_groups(cfg: Mapping) -> dict[str, tuple[int, ...]]:

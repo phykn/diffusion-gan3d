@@ -17,7 +17,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.api import InferenceAPI, PlaneAnchor, SuperResolutionAPI, extend_hr
+from src.api import LowResolutionAPI, PlaneAnchor, SuperResolutionAPI, extend_hr
 from src.build.model import build_denoiser, build_sr_model
 from src.config.files import save_yaml
 from src.config.train import load_train_config
@@ -201,7 +201,7 @@ def main(argv=None):
         with Image.open(args.anchor_image) as source:
             image = torch.from_numpy(np.array(source))
     report = check_combinations(
-        InferenceAPI(args.lr_weights, args.device),
+        LowResolutionAPI(args.lr_weights, args.device),
         SuperResolutionAPI(args.sr_weights, args.device),
         root,
         seed=args.seed,

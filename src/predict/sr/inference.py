@@ -6,18 +6,20 @@ import torch.nn.functional as F
 
 from src.build.model import build_diffusion, build_sr_model
 from src.build.predict import resolve_weights
-from src.config.train import get_sr_sizes, normalize_train_config
-from src.predict.base import resolve_offset, volume_shape
+from src.config.train import get_sr_resolution, normalize_train_config
 from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 from src.predict.generator import Generator, GuidedDenoiser
 from src.predict.random import seeded_rng
 from src.predict.sr.memory import check_sr_memory, estimate_sr_memory
 from src.predict.sr.tiled import refine_tiled
+from src.predict.volume_condition import resolve_offset, volume_shape
 from src.prepare.height import height_field, resolve_extent
 from src.prepare.resize import phase_channels, resize_phases, scaled_size
 
 
 class SuperResolutionAPI:
+    """Refine an LR label/fraction volume into HR voxels using separate SR weights."""
+
     def __init__(self, weights: str | Path, device: str | torch.device = "cpu"):
         self.device = torch.device(device)
         self.weights = resolve_weights(weights)
@@ -30,7 +32,10 @@ class SuperResolutionAPI:
         self.model = build_sr_model(self.config).to(self.device)
         self.model.load_state_dict(payload["model"], strict=True)
         self.model.eval().requires_grad_(False)
-        self.crop_size, self.lo_res_size, self.hi_res_size = get_sr_sizes(self.config)
+        resolution = get_sr_resolution(self.config)
+        self.crop_size = resolution.crop_pixels
+        self.lo_res_size = resolution.low_res_voxels
+        self.hi_res_size = resolution.high_res_voxels
         self.scale_factor = self.hi_res_size / self.lo_res_size
         self.num_phases = self.config["data"]["num_phases"]
         self.generator = Generator(

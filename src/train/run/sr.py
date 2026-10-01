@@ -5,9 +5,9 @@ import torch
 from src.build.data import build_augmentation
 from src.build.sr import build_sr_trainer
 from src.config.data import validate_sr_source
-from src.config.files import PROJECT_ROOT, find_train_config
+from src.config.files import PROJECT_ROOT, find_saved_config
 from src.config.train import (
-    get_sr_sizes,
+    get_sr_resolution,
     load_train_config,
     normalize_train_config,
     validate_sr_config,
@@ -101,7 +101,7 @@ def run_sr_train(
     if payload:
         resume_sr_training(trainer, payload)
     cfg = trainer.cfg
-    crop, low, high = get_sr_sizes(cfg)
+    crop, low, high = get_sr_resolution(cfg)
     print(f"SR: source crop {crop}, LR {low}³ -> HR {high}³; run {run_dir}", flush=True)
 
     def before_step(step: int) -> None:
@@ -136,7 +136,7 @@ def prepare_source(cfg: dict, base_weights: Path | None) -> None:
     base_path = base_path.resolve()
     if base_path.is_dir():
         base_path = base_path / "generator.pt"
-    base_cfg, data_sha256 = read_source_config(find_train_config(base_path))
+    base_cfg, data_sha256 = read_source_config(find_saved_config(base_path))
     if cfg["conditioning"]["height_enabled"]:
         cfg["data"]["height_extents"] = infer_height_extents(cfg["data"])
     cfg["data"] = validate_sr_source(cfg["data"], base_cfg["data"])
@@ -148,7 +148,7 @@ def prepare_source(cfg: dict, base_weights: Path | None) -> None:
     cfg["source"] = {
         "weights": str(base_path),
         "weights_sha256": file_hash(base_path),
-        "config_sha256": file_hash(find_train_config(base_path)),
+        "config_sha256": file_hash(find_saved_config(base_path)),
     }
     if data_sha256 is not None:
         cfg["source"]["data_sha256"] = data_sha256

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.api import InferenceAPI, PlaneAnchor
+from src.api import LowResolutionAPI, PlaneAnchor
 from src.predict import inference as inference_module
 from src.predict.random import seeded_rng
 
@@ -33,7 +33,7 @@ class FakeTiledGenerator:
 
 
 @pytest.fixture
-def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> InferenceAPI:
+def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LowResolutionAPI:
     weights = tmp_path / "generator.pt"
     weights.touch()
     generator = FakeGenerator()
@@ -47,17 +47,17 @@ def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> InferenceAPI:
         "build_generator",
         lambda _weights, cfg, device: generator,
     )
-    monkeypatch.setattr(inference_module, "find_train_config", lambda _weights: weights)
+    monkeypatch.setattr(inference_module, "find_saved_config", lambda _weights: weights)
     monkeypatch.setattr(
         inference_module,
         "load_train_config",
         lambda _path: {"data": {"crop_size": 6, "lo_res_size": 8}},
     )
     monkeypatch.setattr(inference_module, "TiledGenerator", FakeTiledGenerator)
-    return InferenceAPI(weights, device="cpu")
+    return LowResolutionAPI(weights, device="cpu")
 
 
-def test_crop_and_input_sizes_are_loaded_independently(api: InferenceAPI) -> None:
+def test_crop_and_input_sizes_are_loaded_independently(api: LowResolutionAPI) -> None:
     assert api.crop_size == 6
     assert api.input_size == 8
 
@@ -67,12 +67,12 @@ def test_inference_expands_home_in_weight_paths(api, monkeypatch, weights):
     monkeypatch.setenv("HOME", str(api.weights.parent))
     monkeypatch.setenv("USERPROFILE", str(api.weights.parent))
 
-    loaded = InferenceAPI(weights, device="cpu")
+    loaded = LowResolutionAPI(weights, device="cpu")
 
     assert loaded.weights == api.weights
 
 
-def test_generate_without_geometry_uses_direct_generator(api: InferenceAPI) -> None:
+def test_generate_without_geometry_uses_direct_generator(api: LowResolutionAPI) -> None:
     result = api.generate(domain=0, seed=4)
 
     assert result.shape == (8, 8, 8)
@@ -93,7 +93,7 @@ def test_generate_without_geometry_uses_direct_generator(api: InferenceAPI) -> N
     assert api.scaled.calls == []
 
 
-def test_generate_with_anchor_uses_direct_conditioning(api: InferenceAPI) -> None:
+def test_generate_with_anchor_uses_direct_conditioning(api: LowResolutionAPI) -> None:
     anchor = PlaneAnchor(torch.zeros(8, 8, dtype=torch.uint8), axis=0, index=0)
 
     api.generate(anchors=(anchor,), anchor_strength=0.8)
@@ -103,7 +103,7 @@ def test_generate_with_anchor_uses_direct_conditioning(api: InferenceAPI) -> Non
     assert api.scaled.calls == []
 
 
-def test_generate_with_shape_uses_scaled_generator(api: InferenceAPI) -> None:
+def test_generate_with_shape_uses_scaled_generator(api: LowResolutionAPI) -> None:
     result = api.generate(shape=(12, 12, 12), storage="cpu", progress=True)
 
     assert result.shape == (12, 12, 12)
@@ -116,7 +116,7 @@ def test_generate_with_shape_uses_scaled_generator(api: InferenceAPI) -> None:
 
 
 def test_generate_with_anchor_and_blocks_passes_global_anchor_to_tiler(
-    api: InferenceAPI,
+    api: LowResolutionAPI,
 ) -> None:
     anchor = PlaneAnchor(torch.zeros(8, 8, dtype=torch.uint8), axis=0, index=0)
 
@@ -130,7 +130,7 @@ def test_generate_with_anchor_and_blocks_passes_global_anchor_to_tiler(
 
 
 def test_explicit_partial_anchor_position_preserves_all_global_axes(
-    api: InferenceAPI,
+    api: LowResolutionAPI,
 ) -> None:
     anchor = PlaneAnchor(
         torch.zeros(4, 4, dtype=torch.uint8),
@@ -144,7 +144,7 @@ def test_explicit_partial_anchor_position_preserves_all_global_axes(
     assert api.scaled.calls[0]["anchors"] == (anchor,)
 
 
-def test_seed_is_reproducible_without_changing_caller_rng(api: InferenceAPI) -> None:
+def test_seed_is_reproducible_without_changing_caller_rng(api: LowResolutionAPI) -> None:
     first = api.generate(seed=7)
     second = api.generate(seed=7)
     assert torch.equal(first, second)
@@ -175,7 +175,7 @@ def test_probability_api_forwards_tiled_storage_and_geometry(api, monkeypatch):
 
 
 def test_cpu_seed_never_queries_the_cuda_device(
-    api: InferenceAPI,
+    api: LowResolutionAPI,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail() -> int:
@@ -201,7 +201,7 @@ def test_cpu_seed_never_queries_the_cuda_device(
 )
 @pytest.mark.parametrize("method", ["generate", "generate_probs"])
 def test_generate_rejects_ambiguous_inputs(
-    api: InferenceAPI,
+    api: LowResolutionAPI,
     kwargs: dict,
     message: str,
     method: str,
@@ -218,7 +218,7 @@ def test_public_inference_import_does_not_load_training():
             sys.executable,
             "-B",
             "-c",
-            "import sys; from src.api import InferenceAPI, PlaneAnchor, create_app, SuperResolutionAPI; "
+            "import sys; from src.api import LowResolutionAPI, PlaneAnchor, create_app, SuperResolutionAPI; "
             "assert not [name for name in sys.modules if name.startswith('src.train')]",
         ],
         cwd=Path(__file__).resolve().parents[2],

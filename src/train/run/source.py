@@ -1,7 +1,7 @@
 import hashlib
 from pathlib import Path
 
-from src.config.files import find_train_config, load_yaml
+from src.config.files import find_saved_config, load_yaml
 from src.config.train import (
     normalize_loaded_train_config,
     resolve_external_data_path,
@@ -17,7 +17,7 @@ def file_hash(path: Path) -> str:
 def _validate_source_files(weights: Path, recorded: dict) -> None:
     for key, path, label in (
         ("weights_sha256", weights, "weights"),
-        ("config_sha256", find_train_config(weights), "configuration"),
+        ("config_sha256", find_saved_config(weights), "configuration"),
     ):
         if not recorded.get(key):
             raise ValueError(f"frozen LR source has no saved {label} hash.")
@@ -59,7 +59,7 @@ def read_source_config(
 def load_frozen_source(source: dict, path_maps: list | None = None) -> dict:
     weights = Path(source["weights"])
     _validate_source_files(weights, source)
-    cfg, data_sha256 = read_source_config(find_train_config(weights), path_maps)
+    cfg, data_sha256 = read_source_config(find_saved_config(weights), path_maps)
     if data_sha256 is not None and not source.get("data_sha256"):
         raise ValueError("frozen LR source has no saved data configuration hash.")
     if data_sha256 != source.get("data_sha256"):

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 import src.config.generation as config_module
-from src.config.files import find_train_config, load_yaml, save_yaml
+from src.config.files import find_saved_config, load_yaml, save_yaml
 from src.config.generation import GenerationSettings, load_generation_settings
 from src.config.train import get_schedule_steps
 
@@ -27,7 +27,7 @@ def test_schedule_accepts_a_ramp_past_the_training_horizon() -> None:
         )
 
 
-def test_find_train_config_walks_from_numbered_checkpoint(tmp_path: Path) -> None:
+def test_find_saved_config_walks_from_numbered_checkpoint(tmp_path: Path) -> None:
     config = tmp_path / "run" / "train.yaml"
     config.parent.mkdir()
     config.write_text("train: {}\n", encoding="utf-8")
@@ -35,7 +35,7 @@ def test_find_train_config_walks_from_numbered_checkpoint(tmp_path: Path) -> Non
     weight.parent.mkdir(parents=True)
     weight.write_bytes(b"weights")
 
-    assert find_train_config(weight) == config.resolve()
+    assert find_saved_config(weight) == config.resolve()
 
 
 def test_generation_settings_use_gen_yaml(

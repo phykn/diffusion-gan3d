@@ -10,7 +10,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train a separate 3D super-resolution model from stage-1 volumes and real 2D slices."
     )
-    parser.add_argument("--config", type=Path)
+    parser.add_argument(
+        "--config", type=Path, help="Training YAML; defaults to config/train/sr.yaml."
+    )
     parser.add_argument("--data", type=Path, help="Data YAML for a new run.")
     source = parser.add_mutually_exclusive_group()
     source.add_argument(

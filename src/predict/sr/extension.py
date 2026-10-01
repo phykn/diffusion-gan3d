@@ -5,9 +5,9 @@ import psutil
 import torch
 
 from src.config.data import validate_sr_source
-from src.predict.base import phase_fractions, resolve_offset, volume_shape
 from src.predict.memory import require_memory
 from src.predict.tiling.layout import parse_shape
+from src.predict.volume_condition import phase_fractions, resolve_offset, volume_shape
 from src.prepare.resize import downsample
 
 

@@ -18,7 +18,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.api import InferenceAPI, PlaneAnchor, SuperResolutionAPI
+from src.api import LowResolutionAPI, PlaneAnchor, SuperResolutionAPI
 from src.build.trainer import build_trainer
 from src.config.files import save_yaml
 from src.config.train import load_train_config
@@ -182,7 +182,7 @@ def main():
         resumed = restored.completed_steps == args.steps + 1
         del restored, payload
         torch.cuda.empty_cache() if args.device == "cuda" else None
-        api = InferenceAPI(out / "generator.pt", device=args.device)
+        api = LowResolutionAPI(out / "generator.pt", device=args.device)
         validation, _ = evaluate(api, crops, out, [100, 101])
         del api
         records = [
@@ -231,7 +231,7 @@ def main():
         config=root / "sr.yaml",
         run_dir=root / "sr",
     )
-    api = InferenceAPI(base / "generator.pt", device=args.device)
+    api = LowResolutionAPI(base / "generator.pt", device=args.device)
     _, low_volumes = evaluate(api, crops, root, [200, 201])
     sr = SuperResolutionAPI(sr_run / "generator.pt", device=args.device)
     sr_checks = []
