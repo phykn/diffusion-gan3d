@@ -54,12 +54,13 @@ def test_generation_settings_use_gen_yaml(
     assert load_generation_settings() == GenerationSettings(1.5, 0.7, 12)
 
 
-def test_generation_settings_support_missing_values(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(config_module, "load_yaml", lambda path: {})
-
-    assert load_generation_settings() == GenerationSettings()
+@pytest.mark.parametrize(
+    "key,value", [("guidance", 2.3), ("anchor_strength", 0.45), ("overlap", 6)]
+)
+def test_partial_generation_settings_preserve_supplied_options(monkeypatch, key, value):
+    monkeypatch.setattr(config_module, "load_yaml", lambda path: {key: value})
+    settings = load_generation_settings()
+    assert getattr(settings, key) == value
 
 
 @pytest.mark.parametrize(

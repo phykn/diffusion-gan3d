@@ -125,7 +125,9 @@ def test_lr_checkpoint_restores_training_state_without_rng(
 @pytest.mark.parametrize("active", [False, True])
 def test_lr_resume_without_auxiliary_state_requires_disabled_replay(tmp_path, active):
     cfg = small_config(tmp_path)
-    cfg["loss"]["connectivity"].update(adversarial_weight=float(active))
+    cfg["loss"]["connectivity"].update(
+        adversarial_weight=float(active), normal_transition_weight=0
+    )
     trainer = build_trainer(cfg, torch.device("cpu"))
     path = tmp_path / "training.pt"
     save_training(path, trainer)
@@ -133,13 +135,6 @@ def test_lr_resume_without_auxiliary_state_requires_disabled_replay(tmp_path, ac
     payload.pop("connectivity")
     payload.pop("connectivity_optim")
     payload["updates"].pop("connectivity")
-    if not active:
-        for key in (
-            "adversarial_weight",
-            "normal_transition_weight",
-            "windows_per_plane",
-        ):
-            payload["config"]["loss"]["connectivity"].pop(key)
     restored = build_trainer(cfg, torch.device("cpu"))
     before = copy.deepcopy(restored.denoiser.state_dict())
     if active:

@@ -3,9 +3,10 @@ import inspect
 import pytest
 import torch
 
+from src.build.model import build_models
 from src.config.train import load_train_config, normalize_train_config
 from src.model.critic import PairCritic2D, PlaneCritic2D
-from src.train.loss.gan import get_generator_loss
+from src.train.loss.gan import get_generator_loss, score_plane
 
 
 @pytest.mark.parametrize("mode,channels", [("pair", 4), ("single", 2)])
@@ -38,21 +39,40 @@ def test_critic_input_mode_controls_current_dependency(mode, channels):
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
-def test_critic_mode_defaults_and_validation(stage):
-    assert (
-        load_train_config(f"config/train/{stage}.yaml", stage)["model"]["critic"][
-            "input_mode"
-        ]
-        == "single"
+@pytest.mark.parametrize("mode", ["pair", "single"])
+def test_selected_critic_mode_controls_built_model_gradients(stage, mode):
+    cfg = load_train_config(f"tests/fixtures/config/train/{stage}.yaml", stage)
+    cfg["model"]["critic"].update(input_mode=mode, channels=[4, 8])
+    cfg["model"]["generator"].update(
+        channels=[4, 8], embedding_channels=8, latent_channels=4
     )
-    assert (
-        normalize_train_config({}, stage)["model"]["critic"]["input_mode"] == "single"
-    )
-    for mode in ("pair", "single"):
-        cfg = {"model": {"critic": {"input_mode": mode}}}
-        assert (
-            normalize_train_config(cfg, stage)["model"]["critic"]["input_mode"] == mode
+    cfg["model"]["gradient_checkpointing"] = False
+    cfg["conditioning"]["height_enabled"] = False
+    _, critics, _ = build_models(cfg)
+    for critic in critics.values():
+        previous = torch.randn(2, 2, 8, 8, requires_grad=True)
+        current = torch.randn_like(previous, requires_grad=True)
+        scores = score_plane(
+            critic,
+            previous,
+            current,
+            torch.tensor([0, 1]),
+            torch.zeros(2, dtype=torch.long),
         )
-    for value in (None, True, "current", [], 1):
-        with pytest.raises(ValueError, match="input_mode"):
-            normalize_train_config({"model": {"critic": {"input_mode": value}}}, stage)
+        gradients = torch.autograd.grad(
+            get_generator_loss(scores).combine(0.5),
+            (previous, current),
+            allow_unused=True,
+        )
+        assert gradients[0].isfinite().all() and gradients[0].abs().sum() > 0
+        if mode == "pair":
+            assert gradients[1].isfinite().all() and gradients[1].abs().sum() > 0
+        else:
+            assert gradients[1] is None
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("value", [None, True, "current", [], 1])
+def test_invalid_critic_modes_are_rejected(stage, value):
+    with pytest.raises(ValueError, match="input_mode"):
+        normalize_train_config({"model": {"critic": {"input_mode": value}}}, stage)

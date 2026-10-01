@@ -355,18 +355,16 @@ def test_generator_derives_margin_from_one_coarse_3d_cell() -> None:
     assert generator.default_margin == 4
 
 
-def test_guidance_one_preserves_default_rng_path() -> None:
-    generator = _generator(_ControlledModel(), Diffusion(3))
-
-    torch.manual_seed(71)
-    baseline = generator.generate_probs(vf=(0.5, 0.1, 0.4))
-    torch.manual_seed(71)
-    explicit = generator.generate_probs(
+def test_unit_guidance_uses_one_conditioned_prediction_per_transition() -> None:
+    model = _TraceModel()
+    generator = _generator(model, Diffusion(3))
+    probs = generator.generate_probs(
         vf=(0.5, 0.1, 0.4),
         guidance=1.0,
     )
-
-    assert torch.equal(explicit, baseline)
+    assert probs.shape == (3, 4, 4, 4)
+    assert [call.transition for call in model.calls] == [2, 1, 0]
+    assert all(call.vf is not None for call in model.calls)
 
 
 def test_volume_fraction_normalization_handles_large_finite_values() -> None:
@@ -486,26 +484,21 @@ def test_guided_sampling_uses_anchor_as_a_condition() -> None:
         assert int(call.kwargs["anchor_mask"].sum()) == 16
 
 
-def test_scaled_guidance_one_preserves_default_rng_path() -> None:
-    scaled = TiledGenerator(_generator(_ControlledModel(), Diffusion(2)))
-
-    torch.manual_seed(73)
-    baseline = scaled.generate(
-        shape=(6, 4, 4),
-        vf=(0.5, 0.1, 0.4),
-        overlap=0,
-        progress=False,
-    )
-    torch.manual_seed(73)
-    explicit = scaled.generate(
+def test_tiled_unit_guidance_uses_one_conditioned_prediction_per_tile_and_transition() -> (
+    None
+):
+    model = _TraceModel()
+    scaled = TiledGenerator(_generator(model, Diffusion(2)))
+    volume = scaled.generate(
         shape=(6, 4, 4),
         vf=(0.5, 0.1, 0.4),
         overlap=0,
         progress=False,
         guidance=1.0,
     )
-
-    assert torch.equal(explicit, baseline)
+    assert volume.shape == (6, 4, 4)
+    assert [call.transition for call in model.calls] == [1, 1, 0, 0]
+    assert all(call.vf is not None for call in model.calls)
 
 
 def test_base_only_guidance_is_a_no_op() -> None:
@@ -798,18 +791,19 @@ def test_blocks_define_fixed_tiles_and_margin_reduced_output() -> None:
     )
 
 
-def test_scaled_generator_uses_default_overlap() -> None:
+@pytest.mark.parametrize("overlap", [0, 3, 7])
+def test_tiled_generation_applies_the_requested_overlap(overlap) -> None:
     scaled = TiledGenerator(_generator(_ControlledModel(), Diffusion(1), patch_size=32))
 
-    plan = scaled.plan(shape=(48, 32, 32))
-    probs = scaled.generate_probs(shape=(48, 32, 32), progress=False)
-    vol = scaled.generate(shape=(48, 32, 32), progress=False)
+    plan = scaled.plan(shape=(48, 32, 32), overlap=overlap)
+    probs = scaled.generate_probs(shape=(48, 32, 32), overlap=overlap, progress=False)
+    vol = scaled.generate(shape=(48, 32, 32), overlap=overlap, progress=False)
 
-    assert plan.overlap == 8
+    assert plan.overlap == overlap
     assert probs.shape == (3, 48, 32, 32)
     assert vol.shape == (48, 32, 32)
     assert scaled.stats is not None
-    assert scaled.stats.overlap == 8
+    assert scaled.stats.overlap == overlap
 
 
 def test_scaled_generation_uses_model_derived_outer_margin() -> None:

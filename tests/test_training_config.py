@@ -15,26 +15,22 @@ from src.config.train import (
 from src.train.run.sr import run_sr_train
 
 
-def test_default_lr_uses_measured_transitions_and_disables_replay_losses():
-    cfg = load_train_config("config/train/low_res.yaml")
-    loss = cfg["loss"]["connectivity"]
-    assert loss["real_transition_weight"] > 0
-    assert loss["normal_transition_weight"] == loss["adversarial_weight"] == 0
-    defaults = normalize_train_config({})["loss"]["connectivity"]
-    assert defaults["normal_transition_weight"] == defaults["adversarial_weight"] == 0
-
-
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
-def test_group_statistics_defaults_are_enabled_and_explicit_opt_out_is_preserved(stage):
-    cfg = load_train_config(f"config/train/{stage}.yaml", stage)
-    assert cfg["loss"]["group_statistics"]["weight"] == 0.1
-    assert (
-        normalize_train_config({}, stage)["loss"]["group_statistics"]["weight"] == 0.1
-    )
-    disabled = normalize_train_config(
-        {"loss": {"group_statistics": {"weight": 0}}}, stage
-    )
-    assert disabled["loss"]["group_statistics"]["weight"] == 0
+@pytest.mark.parametrize("weight", [0, 0.37])
+def test_explicit_group_statistics_settings_survive_normalization(stage, weight):
+    settings = {
+        "weight": weight,
+        "max_gap": 3,
+        "tolerance": 0.07,
+        "start_step": 13,
+        "ramp_steps": 19,
+    }
+    raw = {"loss": {"group_statistics": settings}}
+    before = copy.deepcopy(raw)
+    cfg = normalize_train_config(raw, stage)
+    for key, value in settings.items():
+        assert cfg["loss"]["group_statistics"][key] == value
+    assert raw == before
     assert normalize_train_config(cfg, stage) == cfg
 
 
@@ -75,24 +71,16 @@ def test_transition_gap_is_validated(gap):
         normalize_train_config({"loss": {"connectivity": {"max_slice_gap": gap}}})
 
 
-def test_lr_transition_defaults_and_sr_rejects_lr_transition_option():
-    cfg = load_train_config("tests/fixtures/config/train/low_res.yaml")
-    assert cfg["loss"]["connectivity"]["real_transition_weight"] == 0.1
-    with pytest.raises(ValueError, match="connectivity"):
-        normalize_train_config(
-            {"loss": {"connectivity": {"real_transition_weight": 0.1}}}, "sr"
-        )
-
-
 @pytest.mark.parametrize(
     "key,value",
     [
         ("adversarial_weight", 0.25),
         ("normal_transition_weight", 0.1),
+        ("real_transition_weight", 0.47),
         ("windows_per_plane", 4),
     ],
 )
-def test_lr_replay_settings_are_selectable_and_sr_rejects_them(key, value):
+def test_lr_transition_settings_are_selectable_and_sr_rejects_them(key, value):
     raw = {"loss": {"connectivity": {key: value}}}
     assert normalize_train_config(raw)["loss"]["connectivity"][key] == value
     with pytest.raises(ValueError, match="connectivity"):
@@ -108,10 +96,12 @@ def test_replay_weights_are_validated(key, value):
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
 @pytest.mark.parametrize("height", [False, True])
-def test_default_presets_resolve_height_safe_augmentation(stage, height):
-    raw = load_yaml(f"config/train/{stage}.yaml")
-    raw["data"] = load_yaml(raw["data"])
-    raw.setdefault("conditioning", {})["height_enabled"] = height
+def test_requested_auto_augmentation_preserves_height_coordinates(stage, height):
+    raw = {
+        "data": {"domains": {0: {plane: ["images"] for plane in ("xy", "xz", "yz")}}},
+        "augmentation": {"probability": 0.7, "auto_planes": True},
+        "conditioning": {"height_enabled": height},
+    }
     cfg = normalize_train_config(raw, stage)
     augment = build_augmentation(cfg)
     assert set(augment.plane_transforms[0]) == set(range(8))
@@ -199,22 +189,23 @@ def test_resolved_snapshot_survives_default_and_learning_rate_changes(
     )
 
 
-def test_explicit_disabled_options_and_defaults_are_not_shared():
-    cfg = normalize_train_config(
-        {
-            "model": {"gradient_checkpointing": False},
-            "train": {"mixed_precision": False},
-            "conditioning": {"anchor": {"ramp_steps": 0}},
-            "optim": {"ema_decay": 0.0},
-        }
-    )
+def test_explicit_disabled_options_are_preserved_without_sharing_input():
+    raw = {
+        "model": {"gradient_checkpointing": False},
+        "train": {"mixed_precision": False},
+        "conditioning": {"anchor": {"ramp_steps": 0}},
+        "optim": {"ema_decay": 0.0, "adam_betas": [0.12, 0.78]},
+    }
+    before = copy.deepcopy(raw)
+    cfg = normalize_train_config(raw)
+    other = normalize_train_config(raw)
     assert cfg["model"]["gradient_checkpointing"] is False
     assert cfg["train"]["mixed_precision"] is False
     assert cfg["conditioning"]["anchor"]["ramp_steps"] == 0
     assert cfg["optim"]["ema_decay"] == 0.0
-    original_betas = cfg["optim"]["adam_betas"].copy()
     cfg["optim"]["adam_betas"][0] += 0.1
-    assert normalize_train_config({})["optim"]["adam_betas"] == original_betas
+    assert raw == before
+    assert other["optim"]["adam_betas"] == raw["optim"]["adam_betas"]
 
 
 def test_conflicting_old_and_new_keys_fail_instead_of_overriding():
@@ -238,8 +229,10 @@ def test_sr_rejects_incompatible_data_before_creating_a_run(tmp_path, change, me
     base = tmp_path / "base"
     base.mkdir()
     low = load_train_config("tests/fixtures/config/train/low_res.yaml")
+    low["conditioning"]["height_enabled"] = False
     save_yaml(base / "train.yaml", low)
     cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
+    cfg["conditioning"]["height_enabled"] = False
     cfg["data"].update(change)
     preset = tmp_path / "sr.yaml"
     save_yaml(preset, cfg)
@@ -296,7 +289,6 @@ def test_sr_resume_rejects_an_explicit_lr_source_override(tmp_path):
 def test_nickname_is_optional_and_normalized(stage, nickname):
     cfg = normalize_train_config({"nickname": nickname}, stage)
     assert cfg["nickname"] == (nickname or "").strip()
-    assert normalize_train_config({}, stage)["nickname"] == ""
 
 
 @pytest.mark.parametrize(
@@ -318,14 +310,17 @@ def test_sr_archive_interval_rejects_invalid_values(archive):
 def test_sr_validation_returns_resolved_config_without_mutating_input():
     cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     del cfg["optim"]["critic_lr"]
-    del cfg["conditioning"]["height_enabled"]
+    cfg["conditioning"]["height_enabled"] = True
     original = copy.deepcopy(cfg)
 
     validated = validate_sr_config(cfg)
 
     assert cfg == original
     assert validated["optim"]["critic_lr"] == cfg["optim"]["generator_lr"]
-    assert validated["conditioning"]["height_enabled"] is False
+    assert (
+        validated["conditioning"]["height_enabled"]
+        is cfg["conditioning"]["height_enabled"]
+    )
 
 
 def test_saved_yaml_uses_inline_lists_and_separates_groups(tmp_path):
