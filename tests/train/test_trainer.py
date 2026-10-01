@@ -23,7 +23,7 @@ from src.prepare.resize import phase_channels
 from src.train.anchor_bank import AnchorBank
 from src.train.batch import ConditionPresence, RealBatch
 from src.train.ema import build_ema
-from src.train.loss.gan import get_critic_r1
+from src.train.loss.gan import get_gradient_penalty
 from src.train.metrics import Metrics
 from src.train.run.loop import run_train
 from src.train.trainer import (
@@ -538,11 +538,11 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     r1_values = []
 
     def track_r1(scores, inputs):
-        penalties = get_critic_r1(scores, inputs)
+        penalties = get_gradient_penalty(scores, inputs)
         r1_values.append(float(penalties.combine(optim.local_loss_weight).detach()))
         return penalties
 
-    with patch("src.train.trainer.get_critic_r1", side_effect=track_r1):
+    with patch("src.train.loss.gan.get_gradient_penalty", side_effect=track_r1):
         metrics = trainer.step(0)
 
     assert math.isfinite(metrics.generator)

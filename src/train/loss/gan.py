@@ -16,6 +16,14 @@ class HeadLoss:
         return self.global_loss + local_weight * self.local_loss
 
 
+@dataclass(frozen=True)
+class CriticObjective:
+    adversarial: HeadLoss
+    total: torch.Tensor
+    r1: torch.Tensor
+    r2: torch.Tensor
+
+
 def score_plane(critic, previous, current, time, domain, **conditions):
     if getattr(critic, "input_mode", "pair") == "single":
         return critic(previous, time, domain, **conditions)
@@ -57,6 +65,29 @@ def get_critic_loss(
     )
 
 
+def critic_objective(
+    real_scores: CriticScores,
+    fake_scores: CriticScores,
+    real_inputs: Sequence[torch.Tensor],
+    fake_inputs: Sequence[torch.Tensor],
+    local_weight: float,
+    r1_weight: float,
+    r2_weight: float,
+    interval: int,
+) -> CriticObjective:
+    adversarial = get_critic_loss(real_scores, fake_scores)
+    total = adversarial.combine(local_weight)
+    r1 = total.new_zeros(())
+    r2 = total.new_zeros(())
+    if r1_weight > 0:
+        r1 = get_gradient_penalty(real_scores, real_inputs).combine(local_weight)
+        total = total + 0.5 * r1_weight * interval * r1
+    if r2_weight > 0:
+        r2 = get_gradient_penalty(fake_scores, fake_inputs).combine(local_weight)
+        total = total + 0.5 * r2_weight * interval * r2
+    return CriticObjective(adversarial, total, r1, r2)
+
+
 def get_generator_loss(
     fake_scores: CriticScores,
 ) -> HeadLoss:
@@ -68,19 +99,19 @@ def get_generator_loss(
     )
 
 
-def get_critic_r1(
+def get_gradient_penalty(
     scores: CriticScores,
-    real_inputs: Sequence[torch.Tensor],
+    inputs: Sequence[torch.Tensor],
 ) -> HeadLoss:
     if scores.levels:
         return mean_heads(
-            [get_critic_r1(level, real_inputs) for level in scores.levels]
+            [get_gradient_penalty(level, inputs) for level in scores.levels]
         )
     return HeadLoss(
-        global_loss=get_r1(scores.logits_global, real_inputs),
-        local_loss=get_r1(
+        global_loss=input_gradient_penalty(scores.logits_global, inputs),
+        local_loss=input_gradient_penalty(
             scores.logits_local.mean(dim=(-2, -1)),
-            real_inputs,
+            inputs,
         ),
     )
 
@@ -92,7 +123,7 @@ def mean_heads(heads):
     )
 
 
-def get_r1(
+def input_gradient_penalty(
     logits: torch.Tensor,
     inputs: Sequence[torch.Tensor],
 ) -> torch.Tensor:

@@ -34,8 +34,7 @@ from src.train.loss.anchor import SoftAnchorLoss
 from src.train.loss.denoiser import DenoiserLossSettings, denoiser_objective
 from src.train.loss.gan import (
     active_groups,
-    get_critic_loss,
-    get_critic_r1,
+    critic_objective,
     score_plane,
 )
 from src.train.loss.transition import compute_real_transition_loss
@@ -1248,10 +1247,18 @@ class Trainer:
                         fake_domain,
                         **fake_conditions,
                     )
-                    losses = get_critic_loss(real_score, fake_score)
-                    loss = losses.combine(local_weight)
-                global_sum += losses.global_loss.detach() * weight
-                local_sum += losses.local_loss.detach() * weight
+                    losses = critic_objective(
+                        real_score,
+                        fake_score,
+                        (real_prev,),
+                        (fake_prev,),
+                        local_weight=local_weight,
+                        r1_weight=self.r1_gamma if apply_r1 else 0.0,
+                        r2_weight=self.r2_gamma if apply_r2 else 0.0,
+                        interval=self.r1_interval,
+                    )
+                global_sum += losses.adversarial.global_loss.detach() * weight
+                local_sum += losses.adversarial.local_loss.detach() * weight
                 self.diagnostics[f"score/{group}/{axis}/real"] = (
                     real_score.logits_global.detach().mean()
                 )
@@ -1265,21 +1272,10 @@ class Trainer:
                     )
                     for name, norm in zip(("previous", "current"), norms):
                         self.diagnostics[f"input_gradient/{group}/{axis}/{name}"] = norm
-                if apply_r1:
-                    r1 = get_critic_r1(
-                        real_score,
-                        (real_prev,),
-                    )
-                    penalty = r1.combine(local_weight)
-                    r1_sum += penalty.detach() * weight
-                    loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
+                r1_sum += losses.r1.detach() * weight
                 if apply_r2:
-                    penalty = get_critic_r1(fake_score, (fake_prev,)).combine(
-                        local_weight
-                    )
-                    self.diagnostics[f"r2/{group}/{axis}"] = penalty.detach()
-                    loss = loss + 0.5 * self.r2_gamma * self.r1_interval * penalty
-                loss = validate_loss(loss, f"critic {group}/{axis}")
+                    self.diagnostics[f"r2/{group}/{axis}"] = losses.r2.detach()
+                loss = validate_loss(losses.total, f"critic {group}/{axis}")
                 self.scaler.scale(loss * weight).backward()
                 critic_losses[axis] = loss.detach() * weight
             if step_optimizer(optimizer, self.scaler, self.diagnostics, group):
@@ -1321,32 +1317,27 @@ class Trainer:
                 **({"height": fake.height} if fake.height is not None else {}),
                 **({"profile": fake.profile} if fake.profile is not None else {}),
             )
-            losses = get_critic_loss(
+            losses = critic_objective(
                 real_score,
                 fake_score,
+                (real,),
+                (fake_values,),
+                local_weight=self.critic_local_weight,
+                r1_weight=self.r1_gamma if apply_r1 else 0.0,
+                r2_weight=self.r2_gamma if apply_r2 else 0.0,
+                interval=self.r1_interval,
             )
-            loss = losses.combine(self.critic_local_weight)
-        adversarial = loss.detach()
-        r1_value = 0.0
-        if apply_r1:
-            r1 = get_critic_r1(real_score, (real,))
-            penalty = r1.combine(self.critic_local_weight)
-            r1_value = penalty.detach()
-            loss = loss + 0.5 * self.r1_gamma * self.r1_interval * penalty
+        adversarial = losses.adversarial.combine(self.critic_local_weight).detach()
         if apply_r2:
-            penalty = get_critic_r1(fake_score, (fake_values,)).combine(
-                self.critic_local_weight
-            )
-            self.diagnostics["r2/connectivity"] = penalty.detach()
-            loss = loss + 0.5 * self.r2_gamma * self.r1_interval * penalty
+            self.diagnostics["r2/connectivity"] = losses.r2.detach()
         self.diagnostics["regularization/connectivity"] = int(regularize)
-        loss = validate_loss(loss, "connectivity")
+        loss = validate_loss(losses.total, "connectivity")
         self.scaler.scale(loss).backward()
         if step_optimizer(
             self.connectivity_optim, self.scaler, self.diagnostics, "connectivity"
         ):
             self.updates["connectivity"] += 1
-        return adversarial, r1_value
+        return adversarial, losses.r1.detach()
 
     def update_denoiser(self, batch: DenoiserBatch) -> DenoiserUpdate:
         self.denoiser_optim.zero_grad(set_to_none=True)

@@ -27,6 +27,7 @@ from src.prepare.resize import (
     resize_phases,
     scaled_size,
 )
+from src.train.batch import RealBatch
 from src.train.coarse import corrupt_coarse
 from src.train.loss.sr import consistency_loss
 from src.train.state import export_sr, resume_sr_training, save_sr_training
@@ -89,6 +90,40 @@ def test_sr_expands_home_in_weight_paths(tmp_path, monkeypatch, weights):
 
     assert api.weights == path.resolve()
     assert api.num_phases == cfg["data"]["num_phases"]
+
+
+@pytest.mark.parametrize(
+    "extent", [None, 24.0, torch.tensor(24.0), torch.tensor([24.0, 28.0])]
+)
+def test_sr_height_metadata_supports_sampling_shared_and_per_sample_extents(
+    tmp_path, extent
+):
+    cfg = sr_config(tmp_path)
+    cfg["conditioning"]["height_enabled"] = True
+    cfg["conditioning"]["coarse_corruption_probability"] = 0.0
+    cfg["augmentation"]["planes"] = {
+        "xy": {"flip_axes": ["x", "y"], "rotate_90": True},
+        "yz": {"flip_axes": ["y"], "rotate_90": False},
+    }
+    bank = {0: torch.rand(2, 3, 8, 8, 8).softmax(1)}
+    origins = {0: torch.tensor([0.0, 4.0])}
+    extents = None if extent is None else {0: extent}
+    trainer = build_sr_trainer(cfg, bank, torch.device("cpu"), origins, extents)
+    expected = (
+        torch.tensor([24.0, 24.0])
+        if extent is None
+        else torch.as_tensor(extent).expand(2)
+    )
+
+    with patch("src.train.trainer.torch.randint", return_value=torch.tensor([1])):
+        prepared = trainer.prepare_sr_step(0, 0, {0: 0, 2: 0}, RealBatch({}), 0)
+
+    torch.testing.assert_close(
+        prepared.model_conditions["height"],
+        trainer.volume_height(origins[0][[1]], 0, expected[[1]]),
+    )
+    if extents is not None:
+        assert extents[0] is extent
 
 
 @pytest.mark.parametrize("height", [False, True])
@@ -185,7 +220,9 @@ def test_hr_extension_rejects_misaligned_geometry_before_lr_sampling(tmp_path):
     "crop,low,scale,high", [(256, 64, 1.5, 96), (128, 64, 2, 128), (256, 64, 4, 256)]
 )
 def test_independent_crop_and_fractional_scale(crop, low, scale, high):
-    assert get_resolution({"crop_size": crop, "lo_res_size": low, "hi_res_size": high}) == (
+    assert get_resolution(
+        {"crop_size": crop, "lo_res_size": low, "hi_res_size": high}
+    ) == (
         crop,
         low,
         high,
@@ -290,7 +327,8 @@ def test_web_anchor_preparation_matches_new_dataset(tmp_path):
     expected = resize_crop(crop, 8, 3)
     with TestClient(
         create_app(
-            inference=api, config=load_server_config("tests/fixtures/config/backend.yaml")
+            inference=api,
+            config=load_server_config("tests/fixtures/config/backend.yaml"),
         )
     ) as client:
         response = client.post("/prepare", json={"image": crop.tolist()})
