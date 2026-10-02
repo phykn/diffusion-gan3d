@@ -69,7 +69,7 @@ def run_sr_train(
         validate_frozen_source(
             Path(cfg["source"]["weights"]),
             cfg["source"],
-            payload.get("path_maps"),
+            payload["path_maps"],
         )
         bank_payload = load_bank(bank_path)
     else:

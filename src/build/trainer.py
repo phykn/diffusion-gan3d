@@ -19,6 +19,7 @@ from src.data.provenance import fingerprint_data
 from src.data.source import infer_height_extents
 from src.storage import load_model
 from src.train.ema import build_ema
+from src.train.loss.denoiser import DenoiserLossSettings
 from src.train.trainer import Trainer, TrainerComponents, TrainerSettings
 
 
@@ -127,6 +128,7 @@ def build_trainer(
             bank_extents=bank_extents,
             data_fingerprint=fingerprint_data(streams),
             critic_groups_by_domain=get_sr_plane_groups(cfg) if sr else None,
+            cfg=cfg,
         ),
         settings=settings,
     )
@@ -139,6 +141,7 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
     generator = cfg["model"]["generator"]
     loss = cfg["loss"]
     conditioning = cfg["conditioning"]
+    profile = conditioning.get("spatial_profile", {"enabled": False, "num_bins": 16})
     anchor = conditioning.get("anchor", {})
     connectivity = loss.get("connectivity", {})
     statistics = loss["group_statistics"]
@@ -166,13 +169,25 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
             "height conditioning requires real_batch_size >= volume_batch_size."
         )
     return TrainerSettings(
-        cfg=cfg,
         height_data=data if conditioning["height_enabled"] else None,
-        profile_settings=conditioning.get(
-            "spatial_profile", {"enabled": False, "num_bins": 16}
+        profile_settings=profile,
+        loss=DenoiserLossSettings(
+            local_weight=loss["critic_local_weight"],
+            connectivity_weight=connectivity.get("adversarial_weight", 0.0),
+            normal_transition_weight=connectivity.get("normal_transition_weight", 0.0),
+            real_transition_weight=connectivity.get("real_transition_weight", 0.0),
+            vf_weight=loss.get("volume_fraction_weight", 0.0),
+            profile_bins=profile.get("num_bins", 16),
+            profile_weight=loss.get("spatial_profile_weight", 0.0),
+            profile_gradient_weight=loss.get("spatial_profile_gradient_weight", 0.0),
+            consistency_weight=loss.get("downsample_consistency_weight", 0.0),
+            consistency_tolerance=loss.get("downsample_mse_tolerance", 0.0),
+            num_phases=data["num_phases"],
+            group_statistics_weight=statistics["weight"],
+            group_statistics_max_gap=statistics["max_gap"],
+            group_statistics_tolerance=statistics["tolerance"],
+            preserve_height=conditioning["height_enabled"],
         ),
-        profile_weight=loss.get("spatial_profile_weight", 0.0),
-        profile_gradient_weight=loss.get("spatial_profile_gradient_weight", 0.0),
         volume_batch_size=train["volume_batch_size"],
         num_phases=data["num_phases"],
         patch_size=get_sr_resolution(cfg).high_res_voxels
@@ -182,7 +197,6 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         ema_decay=optim["ema_decay"],
         r1_gamma=loss["r1_weight"],
         r1_interval=loss["r1_every_steps"],
-        critic_local_weight=loss["critic_local_weight"],
         anchor_training_probability=anchor.get("probability", 0.0),
         anchor_start_step=anchor_start_step,
         anchor_ramp_steps=anchor_ramp_steps,
@@ -191,26 +205,17 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         anchor_bank_capacity=anchor.get("bank_capacity", 0),
         anchor_plane_spacing=anchor.get("plane_spacing", 1),
         structure_every_steps=train["structure_every_steps"],
-        connectivity_weight=connectivity.get("adversarial_weight", 0.0),
-        normal_transition_weight=connectivity.get("normal_transition_weight", 0.0),
-        real_transition_weight=connectivity.get("real_transition_weight", 0.0),
-        group_statistics_weight=statistics["weight"],
-        group_statistics_max_gap=statistics["max_gap"],
-        group_statistics_tolerance=statistics["tolerance"],
         group_statistics_start_step=statistics["start_step"],
         group_statistics_ramp_steps=statistics["ramp_steps"],
         connectivity_max_gap=connectivity.get("max_slice_gap", 1),
         connectivity_start_step=connectivity_start,
         connectivity_ramp_steps=connectivity_ramp,
         connectivity_windows_per_plane=connectivity.get("windows_per_plane", 1),
-        vf_loss_weight=loss.get("volume_fraction_weight", 0.0),
         domain_dropout=1.0 - conditioning["domain_keep_probability"],
         cfg_drop_each_probability=conditioning.get("dropout_probability_per_case", 0.0),
         latent_channels=generator["latent_channels"],
         amp_enabled=train["mixed_precision"] and device.type == "cuda",
         r2_gamma=loss["r2_weight"],
-        consistency_weight=loss.get("downsample_consistency_weight", 0.0),
-        consistency_tolerance=loss.get("downsample_mse_tolerance", 0.0),
         coarse_corruption_probability=conditioning.get(
             "coarse_corruption_probability", 0.0
         ),

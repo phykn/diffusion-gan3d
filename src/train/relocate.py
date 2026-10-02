@@ -84,7 +84,7 @@ def relocate_checkpoint(payload, path_map):
     result["data_fingerprint"] = mapper.keys(payload["data_fingerprint"])
     # Keep the map history for frozen LR train.yaml files, which must remain
     # byte-identical to preserve the recorded source configuration hash.
-    result["path_maps"] = [*payload.get("path_maps", []), group]
+    result["path_maps"] = [*payload["path_maps"], group]
     if "anchor_bank" in payload:
         result["anchor_bank"] = {
             domain: [

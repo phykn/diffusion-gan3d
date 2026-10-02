@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 from unittest.mock import Mock
 
 import numpy as np
@@ -125,7 +126,7 @@ class ScalarCritic(nn.Module):
 def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
     cfg = config(tmp_path, "low_res", groups)
     trainer = build_trainer(cfg, torch.device("cpu"))
-    trainer.r1_gamma = 0
+    trainer.settings = replace(trainer.settings, r1_gamma=0)
     trainer.critics = nn.ModuleDict(
         {name: ScalarCritic() for name in trainer.critic_groups}
     )
@@ -135,15 +136,15 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
     }
     real = {
         axis: (
-            torch.full((2, trainer.num_phases, 8, 8), float(axis + 1)),
-            torch.zeros(2, trainer.num_phases, 8, 8),
+            torch.full((2, trainer.settings.num_phases, 8, 8), float(axis + 1)),
+            torch.zeros(2, trainer.settings.num_phases, 8, 8),
         )
         for axis in range(3)
     }
     fake = {
         axis: (
-            torch.zeros(2, trainer.num_phases, 8, 8),
-            torch.zeros(2, trainer.num_phases, 8, 8),
+            torch.zeros(2, trainer.settings.num_phases, 8, 8),
+            torch.zeros(2, trainer.settings.num_phases, 8, 8),
         )
         for axis in range(3)
     }
@@ -161,7 +162,7 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
     for name, axes in trainer.critic_groups.items():
         # At weight=0, d softplus(-w*x)/dw = -x/2. Fake x is zero.
         expected = (
-            (1 + trainer.critic_local_weight)
+            (1 + trainer.settings.loss.local_weight)
             * sum(axis + 1 for axis in axes)
             / (2 * len(axes))
             / len(groups)

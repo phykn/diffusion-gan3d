@@ -56,7 +56,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     base_dir.mkdir()
     save_yaml(base_dir / "train.yaml", cfg)
     trainer = build_trainer(cfg, torch.device("cpu"))
-    assert trainer.patch_size == 8
+    assert trainer.settings.patch_size == 8
     run_train(trainer, steps=1, save_every=1, run_dir=base_dir)
     sr_cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     sr_cfg["nickname"] = "refine"

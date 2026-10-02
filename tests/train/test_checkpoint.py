@@ -128,9 +128,13 @@ def test_data_manifest_preserves_source_records_and_references(
         cfg={"data": {"split": split}},
         streams=streams,
         data_fingerprint=fingerprints,
-        connectivity_weight=connectivity,
-        normal_transition_weight=transition,
-        real_transition_weight=measured,
+        settings=SimpleNamespace(
+            loss=SimpleNamespace(
+                connectivity_weight=connectivity,
+                normal_transition_weight=transition,
+                real_transition_weight=measured,
+            )
+        ),
     )
     expected_records = [
         {

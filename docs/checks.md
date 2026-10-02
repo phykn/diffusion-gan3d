@@ -45,6 +45,11 @@ overwrites exports, `archive_every_steps` creates checkpoints, and `structure_ev
 controls diagnostics. Completion and Ctrl+C at a completed step also save progress.
 Load exports after writing has finished.
 
+Resume requires the current checkpoint schema, including `path_maps` (an empty
+list when no paths have moved). LR checkpoints also require the connectivity model,
+optimizer, and update counter even when replay losses are disabled. Checkpoints
+missing these fields are rejected; they are not upgraded during loading.
+
 ```bash
 python run_train_1st.py --resume "run/my-lr-run" --steps 20000 --device cuda
 ```

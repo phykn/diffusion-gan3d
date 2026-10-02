@@ -304,7 +304,7 @@ def test_trainer_schedule_is_independent_of_replay_and_roundtrips_checkpoints(
     resume = resume_training if stage == "low_res" else resume_sr_training
     resume(restored, payload)
     assert restored.completed_steps == 1
-    assert restored.group_statistics_weight == 0.2
+    assert restored.settings.loss.group_statistics_weight == 0.2
     restored.cfg["loss"]["group_statistics"]["weight"] = 0
     with pytest.raises(ValueError, match="saved"):
         resume(restored, payload)

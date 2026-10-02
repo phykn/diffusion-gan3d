@@ -124,9 +124,11 @@ def test_absent_height_targets_remain_finite_with_half_precision():
 
 def test_transition_targets_exclude_borrowed_domain_planes():
     trainer = object.__new__(Trainer)
-    trainer.real_transition_weight = 1.0
-    trainer.connectivity_max_gap = 1
-    trainer.slice_pairs_per_axis = 2
+    trainer.settings = SimpleNamespace(
+        loss=SimpleNamespace(real_transition_weight=1.0),
+        connectivity_max_gap=1,
+        slice_pairs_per_axis=2,
+    )
     trainer.streams = {0: {0: None}, 1: {1: None}}
     trainer.diagnostics = {}
     volume = torch.zeros(1, 2, 4, 4, 4)

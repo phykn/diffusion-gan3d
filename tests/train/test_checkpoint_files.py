@@ -16,6 +16,7 @@ def trainer():
         cfg={},
         completed_steps=1,
         data_fingerprint={},
+        path_maps=[],
         updates={},
         denoiser=model,
         ema_denoiser=model,

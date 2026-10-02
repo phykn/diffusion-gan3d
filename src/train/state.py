@@ -31,24 +31,14 @@ def resume_training(trainer, payload: dict) -> None:
         )
     if payload["data_fingerprint"] != trainer.data_fingerprint:
         raise ValueError("LR source images changed since the checkpoint.")
-    connectivity_fields = (
-        "connectivity" in payload,
-        "connectivity_optim" in payload,
-        "connectivity" in payload["updates"],
-    )
-    if not any(connectivity_fields):
-        if trainer.connectivity_weight > 0 or trainer.normal_transition_weight > 0:
-            raise ValueError("Active replay losses require saved connectivity state.")
-        # Checkpoints saved while replay support was absent have no auxiliary state.
-        payload = {**payload, "updates": {**payload["updates"], "connectivity": 0}}
-    elif not all(connectivity_fields):
-        raise ValueError(
-            "Connectivity optimizer state and update counters are incomplete."
-        )
+    if (
+        not {"connectivity", "connectivity_optim"} <= payload.keys()
+        or "connectivity" not in payload["updates"]
+    ):
+        raise ValueError("Connectivity training state is incomplete.")
     _restore_state(trainer, payload)
-    if all(connectivity_fields):
-        trainer.connectivity_critic.load_state_dict(payload["connectivity"])
-        trainer.connectivity_optim.load_state_dict(payload["connectivity_optim"])
+    trainer.connectivity_critic.load_state_dict(payload["connectivity"])
+    trainer.connectivity_optim.load_state_dict(payload["connectivity_optim"])
     trainer.use_multi_anchor_next = payload["use_multi_anchor_next"]
     trainer.anchor_bank.entries = payload["anchor_bank"]
 
@@ -81,7 +71,7 @@ def _capture_state(trainer) -> dict:
         "config": trainer.cfg,
         "step": trainer.completed_steps,
         "data_fingerprint": trainer.data_fingerprint,
-        "path_maps": getattr(trainer, "path_maps", []),
+        "path_maps": trainer.path_maps,
         "updates": trainer.updates,
         "model": trainer.denoiser.state_dict(),
         "ema": trainer.ema_denoiser.state_dict(),
@@ -95,6 +85,7 @@ def _capture_state(trainer) -> dict:
 
 
 def _restore_state(trainer, payload: dict) -> None:
+    path_maps = payload["path_maps"]
     if set(payload["critic_optims"]) != set(trainer.critic_optims):
         raise ValueError("critic optimizer groups do not match the checkpoint.")
     if set(payload["updates"]) != set(trainer.updates):
@@ -108,7 +99,7 @@ def _restore_state(trainer, payload: dict) -> None:
     trainer.scaler.load_state_dict(payload["scaler"])
     trainer.updates = dict(payload["updates"])
     trainer.completed_steps = payload["step"]
-    trainer.path_maps = payload.get("path_maps", [])
+    trainer.path_maps = path_maps
 
 
 def export_sr(trainer, path):

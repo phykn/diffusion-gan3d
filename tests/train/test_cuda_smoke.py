@@ -8,6 +8,7 @@ from src.build.trainer import build_optimizers
 from src.model.diffusion import Diffusion
 from src.prepare.resize import phase_channels
 from src.train.ema import build_ema
+from src.train.loss.denoiser import DenoiserLossSettings
 from src.train.trainer import Trainer, TrainerComponents, TrainerSettings
 
 
@@ -136,7 +137,21 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             ema_decay=optim["ema_decay"],
             r1_gamma=cfg["loss"]["r1_weight"],
             r1_interval=cfg["loss"]["r1_every_steps"],
-            critic_local_weight=cfg["loss"]["critic_local_weight"],
+            loss=DenoiserLossSettings(
+                local_weight=cfg["loss"]["critic_local_weight"],
+                connectivity_weight=cfg["loss"]["connectivity"]["adversarial_weight"],
+                normal_transition_weight=cfg["loss"]["connectivity"][
+                    "normal_transition_weight"
+                ],
+                vf_weight=cfg["loss"]["volume_fraction_weight"],
+                real_transition_weight=0.0,
+                profile_bins=16,
+                profile_weight=0.0,
+                profile_gradient_weight=0.0,
+                consistency_weight=0.0,
+                consistency_tolerance=0.0,
+                num_phases=data["num_phases"],
+            ),
             anchor_training_probability=cfg["conditioning"]["anchor"]["probability"],
             anchor_start_step=cfg["conditioning"]["anchor"]["start_step"],
             anchor_ramp_steps=cfg["conditioning"]["anchor"]["ramp_steps"],
@@ -144,11 +159,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             anchor_shared_axis_probability=cfg["conditioning"]["anchor"][
                 "borrowed_plane_probability"
             ],
-            connectivity_weight=cfg["loss"]["connectivity"]["adversarial_weight"],
-            normal_transition_weight=cfg["loss"]["connectivity"][
-                "normal_transition_weight"
-            ],
-            vf_loss_weight=cfg["loss"]["volume_fraction_weight"],
             domain_dropout=1.0 - cfg["conditioning"]["domain_keep_probability"],
             cfg_drop_each_probability=0.0,
             latent_channels=model["generator"]["latent_channels"],

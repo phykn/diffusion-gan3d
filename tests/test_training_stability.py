@@ -123,7 +123,10 @@ def test_lr_checkpoint_restores_training_state_without_rng(
 
 
 @pytest.mark.parametrize("active", [False, True])
-def test_lr_resume_without_auxiliary_state_requires_disabled_replay(tmp_path, active):
+@pytest.mark.parametrize(
+    "missing", ["connectivity", "connectivity_optim", "counter", "all"]
+)
+def test_lr_resume_rejects_incomplete_connectivity_state(tmp_path, active, missing):
     cfg = small_config(tmp_path)
     cfg["loss"]["connectivity"].update(
         adversarial_weight=float(active), normal_transition_weight=0
@@ -132,21 +135,31 @@ def test_lr_resume_without_auxiliary_state_requires_disabled_replay(tmp_path, ac
     path = tmp_path / "training.pt"
     save_training(path, trainer)
     payload = torch.load(path, weights_only=True)
-    payload.pop("connectivity")
-    payload.pop("connectivity_optim")
-    payload["updates"].pop("connectivity")
+    if missing in ("connectivity", "all"):
+        payload.pop("connectivity")
+    if missing in ("connectivity_optim", "all"):
+        payload.pop("connectivity_optim")
+    if missing in ("counter", "all"):
+        payload["updates"].pop("connectivity")
     restored = build_trainer(cfg, torch.device("cpu"))
     before = copy.deepcopy(restored.denoiser.state_dict())
-    if active:
-        with pytest.raises(ValueError, match="require saved connectivity"):
-            resume_training(restored, payload)
-        torch.testing.assert_close(restored.denoiser.state_dict(), before)
-    else:
+    with pytest.raises(ValueError, match="Connectivity training state is incomplete"):
         resume_training(restored, payload)
-        assert restored.updates["connectivity"] == 0
-        assert "connectivity" not in payload["updates"]
-        restored.step(0, transition=0)
-        assert restored.updates["connectivity"] == 0
+    torch.testing.assert_close(restored.denoiser.state_dict(), before, rtol=0, atol=0)
+
+
+def test_lr_resume_requires_path_map_history_before_loading_weights(tmp_path):
+    cfg = small_config(tmp_path)
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    path = tmp_path / "training.pt"
+    save_training(path, trainer)
+    payload = torch.load(path, weights_only=True)
+    payload.pop("path_maps")
+    restored = build_trainer(cfg, torch.device("cpu"))
+    before = copy.deepcopy(restored.denoiser.state_dict())
+    with pytest.raises(KeyError, match="path_maps"):
+        resume_training(restored, payload)
+    torch.testing.assert_close(restored.denoiser.state_dict(), before, rtol=0, atol=0)
 
 
 def test_lr_resume_rejects_changed_images_or_training_contract(tmp_path):

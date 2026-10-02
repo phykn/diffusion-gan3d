@@ -65,6 +65,7 @@ class TrainerComponents:
     bank_extents: dict | None = None
     critic_groups_by_domain: dict | None = None
     data_fingerprint: dict[str, str] = field(default_factory=dict)
+    cfg: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -76,13 +77,10 @@ class TrainerSettings:
     ema_decay: float
     r1_gamma: float
     r1_interval: int
-    critic_local_weight: float
+    loss: DenoiserLossSettings
     anchor_training_probability: float
     anchor_start_step: int
     anchor_ramp_steps: int
-    connectivity_weight: float
-    normal_transition_weight: float
-    vf_loss_weight: float
     cfg_drop_each_probability: float
     latent_channels: int
     amp_enabled: bool
@@ -90,10 +88,6 @@ class TrainerSettings:
     anchor_pixel_loss_weight: float
     anchor_shared_axis_probability: float
     connectivity_max_gap: int = 1
-    real_transition_weight: float = 0.0
-    group_statistics_weight: float = 0.0
-    group_statistics_max_gap: int = 8
-    group_statistics_tolerance: float = 0.01
     group_statistics_start_step: int = 0
     group_statistics_ramp_steps: int = 5000
     r2_gamma: float = 0.0
@@ -103,17 +97,12 @@ class TrainerSettings:
     anchor_bank_capacity: int = 4
     anchor_plane_spacing: int = 16
     structure_every_steps: int = 100
-    consistency_weight: float = 0.0
-    consistency_tolerance: float = 0.0
     coarse_corruption_probability: float = 0.0
     coarse_corruption_strength: float = 0.0
-    cfg: dict = field(default_factory=dict)
     height_data: dict | None = None
     profile_settings: dict = field(
         default_factory=lambda: {"enabled": False, "num_bins": 16}
     )
-    profile_weight: float = 0.0
-    profile_gradient_weight: float = 0.0
 
 
 class Trainer:
@@ -122,6 +111,15 @@ class Trainer:
         components: TrainerComponents,
         settings: TrainerSettings,
     ) -> None:
+        self.settings = replace(
+            settings,
+            anchor_training_probability=float(settings.anchor_training_probability),
+            anchor_shared_axis_probability=float(
+                settings.anchor_shared_axis_probability
+            ),
+            cfg_drop_each_probability=float(settings.cfg_drop_each_probability),
+            domain_dropout=float(settings.domain_dropout),
+        )
         self.denoiser = components.denoiser
         self.ema_denoiser = components.ema_denoiser
         self.critics = components.critics
@@ -131,7 +129,7 @@ class Trainer:
         self.bank_origins = components.bank_origins
         self.bank_extents = components.bank_extents
         self.data_fingerprint = components.data_fingerprint
-        self.cfg = settings.cfg
+        self.cfg = components.cfg
         self.critic_groups_by_domain = components.critic_groups_by_domain
         self.critic_groups = (
             {
@@ -157,36 +155,11 @@ class Trainer:
         self.connectivity_optim = components.connectivity_optim
         self.scaler = components.scaler
         self.device = components.device
-        self.volume_batch_size = settings.volume_batch_size
-        self.num_phases = settings.num_phases
-        self.patch_size = settings.patch_size
-        self.slice_pairs_per_axis = settings.slice_pairs_per_axis
-        self.ema_decay = settings.ema_decay
-        self.r1_gamma = settings.r1_gamma
-        self.r1_interval = settings.r1_interval
-        self.critic_local_weight = settings.critic_local_weight
-        self.anchor_training_probability = float(settings.anchor_training_probability)
-        self.anchor_start_step = settings.anchor_start_step
-        self.anchor_ramp_steps = settings.anchor_ramp_steps
-        self.anchor_shared_axis_probability = float(
-            settings.anchor_shared_axis_probability
-        )
         pool_exponent = math.ceil(math.log2(self.denoiser.downsample_factor) / 2.0)
         self.anchor_loss = SoftAnchorLoss(
             pool_size=2**pool_exponent,
             pixel_weight=settings.anchor_pixel_loss_weight,
         )
-        self.connectivity_weight = settings.connectivity_weight
-        self.normal_transition_weight = settings.normal_transition_weight
-        self.real_transition_weight = settings.real_transition_weight
-        self.group_statistics_weight = settings.group_statistics_weight
-        self.group_statistics_max_gap = settings.group_statistics_max_gap
-        self.group_statistics_tolerance = settings.group_statistics_tolerance
-        self.group_statistics_start_step = settings.group_statistics_start_step
-        self.group_statistics_ramp_steps = settings.group_statistics_ramp_steps
-        self.connectivity_max_gap = settings.connectivity_max_gap
-        self.connectivity_start_step = settings.connectivity_start_step
-        self.connectivity_ramp_steps = settings.connectivity_ramp_steps
         self.anchor_triplets = AnchorTripletSampler(
             max_gap=settings.connectivity_max_gap,
             windows_per_plane=settings.connectivity_windows_per_plane,
@@ -198,38 +171,23 @@ class Trainer:
                 settings.anchor_bank_capacity, settings.anchor_plane_spacing
             )
         )
-        self.structure_every_steps = settings.structure_every_steps
         self.use_multi_anchor_next = False
-        self.vf_loss_weight = settings.vf_loss_weight
-        self.consistency_weight = settings.consistency_weight
-        self.consistency_tolerance = settings.consistency_tolerance
-        self.coarse_corruption_probability = settings.coarse_corruption_probability
-        self.coarse_corruption_strength = settings.coarse_corruption_strength
-        self.cfg_drop_each_probability = float(settings.cfg_drop_each_probability)
-        self.domain_dropout = float(settings.domain_dropout)
-        self.latent_channels = settings.latent_channels
-        self.amp_enabled = settings.amp_enabled
         if (
-            type(self.r1_interval) is not int
-            or self.r1_interval < 1
-            or not math.isfinite(self.r1_gamma)
-            or self.r1_gamma < 0
+            type(settings.r1_interval) is not int
+            or settings.r1_interval < 1
+            or not math.isfinite(settings.r1_gamma)
+            or settings.r1_gamma < 0
             or not math.isfinite(settings.r2_gamma)
             or settings.r2_gamma < 0
         ):
             raise ValueError(
                 "regularization interval must be positive and R2 weight finite/non-negative."
             )
-        self.r2_gamma = settings.r2_gamma
         self.updates = {
             name: 0 for name in (*self.critics, "connectivity", "generator")
         }
         self.completed_steps = 0
         self.path_maps = []
-        self.height_data = settings.height_data
-        self.profile_settings = settings.profile_settings
-        self.profile_weight = settings.profile_weight
-        self.profile_gradient_weight = settings.profile_gradient_weight
         self.diagnostics = {}
         self.generator_updated = True
         self.critic_augment = (
@@ -245,7 +203,7 @@ class Trainer:
     ) -> Metrics:
         self.diagnostics = {}
         prepared = self.prepare_step(step, transition)
-        volume_size = self.patch_size
+        volume_size = self.settings.patch_size
         transition = prepared.transition
         real = prepared.real
         critic_domains = prepared.critic_domains
@@ -267,7 +225,7 @@ class Trainer:
         measured = None if selection is None else selection.measured
         profile = (
             prepared.model_conditions.get("profile")
-            if self.profile_settings.get("critic_enabled", False)
+            if self.settings.profile_settings.get("critic_enabled", False)
             else None
         )
         profile_present = presence.vf.to(self.device)
@@ -278,7 +236,7 @@ class Trainer:
             anchor,
             transition,
             presence.anchor & presence.vf
-            if self.profile_settings["enabled"]
+            if self.settings.profile_settings["enabled"]
             else presence.anchor,
             None if selection is None else selection.source,
             height=prepared.model_conditions.get("height"),
@@ -309,7 +267,7 @@ class Trainer:
             critic_domains,
             profile_present=profile_present,
         )
-        if self.connectivity_weight > 0.0:
+        if self.settings.loss.connectivity_weight > 0.0:
             critic_connectivity, connectivity_r1 = self.update_connectivity_critic(
                 connectivity_real.values,
                 connectivity_fake,
@@ -341,14 +299,17 @@ class Trainer:
                 prediction,
                 measured,
                 presence.anchor & presence.vf
-                if self.profile_settings["enabled"]
+                if self.settings.profile_settings["enabled"]
                 else presence.anchor,
                 prepared.model_conditions.get("height"),
                 prepared.model_conditions.get("profile"),
                 selection.geometry,
             )
         self.scaler.update()
-        if self.structure_every_steps and (step + 1) % self.structure_every_steps == 0:
+        if (
+            self.settings.structure_every_steps
+            and (step + 1) % self.settings.structure_every_steps == 0
+        ):
             self.diagnostics.update(
                 structure_metrics(clean_probs, real.images, self.critic_groups)
             )
@@ -386,7 +347,7 @@ class Trainer:
         volume_height = prepared.model_conditions.get("height")
         profile = (
             prepared.model_conditions.get("profile")
-            if self.profile_settings.get("critic_enabled", False)
+            if self.settings.profile_settings.get("critic_enabled", False)
             else None
         )
         profile_present = prepared.presence.vf.to(self.device)
@@ -401,7 +362,7 @@ class Trainer:
                 previous,
                 current,
                 axis,
-                self.slice_pairs_per_axis,
+                self.settings.slice_pairs_per_axis,
                 tuple(real.images[axis].shape[-2:]),
                 anchor=visible,
                 measured=excluded,
@@ -457,7 +418,7 @@ class Trainer:
         )
 
     def _real_transition_loss(self, prepared, clean_probs):
-        if self.real_transition_weight == 0.0 or prepared.transition != 0:
+        if self.settings.loss.real_transition_weight == 0.0 or prepared.transition != 0:
             return None
         real, fake, real_heights, fake_heights = {}, {}, {}, {}
         height = prepared.model_conditions.get("height")
@@ -470,7 +431,7 @@ class Trainer:
                 clean_probs,
                 clean_probs,
                 axis,
-                self.slice_pairs_per_axis,
+                self.settings.slice_pairs_per_axis,
                 tuple(real[axis].shape[-2:]),
                 height=height,
             )
@@ -483,7 +444,7 @@ class Trainer:
         loss, diagnostics = compute_real_transition_loss(
             real,
             fake,
-            self.connectivity_max_gap,
+            self.settings.connectivity_max_gap,
             real_heights if height is not None else None,
             fake_heights if height is not None else None,
         )
@@ -525,11 +486,13 @@ class Trainer:
             prepared = self.prepare_lr_step(
                 step, domain, model_domain, critic_domains, batches, transition
             )
-        elapsed = step - self.group_statistics_start_step
+        elapsed = step - self.settings.group_statistics_start_step
         ramp = (
             0.0
             if elapsed < 0
-            else min(1.0, (elapsed + 1) / max(self.group_statistics_ramp_steps, 1))
+            else min(
+                1.0, (elapsed + 1) / max(self.settings.group_statistics_ramp_steps, 1)
+            )
         )
         return replace(prepared, group_statistics_ramp=ramp)
 
@@ -541,18 +504,24 @@ class Trainer:
         batches: RealBatch,
         transition: int | None,
     ) -> StepPreparation:
-        indices = torch.randint(len(self.bank[domain]), (self.volume_batch_size,))
+        indices = torch.randint(
+            len(self.bank[domain]), (self.settings.volume_batch_size,)
+        )
         low = self.bank[domain][indices].to(self.device)
-        low = augment_volumes(low, preserve_height=self.height_data is not None)
+        low = augment_volumes(
+            low, preserve_height=self.settings.height_data is not None
+        )
         coarse, level = corrupt_coarse(
-            low, self.coarse_corruption_probability, self.coarse_corruption_strength
+            low,
+            self.settings.coarse_corruption_probability,
+            self.settings.coarse_corruption_strength,
         )
         conditions = {
-            "domain": self.make_domain(model_domain, self.volume_batch_size),
-            "coarse": resize_phases(coarse, (self.patch_size,) * 3),
+            "domain": self.make_domain(model_domain, self.settings.volume_batch_size),
+            "coarse": resize_phases(coarse, (self.settings.patch_size,) * 3),
             "corruption_level": level,
         }
-        if self.height_data is not None:
+        if self.settings.height_data is not None:
             conditions["height"] = self.volume_height(
                 self.bank_origins[domain][indices],
                 domain,
@@ -562,7 +531,7 @@ class Trainer:
             )
         self.diagnostics["coarse_corruption_mse"] = (coarse - low).square().mean()
         self.diagnostics["coarse_corruption_level"] = level.mean()
-        absent = torch.zeros(self.volume_batch_size, dtype=torch.bool)
+        absent = torch.zeros(self.settings.volume_batch_size, dtype=torch.bool)
         return StepPreparation(
             transition=self.sample_transition(False)
             if transition is None
@@ -571,7 +540,9 @@ class Trainer:
             critic_domains=critic_domains,
             real=batches,
             selection=None,
-            target_vf=low.new_zeros((self.volume_batch_size, self.num_phases)),
+            target_vf=low.new_zeros(
+                (self.settings.volume_batch_size, self.settings.num_phases)
+            ),
             presence=ConditionPresence(absent, absent),
             model_conditions=conditions,
             anchor_ramp=0.0,
@@ -595,7 +566,7 @@ class Trainer:
             if ramp == 0.0
             else self.sample_anchor(
                 batches,
-                self.patch_size,
+                self.settings.patch_size,
                 owned_axes=tuple(own_batches),
                 domain=domain,
             )
@@ -607,23 +578,23 @@ class Trainer:
             anchor,
             target_vf,
             presence,
-            self.make_domain(model_domain, self.volume_batch_size),
+            self.make_domain(model_domain, self.settings.volume_batch_size),
         )
-        if self.height_data is not None:
+        if self.settings.height_data is not None:
             height = None if selection is None else selection.height
             if height is None:
                 axis = next(a for a in self.streams[domain] if a in batches.origins)
                 height = self.volume_height(
-                    batches.origins[axis][: self.volume_batch_size],
+                    batches.origins[axis][: self.settings.volume_batch_size],
                     domain,
-                    batches.extents[axis][: self.volume_batch_size],
+                    batches.extents[axis][: self.settings.volume_batch_size],
                 )
             model_conditions["height"] = height
-        if self.profile_settings["enabled"]:
+        if self.settings.profile_settings["enabled"]:
             profile = None if selection is None else selection.profile
             if profile is None:
                 axis = next(a for a in own_batches if a in batches.profiles)
-                profile = batches.profiles[axis][: self.volume_batch_size]
+                profile = batches.profiles[axis][: self.settings.volume_batch_size]
             target_vf = profile.mean(-1)
             model_conditions.update(
                 profile=profile,
@@ -643,7 +614,9 @@ class Trainer:
             model_conditions=model_conditions,
             anchor_ramp=ramp,
             connectivity_ramp=self.schedule_ramp(
-                step, self.connectivity_start_step, self.connectivity_ramp_steps
+                step,
+                self.settings.connectivity_start_step,
+                self.settings.connectivity_ramp_steps,
             ),
         )
 
@@ -659,7 +632,7 @@ class Trainer:
         connectivity_r1: float,
     ) -> Metrics:
         if self.generator_updated:
-            update_ema(self.ema_denoiser, self.denoiser, self.ema_decay)
+            update_ema(self.ema_denoiser, self.denoiser, self.settings.ema_decay)
         selection = prepared.selection
         anchor = None if selection is None else selection.condition
         presence = prepared.presence
@@ -670,7 +643,7 @@ class Trainer:
                 critic=sum(critic_vals),
                 r1=r1,
                 transition=prepared.transition,
-                volume_size=self.patch_size,
+                volume_size=self.settings.patch_size,
                 domain=prepared.domain,
                 critic_axes=tuple(critic_vals),
                 anchor_planes=0 if anchor is None else anchor.planes,
@@ -732,13 +705,22 @@ class Trainer:
     ) -> tuple[TripletBatch, TripletBatch]:
         empty = TripletBatch(
             values=prediction.new_empty(
-                (0, 3, self.num_phases, prediction.shape[-2], prediction.shape[-1])
+                (
+                    0,
+                    3,
+                    self.settings.num_phases,
+                    prediction.shape[-2],
+                    prediction.shape[-1],
+                )
             ),
             axes=torch.empty(0, device=self.device, dtype=torch.long),
             gaps=torch.empty(0, device=self.device, dtype=torch.long),
             center_slots=torch.empty(0, device=self.device, dtype=torch.long),
         )
-        enabled = self.connectivity_weight > 0.0 or self.normal_transition_weight > 0.0
+        enabled = (
+            self.settings.loss.connectivity_weight > 0.0
+            or self.settings.loss.normal_transition_weight > 0.0
+        )
         if (
             not enabled
             or transition != 0
@@ -844,7 +826,7 @@ class Trainer:
         for axis in self.active_axes:
             batch = self.streams[batch_domains[axis]][axis].next()
             images = batch["image"]
-            if self.height_data is not None:
+            if self.settings.height_data is not None:
                 origins = batch["height_origin"]
                 if axis != 0:
                     batches.origins[axis] = origins
@@ -870,33 +852,36 @@ class Trainer:
                         images.shape[-2:],
                         0,
                         origins,
-                        self.height_data["crop_size"] / images.shape[-1],
+                        self.settings.height_data["crop_size"] / images.shape[-1],
                         batch["height_extent"],
                         self.device,
                     )
             batches.images[axis] = images.to(self.device, non_blocking=True)
-            if self.profile_settings["enabled"] and axis in batches.origins:
+            if self.settings.profile_settings["enabled"] and axis in batches.origins:
                 batches.profiles[axis] = rebin_profile(
                     image_profile(
-                        batches.images[axis], bins=self.profile_settings["num_bins"]
+                        batches.images[axis],
+                        bins=self.settings.profile_settings["num_bins"],
                     ),
-                    self.patch_size,
+                    self.settings.patch_size,
                 )
         return batches
 
     def volume_height(self, origins, domain, extents=None):
-        data = self.height_data
+        data = self.settings.height_data
         return height_field(
-            (self.patch_size,) * 3,
+            (self.settings.patch_size,) * 3,
             0,
             origins,
-            data["crop_size"] / self.patch_size,
+            data["crop_size"] / self.settings.patch_size,
             data["height_extents"][domain] if extents is None else extents,
             self.device,
         )
 
     def sample_domain_condition(self, domain: int) -> int:
-        if self.domain_dropout > 0.0 and bool(torch.rand(()) < self.domain_dropout):
+        if self.settings.domain_dropout > 0.0 and bool(
+            torch.rand(()) < self.settings.domain_dropout
+        ):
             return NULL_DOMAIN
         return domain
 
@@ -933,16 +918,16 @@ class Trainer:
             sums = torch.einsum("bcdhw,bdhw->bc", measured.image.float(), mask)
             counts = mask.sum(dim=(1, 2, 3)).unsqueeze(1)
             return (sums / counts + 1.0) * 0.5
-        if self.height_data is not None:
+        if self.settings.height_data is not None:
             axis = next(axis for axis in owned_axes if axis in batches.origins)
         else:
             axis = owned_axes[int(torch.randint(len(owned_axes), ()).item())]
         fractions = batches.images[axis].float().mean((2, 3))
-        indices = torch.arange(self.volume_batch_size, device=fractions.device)
+        indices = torch.arange(self.settings.volume_batch_size, device=fractions.device)
         return fractions[indices % len(fractions)]
 
     def sample_condition_presence(self, has_anchor: bool) -> ConditionPresence:
-        batch = self.volume_batch_size
+        batch = self.settings.volume_batch_size
         anchor = torch.full(
             (batch,),
             has_anchor,
@@ -952,14 +937,14 @@ class Trainer:
         vf = torch.ones(batch, device="cpu", dtype=torch.bool)
         random = torch.rand(batch, device="cpu")
         if has_anchor:
-            probability = self.cfg_drop_each_probability
+            probability = self.settings.cfg_drop_each_probability
             joint_null = random < probability
             anchor_null = (random >= probability) & (random < 2.0 * probability)
             vf_null = (random >= 2.0 * probability) & (random < 3.0 * probability)
             anchor = ~(joint_null | anchor_null)
             vf = ~(joint_null | vf_null)
         else:
-            vf = random >= 2.0 * self.cfg_drop_each_probability
+            vf = random >= 2.0 * self.settings.cfg_drop_each_probability
         return ConditionPresence(anchor=anchor, vf=vf)
 
     @staticmethod
@@ -981,7 +966,9 @@ class Trainer:
         return conditions
 
     def get_anchor_ramp(self, step: int) -> float:
-        return self.schedule_ramp(step, self.anchor_start_step, self.anchor_ramp_steps)
+        return self.schedule_ramp(
+            step, self.settings.anchor_start_step, self.settings.anchor_ramp_steps
+        )
 
     @staticmethod
     def schedule_ramp(step: int, start: int, ramp: int) -> float:
@@ -998,14 +985,14 @@ class Trainer:
         owned_axes: tuple[int, ...] | None = None,
         domain: int = 0,
     ) -> AnchorSelection | None:
-        probability = self.anchor_training_probability
+        probability = self.settings.anchor_training_probability
         if probability <= 0.0:
             return None
         if probability < 1.0 and not bool(torch.rand(()) < probability):
             return None
         if self.use_multi_anchor_next:
             replay = self.anchor_bank.sample(
-                domain, self.volume_batch_size, self.device
+                domain, self.settings.volume_batch_size, self.device
             )
             self.use_multi_anchor_next = False
             if replay is not None:
@@ -1038,8 +1025,8 @@ class Trainer:
         shared_axes = tuple(axis for axis in batches.images if axis not in owned_axes)
         use_shared = (
             bool(shared_axes)
-            and self.anchor_shared_axis_probability > 0.0
-            and bool(torch.rand(()) < self.anchor_shared_axis_probability)
+            and self.settings.anchor_shared_axis_probability > 0.0
+            and bool(torch.rand(()) < self.settings.anchor_shared_axis_probability)
         )
         axes = shared_axes if use_shared else owned_axes
         if batches.origins:
@@ -1053,7 +1040,7 @@ class Trainer:
         batch_indices = torch.randperm(
             images.shape[0],
             device="cpu",
-        )[: self.volume_batch_size]
+        )[: self.settings.volume_batch_size]
         selected = images.index_select(0, batch_indices.to(images.device))
         shape = tuple(min(volume_size, size) for size in selected.shape[-2:])
         selected = crop_images(selected, shape)
@@ -1069,8 +1056,8 @@ class Trainer:
         )
         condition = encode_anchors(
             (plane,),
-            batch_size=self.volume_batch_size,
-            num_phases=self.num_phases,
+            batch_size=self.settings.volume_batch_size,
+            num_phases=self.settings.num_phases,
             volume_size=volume_size,
             device=self.device,
             dtype=torch.float32,
@@ -1105,8 +1092,8 @@ class Trainer:
         volume_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         shape = (
-            self.volume_batch_size,
-            self.num_phases,
+            self.settings.volume_batch_size,
+            self.settings.num_phases,
             volume_size,
             volume_size,
             volume_size,
@@ -1160,13 +1147,13 @@ class Trainer:
         r1_sum = 0.0
         global_sum = 0.0
         local_sum = 0.0
-        local_weight = self.critic_local_weight
+        local_weight = self.settings.loss.local_weight
         groups = active_groups(fake.pairs, self.critic_groups)
         for group, axes in groups.items():
             count = self.updates[group]
-            regularize = (count + 1) % self.r1_interval == 0
-            apply_r1 = self.r1_gamma > 0.0 and regularize
-            apply_r2 = self.r2_gamma > 0.0 and regularize
+            regularize = (count + 1) % self.settings.r1_interval == 0
+            apply_r1 = self.settings.r1_gamma > 0.0 and regularize
+            apply_r2 = self.settings.r2_gamma > 0.0 and regularize
             weight = 1.0 / (len(axes) * len(groups))
             critic = self.critics[group]
             optimizer = self.critic_optims[group]
@@ -1175,7 +1162,7 @@ class Trainer:
                 images = batches.images[axis]
                 if (
                     images.ndim != 4
-                    or images.shape[1] != self.num_phases
+                    or images.shape[1] != self.settings.num_phases
                     or not images.is_floating_point()
                 ):
                     raise ValueError(
@@ -1229,7 +1216,7 @@ class Trainer:
                 real_domain = self.make_domain(domains[axis], real_prev.shape[0])
                 fake_domain = self.make_domain(domains[axis], fake_prev.shape[0])
 
-                autocast = self.autocast(self.amp_enabled and not regularize)
+                autocast = self.autocast(self.settings.amp_enabled and not regularize)
                 with autocast:
                     real_score = score_plane(
                         critic,
@@ -1253,9 +1240,9 @@ class Trainer:
                         (real_prev,),
                         (fake_prev,),
                         local_weight=local_weight,
-                        r1_weight=self.r1_gamma if apply_r1 else 0.0,
-                        r2_weight=self.r2_gamma if apply_r2 else 0.0,
-                        interval=self.r1_interval,
+                        r1_weight=self.settings.r1_gamma if apply_r1 else 0.0,
+                        r2_weight=self.settings.r2_gamma if apply_r2 else 0.0,
+                        interval=self.settings.r1_interval,
                     )
                 global_sum += losses.adversarial.global_loss.detach() * weight
                 local_sum += losses.adversarial.local_loss.detach() * weight
@@ -1293,13 +1280,13 @@ class Trainer:
             return 0.0, 0.0
 
         count = self.updates["connectivity"]
-        regularize = (count + 1) % self.r1_interval == 0
-        apply_r1 = self.r1_gamma > 0.0 and regularize
-        apply_r2 = self.r2_gamma > 0.0 and regularize
+        regularize = (count + 1) % self.settings.r1_interval == 0
+        apply_r1 = self.settings.r1_gamma > 0.0 and regularize
+        apply_r2 = self.settings.r2_gamma > 0.0 and regularize
         self.connectivity_optim.zero_grad(set_to_none=True)
         real = real.detach().float().requires_grad_(apply_r1)
         fake_values = fake.values.detach().float().requires_grad_(apply_r2)
-        autocast = self.autocast(self.amp_enabled and not regularize)
+        autocast = self.autocast(self.settings.amp_enabled and not regularize)
         with autocast:
             real_score = self.connectivity_critic(
                 real,
@@ -1322,12 +1309,14 @@ class Trainer:
                 fake_score,
                 (real,),
                 (fake_values,),
-                local_weight=self.critic_local_weight,
-                r1_weight=self.r1_gamma if apply_r1 else 0.0,
-                r2_weight=self.r2_gamma if apply_r2 else 0.0,
-                interval=self.r1_interval,
+                local_weight=self.settings.loss.local_weight,
+                r1_weight=self.settings.r1_gamma if apply_r1 else 0.0,
+                r2_weight=self.settings.r2_gamma if apply_r2 else 0.0,
+                interval=self.settings.r1_interval,
             )
-        adversarial = losses.adversarial.combine(self.critic_local_weight).detach()
+        adversarial = losses.adversarial.combine(
+            self.settings.loss.local_weight
+        ).detach()
         if apply_r2:
             self.diagnostics["r2/connectivity"] = losses.r2.detach()
         self.diagnostics["regularization/connectivity"] = int(regularize)
@@ -1346,23 +1335,6 @@ class Trainer:
         if self.connectivity_critic is not None:
             self.connectivity_critic.requires_grad_(False)
         try:
-            settings = DenoiserLossSettings(
-                local_weight=self.critic_local_weight,
-                connectivity_weight=self.connectivity_weight,
-                normal_transition_weight=self.normal_transition_weight,
-                vf_weight=self.vf_loss_weight,
-                real_transition_weight=self.real_transition_weight,
-                profile_bins=self.profile_settings.get("num_bins", 16),
-                profile_weight=self.profile_weight,
-                profile_gradient_weight=self.profile_gradient_weight,
-                consistency_weight=self.consistency_weight,
-                consistency_tolerance=self.consistency_tolerance,
-                num_phases=self.num_phases,
-                group_statistics_weight=self.group_statistics_weight,
-                group_statistics_max_gap=self.group_statistics_max_gap,
-                group_statistics_tolerance=self.group_statistics_tolerance,
-                preserve_height=self.height_data is not None,
-            )
             with self.autocast():
                 losses, diagnostics = denoiser_objective(
                     batch,
@@ -1370,8 +1342,9 @@ class Trainer:
                     self.connectivity_critic,
                     self.critic_groups,
                     self.anchor_loss,
-                    settings,
-                    diagnose=(self.updates["generator"] + 1) % self.r1_interval == 0,
+                    self.settings.loss,
+                    diagnose=(self.updates["generator"] + 1) % self.settings.r1_interval
+                    == 0,
                 )
             self.diagnostics.update(diagnostics)
             total = validate_loss(losses.total, "generator")
@@ -1399,7 +1372,7 @@ class Trainer:
     def sample_latent(self, batch: int, dtype: torch.dtype) -> torch.Tensor:
         return torch.randn(
             batch,
-            self.latent_channels,
+            self.settings.latent_channels,
             device=self.device,
             dtype=dtype,
         )
@@ -1409,7 +1382,7 @@ class Trainer:
         enabled: bool | None = None,
     ) -> AbstractContextManager:
         if enabled is None:
-            enabled = self.amp_enabled
+            enabled = self.settings.amp_enabled
         return torch.autocast(
             device_type=self.device.type,
             dtype=torch.float16,

@@ -744,7 +744,7 @@ def test_measured_transition_training_keeps_replay_but_never_scores_it(
     save_training(tmp_path / "training.pt", trainer)
     restored = build_trainer(cfg, torch.device("cpu"))
     resume_training(restored, torch.load(tmp_path / "training.pt", weights_only=True))
-    assert restored.real_transition_weight == 1
+    assert restored.settings.loss.real_transition_weight == 1
     assert len(restored.anchor_bank.entries[0]) == len(trainer.anchor_bank.entries[0])
 
 

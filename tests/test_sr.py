@@ -393,6 +393,14 @@ def test_sr_training_restores_state_without_rng(tmp_path):
     assert payload["format"] == "diffusion-gan3d.sr.train"
     assert not {"torch_rng", "cuda_rng", "numpy_rng"} & payload.keys()
     assert set(trainer.critics) == {"0_xy", "0_yz"}
+    incomplete = dict(payload)
+    incomplete.pop("path_maps")
+    before_restore = copy.deepcopy(restored.denoiser.state_dict())
+    with pytest.raises(KeyError, match="path_maps"):
+        resume_sr_training(restored, incomplete)
+    torch.testing.assert_close(
+        restored.denoiser.state_dict(), before_restore, rtol=0, atol=0
+    )
     rng = torch.get_rng_state().clone()
     resume_sr_training(restored, payload)
     assert torch.equal(rng, torch.get_rng_state())

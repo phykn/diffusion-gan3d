@@ -20,6 +20,11 @@ then `src/build/` assembles data, models, and the trainer. `Trainer.step` owns u
 the shared plane/connectivity critic objective and R1/R2 input penalties.
 The web backend calls `LowResolutionAPI`.
 
+`Trainer.settings` holds runtime settings; its `loss` field holds the generator
+objective settings assembled once in `src/build/trainer.py`. Read settings from
+these objects instead of copying them onto the trainer or rebuilding them per step.
+`Trainer.cfg` keeps the resolved configuration used for logging and checkpoints.
+
 ## Contracts to preserve
 
 - Volumes use `(z, y, x)` axes. Crop/height coordinates use source pixels;

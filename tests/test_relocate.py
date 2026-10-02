@@ -35,6 +35,7 @@ def test_relocation_maps_path_fields_without_copying_tensors_or_changing_hashes(
             },
         },
         "data_fingerprint": {image: "image hash"},
+        "path_maps": [],
         "model": {"weight": tensor},
         "anchor_bank": {0: [{"volume": tensor, "geometry": {"image_id": image}}]},
     }
@@ -81,6 +82,7 @@ def test_repeated_relocation_history_maps_original_frozen_config(tmp_path):
     original = {
         "config": {"data": {"domains": {0: {"xy": ["/old/images"]}}}},
         "data_fingerprint": {"/old/images/a.png": "unchanged"},
+        "path_maps": [],
     }
     first = relocate_checkpoint(original, [("/old", str(tmp_path / "first"))])
     second = relocate_checkpoint(
@@ -95,7 +97,11 @@ def test_repeated_relocation_history_maps_original_frozen_config(tmp_path):
 
 
 def test_relocation_rejects_merged_image_paths(tmp_path):
-    payload = {"config": {}, "data_fingerprint": {"/a/img.png": "x", "/b/img.png": "y"}}
+    payload = {
+        "config": {},
+        "data_fingerprint": {"/a/img.png": "x", "/b/img.png": "y"},
+        "path_maps": [],
+    }
     with pytest.raises(ValueError, match="merges distinct"):
         relocate_checkpoint(payload, [("/a", str(tmp_path)), ("/b", str(tmp_path))])
 
