@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import fields, replace
 from types import SimpleNamespace
 
 import pytest
@@ -218,6 +218,32 @@ def test_objective_adds_the_ramped_prior_and_preserves_the_real_loss():
     assert logs["loss/group_statistics"] > 0
     update.total.backward()
     assert batch.clean_probs.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize("transition", (0, 1))
+def test_continuity_is_additive_at_every_transition_and_leaves_existing_losses(
+    transition,
+):
+    batch, settings = objective_batch()
+    batch = replace(batch, transition=transition, anchor_ramp=0.5)
+    original, logs = denoiser_objective(batch, {}, None, ALL, None, settings)
+    value = batch.clean_probs.sum() * 0 + 0.7
+    batch = replace(batch, anchor_continuity_loss=value)
+    disabled, _ = denoiser_objective(batch, {}, None, ALL, None, settings)
+    torch.testing.assert_close(disabled.total, original.total, rtol=0, atol=0)
+    settings = replace(settings, anchor_continuity_weight=0.2)
+    updated, updated_logs = denoiser_objective(batch, {}, None, ALL, None, settings)
+    for item in fields(original):
+        if item.name != "total":
+            torch.testing.assert_close(
+                getattr(updated, item.name),
+                getattr(original, item.name),
+                rtol=0,
+                atol=0,
+            )
+    torch.testing.assert_close(updated.total, original.total + 0.1 * value)
+    for key in logs:
+        torch.testing.assert_close(logs[key], updated_logs[key], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("change", [{"transition": 1}, {"group_statistics_ramp": 0}])

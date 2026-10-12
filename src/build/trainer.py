@@ -176,6 +176,7 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
             connectivity_weight=connectivity.get("adversarial_weight", 0.0),
             normal_transition_weight=connectivity.get("normal_transition_weight", 0.0),
             real_transition_weight=connectivity.get("real_transition_weight", 0.0),
+            anchor_continuity_weight=loss.get("anchor_continuity_weight", 0.0),
             vf_weight=loss.get("volume_fraction_weight", 0.0),
             profile_bins=profile.get("num_bins", 16),
             profile_weight=loss.get("spatial_profile_weight", 0.0),

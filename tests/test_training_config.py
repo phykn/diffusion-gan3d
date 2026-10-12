@@ -65,6 +65,22 @@ def test_real_transition_weight_is_validated(weight):
         )
 
 
+@pytest.mark.parametrize("weight", (-1, float("nan"), float("inf"), True))
+def test_anchor_continuity_weight_is_validated(weight):
+    with pytest.raises(ValueError, match="anchor_continuity_weight"):
+        normalize_train_config({"loss": {"anchor_continuity_weight": weight}})
+
+
+@pytest.mark.parametrize("weight", (0, 0.37))
+def test_anchor_continuity_is_lr_only_and_preserves_explicit_settings(weight):
+    cfg = normalize_train_config({"loss": {"anchor_continuity_weight": weight}})
+    assert cfg["loss"]["anchor_continuity_weight"] == weight
+    assert normalize_train_config(cfg) == cfg
+    with pytest.raises(ValueError, match="anchor_continuity_weight"):
+        normalize_train_config({"loss": {"anchor_continuity_weight": weight}}, "sr")
+    assert "anchor_continuity_weight" not in normalize_train_config({}, "sr")["loss"]
+
+
 @pytest.mark.parametrize("gap", (0, -1, 0.5, True))
 def test_transition_gap_is_validated(gap):
     with pytest.raises(ValueError, match="max_slice_gap"):

@@ -6,7 +6,11 @@ import torch
 from src.prepare.height import height_field
 from src.prepare.resize import phase_channels
 from src.train.batch import RealBatch
-from src.train.loss.transition import compute_real_transition_loss, phase_pairs
+from src.train.loss.transition import (
+    compute_real_transition_loss,
+    phase_pairs,
+    transition_statistics,
+)
 from src.train.trainer import Trainer
 
 
@@ -144,3 +148,31 @@ def test_transition_targets_exclude_borrowed_domain_planes():
     loss = trainer._real_transition_loss(prepared, volume)
     assert loss == 0
     assert not any("/z/" in key for key in trainer.diagnostics)
+
+
+@pytest.mark.parametrize("height_enabled", (False, True))
+def test_cached_statistics_preserve_real_loss_and_generated_gradients(height_enabled):
+    torch.manual_seed(7)
+    real = {axis: torch.rand(2, 2, 8, 8).softmax(1) for axis in range(3)}
+    fake = {axis: torch.rand(2, 2, 8, 8, requires_grad=True) for axis in range(3)}
+    heights = (
+        {axis: height_field((8, 8), 0, [0, 1], 1, 16) for axis in (1, 2)}
+        if height_enabled
+        else None
+    )
+    stats = transition_statistics(real, 3, heights)
+    original, original_logs = compute_real_transition_loss(
+        real, fake, 3, heights, heights
+    )
+    cached, cached_logs = compute_real_transition_loss(
+        real, fake, 3, heights, heights, stats
+    )
+    torch.testing.assert_close(original, cached, rtol=0, atol=0)
+    assert original_logs.keys() == cached_logs.keys()
+    for key in original_logs:
+        torch.testing.assert_close(original_logs[key], cached_logs[key], rtol=0, atol=0)
+    active = [fake[axis] for axis in ((1, 2) if height_enabled else (0, 1, 2))]
+    first = torch.autograd.grad(original, active)
+    second = torch.autograd.grad(cached, active)
+    for a, b in zip(first, second, strict=True):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)

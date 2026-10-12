@@ -10,7 +10,9 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 from torch import nn
+from torch.utils.tensorboard import SummaryWriter
 
+from scripts.common.metrics import read_metrics
 from src.anchor import PlaneAnchor, encode_anchors
 from src.build.model import build_models
 from src.build.trainer import build_optimizers
@@ -27,7 +29,7 @@ from src.train.batch import ConditionPresence, RealBatch
 from src.train.ema import build_ema
 from src.train.loss.denoiser import DenoiserLossSettings
 from src.train.loss.gan import get_gradient_penalty
-from src.train.metrics import Metrics
+from src.train.metrics import Metrics, write_metrics
 from src.train.run.loop import run_train
 from src.train.trainer import (
     Trainer,
@@ -1087,6 +1089,10 @@ def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
         anchored=True,
         connectivity_weight=0.25,
     )
+    trainer.settings = replace(
+        trainer.settings,
+        loss=replace(trainer.settings.loss, anchor_continuity_weight=0.1),
+    )
     observed = encode_anchors(
         (PlaneAnchor(torch.zeros(8, 8, dtype=torch.uint8), axis=0, index=4),),
         batch_size=1,
@@ -1130,6 +1136,72 @@ def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
     assert metrics.anchor_pixel_loss == 0.0
     assert metrics.generator_connectivity == 0.0
     assert metrics.normal_transition_loss == 0.0
+    assert metrics.diagnostics["loss/anchor_continuity"] == 0
+    assert metrics.diagnostics["anchor_continuity/gap1/pairs"] == 0
+
+
+@pytest.mark.parametrize("transition", (0, 1))
+@pytest.mark.parametrize("replay", (False, True))
+def test_anchor_continuity_updates_x0_at_every_transition_and_records_metrics(
+    tmp_path, transition, replay
+):
+    torch.manual_seed(17)
+    trainer, _, _ = _conditioning_trainer(anchored=True)
+    trainer.settings = replace(
+        trainer.settings,
+        loss=replace(
+            trainer.settings.loss,
+            anchor_continuity_weight=0.1,
+            real_transition_weight=0.2,
+        ),
+    )
+    if replay:
+        trainer.step(0, transition=0)
+    original_update = trainer.update_denoiser
+
+    def check_gradient(batch):
+        assert batch.anchor_continuity_loss is not None
+        (gradient,) = torch.autograd.grad(
+            batch.anchor_continuity_loss, batch.logits, retain_graph=True
+        )
+        assert gradient.abs().sum() > 0
+        assert gradient[batch.anchor.mask.expand_as(gradient)].abs().sum() == 0
+        return original_update(batch)
+
+    original_generate = trainer.generate_pair
+
+    def check_chain(*args, **kwargs):
+        result = original_generate(*args, **kwargs)
+        assert not result[1].requires_grad
+        assert result[2].requires_grad and result[3].requires_grad
+        return result
+
+    with (
+        patch.object(trainer, "update_denoiser", side_effect=check_gradient),
+        patch.object(trainer, "generate_pair", side_effect=check_chain),
+        patch.object(
+            trainer, "_transition_statistics", wraps=trainer._transition_statistics
+        ) as statistics,
+    ):
+        metrics = trainer.step(int(replay), transition=transition)
+    assert statistics.call_count == 1
+    assert (metrics.anchor_planes > 1) == replay
+    assert metrics.diagnostics["loss/anchor_continuity"] > 0
+    assert ("loss/real_transition" in metrics.diagnostics) == (transition == 0)
+    assert metrics.diagnostics["anchor_continuity/contribution"] == pytest.approx(
+        0.1 * metrics.anchor_ramp * metrics.diagnostics["loss/anchor_continuity"]
+    )
+    with SummaryWriter(tmp_path) as writer:
+        write_metrics(writer, 2, metrics)
+    (record,) = read_metrics(tmp_path)
+    for key in (
+        "loss/anchor_continuity",
+        "anchor_continuity/gap1/loss",
+        "anchor_continuity/gap1/sharpness",
+        "anchor_continuity/sharpness_near",
+        "anchor_continuity/sharpness_far",
+    ):
+        assert record[key] == pytest.approx(metrics.diagnostics[key])
 
 
 def test_vf_total_variation_uses_raw_prediction() -> None:

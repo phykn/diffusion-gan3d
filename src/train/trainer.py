@@ -31,13 +31,17 @@ from src.train.batch import (
 from src.train.coarse import corrupt_coarse
 from src.train.ema import update_ema
 from src.train.loss.anchor import SoftAnchorLoss
+from src.train.loss.anchor_continuity import compute_anchor_continuity_loss
 from src.train.loss.denoiser import DenoiserLossSettings, denoiser_objective
 from src.train.loss.gan import (
     active_groups,
     critic_objective,
     score_plane,
 )
-from src.train.loss.transition import compute_real_transition_loss
+from src.train.loss.transition import (
+    compute_real_transition_loss,
+    transition_statistics,
+)
 from src.train.metrics import Metrics, collect_metrics
 from src.train.step import (
     input_gradient_norms,
@@ -391,6 +395,18 @@ class Trainer:
         clean_probs: torch.Tensor,
     ) -> DenoiserBatch:
         selection = prepared.selection
+        continuity = (
+            self.bank is None
+            and self.settings.loss.anchor_continuity_weight > 0
+            and selection is not None
+            and selection.measured is not None
+        )
+        statistics = (
+            self._transition_statistics(prepared)
+            if continuity
+            or (self.settings.loss.real_transition_weight > 0 and prepared.transition == 0)
+            else None
+        )
         return DenoiserBatch(
             transition=prepared.transition,
             connectivity_domains=connectivity_domains,
@@ -416,12 +432,43 @@ class Trainer:
             fake_profiles=fake.profiles,
             profile=prepared.model_conditions.get("profile"),
             coarse_target=prepared.coarse_target,
-            real_transition_loss=self._real_transition_loss(prepared, clean_probs),
+            real_transition_loss=self._real_transition_loss(
+                prepared, clean_probs, statistics
+            ),
+            anchor_continuity_loss=(
+                self._anchor_continuity_loss(prepared, clean_probs, statistics)
+                if continuity
+                else None
+            ),
             observed_axes=tuple(self.streams[prepared.domain]),
             group_statistics_ramp=prepared.group_statistics_ramp,
         )
 
-    def _real_transition_loss(self, prepared, clean_probs):
+    def _transition_statistics(self, prepared):
+        real = {
+            axis: prepared.real.images[axis] for axis in self.streams[prepared.domain]
+        }
+        return transition_statistics(
+            real,
+            self.settings.connectivity_max_gap,
+            prepared.real.heights if "height" in prepared.model_conditions else None,
+        )
+
+    def _anchor_continuity_loss(self, prepared, clean_probs, statistics):
+        selection = prepared.selection
+        visible = prepared.presence.anchor
+        loss, diagnostics = compute_anchor_continuity_loss(
+            clean_probs,
+            self.visible_anchor(selection.measured, visible),
+            self.visible_anchor(selection.condition, visible),
+            statistics,
+            self.settings.connectivity_max_gap,
+            prepared.model_conditions.get("height"),
+        )
+        self.diagnostics.update(diagnostics)
+        return loss
+
+    def _real_transition_loss(self, prepared, clean_probs, statistics=None):
         if self.settings.loss.real_transition_weight == 0.0 or prepared.transition != 0:
             return None
         real, fake, real_heights, fake_heights = {}, {}, {}, {}
@@ -451,6 +498,7 @@ class Trainer:
             self.settings.connectivity_max_gap,
             real_heights if height is not None else None,
             fake_heights if height is not None else None,
+            statistics,
         )
         self.diagnostics.update(diagnostics)
         return loss

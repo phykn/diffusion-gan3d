@@ -45,6 +45,7 @@ loss:
   r2_weight: 0.1
   r1_every_steps: 8
   anchor_pixel_weight: 0.05
+  anchor_continuity_weight: 0.1
   volume_fraction_weight: 1.0
   group_statistics:
     weight: 0.0

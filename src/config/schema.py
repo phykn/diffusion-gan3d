@@ -88,6 +88,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                 dict.fromkeys(
                     (
                         "anchor_pixel_weight",
+                        "anchor_continuity_weight",
                         "volume_fraction_weight",
                         "spatial_profile_weight",
                         "spatial_profile_gradient_weight",
