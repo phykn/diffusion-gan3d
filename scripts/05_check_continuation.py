@@ -34,8 +34,8 @@ from src.evaluate.anchor import (
     measure_slice_smoothness,
 )
 from src.evaluate.label import voxel_accuracy
-from src.predict.random import seeded_rng
 from src.prepare.resize import resize_crop
+from src.random import seeded_rng
 from src.storage import save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)

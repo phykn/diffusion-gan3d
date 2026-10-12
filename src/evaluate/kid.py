@@ -1,10 +1,10 @@
-from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
 from torchmetrics.image.kid import KernelInceptionDistance
 
 from src.evaluate.image import prepare_images
+from src.random import seeded_rng
 
 
 @dataclass(frozen=True)
@@ -40,20 +40,7 @@ def compute_kid(
     if type(batch_size) is not int or batch_size < 1:
         raise ValueError("KID batch_size must be a positive integer.")
     device = torch.device(device)
-    devices = (
-        []
-        if device.type != "cuda"
-        else [torch.cuda.current_device() if device.index is None else device.index]
-    )
-    context = (
-        torch.random.fork_rng(devices=devices) if seed is not None else nullcontext()
-    )
-    with context:
-        if seed is not None:
-            # Seed only the devices owned by this evaluation, restoring them on exit.
-            torch.random.default_generator.manual_seed(seed)
-            for index in devices:
-                torch.cuda.default_generators[index].manual_seed(seed)
+    with seeded_rng(seed, device):
         metric = KernelInceptionDistance(
             feature=feature,
             subsets=subsets,

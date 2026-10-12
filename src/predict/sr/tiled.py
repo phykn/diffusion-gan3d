@@ -40,7 +40,7 @@ def refine_tiled(
     current, next_state = sampler.make_states(plan, "cpu")
     sampler.fill_noise(current, tiles)
 
-    def conditions(tile):
+    def conditions(tile, index):
         origin = tuple(part.start - margin for part in tile.source)
         expanded = tuple(part.stop - part.start for part in tile.source)
         if len(tiles) > 1:

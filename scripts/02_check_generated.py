@@ -18,7 +18,7 @@ from scripts.common.diagnostic import show_napari
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
 from src.plane import PLANES
-from src.predict.random import seeded_rng
+from src.random import seeded_rng
 from src.storage import save_volume
 
 

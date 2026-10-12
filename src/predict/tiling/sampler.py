@@ -217,6 +217,43 @@ class TiledGenerator:
             dtype=torch.float32 if probabilities else torch.uint8,
         )
         self.fill_noise(current, tiles)
+
+        def conditions(tile, index):
+            generator = self.generator
+            shape = tuple(part.stop - part.start for part in tile.source)
+            result = {}
+            if tile_anchors[index] and anchor_strength > 0:
+                anchor = encode_anchors(
+                    tile_anchors[index],
+                    1,
+                    generator.num_phases,
+                    shape,
+                    generator.device,
+                    torch.float32,
+                    validate=False,
+                )
+                result.update(
+                    anchor_image=anchor.image,
+                    anchor_mask=anchor.mask,
+                    anchor_strength=anchor_strength,
+                )
+            offset = tile.source[0].start - plan.margin
+            if generator.height_data is not None:
+                result["height"] = generator.height_condition(
+                    shape, height_domain, height_origin, offset, height_extent
+                )
+            if vf_profile is not None:
+                profile = generator.profile_condition(
+                    vf_profile,
+                    shape[0],
+                    height_domain,
+                    height_origin,
+                    offset,
+                    height_extent,
+                )
+                result.update(profile=profile, vf=profile.mean(-1))
+            return result
+
         self.sample(
             current,
             next_state,
@@ -228,12 +265,7 @@ class TiledGenerator:
             output=output,
             progress=progress,
             guidance=guidance,
-            tile_anchors=tile_anchors,
-            anchor_strength=anchor_strength,
-            height_origin=height_origin,
-            height_extent=height_extent,
-            vf_profile=vf_profile,
-            height_domain=height_domain,
+            tile_conditions=conditions,
         )
         self.stats = output_plan(plan, output_shape)
         return output
@@ -444,12 +476,6 @@ class TiledGenerator:
         output: torch.Tensor | None,
         progress: bool,
         guidance: float = 1.0,
-        tile_anchors: tuple = (),
-        anchor_strength: float = 1.0,
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
-        vf_profile: dict | None = None,
-        height_domain: int | None = None,
         tile_conditions=None,
     ) -> VolumeState:
         generator = self.generator
@@ -498,12 +524,6 @@ class TiledGenerator:
                     fusion,
                     tile_buffer,
                     guidance=guidance,
-                    tile_anchors=tile_anchors,
-                    anchor_strength=anchor_strength,
-                    height_origin=height_origin,
-                    height_extent=height_extent,
-                    vf_profile=vf_profile,
-                    height_domain=height_domain,
                     tile_conditions=tile_conditions,
                     base=base,
                 )
@@ -527,12 +547,6 @@ class TiledGenerator:
         fusion: Fusion,
         tile_buffer: TileBuffer | None = None,
         guidance: float = 1.0,
-        tile_anchors: tuple = (),
-        anchor_strength: float = 1.0,
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
-        vf_profile: dict | None = None,
-        height_domain: int | None = None,
         tile_conditions=None,
         base: VolumeCondition | None = None,
     ) -> None:
@@ -552,46 +566,9 @@ class TiledGenerator:
                 tile.source,
                 generator.device,
             )
-            conditions = {}
+            conditions = {"vf": vf}
             if tile_conditions is not None:
-                conditions.update(tile_conditions(tile))
-            if tile_anchors and tile_anchors[index] and anchor_strength > 0:
-                anchor = encode_anchors(
-                    tile_anchors[index],
-                    1,
-                    generator.num_phases,
-                    tuple(values.shape[-3:]),
-                    generator.device,
-                    values.dtype,
-                    validate=False,
-                )
-                conditions.update(
-                    {
-                        "anchor_image": anchor.image,
-                        "anchor_mask": anchor.mask,
-                        "anchor_strength": anchor_strength,
-                    }
-                )
-            if generator.height_data is not None:
-                conditions["height"] = generator.height_condition(
-                    values.shape[-3:],
-                    height_domain,
-                    height_origin,
-                    tile.source[0].start - plan.margin,
-                    height_extent,
-                )
-            tile_vf = vf
-            if vf_profile is not None:
-                profile = generator.profile_condition(
-                    vf_profile,
-                    values.shape[-3],
-                    height_domain,
-                    height_origin,
-                    tile.source[0].start - plan.margin,
-                    height_extent,
-                )
-                conditions["profile"] = profile
-                tile_vf = profile.mean(-1)
+                conditions.update(tile_conditions(tile, index))
             pred = (
                 None if base is None else base.prediction(tile.source, generator.device)
             )
@@ -607,7 +584,6 @@ class TiledGenerator:
                         latent,
                         guidance=guidance,
                         domain=domain,
-                        vf=tile_vf,
                         **conditions,
                     )
             expected = (1, generator.num_phases, *values.shape[-3:])

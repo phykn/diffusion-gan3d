@@ -9,7 +9,7 @@ import torch
 
 from src.api import LowResolutionAPI, PlaneAnchor
 from src.predict import inference as inference_module
-from src.predict.random import seeded_rng
+from src.random import seeded_rng
 
 
 class FakeGenerator:

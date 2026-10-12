@@ -11,8 +11,8 @@ def save_training(path: str | Path, trainer) -> None:
         format="diffusion-gan3d.lr.train",
         connectivity=trainer.connectivity_critic.state_dict(),
         connectivity_optim=trainer.connectivity_optim.state_dict(),
-        use_multi_anchor_next=trainer.use_multi_anchor_next,
-        anchor_bank=trainer.anchor_bank.entries,
+        use_multi_anchor_next=trainer.conditions.use_multi_anchor_next,
+        anchor_bank=trainer.conditions.anchor_bank.entries,
     )
     torch_save(payload, path, overwrite=False)
 
@@ -39,8 +39,8 @@ def resume_training(trainer, payload: dict) -> None:
     _restore_state(trainer, payload)
     trainer.connectivity_critic.load_state_dict(payload["connectivity"])
     trainer.connectivity_optim.load_state_dict(payload["connectivity_optim"])
-    trainer.use_multi_anchor_next = payload["use_multi_anchor_next"]
-    trainer.anchor_bank.entries = payload["anchor_bank"]
+    trainer.conditions.use_multi_anchor_next = payload["use_multi_anchor_next"]
+    trainer.conditions.anchor_bank.entries = payload["anchor_bank"]
 
 
 def save_sr_training(trainer, path: str | Path) -> None:

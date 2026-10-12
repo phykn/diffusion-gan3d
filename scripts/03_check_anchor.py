@@ -33,7 +33,7 @@ from src.evaluate.anchor import (
     measure_slice_smoothness,
 )
 from src.evaluate.label import voxel_accuracy
-from src.predict.random import seeded_rng
+from src.random import seeded_rng
 from src.storage import save_volume
 
 

@@ -10,10 +10,10 @@ from src.config.files import find_saved_config
 from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
 from src.predict.memory import estimate_memory, select_storage
-from src.predict.random import seeded_rng
 from src.predict.tiling.layout import parse_shape
 from src.predict.tiling.sampler import TiledGenerator
 from src.prepare.resize import resize_crop
+from src.random import seeded_rng
 
 
 class LowResolutionAPI:

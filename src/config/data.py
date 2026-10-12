@@ -29,18 +29,6 @@ def validate_sr_source(data: Mapping, base_data: Mapping) -> Mapping:
 
 
 def get_resolution(data: Mapping[str, object]) -> DataResolution:
-    if any(
-        key in data
-        for key in (
-            "input_size",
-            "scale_factor",
-            "allow_part",
-            "allow_partial_crops",
-        )
-    ):
-        raise ValueError(
-            "use crop_size, lo_res_size and hi_res_size; scale_factor is derived."
-        )
     crop, low = data["crop_size"], data["lo_res_size"]
     for name, size in (("crop_size", crop), ("lo_res_size", low)):
         if isinstance(size, bool) or not isinstance(size, int) or size < 1:

@@ -30,8 +30,10 @@ def trainer():
         critic_optims={"xy": optim},
         connectivity_optim=optim,
         scaler=optim,
-        use_multi_anchor_next=False,
-        anchor_bank=SimpleNamespace(entries=[]),
+        conditions=SimpleNamespace(
+            use_multi_anchor_next=False,
+            anchor_bank=SimpleNamespace(entries=[]),
+        ),
     )
 
 

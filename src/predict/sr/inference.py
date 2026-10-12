@@ -9,12 +9,12 @@ from src.build.predict import resolve_weights
 from src.config.train import get_sr_resolution, normalize_train_config
 from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 from src.predict.generator import Generator, GuidedDenoiser
-from src.predict.random import seeded_rng
 from src.predict.sr.memory import check_sr_memory, estimate_sr_memory
 from src.predict.sr.tiled import refine_tiled
 from src.predict.volume_condition import resolve_offset, volume_shape
 from src.prepare.height import height_field, resolve_extent
 from src.prepare.resize import phase_channels, resize_phases, scaled_size
+from src.random import seeded_rng
 
 
 class SuperResolutionAPI:

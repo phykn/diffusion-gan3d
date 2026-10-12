@@ -28,6 +28,19 @@ def _config(root: Path, count: int) -> dict:
     }
 
 
+@pytest.mark.parametrize("field", ["count", "size"])
+@pytest.mark.parametrize("value", [True, 1.5, 0])
+def test_invalid_dimensions_leave_no_export(tmp_path, field, value):
+    root = tmp_path / "output"
+    cfg = _config(root, 1)
+    cfg["geometry"] = dict(GEOMETRY)
+    section = "output" if field == "count" else "geometry"
+    cfg[section][field] = value
+    with pytest.raises(ValueError, match="positive integer"):
+        generate(cfg)
+    assert not root.exists()
+
+
 class SimulationExportTest(unittest.TestCase):
     def test_exports_only_volumes_and_axis_slices(self):
         with tempfile.TemporaryDirectory() as tmp:

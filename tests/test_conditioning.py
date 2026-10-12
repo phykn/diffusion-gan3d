@@ -330,7 +330,7 @@ def test_profile_training_replay_and_conditional_critics(tmp_path):
     first = trainer.step(0, transition=0)
     assert np.isfinite(first.generator_total)
     assert trainer.denoiser.profile_input.weight.grad.abs().sum() > 0
-    original = trainer.anchor_bank.entries[0][0]
+    original = trainer.conditions.anchor_bank.entries[0][0]
     assert original["profile"] is not None
     assert original["geometry"]["height_extent"] in (24, 32)
     assert Path(original["geometry"]["image_id"]).is_file()
@@ -343,7 +343,7 @@ def test_profile_training_replay_and_conditional_critics(tmp_path):
     restored = build_trainer(cfg, torch.device("cpu"))
     resume_training(restored, torch.load(tmp_path / "training.pt", weights_only=True))
     torch.testing.assert_close(
-        restored.anchor_bank.entries[0][0]["profile"], original["profile"]
+        restored.conditions.anchor_bank.entries[0][0]["profile"], original["profile"]
     )
 
 
@@ -351,7 +351,7 @@ def test_real_batch_keeps_geometry_after_loading_another_batch(tmp_path):
     cfg = configuration(tmp_path, height=True)
     cfg["conditioning"]["spatial_profile"].update(enabled=True, num_bins=4)
     trainer = build_trainer(cfg, torch.device("cpu"))
-    trainer.active_axes = (1,)
+    trainer.conditions.active_axes = (1,)
 
     def sample(origin, phase):
         images = torch.zeros(2, 2, 8, 8)
@@ -368,11 +368,11 @@ def test_real_batch_keeps_geometry_after_loading_another_batch(tmp_path):
     with patch.object(
         trainer.streams[0][1], "next", side_effect=[sample(0, 0), sample(8, 1)]
     ):
-        first = trainer.get_batches(0)
-        second = trainer.get_batches(0)
+        first = trainer.conditions.get_batches(0)
+        second = trainer.conditions.get_batches(0)
 
     for batch, origin, phase in ((first, 0, 0), (second, 8, 1)):
-        selected = trainer.sample_real_anchor(batch, volume_size=8)
+        selected = trainer.conditions.sample_real_anchor(batch, volume_size=8)
         assert selected.geometry[0]["image_id"] == f"source-{origin}.png"
         assert selected.geometry[0]["crop_origin"] == [origin, 0]
         expected = 2 * (torch.arange(8) + origin + 0.5) / 24 - 1
@@ -421,7 +421,7 @@ def test_profile_cfg_removes_profile_and_keeps_height(tmp_path):
     current = torch.randn(1, 2, 8, 8, 8)
     latent = torch.randn(1, 4)
     domain = torch.zeros(1, dtype=torch.long)
-    height = trainer.volume_height([2], 0)
+    height = trainer.conditions.volume_height([2], 0)
     profile = torch.rand(1, 2, 8).softmax(1)
     with (
         torch.no_grad(),
@@ -687,7 +687,9 @@ def test_replay_training_never_generates_reference_and_survives_resume(tmp_path)
     restored = build_trainer(cfg, torch.device("cpu"))
     payload = torch.load(tmp_path / "training.pt", weights_only=True)
     resume_training(restored, payload)
-    assert len(restored.anchor_bank.entries[0]) == len(trainer.anchor_bank.entries[0])
+    assert len(restored.conditions.anchor_bank.entries[0]) == len(
+        trainer.conditions.anchor_bank.entries[0]
+    )
     assert not any("rng" in key for key in payload)
 
 
@@ -737,7 +739,9 @@ def test_measured_transition_training_keeps_replay_but_never_scores_it(
     restored = build_trainer(cfg, torch.device("cpu"))
     resume_training(restored, torch.load(tmp_path / "training.pt", weights_only=True))
     assert restored.settings.loss.real_transition_weight == 1
-    assert len(restored.anchor_bank.entries[0]) == len(trainer.anchor_bank.entries[0])
+    assert len(restored.conditions.anchor_bank.entries[0]) == len(
+        trainer.conditions.anchor_bank.entries[0]
+    )
 
 
 def test_real_transition_loss_is_independent_of_replay_volume(tmp_path):
@@ -797,9 +801,9 @@ def test_height_origin_survives_loader_training_export_and_tiles(tmp_path):
     trainer = build_trainer(cfg, torch.device("cpu"))
     trainer.step(0, transition=0)
     assert trainer.denoiser.height_input.weight.grad.abs().sum() > 0
-    batches = trainer.get_batches(0)
-    with patch("src.train.trainer.torch.randint", return_value=torch.tensor(0)):
-        selected = trainer.sample_real_anchor(batches, volume_size=8)
+    batches = trainer.conditions.get_batches(0)
+    with patch("src.train.conditioning.torch.randint", return_value=torch.tensor(0)):
+        selected = trainer.conditions.sample_real_anchor(batches, volume_size=8)
     assert selected.condition.regions[0].axis != 0
     save_yaml(tmp_path / "train.yaml", trainer.cfg)
     torch.save(trainer.denoiser.state_dict(), tmp_path / "generator.pt")
@@ -895,7 +899,7 @@ def test_height_conditioned_sr_uses_fractional_bank_and_zero_level_at_inference(
     trainer = build_sr_trainer(
         cfg, bank, torch.device("cpu"), {0: torch.tensor([2.0, 8.0])}
     )
-    high_height = trainer.volume_height(torch.tensor([2.0]), 0)
+    high_height = trainer.conditions.volume_height(torch.tensor([2.0]), 0)
     assert high_height[0, 0, 0, 0, 0] == pytest.approx(2 * 2.25 / 24 - 1)
     metrics = trainer.step(0)
     assert np.isfinite(metrics.generator_total)

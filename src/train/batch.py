@@ -86,6 +86,7 @@ class StepPreparation:
     connectivity_ramp: float = 1.0
     coarse_target: torch.Tensor | None = None
     group_statistics_ramp: float = 1.0
+    diagnostics: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

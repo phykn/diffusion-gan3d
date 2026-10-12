@@ -115,12 +115,14 @@ def test_sr_height_metadata_supports_sampling_shared_and_per_sample_extents(
         else torch.as_tensor(extent).expand(2)
     )
 
-    with patch("src.train.trainer.torch.randint", return_value=torch.tensor([1])):
-        prepared = trainer.prepare_sr_step(0, 0, {0: 0, 2: 0}, RealBatch({}), 0)
+    with patch("src.train.conditioning.torch.randint", return_value=torch.tensor([1])):
+        prepared = trainer.conditions.prepare_sr_step(
+            0, 0, {0: 0, 2: 0}, RealBatch({}), 0
+        )
 
     torch.testing.assert_close(
         prepared.model_conditions["height"],
-        trainer.volume_height(origins[0][[1]], 0, expected[[1]]),
+        trainer.conditions.volume_height(origins[0][[1]], 0, expected[[1]]),
     )
     if extents is not None:
         assert extents[0] is extent
@@ -143,11 +145,11 @@ def test_sr_augments_clean_target_before_corruption_and_preserves_bank(
     trainer = build_sr_trainer(cfg, bank, torch.device("cpu"), origins, extents)
     with (
         patch(
-            "src.train.trainer.augment_volumes",
+            "src.train.conditioning.augment_volumes",
             side_effect=lambda low, **kw: low.flip(-1),
         ) as augment,
         patch(
-            "src.train.trainer.corrupt_coarse",
+            "src.train.conditioning.corrupt_coarse",
             side_effect=lambda low, *args: (low.flip(1), low.new_ones(len(low))),
         ) as corrupt,
     ):
@@ -163,7 +165,7 @@ def test_sr_augments_clean_target_before_corruption_and_preserves_bank(
     if height:
         torch.testing.assert_close(
             prepared.model_conditions["height"],
-            trainer.volume_height(origins[0], 0, extents[0]),
+            trainer.conditions.volume_height(origins[0], 0, extents[0]),
         )
 
 
@@ -237,9 +239,9 @@ def test_invalid_scale_never_silently_rounds(size, scale):
         scaled_size(size, scale)
 
 
-def test_old_resolution_keys_are_rejected():
-    with pytest.raises(ValueError, match="lo_res_size"):
-        get_resolution({"crop_size": 16, "input_size": 8, "allow_part": True})
+def test_resolution_requires_low_resolution_size():
+    with pytest.raises(KeyError, match="lo_res_size"):
+        get_resolution({"crop_size": 16})
 
 
 @pytest.mark.parametrize("scale", [1.5, 2, 4])
@@ -643,7 +645,7 @@ def test_sr_loss_targets_clean_coarse_while_model_receives_corrupted_input(tmp_p
     )
     with (
         patch(
-            "src.train.trainer.corrupt_coarse",
+            "src.train.conditioning.corrupt_coarse",
             side_effect=lambda low, *args: (low.flip(1), low.new_ones(len(low))),
         ),
         patch.object(
@@ -943,13 +945,15 @@ def test_sr_cuda_amp_checkpointing_and_cfg_inference(tmp_path):
     export_sr(trainer, path)
     api = SuperResolutionAPI(path, "cuda")
     for guidance in (1.0, 1.7):
-        probs = api.predict_probs(trainer.bank[0][0], guidance=guidance, margin=0)
+        probs = api.predict_probs(
+            trainer.conditions.bank[0][0], guidance=guidance, margin=0
+        )
         assert torch.isfinite(probs).all()
         torch.testing.assert_close(
             probs.sum(0), torch.ones(16, 16, 16), atol=2e-6, rtol=0
         )
     tiled = api.predict_probs(
-        trainer.bank[0][0], guidance=1.7, tile_size=12, overlap=2, margin=2
+        trainer.conditions.bank[0][0], guidance=1.7, tile_size=12, overlap=2, margin=2
     )
     assert torch.isfinite(tiled).all()
     torch.testing.assert_close(tiled.sum(0), torch.ones(16, 16, 16), atol=2e-6, rtol=0)

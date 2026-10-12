@@ -23,7 +23,7 @@ def generate(cfg: dict) -> Export:
     geometry = {"big_elongation": 1.0, "radius_gradient": [1.0, 1.0], **cfg["geometry"]}
     check_geometry(**geometry)
     count = output["count"]
-    if count < 1:
+    if type(count) is not int or count < 1:
         raise ValueError("output count must be a positive integer.")
     root = Path(output["data_dir"])
     vol_dir, slice_dirs = make_dirs(root)

@@ -127,6 +127,7 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
     cfg = config(tmp_path, "low_res", groups)
     trainer = build_trainer(cfg, torch.device("cpu"))
     trainer.settings = replace(trainer.settings, r1_gamma=0)
+    trainer.conditions.settings = trainer.settings
     trainer.critics = nn.ModuleDict(
         {name: ScalarCritic() for name in trainer.critic_groups}
     )

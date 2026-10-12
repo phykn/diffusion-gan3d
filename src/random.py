@@ -5,6 +5,7 @@ import torch
 
 @contextmanager
 def seeded_rng(seed: int | None, device: torch.device):
+    """Temporarily seed CPU and the selected device, restoring both on exit."""
     if seed is None:
         yield
         return

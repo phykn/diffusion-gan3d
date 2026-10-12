@@ -68,7 +68,7 @@ def check_geometry(
     big_elongation: float,
     radius_gradient: tuple[float, float] = (1.0, 1.0),
 ) -> None:
-    if size < 1:
+    if type(size) is not int or size < 1:
         raise ValueError("size must be a positive integer.")
     if big_radius < 1 or small_radius < 1:
         raise ValueError("radii must be positive.")

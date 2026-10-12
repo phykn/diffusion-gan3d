@@ -177,35 +177,6 @@ def test_connectivity_weight_controls_triplets_and_preserves_center_slots(weight
     assert torch.equal(augmented_fake.values, fake.values + 3.0)
 
 
-def test_anchor_transitions_prioritize_the_final_step() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.settings = SimpleNamespace(profile_settings={"enabled": False})
-    trainer.diffusion = Diffusion(11)
-
-    with (
-        patch("src.train.trainer.torch.rand", return_value=torch.tensor(0.1)),
-        patch("src.train.trainer.torch.randint") as randint,
-    ):
-        assert trainer.sample_transition(anchored=True) == 0
-        randint.assert_not_called()
-
-    with (
-        patch("src.train.trainer.torch.rand", return_value=torch.tensor(0.5)),
-        patch(
-            "src.train.trainer.torch.randint", return_value=torch.tensor(7)
-        ) as randint,
-    ):
-        assert trainer.sample_transition(anchored=True) == 7
-        randint.assert_called_once_with(1, 11, ())
-
-    with patch(
-        "src.train.trainer.torch.randint",
-        return_value=torch.tensor(6),
-    ) as randint:
-        assert trainer.sample_transition(anchored=False) == 6
-        randint.assert_called_once_with(11, ())
-
-
 def test_sample_pairs_centers_half_the_patches_on_focus() -> None:
     previous = torch.zeros(1, 1, 8, 8, 8)
     previous[0, 0, 2, 5, 6] = 1.0
@@ -277,55 +248,6 @@ class _ConstantStream:
         return {"image": self.images.clone()}
 
 
-def test_get_batches_uses_one_domain_for_all_axes() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.settings = SimpleNamespace(
-        height_data=None, profile_settings={"enabled": False}
-    )
-    trainer.device = torch.device("cpu")
-    streams = {
-        domain: {
-            axis: _ConstantStream(torch.full((1, 2, 2), domain)) for axis in (0, 1, 2)
-        }
-        for domain in (0, 1)
-    }
-    trainer.streams = streams
-    trainer.active_axes = (0, 1, 2)
-    trainer.axis_domains = {axis: (0, 1) for axis in (0, 1, 2)}
-
-    batches = trainer.get_batches(1)
-
-    assert all(bool((batch == 1).all()) for batch in batches.images.values())
-    assert all(stream.calls == 0 for stream in streams[0].values())
-    assert all(stream.calls == 1 for stream in streams[1].values())
-
-
-def test_missing_axes_borrow_from_axis_providers() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.settings = SimpleNamespace(
-        height_data=None, profile_settings={"enabled": False}
-    )
-    trainer.device = torch.device("cpu")
-    trainer.streams = {
-        0: {0: _ConstantStream(torch.full((1, 2, 2), 10))},
-        1: {
-            0: _ConstantStream(torch.full((1, 2, 2), 20)),
-            1: _ConstantStream(torch.full((1, 2, 2), 21)),
-            2: _ConstantStream(torch.full((1, 2, 2), 22)),
-        },
-    }
-    trainer.axis_domains = {0: (0, 1), 1: (1,), 2: (1,)}
-    trainer.active_axes = (0, 1, 2)
-
-    sources = trainer.select_batch_domains(0)
-    batches = trainer.get_batches(0, sources)
-    critic_domains = trainer.make_critic_domains(0, 0, sources)
-
-    assert sources == {0: 0, 1: 1, 2: 1}
-    assert [int(batches.images[axis][0, 0, 0]) for axis in (0, 1, 2)] == [10, 21, 22]
-    assert critic_domains == {0: 0, 1: NULL_DOMAIN, 2: NULL_DOMAIN}
-
-
 def test_connectivity_uses_axis_critic_domain_for_shared_context() -> None:
     triplets = TripletBatch(
         values=torch.zeros(3, 3, 2, 4, 4),
@@ -340,53 +262,6 @@ def test_connectivity_uses_axis_critic_domain_for_shared_context() -> None:
     )
 
     assert domains.tolist() == [0, NULL_DOMAIN, NULL_DOMAIN]
-
-
-def test_domain_dropout_masks_every_axis_critic() -> None:
-    sources = {0: 0, 1: 1, 2: 1}
-
-    critic_domains = Trainer.make_critic_domains(0, NULL_DOMAIN, sources)
-
-    assert critic_domains == {axis: NULL_DOMAIN for axis in (0, 1, 2)}
-
-
-def test_domain_dropout_probability_controls_the_model_condition() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.settings = SimpleNamespace(
-        profile_settings={"enabled": False}, domain_dropout=0.0
-    )
-    assert trainer.sample_domain_condition(2) == 2
-
-    trainer.settings.domain_dropout = 1.0
-    assert trainer.sample_domain_condition(2) == NULL_DOMAIN
-
-
-def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.settings = SimpleNamespace(
-        profile_settings={"enabled": False},
-        anchor_training_probability=0.5,
-        volume_batch_size=1,
-    )
-    trainer.use_multi_anchor_next = False
-    trainer.anchor_bank = AnchorBank()
-    trainer.device = torch.device("cpu")
-    trainer.sample_real_anchor = Mock(return_value=Mock(source="real"))
-
-    with patch("src.train.trainer.torch.rand", return_value=torch.tensor(0.9)):
-        assert trainer.sample_anchor(RealBatch({}), 2, owned_axes=()) is None
-    assert not trainer.use_multi_anchor_next
-
-    trainer.settings.anchor_training_probability = 1.0
-    sources = [
-        trainer.sample_anchor(RealBatch({}), 2, owned_axes=()).source for _ in range(3)
-    ]
-
-    assert sources == [
-        "real",
-        "real",
-        "real",
-    ]  # Replay waits for a measured-conditioned sample.
 
 
 def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
@@ -470,7 +345,7 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         for axis in (0, 1, 2)
     ]
     try:
-        with patch.object(trainer, "sample_target_domain", return_value=0):
+        with patch.object(trainer.conditions, "sample_target_domain", return_value=0):
             metrics = trainer.step(0, transition=1)
     finally:
         for hook in hooks:
@@ -718,7 +593,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     )
     vf_batch_ids = []
     critic_batch_ids = []
-    original_sample_vf = trainer.sample_vf
+    original_sample_vf = trainer.conditions.sample_vf
     original_update_critics = trainer.update_critics
     measured = []
 
@@ -739,7 +614,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         )
 
     with (
-        patch.object(trainer, "sample_vf", side_effect=track_vfs),
+        patch.object(trainer.conditions, "sample_vf", side_effect=track_vfs),
         patch.object(trainer, "update_critics", side_effect=track_critics),
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
@@ -776,6 +651,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
 def test_vf_conditions_follow_individual_fractional_crops(anchored):
     trainer, _, streams = _conditioning_trainer(anchored=anchored)
     trainer.settings = replace(trainer.settings, volume_batch_size=2)
+    trainer.conditions.settings = trainer.settings
     fractions = torch.tensor([[0.8, 0.2, 0.0], [0.1, 0.3, 0.6]])
     for stream in streams.values():
         stream.images = fractions[:, :, None, None].expand(-1, -1, 4, 8)
@@ -797,6 +673,7 @@ def test_vf_conditions_follow_individual_fractional_crops(anchored):
 def test_replay_vf_uses_only_its_measured_root():
     trainer, _, streams = _conditioning_trainer(anchored=True)
     trainer.settings = replace(trainer.settings, volume_batch_size=2)
+    trainer.conditions.settings = trainer.settings
     fractions = torch.tensor([0.2, 0.3, 0.5])
     measured = encode_anchors(
         [PlaneAnchor(fractions[:, None, None].expand(-1, 4, 4), 0, 2)],
@@ -808,8 +685,8 @@ def test_replay_vf_uses_only_its_measured_root():
     )
     prediction = torch.full((1, 3, 8, 8, 8), -1.0)
     prediction[:, 0] = 1.0
-    trainer.anchor_bank.add(0, prediction, measured, torch.tensor([True]))
-    trainer.use_multi_anchor_next = True
+    trainer.conditions.anchor_bank.add(0, prediction, measured, torch.tensor([True]))
+    trainer.conditions.use_multi_anchor_next = True
     for stream in streams.values():
         stream.images.zero_()
         stream.images[:, 1] = 1.0
@@ -823,6 +700,7 @@ def test_replay_vf_uses_only_its_measured_root():
 def test_unanchored_vf_supports_more_volumes_than_real_crops():
     trainer, _, streams = _conditioning_trainer(anchored=False)
     trainer.settings = replace(trainer.settings, volume_batch_size=5)
+    trainer.conditions.settings = trainer.settings
     fractions = torch.tensor([[0.8, 0.2, 0.0], [0.1, 0.3, 0.6]])
     for stream in streams.values():
         stream.images = fractions[:, :, None, None].expand(-1, -1, 8, 8)
@@ -842,6 +720,7 @@ def test_unanchored_vf_and_height_use_the_same_owned_crops():
         volume_batch_size=2,
         height_data={"crop_size": 8, "height_extents": {0: 32}},
     )
+    trainer.conditions.settings = trainer.settings
     fractions = torch.tensor([[0.8, 0.2, 0.0], [0.1, 0.3, 0.6]])
     batches = RealBatch(
         images={
@@ -852,25 +731,26 @@ def test_unanchored_vf_and_height_use_the_same_owned_crops():
         origins={1: torch.tensor([0.0, 8.0])},
         extents={1: torch.tensor([32.0, 32.0])},
     )
-    with patch.object(trainer, "get_batches", return_value=batches):
+    with patch.object(trainer.conditions, "get_batches", return_value=batches):
         prepared = trainer.prepare_step(0, 0)
 
     torch.testing.assert_close(prepared.target_vf, fractions)
     torch.testing.assert_close(
         prepared.model_conditions["height"],
-        trainer.volume_height(batches.origins[1], 0, batches.extents[1]),
+        trainer.conditions.volume_height(batches.origins[1], 0, batches.extents[1]),
     )
 
 
 def test_profile_keeps_priority_over_crop_vf():
     trainer, _, _ = _conditioning_trainer(anchored=False)
     trainer.settings = replace(trainer.settings, profile_settings={"enabled": True})
+    trainer.conditions.settings = trainer.settings
     profile = torch.tensor([[[0.2, 0.4], [0.3, 0.2], [0.5, 0.4]]])
     batches = RealBatch(
         images={axis: torch.full((2, 3, 8, 8), 1 / 3) for axis in (0, 1, 2)},
         profiles={1: profile},
     )
-    with patch.object(trainer, "get_batches", return_value=batches):
+    with patch.object(trainer.conditions, "get_batches", return_value=batches):
         prepared = trainer.prepare_step(0, 0)
     torch.testing.assert_close(prepared.target_vf, profile.mean(-1))
     assert prepared.model_conditions["vf"] is prepared.target_vf
@@ -880,17 +760,17 @@ def test_generate_pair_keeps_initial_noise_and_posterior_unprojected() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
     )
-    batches = trainer.get_batches(0)
-    selection = trainer.sample_real_anchor(batches, volume_size=8)
+    batches = trainer.conditions.get_batches(0)
+    selection = trainer.conditions.sample_real_anchor(batches, volume_size=8)
     presence = ConditionPresence(
         anchor=torch.tensor((False,)),
         vf=torch.tensor((False,)),
     )
-    model_conditions = trainer.make_model_conditions(
+    model_conditions = trainer.conditions.make_model_conditions(
         selection.condition,
         torch.tensor(((0.3, 0.3, 0.4),)),
         presence,
-        trainer.make_domain(0, 1),
+        trainer.conditions.make_domain(0, 1),
     )
     trainer.diffusion = Diffusion(1)
 
@@ -967,6 +847,7 @@ def test_training_critics_match_each_axis_rectangular_real_shape() -> None:
         2: (8, 6),
     }
     trainer.settings = replace(trainer.settings, r1_gamma=0.01, r1_interval=1)
+    trainer.conditions.settings = trainer.settings
     for axis, shape in shapes.items():
         streams[axis].images = phase_channels(torch.randint(0, 3, (2, *shape)), 3)
 
@@ -996,7 +877,7 @@ def test_real_anchor_preserves_a_rectangular_observation() -> None:
     trainer, _, _ = _conditioning_trainer(anchored=True)
     batches = RealBatch({axis: torch.randint(0, 3, (2, 4, 8)) for axis in (0, 1, 2)})
 
-    selection = trainer.sample_real_anchor(batches, volume_size=8)
+    selection = trainer.conditions.sample_real_anchor(batches, volume_size=8)
 
     condition = selection.condition
     coords = condition.mask[0, 0].nonzero()
@@ -1019,7 +900,9 @@ def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
     )
 
     with (
-        patch.object(trainer, "sample_condition_presence", return_value=hidden),
+        patch.object(
+            trainer.conditions, "sample_condition_presence", return_value=hidden
+        ),
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
             denoiser,
@@ -1043,44 +926,6 @@ def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
     )
 
 
-def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.settings = SimpleNamespace(
-        profile_settings={"enabled": False},
-        volume_batch_size=4,
-        cfg_drop_each_probability=0.1,
-    )
-    trainer.device = torch.device("cpu")
-
-    with patch(
-        "src.train.trainer.torch.rand",
-        return_value=torch.tensor((0.05, 0.15, 0.25, 0.35)),
-    ):
-        presence = trainer.sample_condition_presence(has_anchor=True)
-
-    assert presence.anchor.tolist() == [False, False, True, True]
-    assert presence.vf.tolist() == [False, True, False, True]
-
-
-def test_single_condition_dropout_matches_joint_marginal_visibility() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.settings = SimpleNamespace(
-        profile_settings={"enabled": False},
-        volume_batch_size=2,
-        cfg_drop_each_probability=0.1,
-    )
-    trainer.device = torch.device("cpu")
-
-    with patch(
-        "src.train.trainer.torch.rand",
-        return_value=torch.tensor((0.19, 0.21)),
-    ):
-        presence = trainer.sample_condition_presence(has_anchor=False)
-
-    assert presence.anchor.tolist() == [False, False]
-    assert presence.vf.tolist() == [False, True]
-
-
 def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
@@ -1090,6 +935,7 @@ def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
         trainer.settings,
         loss=replace(trainer.settings.loss, anchor_continuity_weight=0.1),
     )
+    trainer.conditions.settings = trainer.settings
     observed = encode_anchors(
         (PlaneAnchor(torch.zeros(8, 8, dtype=torch.uint8), axis=0, index=4),),
         batch_size=1,
@@ -1114,7 +960,9 @@ def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
         return result
 
     with (
-        patch.object(trainer, "sample_condition_presence", return_value=dropped),
+        patch.object(
+            trainer.conditions, "sample_condition_presence", return_value=dropped
+        ),
         patch.object(trainer, "generate_pair", side_effect=capture_generate_pair),
     ):
         metrics = trainer.step(0, transition=0)
@@ -1151,6 +999,7 @@ def test_anchor_continuity_updates_x0_at_every_transition_and_records_metrics(
             real_transition_weight=0.2,
         ),
     )
+    trainer.conditions.settings = trainer.settings
     if replay:
         trainer.step(0, transition=0)
     original_update = trainer.update_denoiser
@@ -1202,8 +1051,8 @@ def test_anchor_continuity_updates_x0_at_every_transition_and_records_metrics(
 
 def test_vf_total_variation_uses_raw_prediction() -> None:
     trainer, _, _ = _conditioning_trainer(anchored=True)
-    batches = trainer.get_batches(0)
-    selection = trainer.sample_real_anchor(batches, volume_size=8)
+    batches = trainer.conditions.get_batches(0)
+    selection = trainer.conditions.sample_real_anchor(batches, volume_size=8)
     condition = selection.condition
     prediction = torch.full((1, 3, 8, 8, 8), -1.0)
     prediction[:, 0] = 1.0
@@ -1220,8 +1069,8 @@ def test_vf_total_variation_uses_raw_prediction() -> None:
     logits = torch.zeros_like(prediction, requires_grad=True)
 
     with (
-        patch.object(trainer, "sample_anchor", return_value=selection),
-        patch.object(trainer, "sample_vf", return_value=target),
+        patch.object(trainer.conditions, "sample_anchor", return_value=selection),
+        patch.object(trainer.conditions, "sample_vf", return_value=target),
         patch.object(
             trainer,
             "generate_pair",
@@ -1660,10 +1509,12 @@ def test_replay_connectivity_reference_excludes_pasted_measurement_jump():
 def test_generator_input_diagnostics_preserve_training_updates_and_rng(mode):
     trainer, _, _ = _conditioning_trainer(anchored=False, axes=(0,), critic_mode=mode)
     trainer.settings = replace(trainer.settings, r1_interval=1)
+    trainer.conditions.settings = trainer.settings
     control = copy.deepcopy(trainer)
     control.settings = replace(
         control.settings, r1_interval=3
     )  # R1/R2 weights are zero; only diagnostics differ.
+    control.conditions.settings = control.settings
     with torch.random.fork_rng(devices=[]):
         rng = torch.get_rng_state()
         actual = trainer.step(0, transition=0)
@@ -1689,6 +1540,7 @@ def test_generator_input_diagnostics_preserve_training_updates_and_rng(mode):
             model.state_dict(), baseline.state_dict(), rtol=0, atol=0
         )
     trainer.settings = replace(trainer.settings, r1_interval=3)
+    trainer.conditions.settings = trainer.settings
     metrics = trainer.step(1, transition=1)
     assert not any(
         key.startswith("generator_input_gradient/") for key in metrics.diagnostics

@@ -7,16 +7,18 @@
 | Input images or resolutions | [config/data/](../config/data/), [RealDataset](../src/data/dataset.py) |
 | Network architecture | [src/model/](../src/model/), [model assembly](../src/build/model.py) |
 | Training step or objective | [Trainer](../src/train/trainer.py), [losses](../src/train/loss/) |
+| Training data, anchors, or condition sampling | [ConditionSampler](../src/train/conditioning.py), [step inputs](../src/train/batch.py) |
 | Step metrics and TensorBoard tags | [metrics](../src/train/metrics.py) |
 | SR bank fractions or height coordinates | [bank validation](../src/data/bank.py), [SR assembly](../src/build/sr.py) |
 | Logging, checkpoints, or resume | [run lifecycle](../src/train/run/), [training state](../src/train/state.py) |
 | Generation, tiling, or SR | [public API](../src/api.py), [src/predict/](../src/predict/) |
+| Scoped inference or evaluation seeds | [seeded_rng](../src/random.py) |
 | Existing-volume conditioning | [VolumeCondition](../src/predict/volume_condition.py); [extend_hr](../src/predict/sr/extension.py) coordinates LR/SR extension |
 | HTTP or web behavior | [backend app](../backend/src/app.py), [frontend](../frontend/src/) |
 | Metrics or synthetic data | [src/evaluate/](../src/evaluate/), [simul/](../simul/) |
 
 Training runs from `run_train_1st.py` / `run_train_2nd.py` through `src/train/run/`,
-then `src/build/` assembles data, models, and the trainer. `Trainer.step` owns updates;
+then `src/build/` assembles data, models, and the trainer.
 `train/loss/denoiser.py` owns the generator objective, and `train/loss/gan.py` owns
 the shared plane/connectivity critic objective and R1/R2 input penalties.
 The web backend calls `LowResolutionAPI`.
@@ -33,6 +35,18 @@ read the full scalar history by step, converting those gaps back to `None`.
 objective settings assembled once in `src/build/trainer.py`. Read settings from
 these objects instead of copying them onto the trainer or rebuilding them per step.
 `Trainer.cfg` keeps the resolved configuration used for logging and checkpoints.
+
+`Trainer.conditions` is a `ConditionSampler` sharing those settings and data
+streams. It samples real batches, LR anchors and replay, condition dropout, and
+SR coarse inputs. `Trainer.prepare_step` selects the active critics and asks the
+sampler for a `StepPreparation`, including sampling diagnostics. Checkpoint state
+includes the sampler's replay bank and next-anchor choice through `train/state.py`.
+
+LR and SR inference supply conditions for each tile to the shared tiling sampler.
+The LR provider builds anchors, height, and phase profiles; the SR provider builds
+coarse inputs and height. The shared loop owns diffusion, global buffers, and
+tile fusion. `src/random.py` scopes seeded inference and KID evaluation to the CPU
+and selected CUDA device, restoring the caller's random state on exit.
 
 ## LR anchor continuity
 
