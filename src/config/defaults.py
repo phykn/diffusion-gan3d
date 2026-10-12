@@ -44,7 +44,6 @@ STAGE_DEFAULTS = {
         "loss.connectivity.start_step": 0,
         "loss.connectivity.ramp_steps": 20000,
         "loss.connectivity.adversarial_weight": 0.0,
-        "loss.connectivity.normal_transition_weight": 0.0,
         "loss.connectivity.windows_per_plane": 4,
         "loss.connectivity.real_transition_weight": 0.1,
         "train.initial_weights": None,

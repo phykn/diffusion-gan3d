@@ -241,9 +241,7 @@ def configuration(tmp_path, stage="low_res", height=False):
         cfg["conditioning"]["dropout_probability_per_case"] = 0
         cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2, num_workers=0)
         cfg["loss"]["r1_weight"] = 0
-        cfg["loss"]["connectivity"].update(
-            adversarial_weight=0.1, normal_transition_weight=0.1, ramp_steps=0
-        )
+        cfg["loss"]["connectivity"].update(adversarial_weight=0.1, ramp_steps=0)
     else:
         cfg["model"]["generator"].update(
             channels=[4, 8], embedding_channels=8, latent_channels=4
@@ -703,7 +701,6 @@ def test_measured_transition_training_keeps_replay_but_never_scores_it(
     cfg = configuration(tmp_path, height=height)
     cfg["loss"]["connectivity"].update(
         adversarial_weight=0,
-        normal_transition_weight=0,
         real_transition_weight=1,
     )
     numpy_state = np.random.get_state()
@@ -733,7 +730,7 @@ def test_measured_transition_training_keeps_replay_but_never_scores_it(
         assert second.diagnostics["loss/real_transition"] > 0
     else:
         assert second.diagnostics["loss/real_transition"] == 0
-    assert second.generator_connectivity == second.normal_transition_loss == 0
+    assert second.generator_connectivity == 0
     assert trainer.updates["connectivity"] == 0
     assert all(p.grad is None for p in trainer.connectivity_critic.parameters())
     save_training(tmp_path / "training.pt", trainer)
@@ -747,7 +744,6 @@ def test_real_transition_loss_is_independent_of_replay_volume(tmp_path):
     cfg = configuration(tmp_path)
     cfg["loss"]["connectivity"].update(
         adversarial_weight=0,
-        normal_transition_weight=0,
         real_transition_weight=1,
     )
     trainer = build_trainer(cfg, torch.device("cpu"))
@@ -777,7 +773,6 @@ def test_measured_transition_loss_trains_without_anchor_and_only_at_final_step(
     cfg["conditioning"]["anchor"]["probability"] = 0
     cfg["loss"]["connectivity"].update(
         adversarial_weight=0,
-        normal_transition_weight=0,
         real_transition_weight=1,
     )
     trainer = build_trainer(cfg, torch.device("cpu"))

@@ -18,20 +18,20 @@ from src.train.run.bank import save_bank
 from src.train.state import export_sr
 
 
-def test_model_loading_ignores_unused_weights_but_requires_current_weights(tmp_path):
+@pytest.mark.parametrize("damage", ["extra", "missing"])
+def test_model_loading_rejects_incompatible_weights(tmp_path, damage):
     model = PairCritic2D(2, (4, 8), 8, 1)
     state = model.state_dict()
-    state["local_output.weight"] = torch.ones(1, 8, 1, 1)
-    state["local_output.bias"] = torch.zeros(1)
+    if damage == "extra":
+        state["unused.weight"] = torch.ones(1)
+        message = "Unexpected key"
+    else:
+        del state["output.weight"]
+        message = "Missing key"
     path = tmp_path / "critic.pt"
     torch.save(state, path)
     restored = PairCritic2D(2, (4, 8), 8, 1)
-    storage.load_model(path, restored)
-    torch.testing.assert_close(restored.state_dict(), model.state_dict())
-    assert "local_output.weight" in state
-    del state["output.weight"]
-    torch.save(state, path)
-    with pytest.raises(RuntimeError, match="Missing key.*output.weight"):
+    with pytest.raises(RuntimeError, match=message):
         storage.load_model(path, restored)
 
 

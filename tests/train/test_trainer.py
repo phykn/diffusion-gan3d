@@ -59,7 +59,6 @@ def _anchor_config(**values):
 def _connectivity_config(**values):
     cfg = Config(
         weight=0.0,
-        phase_transition_weight=0.0,
     )
     cfg.update(values)
     return cfg
@@ -112,13 +111,14 @@ def sample_pairs(
     )
 
 
-def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
+@pytest.mark.parametrize("weight", [0.0, 0.25])
+def test_connectivity_weight_controls_triplets_and_preserves_center_slots(weight):
     trainer = object.__new__(Trainer)
     trainer.settings = SimpleNamespace(
         profile_settings={"enabled": False},
         num_phases=2,
         patch_size=1,
-        loss=SimpleNamespace(connectivity_weight=1.0, normal_transition_weight=1.0),
+        loss=SimpleNamespace(connectivity_weight=weight),
     )
     trainer.device = torch.device("cpu")
     trainer.diagnostics = {}
@@ -163,6 +163,14 @@ def test_connectivity_augmentation_preserves_triplet_center_slots() -> None:
         source="multi",
     )
 
+    if weight == 0:
+        assert len(augmented_real) == len(augmented_fake) == 0
+        trainer.anchor_triplets.sample.assert_not_called()
+        trainer.critic_augment.apply_together.assert_not_called()
+        return
+    assert len(augmented_real) == len(augmented_fake) == 2
+    trainer.anchor_triplets.sample.assert_called_once()
+    trainer.critic_augment.apply_together.assert_called_once()
     assert augmented_real.center_slots.tolist() == [1, 1]
     assert augmented_fake.center_slots.tolist() == [0, 2]
     assert torch.equal(augmented_real.values, real.values + 2.0)
@@ -1124,7 +1132,6 @@ def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
     assert metrics.anchor_coarse_loss == 0.0
     assert metrics.anchor_pixel_loss == 0.0
     assert metrics.generator_connectivity == 0.0
-    assert metrics.normal_transition_loss == 0.0
     assert metrics.diagnostics["loss/anchor_continuity"] == 0
     assert metrics.diagnostics["anchor_continuity/gap1/pairs"] == 0
 
@@ -1243,7 +1250,6 @@ def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) 
     )
     trainer.connectivity_critic = nn.Linear(2, 1)
     trainer.settings.loss.connectivity_weight = 0.0
-    trainer.settings.loss.normal_transition_weight = 0.0
     trainer.settings.loss.real_transition_weight = 0.0
     trainer.step = Mock(side_effect=KeyboardInterrupt)
     checkpoint = tmp_path / "checkpoints" / "last.pt"
@@ -1297,7 +1303,6 @@ def test_fit_separates_weight_updates_and_checkpoint_archives(
     )
     trainer.connectivity_critic = nn.Linear(2, 1)
     trainer.settings.loss.connectivity_weight = 0.0
-    trainer.settings.loss.normal_transition_weight = 0.0
     trainer.settings.loss.real_transition_weight = 0.0
     trainer.completed_steps = 0
 
@@ -1372,7 +1377,6 @@ def _conditioning_trainer(
     anchor_start_step: int = 0,
     anchor_ramp_steps: int = 0,
     connectivity_weight: float = 0.0,
-    normal_transition_weight: float = 0.0,
     cfg_drop_each_probability: float = 0.0,
     axes: tuple[int, ...] = (0, 1, 2),
     critic_mode: str = "single",
@@ -1412,7 +1416,6 @@ def _conditioning_trainer(
         ),
         connectivity=_connectivity_config(
             weight=connectivity_weight,
-            phase_transition_weight=normal_transition_weight,
         ),
         conditioning=_conditioning_config(
             joint_each_prob=cfg_drop_each_probability,
@@ -1493,7 +1496,6 @@ def _make_trainer(
             loss=DenoiserLossSettings(
                 connectivity_local_weight=cfg.loss.connectivity_local_weight,
                 connectivity_weight=cfg.loss.connectivity.adversarial_weight,
-                normal_transition_weight=cfg.loss.connectivity.normal_transition_weight,
                 vf_weight=cfg.loss.volume_fraction_weight,
                 real_transition_weight=0.0,
                 profile_bins=16,
@@ -1584,7 +1586,6 @@ def _config(
             volume_fraction_weight=vf.weight,
             connectivity=Config(
                 adversarial_weight=connectivity.weight,
-                normal_transition_weight=connectivity.phase_transition_weight,
             ),
         ),
         optim=Config(
@@ -1628,9 +1629,9 @@ def test_replay_keeps_measurement_and_plane_density(size, count):
     assert bank.sample(1, 1, torch.device("cpu")) is None
 
 
-def test_replay_continuity_reference_excludes_pasted_measurement_jump():
+def test_replay_connectivity_reference_excludes_pasted_measurement_jump():
     from src.data.slice import AnchorTripletSampler
-    from src.train.loss.connectivity import compute_transition_loss
+    from src.model.critic import ConnectivityCritic2D
 
     size = 5
     prediction = torch.empty(1, 2, size, size, size)
@@ -1648,10 +1649,11 @@ def test_replay_continuity_reference_excludes_pasted_measurement_jump():
     sampler = AnchorTripletSampler(max_gap=1, windows_per_plane=1)
     adapted = -prediction
     real, fake = sampler.sample(adapted, reference, target)
-    assert compute_transition_loss(real, fake) == 0
+    images = ConnectivityCritic2D.connectivity_images
+    torch.testing.assert_close(images(real.values), images(fake.values))
     pasted = torch.where(target.mask, target.image, reference)
     real, fake = sampler.sample(pasted, reference, target)
-    assert compute_transition_loss(real, fake) > 0
+    assert not torch.equal(images(real.values), images(fake.values))
 
 
 @pytest.mark.parametrize("mode", ["single", "pair"])

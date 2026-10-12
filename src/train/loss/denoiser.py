@@ -4,7 +4,6 @@ import torch
 
 from src.evaluate.profile import phase_profile
 from src.train.batch import DenoiserBatch, DenoiserUpdate
-from src.train.loss.connectivity import compute_transition_loss
 from src.train.loss.gan import (
     active_groups,
     get_generator_loss,
@@ -21,7 +20,6 @@ from src.train.step import input_gradient_norms
 class DenoiserLossSettings:
     connectivity_local_weight: float
     connectivity_weight: float
-    normal_transition_weight: float
     vf_weight: float
     real_transition_weight: float
     profile_bins: int
@@ -64,11 +62,6 @@ def denoiser_objective(
         head = get_generator_loss(scores)
         connectivity_global, connectivity_local = head.global_loss, head.local_loss
         connectivity = head.combine(settings.connectivity_local_weight)
-    normal = adversarial.new_zeros(())
-    if len(batch.connectivity_fake) and settings.normal_transition_weight > 0.0:
-        normal = compute_transition_loss(
-            batch.connectivity_real, batch.connectivity_fake
-        )
     anchor = adversarial.new_zeros(())
     anchor_coarse = adversarial.new_zeros(())
     anchor_pixel = adversarial.new_zeros(())
@@ -89,11 +82,7 @@ def denoiser_objective(
     total = (
         adversarial
         + batch.anchor_ramp * anchor
-        + batch.connectivity_ramp
-        * (
-            settings.connectivity_weight * connectivity
-            + settings.normal_transition_weight * normal
-        )
+        + batch.connectivity_ramp * (settings.connectivity_weight * connectivity)
         + settings.vf_weight * vf
     )
     if batch.real_transition_loss is not None:
@@ -163,7 +152,6 @@ def denoiser_objective(
         connectivity=connectivity,
         connectivity_global=connectivity_global,
         connectivity_local=connectivity_local,
-        normal_transition=normal,
         anchor=anchor,
         anchor_coarse=anchor_coarse,
         anchor_pixel=anchor_pixel,

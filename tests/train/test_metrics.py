@@ -63,6 +63,7 @@ def test_tensorboard_preserves_unavailable_boundaries_without_changing_diagnosti
     assert record["loss/critic"] == 0.75
     assert "loss/critic_local" not in record
     assert "loss/generator_local" not in record
+    assert "loss/normal_transition" not in record
     assert record["loss/critic_connectivity_global"] == 0.25
     assert record["loss/critic_connectivity_local"] == 0.75
     assert record["loss/generator_connectivity_global"] == 0.125

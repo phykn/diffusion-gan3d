@@ -211,7 +211,6 @@ def objective_batch():
             axis: (torch.empty(0, 2, 8, 8), torch.empty(0, 2, 8, 8))
             for axis in range(3)
         },
-        connectivity_real=empty,
         connectivity_fake=empty,
         logits=probs,
         clean_probs=probs,
@@ -228,7 +227,6 @@ def objective_batch():
     settings = DenoiserLossSettings(
         connectivity_local_weight=0,
         connectivity_weight=0,
-        normal_transition_weight=0,
         vf_weight=0,
         real_transition_weight=0,
         profile_bins=4,
@@ -339,9 +337,7 @@ def small_trainer(tmp_path, stage, start=0, ramp=0):
     )
     if stage == "low_res":
         cfg["conditioning"]["anchor"]["probability"] = 0
-        cfg["loss"]["connectivity"].update(
-            adversarial_weight=0, normal_transition_weight=0
-        )
+        cfg["loss"]["connectivity"].update(adversarial_weight=0)
     bank = None if stage == "low_res" else {0: torch.rand(2, 2, 8, 8, 8).softmax(1)}
     return build_trainer(cfg, torch.device("cpu"), bank=bank), cfg, bank
 

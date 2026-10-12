@@ -1,7 +1,6 @@
 import logging
 import os
 import tempfile
-from copy import copy
 from pathlib import Path
 
 import numpy as np
@@ -118,15 +117,5 @@ def load_model(path: str | Path, model: nn.Module) -> nn.Module:
         map_location="cpu",
         weights_only=True,
     )
-    load_model_state(model, state)
-    return model
-
-
-def load_model_state(model: nn.Module, state: dict) -> None:
-    """Load required weights, ignoring parameters absent from the current model."""
-    current = model.state_dict()
-    state = copy(state)
-    for key in list(state):
-        if key not in current:
-            del state[key]
     model.load_state_dict(state, strict=True)
+    return model

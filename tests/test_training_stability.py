@@ -66,9 +66,7 @@ def test_lr_checkpoint_restores_training_state_without_rng(
     cfg = small_config(tmp_path)
     cfg["model"]["critic"]["input_mode"] = mode
     cfg["conditioning"]["dropout_probability_per_case"] = 0
-    cfg["loss"]["connectivity"].update(
-        adversarial_weight=0.25, normal_transition_weight=0.1, ramp_steps=0
-    )
+    cfg["loss"]["connectivity"].update(adversarial_weight=0.25, ramp_steps=0)
     trainer = build_trainer(cfg, torch.device("cpu"))
     trainer.step(0, transition=0)
     path = tmp_path / "training.pt"
@@ -136,7 +134,6 @@ def test_lr_checkpoint_restores_training_state_without_rng(
             assert total == pytest.approx(
                 global_loss + cfg["loss"]["connectivity_local_weight"] * local_loss
             )
-    assert any(row.normal_transition_loss > 0 for row in metrics)
 
 
 @pytest.mark.parametrize("active", [False, True])
@@ -145,9 +142,7 @@ def test_lr_checkpoint_restores_training_state_without_rng(
 )
 def test_lr_resume_rejects_incomplete_connectivity_state(tmp_path, active, missing):
     cfg = small_config(tmp_path)
-    cfg["loss"]["connectivity"].update(
-        adversarial_weight=float(active), normal_transition_weight=0
-    )
+    cfg["loss"]["connectivity"].update(adversarial_weight=float(active))
     trainer = build_trainer(cfg, torch.device("cpu"))
     path = tmp_path / "training.pt"
     save_training(path, trainer)

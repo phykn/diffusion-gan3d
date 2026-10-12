@@ -33,7 +33,6 @@ class DenoiserUpdate:
     connectivity: torch.Tensor
     connectivity_global: torch.Tensor
     connectivity_local: torch.Tensor
-    normal_transition: torch.Tensor
     anchor: torch.Tensor
     anchor_coarse: torch.Tensor
     anchor_pixel: torch.Tensor
@@ -52,7 +51,6 @@ class DenoiserBatch:
     connectivity_domains: torch.Tensor
     critic_domains: dict[int, int]
     fake: dict[int, tuple[torch.Tensor, torch.Tensor]]
-    connectivity_real: TripletBatch
     connectivity_fake: TripletBatch
     logits: torch.Tensor
     clean_probs: torch.Tensor

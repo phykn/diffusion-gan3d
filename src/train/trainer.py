@@ -290,7 +290,6 @@ class Trainer:
                 prepared=prepared,
                 connectivity_domains=connectivity_domains,
                 fake=fake,
-                connectivity_real=connectivity_real,
                 connectivity_fake=connectivity_fake,
                 logits=logits,
                 clean_probs=clean_probs,
@@ -395,7 +394,6 @@ class Trainer:
         prepared: StepPreparation,
         connectivity_domains: torch.Tensor,
         fake: SampledPairs,
-        connectivity_real: TripletBatch,
         connectivity_fake: TripletBatch,
         logits: torch.Tensor,
         clean_probs: torch.Tensor,
@@ -418,7 +416,6 @@ class Trainer:
             connectivity_domains=connectivity_domains,
             critic_domains=prepared.critic_domains,
             fake=fake.pairs,
-            connectivity_real=connectivity_real,
             connectivity_fake=connectivity_fake,
             logits=logits,
             clean_probs=clean_probs,
@@ -704,12 +701,8 @@ class Trainer:
             gaps=torch.empty(0, device=self.device, dtype=torch.long),
             center_slots=torch.empty(0, device=self.device, dtype=torch.long),
         )
-        enabled = (
-            self.settings.loss.connectivity_weight > 0.0
-            or self.settings.loss.normal_transition_weight > 0.0
-        )
         if (
-            not enabled
+            self.settings.loss.connectivity_weight <= 0.0
             or transition != 0
             or anchor is None
             or source != "multi"

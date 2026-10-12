@@ -181,7 +181,6 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         "loss/generator_connectivity",
         "loss/critic_connectivity",
         "loss/connectivity_r1",
-        "loss/normal_transition",
         "loss/anchor",
         "loss/vf",
         "conditioning/anchor_fraction",
@@ -293,7 +292,6 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
                 "anchor_pixel_weight": 0.05,
                 "connectivity": {
                     "adversarial_weight": 0.25,
-                    "normal_transition_weight": 0.1,
                 },
                 "volume_fraction_weight": 1.0,
                 "connectivity_local_weight": 0.5,

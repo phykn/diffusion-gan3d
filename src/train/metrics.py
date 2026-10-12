@@ -35,7 +35,6 @@ class Metrics:
     vf_active: bool = False
     anchor_input_active_fraction: float = 0.0
     vf_active_fraction: float = 0.0
-    normal_transition_loss: float = 0.0
     anchor_coarse_loss: float = 0.0
     anchor_pixel_loss: float = 0.0
     anchor_shared: bool = False
@@ -92,7 +91,6 @@ def collect_metrics(
             vf_active=presence.vf.any(),
             anchor_input_active_fraction=presence.anchor.to(torch.float32).mean(),
             vf_active_fraction=presence.vf.to(torch.float32).mean(),
-            normal_transition_loss=denoiser_update.normal_transition,
             anchor_coarse_loss=denoiser_update.anchor_coarse,
             anchor_pixel_loss=denoiser_update.anchor_pixel,
             anchor_shared=(
@@ -178,7 +176,6 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "loss/critic_connectivity_global": metrics.critic_connectivity_global,
         "loss/critic_connectivity_local": metrics.critic_connectivity_local,
         "loss/connectivity_r1": metrics.connectivity_r1,
-        "loss/normal_transition": metrics.normal_transition_loss,
         "loss/anchor": metrics.anchor_loss,
         "loss/anchor_coarse": metrics.anchor_coarse_loss,
         "loss/anchor_pixel": metrics.anchor_pixel_loss,

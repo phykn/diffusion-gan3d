@@ -3,9 +3,8 @@ import torch
 import torch.nn.functional as F
 
 from src.anchor import PlaneAnchor, encode_anchors
-from src.data.slice import AnchorTripletSampler, TripletBatch
+from src.data.slice import AnchorTripletSampler
 from src.model.critic import ConnectivityCritic2D
-from src.train.loss.connectivity import compute_transition_loss
 
 
 def test_anchor_triplets_cover_all_axes_and_intersect_the_anchor() -> None:
@@ -75,42 +74,6 @@ def test_endpoint_anchor_uses_an_endpoint_center_slot() -> None:
 
     assert int(axis_zero.sum()) == 1
     assert int(located.triplets.center_slots[axis_zero][0]) == 0
-
-
-def test_compute_transition_loss_is_zero_for_matching_triplets() -> None:
-    labels = torch.tensor(
-        [
-            [
-                [[0, 1], [1, 0]],
-                [[1, 1], [0, 0]],
-                [[0, 0], [1, 1]],
-            ]
-        ]
-    )
-    batch = _triplet_batch(labels, num_phases=2)
-
-    assert float(compute_transition_loss(batch, batch)) == 0.0
-
-
-def test_compute_transition_loss_measures_transition_and_bend() -> None:
-    real_labels = torch.zeros(1, 3, 2, 2, dtype=torch.long)
-    fake_labels = real_labels.clone()
-    fake_labels[:, (0, 2)] = 1
-    real = _triplet_batch(real_labels, num_phases=2)
-    fake_values = _triplet_values(fake_labels, num_phases=2).requires_grad_()
-    fake = TripletBatch(
-        values=fake_values,
-        axes=real.axes,
-        gaps=real.gaps,
-        center_slots=real.center_slots,
-    )
-
-    loss = compute_transition_loss(real, fake)
-    loss.backward()
-
-    assert torch.isclose(loss, torch.tensor(0.5))
-    assert fake_values.grad is not None
-    assert bool(torch.isfinite(fake_values.grad).all())
 
 
 def test_connectivity_images_are_phase_changes_and_discrete_bend() -> None:
@@ -224,22 +187,3 @@ def _soft_prediction_from_labels(
     probs = probs.movedim(-1, 1).to(torch.float32)
     probs = probs.mul(0.8).add(0.2 / num_phases)
     return probs.mul(2.0).sub(1.0)
-
-
-def _triplet_values(labels: torch.Tensor, *, num_phases: int) -> torch.Tensor:
-    return (
-        F.one_hot(labels.to(torch.long), num_classes=num_phases)
-        .movedim(-1, 2)
-        .to(torch.float32)
-        .mul(2.0)
-        .sub(1.0)
-    )
-
-
-def _triplet_batch(labels: torch.Tensor, *, num_phases: int) -> TripletBatch:
-    return TripletBatch(
-        values=_triplet_values(labels, num_phases=num_phases),
-        axes=torch.zeros(labels.shape[0], dtype=torch.long),
-        gaps=torch.ones(labels.shape[0], dtype=torch.long),
-        center_slots=torch.ones(labels.shape[0], dtype=torch.long),
-    )

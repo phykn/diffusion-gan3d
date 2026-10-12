@@ -91,7 +91,6 @@ def test_transition_gap_is_validated(gap):
     "key,value",
     [
         ("adversarial_weight", 0.25),
-        ("normal_transition_weight", 0.1),
         ("real_transition_weight", 0.47),
         ("windows_per_plane", 4),
     ],
@@ -103,11 +102,16 @@ def test_lr_transition_settings_are_selectable_and_sr_rejects_them(key, value):
         normalize_train_config(raw, "sr")
 
 
-@pytest.mark.parametrize("key", ["adversarial_weight", "normal_transition_weight"])
+@pytest.mark.parametrize("key", ["adversarial_weight", "real_transition_weight"])
 @pytest.mark.parametrize("value", [-1, True, float("nan")])
 def test_replay_weights_are_validated(key, value):
     with pytest.raises(ValueError, match=key):
         normalize_train_config({"loss": {"connectivity": {key: value}}})
+
+
+def test_unknown_connectivity_setting_is_rejected():
+    with pytest.raises(ValueError, match="loss.connectivity.unused_weight"):
+        normalize_train_config({"loss": {"connectivity": {"unused_weight": 0}}})
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
@@ -168,22 +172,6 @@ def test_old_keys_are_rejected_without_mutating_input(old):
     with pytest.raises(ValueError, match="unknown training setting"):
         normalize_train_config(old)
     assert old == before
-
-
-@pytest.mark.parametrize("stage", ["low_res", "sr"])
-@pytest.mark.parametrize("weight", [None, 0.7])
-def test_removed_loss_settings_are_ignored_without_aliases(stage, weight):
-    raw = {"loss": {"critic_local_weight": -999, "unused_weight": "removed"}}
-    if weight is not None:
-        raw["loss"]["connectivity_local_weight"] = weight
-    before = copy.deepcopy(raw)
-    cfg = normalize_train_config(raw, stage)
-    assert raw == before
-    assert "critic_local_weight" not in cfg["loss"]
-    assert "unused_weight" not in cfg["loss"]
-    assert cfg["loss"]["connectivity_local_weight"] == (
-        0.5 if weight is None else weight
-    )
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
@@ -392,6 +380,7 @@ def test_saved_yaml_uses_inline_lists_and_separates_groups(tmp_path):
         ("train", "seed"),
         ("train", "stability_version"),
         ("optim", "generatr_lr"),
+        ("loss", "unused_weight"),
         ("data", "input_size"),
     ],
 )

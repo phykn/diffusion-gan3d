@@ -102,11 +102,10 @@ need further training for this loss to affect generation.
   terms. TensorBoard records the unweighted heads separately as
   `loss/{generator,critic}_connectivity_{global,local}`; the existing combined
   connectivity tags retain the weighted sum, before generator ramp/outer weighting.
-- Config loading ignores unrecognized top-level `loss` entries without mapping
-  them to current settings. Model loading ignores weights absent from the current
-  model and still requires every current weight. Resume resets a plane critic's
-  optimizer and update counter if its parameter count changed; matching optimizer
-  states and the rest of the training state are restored normally.
+- Connectivity triplets are sampled when `loss.connectivity.adversarial_weight`
+  is positive and an eligible multi-anchor replay is available at the final
+  diffusion step. The real transition objective uses measured 2D statistics
+  independently of these triplets.
 - SR bank height coordinates use source pixels. Bank validation resolves shared
   extents to one value per sample and keeps existing per-sample tensors connected
   to bank refresh updates.
