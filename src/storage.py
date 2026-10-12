@@ -1,6 +1,8 @@
 import logging
 import os
 import tempfile
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -19,20 +21,52 @@ def atomic_torch_save(payload, path: str | Path, *, overwrite: bool = True) -> P
         dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
     )
     temporary_path = Path(temporary.name)
+    complete = False
+    retain = False
     try:
         with temporary:
             torch.save(payload, temporary)
             temporary.flush()
             os.fsync(temporary.fileno())
+        complete = True
         if overwrite:
-            temporary_path.replace(path)
+            _retry_file_operation(lambda: temporary_path.replace(path))
         else:
             # Link the complete file atomically; unlike replace, this cannot
             # overwrite a snapshot published concurrently by another writer.
-            os.link(temporary_path, path)
+            _retry_file_operation(lambda: os.link(temporary_path, path))
+    except OSError as error:
+        if complete and getattr(error, "winerror", None) in (5, 32, 33):
+            retain = True
+            error.add_note(
+                f"Checkpoint publication failed; complete checkpoint retained at "
+                f"{temporary_path.resolve()}"
+            )
+        raise
     finally:
-        temporary_path.unlink(missing_ok=True)
+        if not retain:
+            try:
+                _retry_file_operation(lambda: temporary_path.unlink(missing_ok=True))
+            except OSError:
+                # Cleanup must not mask a save error or invalidate a published file.
+                logging.getLogger(__name__).warning(
+                    "Could not remove temporary checkpoint %s",
+                    temporary_path,
+                    exc_info=True,
+                )
     return path
+
+
+def _retry_file_operation(operation: Callable[[], object]) -> None:
+    for attempt in range(11):
+        try:
+            operation()
+            return
+        except OSError as error:
+            # Windows can report a locked replacement target as access denied (5).
+            if getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 10:
+                raise
+            time.sleep(min(0.1 * 2**attempt, 1.0))
 
 
 def torch_save(payload, path: str | Path, *, overwrite: bool = True) -> Path:
