@@ -226,7 +226,7 @@ def objective_batch():
         group_statistics_ramp=0.5,
     )
     settings = DenoiserLossSettings(
-        local_weight=0,
+        connectivity_local_weight=0,
         connectivity_weight=0,
         normal_transition_weight=0,
         vf_weight=0,

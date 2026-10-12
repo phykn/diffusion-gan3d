@@ -16,7 +16,12 @@ from src.model.critic import CriticScores
 from src.plane import PLANES
 from src.train.batch import RealBatch, SampledPairs
 from src.train.run.loop import run_train
-from src.train.state import resume_sr_training, save_sr_training
+from src.train.state import (
+    resume_sr_training,
+    resume_training,
+    save_sr_training,
+    save_training,
+)
 
 GROUPS = [[["xy", "xz", "yz"]], [["xy"], ["xz", "yz"]], [["xy"], ["xz"], ["yz"]]]
 
@@ -119,7 +124,7 @@ class ScalarCritic(nn.Module):
 
     def forward(self, previous, current, time, domain):
         score = self.weight * previous.flatten(1).mean(1)
-        return CriticScores(score, score[:, None, None, None])
+        return CriticScores(score)
 
 
 @pytest.mark.parametrize("groups", GROUPS)
@@ -161,12 +166,7 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
     )
     for name, axes in trainer.critic_groups.items():
         # At weight=0, d softplus(-w*x)/dw = -x/2. Fake x is zero.
-        expected = (
-            (1 + trainer.settings.loss.local_weight)
-            * sum(axis + 1 for axis in axes)
-            / (2 * len(axes))
-            / len(groups)
-        )
+        expected = sum(axis + 1 for axis in axes) / (2 * len(axes)) / len(groups)
         assert trainer.critics[name].weight.item() == pytest.approx(expected)
 
 
@@ -207,6 +207,117 @@ def test_sr_groups_step_once_per_critic_update_and_restore_state(tmp_path, group
             build_sr_trainer(other, bank, torch.device("cpu")),
             torch.load(path, weights_only=True),
         )
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("mode", ["single", "pair"])
+def test_resume_ignores_removed_weights_and_restarts_only_changed_optimizers(
+    tmp_path, stage, mode, caplog
+):
+    torch.set_num_threads(1)
+    cfg = config(tmp_path, stage, GROUPS[1])
+    cfg["model"]["critic"]["input_mode"] = mode
+    bank = {0: torch.full((2, 2, 8, 8, 8), 0.5)} if stage == "sr" else None
+    trainer = build_trainer(cfg, torch.device("cpu"), bank=bank)
+    trainer.step(0)
+    if stage == "low_res":
+        for param in trainer.connectivity_critic.parameters():
+            param.grad = torch.ones_like(param)
+        trainer.connectivity_optim.step()
+        trainer.updates["connectivity"] = 3
+    path = tmp_path / "training.pt"
+    if stage == "sr":
+        save_sr_training(trainer, path)
+    else:
+        save_training(path, trainer)
+    payload = torch.load(path, weights_only=True)
+    payload["config"]["loss"].pop("connectivity_local_weight")
+    payload["config"]["loss"]["critic_local_weight"] = 0.9
+    group = next(iter(trainer.critics))
+    for name, value in {
+        "local_norm.weight": torch.ones(8),
+        "local_norm.bias": torch.zeros(8),
+        "local_output.weight": torch.ones(1, 8, 1, 1),
+        "local_output.bias": torch.zeros(1),
+    }.items():
+        payload["critics"][f"{group}.{name}"] = value
+    params = payload["critic_optims"][group]["param_groups"][0]["params"]
+    for _ in range(4):
+        index = max(params) + 1
+        params.append(index)
+        payload["critic_optims"][group]["state"][index] = {"step": torch.tensor(1.0)}
+    restored = build_trainer(cfg, torch.device("cpu"), bank=bank)
+    resume = resume_sr_training if stage == "sr" else resume_training
+    resume(restored, payload)
+    assert "parameter layout changed" in caplog.text
+    assert not restored.critic_optims[group].state
+    assert restored.updates[group] == 0
+    for name in trainer.critic_optims:
+        if name != group:
+            torch.testing.assert_close(
+                restored.critic_optims[name].state_dict(),
+                trainer.critic_optims[name].state_dict(),
+            )
+            assert restored.updates[name] == trainer.updates[name]
+    torch.testing.assert_close(
+        restored.critics.state_dict(), trainer.critics.state_dict()
+    )
+    torch.testing.assert_close(
+        restored.denoiser.state_dict(), trainer.denoiser.state_dict()
+    )
+    torch.testing.assert_close(
+        restored.ema_denoiser.state_dict(), trainer.ema_denoiser.state_dict()
+    )
+    torch.testing.assert_close(
+        restored.denoiser_optim.state_dict(), trainer.denoiser_optim.state_dict()
+    )
+    assert restored.updates["generator"] == trainer.updates["generator"]
+    if stage == "low_res":
+        torch.testing.assert_close(
+            restored.connectivity_critic.state_dict(),
+            trainer.connectivity_critic.state_dict(),
+        )
+        torch.testing.assert_close(
+            restored.connectivity_optim.state_dict(),
+            trainer.connectivity_optim.state_dict(),
+        )
+        assert restored.updates["connectivity"] == 3
+    assert restored.completed_steps == 1
+    restored.step(1)
+    assert restored.completed_steps == 2
+    assert restored.updates[group] == 1
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+def test_plane_training_is_independent_of_connectivity_local_weight(tmp_path, stage):
+    torch.set_num_threads(1)
+    cfg = config(tmp_path, stage, GROUPS[0])
+    bank = {0: torch.full((2, 2, 8, 8, 8), 0.5)} if stage == "sr" else None
+    trained = []
+    for weight in (0.0, 50.0):
+        torch.manual_seed(43)
+        cfg["loss"]["connectivity_local_weight"] = weight
+        trainer = build_trainer(cfg, torch.device("cpu"), bank=bank)
+        metrics = trainer.step(0)
+        assert metrics.generator == metrics.generator_global
+        assert (
+            metrics.generator_connectivity_global
+            == metrics.generator_connectivity_local
+            == 0
+        )
+        assert (
+            metrics.critic_connectivity_global == metrics.critic_connectivity_local == 0
+        )
+        trained.append(trainer)
+    torch.testing.assert_close(
+        trained[0].critics.state_dict(), trained[1].critics.state_dict(), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        trained[0].denoiser.state_dict(),
+        trained[1].denoiser.state_dict(),
+        rtol=0,
+        atol=0,
+    )
 
 
 def test_sr_groups_are_per_domain_and_use_only_observed_members(tmp_path):

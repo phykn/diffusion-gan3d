@@ -6,7 +6,6 @@ from src.evaluate.profile import phase_profile
 from src.train.batch import DenoiserBatch, DenoiserUpdate
 from src.train.loss.connectivity import compute_transition_loss
 from src.train.loss.gan import (
-    HeadLoss,
     active_groups,
     get_generator_loss,
     score_plane,
@@ -20,7 +19,7 @@ from src.train.step import input_gradient_norms
 
 @dataclass(frozen=True)
 class DenoiserLossSettings:
-    local_weight: float
+    connectivity_local_weight: float
     connectivity_weight: float
     normal_transition_weight: float
     vf_weight: float
@@ -48,12 +47,10 @@ def denoiser_objective(
     diagnose: bool = False,
 ) -> tuple[DenoiserUpdate, dict[str, torch.Tensor]]:
     """Compute the differentiable objective without updating training state."""
-    head, diagnostics = adversarial_loss(
-        batch, critics, groups, settings.local_weight, diagnose
-    )
-    global_loss, local_loss = head.global_loss, head.local_loss
-    adversarial = head.combine(settings.local_weight)
+    adversarial, diagnostics = adversarial_loss(batch, critics, groups, diagnose)
     connectivity = adversarial.new_zeros(())
+    connectivity_global = adversarial.new_zeros(())
+    connectivity_local = adversarial.new_zeros(())
     if len(batch.connectivity_fake) and settings.connectivity_weight > 0.0:
         fake = batch.connectivity_fake
         scores = connectivity_critic(
@@ -64,7 +61,9 @@ def denoiser_objective(
             **({"height": fake.height} if fake.height is not None else {}),
             **({"profile": fake.profile} if fake.profile is not None else {}),
         )
-        connectivity = get_generator_loss(scores).combine(settings.local_weight)
+        head = get_generator_loss(scores)
+        connectivity_global, connectivity_local = head.global_loss, head.local_loss
+        connectivity = head.combine(settings.connectivity_local_weight)
     normal = adversarial.new_zeros(())
     if len(batch.connectivity_fake) and settings.normal_transition_weight > 0.0:
         normal = compute_transition_loss(
@@ -160,9 +159,10 @@ def denoiser_objective(
     return DenoiserUpdate(
         adversarial=adversarial,
         total=total,
-        global_loss=global_loss,
-        local_loss=local_loss,
+        global_loss=adversarial,
         connectivity=connectivity,
+        connectivity_global=connectivity_global,
+        connectivity_local=connectivity_local,
         normal_transition=normal,
         anchor=anchor,
         anchor_coarse=anchor_coarse,
@@ -172,8 +172,8 @@ def denoiser_objective(
     ), diagnostics
 
 
-def adversarial_loss(batch, critics, groups, local_weight, diagnose):
-    heads = []
+def adversarial_loss(batch, critics, groups, diagnose):
+    losses = []
     diagnostics = {}
     groups = active_groups(batch.fake, groups)
     axis_critics = {axis: group for group, axes in groups.items() for axis in axes}
@@ -207,28 +207,17 @@ def adversarial_loss(batch, critics, groups, local_weight, diagnose):
             domains,
             **conditions,
         )
-        head = get_generator_loss(scores)
+        loss = get_generator_loss(scores).global_loss
         if diagnose:
-            # Undo only the batch mean, retaining local and pyramid weights.
-            norms = input_gradient_norms(
-                head.combine(local_weight) * len(fake_prev), (fake_prev, fake_curr)
-            )
+            # Undo only the batch mean, retaining pyramid weights.
+            norms = input_gradient_norms(loss * len(fake_prev), (fake_prev, fake_curr))
             prefix = f"generator_input_gradient/{axis_critics[axis]}/{axis}/t{batch.transition}"
             for name, norm in zip(("previous", "current"), norms):
                 diagnostics[f"{prefix}/{name}"] = norm
         count = len(groups[axis_critics[axis]]) * len(groups)
-        heads.append(HeadLoss(head.global_loss / count, head.local_loss / count))
-    global_loss = (
-        torch.stack([loss.global_loss for loss in heads]).sum()
-        if heads
-        else batch.logits.sum() * 0
-    )
-    local_loss = (
-        torch.stack([loss.local_loss for loss in heads]).sum()
-        if heads
-        else batch.logits.sum() * 0
-    )
-    return HeadLoss(global_loss, local_loss), diagnostics
+        losses.append(loss / count)
+    loss = torch.stack(losses).sum() if losses else batch.logits.sum() * 0
+    return loss, diagnostics
 
 
 def profile_loss(batch, settings):

@@ -262,7 +262,6 @@ class Trainer:
             critic_vals,
             r1,
             critic_global,
-            critic_local,
         ) = self.update_critics(
             transition,
             fake,
@@ -272,7 +271,12 @@ class Trainer:
             profile_present=profile_present,
         )
         if self.settings.loss.connectivity_weight > 0.0:
-            critic_connectivity, connectivity_r1 = self.update_connectivity_critic(
+            (
+                critic_connectivity,
+                connectivity_r1,
+                critic_connectivity_global,
+                critic_connectivity_local,
+            ) = self.update_connectivity_critic(
                 connectivity_real.values,
                 connectivity_fake,
                 step,
@@ -280,6 +284,7 @@ class Trainer:
             )
         else:
             critic_connectivity, connectivity_r1 = 0.0, 0.0
+            critic_connectivity_global, critic_connectivity_local = 0.0, 0.0
         denoiser_update = self.update_denoiser(
             self._make_denoiser_batch(
                 prepared=prepared,
@@ -329,8 +334,9 @@ class Trainer:
             critic_vals=critic_vals,
             r1=r1,
             critic_global=critic_global,
-            critic_local=critic_local,
             critic_connectivity=critic_connectivity,
+            critic_connectivity_global=critic_connectivity_global,
+            critic_connectivity_local=critic_connectivity_local,
             connectivity_r1=connectivity_r1,
         )
 
@@ -1123,12 +1129,10 @@ class Trainer:
         step: int,
         domains: dict[int, int],
         profile_present: torch.Tensor | None = None,
-    ) -> tuple[list[float], float, float, float]:
+    ) -> tuple[list[float], float, float]:
         critic_losses = [0.0] * len(AXES)
         r1_sum = 0.0
         global_sum = 0.0
-        local_sum = 0.0
-        local_weight = self.settings.loss.local_weight
         groups = active_groups(fake.pairs, self.critic_groups)
         for group, axes in groups.items():
             count = self.updates[group]
@@ -1220,13 +1224,11 @@ class Trainer:
                         fake_score,
                         (real_prev,),
                         (fake_prev,),
-                        local_weight=local_weight,
                         r1_weight=self.settings.r1_gamma if apply_r1 else 0.0,
                         r2_weight=self.settings.r2_gamma if apply_r2 else 0.0,
                         interval=self.settings.r1_interval,
                     )
                 global_sum += losses.adversarial.global_loss.detach() * weight
-                local_sum += losses.adversarial.local_loss.detach() * weight
                 self.diagnostics[f"score/{group}/{axis}/real"] = (
                     real_score.logits_global.detach().mean()
                 )
@@ -1248,7 +1250,7 @@ class Trainer:
                 critic_losses[axis] = loss.detach() * weight
             if step_optimizer(optimizer, self.scaler, self.diagnostics, group):
                 self.updates[group] += 1
-        return critic_losses, r1_sum, global_sum, local_sum
+        return critic_losses, r1_sum, global_sum
 
     def update_connectivity_critic(
         self,
@@ -1256,9 +1258,9 @@ class Trainer:
         fake: TripletBatch,
         step: int,
         domains: torch.Tensor,
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float, float]:
         if not len(fake):
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0
 
         count = self.updates["connectivity"]
         regularize = (count + 1) % self.settings.r1_interval == 0
@@ -1290,13 +1292,13 @@ class Trainer:
                 fake_score,
                 (real,),
                 (fake_values,),
-                local_weight=self.settings.loss.local_weight,
+                local_weight=self.settings.loss.connectivity_local_weight,
                 r1_weight=self.settings.r1_gamma if apply_r1 else 0.0,
                 r2_weight=self.settings.r2_gamma if apply_r2 else 0.0,
                 interval=self.settings.r1_interval,
             )
         adversarial = losses.adversarial.combine(
-            self.settings.loss.local_weight
+            self.settings.loss.connectivity_local_weight
         ).detach()
         if apply_r2:
             self.diagnostics["r2/connectivity"] = losses.r2.detach()
@@ -1307,7 +1309,12 @@ class Trainer:
             self.connectivity_optim, self.scaler, self.diagnostics, "connectivity"
         ):
             self.updates["connectivity"] += 1
-        return adversarial, losses.r1.detach()
+        return (
+            adversarial,
+            losses.r1.detach(),
+            losses.adversarial.global_loss.detach(),
+            losses.adversarial.local_loss.detach(),
+        )
 
     def update_denoiser(self, batch: DenoiserBatch) -> DenoiserUpdate:
         self.denoiser_optim.zero_grad(set_to_none=True)

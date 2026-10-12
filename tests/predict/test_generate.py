@@ -2255,7 +2255,7 @@ def _config(root: Path) -> dict:
                 "normal_transition_weight": 0.0,
             },
             "volume_fraction_weight": 1.0,
-            "critic_local_weight": 0.5,
+            "connectivity_local_weight": 0.5,
             "r1_weight": 0.0,
             "r1_every_steps": 2,
         },

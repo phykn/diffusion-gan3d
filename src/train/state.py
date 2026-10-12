@@ -1,8 +1,9 @@
+import logging
 from pathlib import Path
 
 from src.config.data import get_plane_groups
 from src.config.train import normalize_train_config
-from src.storage import torch_save
+from src.storage import load_model_state, torch_save
 
 
 def save_training(path: str | Path, trainer) -> None:
@@ -92,12 +93,22 @@ def _restore_state(trainer, payload: dict) -> None:
         raise ValueError("optimizer update counters do not match the checkpoint.")
     trainer.denoiser.load_state_dict(payload["model"])
     trainer.ema_denoiser.load_state_dict(payload["ema"])
-    trainer.critics.load_state_dict(payload["critics"])
+    load_model_state(trainer.critics, payload["critics"])
     trainer.denoiser_optim.load_state_dict(payload["generator_optim"])
-    for group, optimizer in trainer.critic_optims.items():
-        optimizer.load_state_dict(payload["critic_optims"][group])
-    trainer.scaler.load_state_dict(payload["scaler"])
     trainer.updates = dict(payload["updates"])
+    for group, optimizer in trainer.critic_optims.items():
+        state = payload["critic_optims"][group]
+        if [len(g["params"]) for g in state["param_groups"]] == [
+            len(g["params"]) for g in optimizer.param_groups
+        ]:
+            optimizer.load_state_dict(state)
+        else:
+            optimizer.state.clear()
+            trainer.updates[group] = 0
+            logging.getLogger(__name__).warning(
+                "Reset critic optimizer %s because its parameter layout changed.", group
+            )
+    trainer.scaler.load_state_dict(payload["scaler"])
     trainer.completed_steps = payload["step"]
     trainer.path_maps = path_maps
 

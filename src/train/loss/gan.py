@@ -10,9 +10,11 @@ from src.model.critic import CriticScores
 @dataclass(frozen=True)
 class HeadLoss:
     global_loss: torch.Tensor
-    local_loss: torch.Tensor
+    local_loss: torch.Tensor | None = None
 
     def combine(self, local_weight: float) -> torch.Tensor:
+        if self.local_loss is None:
+            return self.global_loss
         return self.global_loss + local_weight * self.local_loss
 
 
@@ -61,7 +63,9 @@ def get_critic_loss(
         local_loss=(
             F.softplus(-real_scores.logits_local).mean()
             + F.softplus(fake_scores.logits_local).mean()
-        ),
+        )
+        if real_scores.logits_local is not None
+        else None,
     )
 
 
@@ -70,10 +74,10 @@ def critic_objective(
     fake_scores: CriticScores,
     real_inputs: Sequence[torch.Tensor],
     fake_inputs: Sequence[torch.Tensor],
-    local_weight: float,
     r1_weight: float,
     r2_weight: float,
     interval: int,
+    local_weight: float = 0.0,
 ) -> CriticObjective:
     adversarial = get_critic_loss(real_scores, fake_scores)
     total = adversarial.combine(local_weight)
@@ -95,7 +99,11 @@ def get_generator_loss(
         return mean_heads([get_generator_loss(level) for level in fake_scores.levels])
     return HeadLoss(
         global_loss=F.softplus(-fake_scores.logits_global).mean(),
-        local_loss=F.softplus(-fake_scores.logits_local).mean(),
+        local_loss=(
+            F.softplus(-fake_scores.logits_local).mean()
+            if fake_scores.logits_local is not None
+            else None
+        ),
     )
 
 
@@ -112,14 +120,18 @@ def get_gradient_penalty(
         local_loss=input_gradient_penalty(
             scores.logits_local.mean(dim=(-2, -1)),
             inputs,
-        ),
+        )
+        if scores.logits_local is not None
+        else None,
     )
 
 
 def mean_heads(heads):
     return HeadLoss(
         torch.stack([head.global_loss for head in heads]).mean(),
-        torch.stack([head.local_loss for head in heads]).mean(),
+        torch.stack([head.local_loss for head in heads]).mean()
+        if heads[0].local_loss is not None
+        else None,
     )
 
 

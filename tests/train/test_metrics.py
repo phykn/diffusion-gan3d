@@ -51,8 +51,9 @@ def test_tensorboard_preserves_unavailable_boundaries_without_changing_diagnosti
         critic_vals=[torch.tensor(0.5), 0.0, torch.tensor(0.25)],
         r1=torch.tensor(0.0),
         critic_global=torch.tensor(0.75),
-        critic_local=0.0,
-        critic_connectivity=0.0,
+        critic_connectivity=0.625,
+        critic_connectivity_global=0.25,
+        critic_connectivity_local=0.75,
         connectivity_r1=0.0,
     )
     with SummaryWriter(tmp_path) as writer:
@@ -60,6 +61,12 @@ def test_tensorboard_preserves_unavailable_boundaries_without_changing_diagnosti
     (record,) = read_metrics(tmp_path)
     assert record["step"] == 7
     assert record["loss/critic"] == 0.75
+    assert "loss/critic_local" not in record
+    assert "loss/generator_local" not in record
+    assert record["loss/critic_connectivity_global"] == 0.25
+    assert record["loss/critic_connectivity_local"] == 0.75
+    assert record["loss/generator_connectivity_global"] == 0.125
+    assert record["loss/generator_connectivity_local"] == 0.125
     assert [record[f"critic_plane/{axis}"] for axis in ("xy", "xz", "yz")] == [
         0.5,
         0.0,

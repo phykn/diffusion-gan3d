@@ -171,6 +171,22 @@ def test_old_keys_are_rejected_without_mutating_input(old):
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("weight", [None, 0.7])
+def test_removed_loss_settings_are_ignored_without_aliases(stage, weight):
+    raw = {"loss": {"critic_local_weight": -999, "unused_weight": "removed"}}
+    if weight is not None:
+        raw["loss"]["connectivity_local_weight"] = weight
+    before = copy.deepcopy(raw)
+    cfg = normalize_train_config(raw, stage)
+    assert raw == before
+    assert "critic_local_weight" not in cfg["loss"]
+    assert "unused_weight" not in cfg["loss"]
+    assert cfg["loss"]["connectivity_local_weight"] == (
+        0.5 if weight is None else weight
+    )
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
 def test_omitted_critic_lr_follows_generator_but_explicit_value_wins(stage):
     raw = load_train_config(f"tests/fixtures/config/train/{stage}.yaml", stage)
     raw["optim"].pop("critic_lr", None)
@@ -404,7 +420,7 @@ def test_obsolete_and_unknown_config_keys_fail_with_full_path(section, key):
         ("optim.adam_betas", [True, 0.9]),
         ("conditioning.domain_keep_probability", 1.1),
         ("conditioning.domain_keep_probability", float("nan")),
-        ("loss.critic_local_weight", -1),
+        ("loss.connectivity_local_weight", -1),
         ("loss.r1_weight", float("inf")),
         ("loss.r2_weight", True),
         ("augmentation.probability", -0.1),

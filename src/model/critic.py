@@ -18,7 +18,7 @@ from src.model.pyramid import area_pyramid
 @dataclass(frozen=True)
 class CriticScores:
     logits_global: torch.Tensor
-    logits_local: torch.Tensor
+    logits_local: torch.Tensor | None = None
     levels: tuple["CriticScores", ...] = ()
 
 
@@ -70,6 +70,7 @@ class CriticBase(nn.Module):
         embedding_channels: int,
         num_domains: int,
         gradient_checkpointing: bool = False,
+        local_head: bool = False,
     ) -> None:
         super().__init__()
         widths = tuple(channels)
@@ -95,8 +96,8 @@ class CriticBase(nn.Module):
             )
             for idx in range(len(widths) - 1)
         )
-        self.local_norm = GroupNorm(widths[1])
-        self.local_output = nn.Conv2d(widths[1], 1, 1)
+        self.local_norm = GroupNorm(widths[1]) if local_head else None
+        self.local_output = nn.Conv2d(widths[1], 1, 1) if local_head else None
         self.output_norm = GroupNorm(widths[-1])
         self.output = nn.Linear(widths[-1], 1)
 
@@ -122,6 +123,7 @@ class CriticBase(nn.Module):
 
     def score_level(self, inputs, embedding, height=None, profile=None) -> CriticScores:
         x = self.input(inputs)
+        logits_local = None
         if height is not None and self.height_input is not None:
             x = x + self.height_input(
                 F.interpolate(height.to(inputs), size=inputs.shape[-2:], mode="area")
@@ -132,7 +134,7 @@ class CriticBase(nn.Module):
             )
         for idx, block in enumerate(self.blocks):
             x = self.apply_block(block, x, embedding)
-            if idx == 1:
+            if idx == 1 and self.local_output is not None:
                 local = F.silu(self.local_norm(x))
                 logits_local = self.local_output(local).squeeze(1)
             if idx < len(self.downsample):
@@ -247,6 +249,7 @@ class ConnectivityCritic2D(CriticBase):
             embedding_channels=embedding_channels,
             num_domains=num_domains,
             gradient_checkpointing=gradient_checkpointing,
+            local_head=True,
         )
         self.axis_embedding = nn.Embedding(3, embedding_channels)
         self.directed_axis = directed_axis

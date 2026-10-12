@@ -623,10 +623,10 @@ class PairCritic2DTest(unittest.TestCase):
 
         self.assertIsInstance(model.blocks[0].norm1, AdaptiveNorm)
         self.assertIsInstance(model.blocks[0].norm1.norm, GroupNorm)
-        self.assertIsInstance(model.local_norm, torch.nn.GroupNorm)
+        self.assertIsNone(model.local_norm)
         self.assertIsInstance(model.output_norm, torch.nn.GroupNorm)
 
-    def test_pair_and_time_conditioning_return_global_and_logits_local(self):
+    def test_pair_and_time_conditioning_return_global_logits(self):
         model = _critic()
         previous = torch.randn(2, 3, 6, 8, requires_grad=True)
         current = torch.randn(2, 3, 6, 8, requires_grad=True)
@@ -638,23 +638,21 @@ class PairCritic2DTest(unittest.TestCase):
 
         self.assertIsInstance(scores, CriticScores)
         self.assertEqual(scores.logits_global.shape, torch.Size([2]))
-        self.assertEqual(scores.logits_local.shape, torch.Size([2, 3, 4]))
+        self.assertIsNone(scores.logits_local)
         self.assertFalse(torch.equal(first.logits_global, scores.logits_global))
-        self.assertFalse(torch.equal(first.logits_local, scores.logits_local))
         self.assertFalse(torch.equal(first.logits_global, other.logits_global))
 
-        (scores.logits_global.mean() + scores.logits_local.mean()).backward()
+        scores.logits_global.mean().backward()
 
         self.assertIsNotNone(previous.grad)
         self.assertIsNotNone(current.grad)
         self.assertIsNotNone(model.output.weight.grad)
-        self.assertIsNotNone(model.local_output.weight.grad)
+        self.assertIsNone(model.local_output)
         self.assertTrue(bool(torch.isfinite(previous.grad).all()))
         self.assertTrue(bool(torch.isfinite(current.grad).all()))
         self.assertGreater(float(previous.grad.abs().sum()), 0.0)
         self.assertGreater(float(current.grad.abs().sum()), 0.0)
         self.assertGreater(float(model.output.weight.grad.abs().sum()), 0.0)
-        self.assertGreater(float(model.local_output.weight.grad.abs().sum()), 0.0)
 
     def test_requires_two_feature_levels(self):
         with self.assertRaisesRegex(ValueError, "at least two levels"):
@@ -682,15 +680,15 @@ class GradientCheckpointingTest(unittest.TestCase):
         previous = torch.randn(1, 3, 4, 4, requires_grad=True)
         current = torch.randn(1, 3, 4, 4, requires_grad=True)
         scores = critic(previous, current, torch.zeros(1), _domain(previous))
-        loss = scores.logits_global.mean() + scores.logits_local.mean()
+        loss = scores.logits_global.mean()
         loss.backward()
 
         self.assertEqual(scores.logits_global.shape, torch.Size([1]))
-        self.assertEqual(scores.logits_local.shape, torch.Size([1, 2, 2]))
+        self.assertIsNone(scores.logits_local)
         self.assertGreater(float(previous.grad.abs().sum()), 0.0)
         self.assertGreater(float(current.grad.abs().sum()), 0.0)
         self.assertGreater(float(critic.output.weight.grad.abs().sum()), 0.0)
-        self.assertGreater(float(critic.local_output.weight.grad.abs().sum()), 0.0)
+        self.assertIsNone(critic.local_output)
 
 
 if __name__ == "__main__":

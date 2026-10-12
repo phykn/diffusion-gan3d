@@ -53,7 +53,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
             )
         ),
         "loss": dict.fromkeys(
-            ("critic_local_weight", "r1_weight", "r1_every_steps", "r2_weight")
+            ("connectivity_local_weight", "r1_weight", "r1_every_steps", "r2_weight")
         )
         | {
             "group_statistics": dict.fromkeys(
@@ -62,6 +62,33 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
         },
     }
     common["data"]["split"] = dict.fromkeys(("validation_files", "validation_regions"))
+    stage_losses = {
+        "low_res": dict.fromkeys(
+            (
+                "anchor_pixel_weight",
+                "anchor_continuity_weight",
+                "volume_fraction_weight",
+                "spatial_profile_weight",
+                "spatial_profile_gradient_weight",
+            )
+        )
+        | {
+            "connectivity": dict.fromkeys(
+                (
+                    "max_slice_gap",
+                    "adversarial_weight",
+                    "normal_transition_weight",
+                    "real_transition_weight",
+                    "start_step",
+                    "ramp_steps",
+                    "windows_per_plane",
+                )
+            )
+        },
+        "sr": dict.fromkeys(
+            ("downsample_consistency_weight", "downsample_mse_tolerance")
+        ),
+    }
     if stage == "low_res":
         common["model"]["generator"]["anchor_multiscale_input"] = None
         schema = common | {
@@ -83,31 +110,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                     )
                 ),
             },
-            "loss": common["loss"]
-            | (
-                dict.fromkeys(
-                    (
-                        "anchor_pixel_weight",
-                        "anchor_continuity_weight",
-                        "volume_fraction_weight",
-                        "spatial_profile_weight",
-                        "spatial_profile_gradient_weight",
-                    )
-                )
-                | {
-                    "connectivity": dict.fromkeys(
-                        (
-                            "max_slice_gap",
-                            "adversarial_weight",
-                            "normal_transition_weight",
-                            "real_transition_weight",
-                            "start_step",
-                            "ramp_steps",
-                            "windows_per_plane",
-                        )
-                    )
-                }
-            ),
+            "loss": common["loss"] | stage_losses[stage],
             "train": common["train"] | {"initial_weights": None},
         }
     else:
@@ -120,10 +123,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                     "domain_keep_probability",
                 )
             ),
-            "loss": common["loss"]
-            | dict.fromkeys(
-                ("downsample_consistency_weight", "downsample_mse_tolerance")
-            ),
+            "loss": common["loss"] | stage_losses[stage],
             "lr_bank": dict.fromkeys(
                 ("samples_per_domain", "guidance", "refresh_every_steps")
             ),
@@ -142,14 +142,21 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
     def check(values, allowed, path=""):
         if not isinstance(values, Mapping):
             raise TypeError(f"{path or 'config'} must be a mapping.")
+        result = {}
         for key, value in values.items():
             name = f"{path}.{key}" if path else str(key)
             if key not in allowed:
+                if path == "loss" and not any(
+                    key in loss for loss in stage_losses.values()
+                ):
+                    continue
                 raise ValueError(f"unknown training setting: {name}")
-            if allowed[key] is not None:
-                check(value, allowed[key], name)
+            result[key] = (
+                check(value, allowed[key], name) if allowed[key] is not None else value
+            )
+        return result
 
-    check(cfg, schema)
+    cfg = check(cfg, schema)
     domains = cfg.get("data", {}).get("domains", {})
     if not isinstance(domains, Mapping):
         raise TypeError("data.domains must be a mapping.")

@@ -30,8 +30,9 @@ class DenoiserUpdate:
     adversarial: torch.Tensor
     total: torch.Tensor
     global_loss: torch.Tensor
-    local_loss: torch.Tensor
     connectivity: torch.Tensor
+    connectivity_global: torch.Tensor
+    connectivity_local: torch.Tensor
     normal_transition: torch.Tensor
     anchor: torch.Tensor
     anchor_coarse: torch.Tensor

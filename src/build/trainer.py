@@ -172,7 +172,7 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         height_data=data if conditioning["height_enabled"] else None,
         profile_settings=profile,
         loss=DenoiserLossSettings(
-            local_weight=loss["critic_local_weight"],
+            connectivity_local_weight=loss["connectivity_local_weight"],
             connectivity_weight=connectivity.get("adversarial_weight", 0.0),
             normal_transition_weight=connectivity.get("normal_transition_weight", 0.0),
             real_transition_weight=connectivity.get("real_transition_weight", 0.0),

@@ -24,6 +24,7 @@ conditioning:
     ramp_steps: 500
 
 loss:
+  connectivity_local_weight: 0.5
   r1_weight: 0.5
   r2_weight: 0.1
   r1_every_steps: 8

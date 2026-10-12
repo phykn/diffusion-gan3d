@@ -123,6 +123,19 @@ def test_lr_checkpoint_restores_training_state_without_rng(
     )
     assert restored.updates["connectivity"] > 0
     assert any(row.generator_connectivity > 0 for row in metrics)
+    assert any(row.critic_connectivity > 0 for row in metrics)
+    for row in metrics:
+        for name in ("generator", "critic"):
+            total = getattr(row, f"{name}_connectivity")
+            global_loss = getattr(row, f"{name}_connectivity_global")
+            local_loss = getattr(row, f"{name}_connectivity_local")
+            if total > 0:
+                assert global_loss > 0 and local_loss > 0
+            else:
+                assert global_loss == local_loss == 0
+            assert total == pytest.approx(
+                global_loss + cfg["loss"]["connectivity_local_weight"] * local_loss
+            )
     assert any(row.normal_transition_loss > 0 for row in metrics)
 
 

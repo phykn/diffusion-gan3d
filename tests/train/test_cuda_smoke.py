@@ -85,7 +85,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
                 "normal_transition_weight": 0.0,
             },
             "volume_fraction_weight": 1.0,
-            "critic_local_weight": 0.5,
+            "connectivity_local_weight": 0.5,
             "r1_weight": 0.05,
             "r1_every_steps": 16,
         },
@@ -138,7 +138,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             r1_gamma=cfg["loss"]["r1_weight"],
             r1_interval=cfg["loss"]["r1_every_steps"],
             loss=DenoiserLossSettings(
-                local_weight=cfg["loss"]["critic_local_weight"],
+                connectivity_local_weight=cfg["loss"]["connectivity_local_weight"],
                 connectivity_weight=cfg["loss"]["connectivity"]["adversarial_weight"],
                 normal_transition_weight=cfg["loss"]["connectivity"][
                     "normal_transition_weight"

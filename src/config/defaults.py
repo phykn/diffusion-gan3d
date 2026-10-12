@@ -13,7 +13,7 @@ TRAIN_DEFAULTS = {
     "model.diffusion.beta_max": 20.0,
     "model.diffusion.time_embedding": "index",
     "conditioning.domain_keep_probability": 0.8,
-    "loss.critic_local_weight": 0.5,
+    "loss.connectivity_local_weight": 0.5,
     "loss.r1_every_steps": 16,
     "loss.r2_weight": 0.0,
     "loss.group_statistics.weight": 0.1,

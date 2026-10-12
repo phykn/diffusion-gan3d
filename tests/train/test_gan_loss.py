@@ -127,7 +127,14 @@ def test_critic_objective_preserves_penalty_weights_and_parameter_gradients(
         4 * fake[:, 0] * weight, (-5 * fake[:, 0] * weight)[:, None, None]
     )
     result = critic_objective(
-        real_scores, fake_scores, (real,), (fake,), 0.5, r1_weight, r2_weight, 4
+        real_scores,
+        fake_scores,
+        (real,),
+        (fake,),
+        r1_weight,
+        r2_weight,
+        4,
+        local_weight=0.5,
     )
     expected_r1 = (4 + 0.5 * 9) * weight.square() if r1_weight else weight.new_zeros(())
     expected_r2 = (
@@ -165,11 +172,58 @@ def test_pyramid_averages_losses_after_nonlinearity():
         torch.zeros(2, dtype=torch.long),
     )
     assert len(scores.levels) == 3
-    assert [s.logits_local.shape[-1] for s in scores.levels] == [8, 4, 2]
+    assert all(s.logits_local is None for s in scores.levels)
     loss = get_generator_loss(scores)
     expected = torch.stack(
         [get_generator_loss(s).global_loss for s in scores.levels]
     ).mean()
     torch.testing.assert_close(loss.global_loss, expected)
-    get_critic_loss(scores, scores).combine(0.5).backward()
+    get_critic_loss(scores, scores).global_loss.backward()
     assert torch.isfinite(previous.grad).all()
+
+
+@pytest.mark.parametrize("levels", [1, 3])
+@pytest.mark.parametrize(
+    "r1_weight,r2_weight", [(0, 0), (0.3, 0), (0, 0.2), (0.3, 0.2)]
+)
+def test_global_only_objective_and_penalties_preserve_gradients(
+    levels, r1_weight, r2_weight
+):
+    real = torch.tensor([[1.0], [2.0]], requires_grad=True)
+    fake = torch.tensor([[-1.0], [0.0], [1.0]], requires_grad=True)
+    weight = torch.nn.Parameter(torch.tensor(2.0))
+    real_levels = tuple(
+        CriticScores(k * real[:, 0] * weight) for k in range(1, levels + 1)
+    )
+    fake_levels = tuple(
+        CriticScores(2 * k * fake[:, 0] * weight) for k in range(1, levels + 1)
+    )
+    real_scores = CriticScores(real_levels[0].logits_global, levels=real_levels)
+    fake_scores = CriticScores(fake_levels[0].logits_global, levels=fake_levels)
+    result = critic_objective(
+        real_scores, fake_scores, (real,), (fake,), r1_weight, r2_weight, 4
+    )
+    penalty = sum(k**2 for k in range(1, levels + 1)) / levels * weight.square()
+    expected_r1 = penalty if r1_weight else weight.new_zeros(())
+    expected_r2 = 4 * penalty if r2_weight else weight.new_zeros(())
+    adversarial = torch.stack(
+        [
+            F.softplus(-r.logits_global).mean() + F.softplus(f.logits_global).mean()
+            for r, f in zip(real_levels, fake_levels, strict=True)
+        ]
+    ).mean()
+    expected = adversarial + 2 * r1_weight * expected_r1 + 2 * r2_weight * expected_r2
+    expected_grad = torch.autograd.grad(expected, weight, retain_graph=True)[0]
+    assert result.adversarial.local_loss is None
+    assert get_gradient_penalty(real_scores, (real,)).local_loss is None
+    generator = get_generator_loss(fake_scores)
+    assert generator.local_loss is None
+    torch.testing.assert_close(
+        generator.global_loss,
+        torch.stack([F.softplus(-s.logits_global).mean() for s in fake_levels]).mean(),
+    )
+    torch.testing.assert_close(result.total, expected)
+    torch.testing.assert_close(result.r1, expected_r1)
+    torch.testing.assert_close(result.r2, expected_r2)
+    result.total.backward()
+    torch.testing.assert_close(weight.grad, expected_grad)

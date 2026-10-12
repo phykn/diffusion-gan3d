@@ -405,7 +405,7 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         beta2=0.9,
         r1_gamma=0.0,
         r1_interval=2,
-        local_loss_weight=0.5,
+        connectivity_local_weight=0.5,
     )
     cfg = _config(
         data,
@@ -502,7 +502,7 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
         beta2=0.9,
         r1_gamma=0.01,
         r1_interval=1,
-        local_loss_weight=0.5,
+        connectivity_local_weight=0.5,
     )
     cfg = _config(data, model, optim)
     denoiser, critics, connectivity_critic = build_models(cfg)
@@ -542,15 +542,12 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     )
     denoiser_before = _parameters(denoiser)
     critic_before = {axis: _parameters(critics[PLANES[axis]]) for axis in (0, 1, 2)}
-    local_before = {
-        axis: _parameters(critics[PLANES[axis]].local_output) for axis in (0, 1, 2)
-    }
 
     r1_values = []
 
     def track_r1(scores, inputs):
         penalties = get_gradient_penalty(scores, inputs)
-        r1_values.append(float(penalties.combine(optim.local_loss_weight).detach()))
+        r1_values.append(float(penalties.global_loss.detach()))
         return penalties
 
     with patch("src.train.loss.gan.get_gradient_penalty", side_effect=track_r1):
@@ -560,9 +557,7 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     assert math.isfinite(metrics.critic)
     assert math.isfinite(metrics.r1)
     assert math.isfinite(metrics.generator_global)
-    assert math.isfinite(metrics.generator_local)
     assert math.isfinite(metrics.critic_global)
-    assert math.isfinite(metrics.critic_local)
     assert metrics.generator_connectivity == 0.0
     assert metrics.critic_connectivity == 0.0
     assert len(r1_values) == 3
@@ -570,14 +565,12 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     assert math.isclose(metrics.r1, sum(r1_values) / len(r1_values), rel_tol=1e-6)
     assert math.isclose(
         metrics.generator,
-        metrics.generator_global + optim.local_loss_weight * metrics.generator_local,
+        metrics.generator_global,
         rel_tol=1e-5,
     )
     assert math.isclose(
         metrics.critic,
-        metrics.critic_global
-        + optim.local_loss_weight * metrics.critic_local
-        + 0.5 * optim.r1_gamma * optim.r1_interval * metrics.r1,
+        metrics.critic_global + 0.5 * optim.r1_gamma * optim.r1_interval * metrics.r1,
         rel_tol=1e-5,
     )
     assert 0 <= metrics.transition < 2
@@ -585,10 +578,6 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     assert _changed(denoiser_before, denoiser)
     assert all(
         _changed(critic_before[axis], critics[PLANES[axis]]) for axis in (0, 1, 2)
-    )
-    assert all(
-        _changed(local_before[axis], critics[PLANES[axis]].local_output)
-        for axis in (0, 1, 2)
     )
     assert all(not parameter.requires_grad for parameter in ema.parameters())
 
@@ -639,7 +628,7 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
         beta2=0.9,
         r1_gamma=0.0,
         r1_interval=2,
-        local_loss_weight=0.5,
+        connectivity_local_weight=0.5,
     )
     cfg = _config(
         data,
@@ -704,7 +693,7 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
     assert 0.0 <= metrics.anchor_accuracy <= 1.0
     assert math.isclose(
         metrics.generator,
-        metrics.generator_global + optim.local_loss_weight * metrics.generator_local,
+        metrics.generator_global,
         rel_tol=1e-5,
     )
     assert math.isclose(
@@ -1410,7 +1399,7 @@ def _conditioning_trainer(
         beta2=0.9,
         r1_gamma=0.0,
         r1_interval=2,
-        local_loss_weight=0.5,
+        connectivity_local_weight=0.5,
     )
     cfg = _config(
         data,
@@ -1502,7 +1491,7 @@ def _make_trainer(
             r1_gamma=cfg.loss.r1_weight,
             r1_interval=cfg.loss.r1_every_steps,
             loss=DenoiserLossSettings(
-                local_weight=cfg.loss.critic_local_weight,
+                connectivity_local_weight=cfg.loss.connectivity_local_weight,
                 connectivity_weight=cfg.loss.connectivity.adversarial_weight,
                 normal_transition_weight=cfg.loss.connectivity.normal_transition_weight,
                 vf_weight=cfg.loss.volume_fraction_weight,
@@ -1588,7 +1577,7 @@ def _config(
             dropout_probability_per_case=conditioning.joint_each_prob,
         ),
         loss=Config(
-            critic_local_weight=optim.local_loss_weight,
+            connectivity_local_weight=optim.connectivity_local_weight,
             r1_weight=optim.r1_gamma,
             r1_every_steps=optim.r1_interval,
             anchor_pixel_weight=anchor.pixel_weight,

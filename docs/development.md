@@ -97,6 +97,16 @@ need further training for this loss to affect generation.
   SR reads settings embedded in its weight export; resume reads checkpoint settings.
 - `src/train/state.py` owns checkpoint formats. Preserve frozen-LR source checks
   during creation, refresh, and resume, and saved-bank integrity checks on resume.
+- Plane critics use only a global head in LR and SR. Connectivity keeps both
+  heads; `loss.connectivity_local_weight` scales its local adversarial and R1/R2
+  terms. TensorBoard records the unweighted heads separately as
+  `loss/{generator,critic}_connectivity_{global,local}`; the existing combined
+  connectivity tags retain the weighted sum, before generator ramp/outer weighting.
+- Config loading ignores unrecognized top-level `loss` entries without mapping
+  them to current settings. Model loading ignores weights absent from the current
+  model and still requires every current weight. Resume resets a plane critic's
+  optimizer and update counter if its parameter count changed; matching optimizer
+  states and the rest of the training state are restored normally.
 - SR bank height coordinates use source pixels. Bank validation resolves shared
   extents to one value per sample and keeps existing per-sample tensors connected
   to bank refresh updates.

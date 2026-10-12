@@ -26,9 +26,11 @@ class Metrics:
     connectivity_r1: float
     anchor_ramp: float
     generator_global: float = 0.0
-    generator_local: float = 0.0
     critic_global: float = 0.0
-    critic_local: float = 0.0
+    generator_connectivity_global: float = 0.0
+    generator_connectivity_local: float = 0.0
+    critic_connectivity_global: float = 0.0
+    critic_connectivity_local: float = 0.0
     vf_loss: float = 0.0
     vf_active: bool = False
     anchor_input_active_fraction: float = 0.0
@@ -51,8 +53,9 @@ def collect_metrics(
     critic_vals: list[float],
     r1: float,
     critic_global: float,
-    critic_local: float,
     critic_connectivity: float,
+    critic_connectivity_global: float,
+    critic_connectivity_local: float,
     connectivity_r1: float,
 ) -> Metrics:
     selection = prepared.selection
@@ -73,16 +76,18 @@ def collect_metrics(
             anchor_loss=denoiser_update.anchor,
             anchor_accuracy=denoiser_update.anchor_accuracy,
             generator_connectivity=denoiser_update.connectivity,
+            generator_connectivity_global=denoiser_update.connectivity_global,
+            generator_connectivity_local=denoiser_update.connectivity_local,
             critic_connectivity=critic_connectivity,
+            critic_connectivity_global=critic_connectivity_global,
+            critic_connectivity_local=critic_connectivity_local,
             connectivity_r1=connectivity_r1,
             anchor_ramp=prepared.anchor_ramp,
             connectivity_ramp=prepared.connectivity_ramp,
             anchor_neighbor_agreement=diagnostics.get("anchor/neighbor_agreement"),
             anchor_neighbor_excess_jump=diagnostics.get("anchor/neighbor_excess_jump"),
             generator_global=denoiser_update.global_loss,
-            generator_local=denoiser_update.local_loss,
             critic_global=critic_global,
-            critic_local=critic_local,
             vf_loss=denoiser_update.vf,
             vf_active=presence.vf.any(),
             anchor_input_active_fraction=presence.anchor.to(torch.float32).mean(),
@@ -163,13 +168,15 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "loss/generator": metrics.generator,
         "loss/generator_total": metrics.generator_total,
         "loss/generator_global": metrics.generator_global,
-        "loss/generator_local": metrics.generator_local,
         "loss/critic": metrics.critic,
         "loss/critic_global": metrics.critic_global,
-        "loss/critic_local": metrics.critic_local,
         "loss/r1": metrics.r1,
         "loss/generator_connectivity": metrics.generator_connectivity,
+        "loss/generator_connectivity_global": metrics.generator_connectivity_global,
+        "loss/generator_connectivity_local": metrics.generator_connectivity_local,
         "loss/critic_connectivity": metrics.critic_connectivity,
+        "loss/critic_connectivity_global": metrics.critic_connectivity_global,
+        "loss/critic_connectivity_local": metrics.critic_connectivity_local,
         "loss/connectivity_r1": metrics.connectivity_r1,
         "loss/normal_transition": metrics.normal_transition_loss,
         "loss/anchor": metrics.anchor_loss,

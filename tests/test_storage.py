@@ -5,6 +5,7 @@ import pytest
 import torch
 
 import src.storage as storage
+from src.model.critic import PairCritic2D
 from src.storage import (
     atomic_torch_save,
     load_probabilities,
@@ -15,6 +16,23 @@ from src.storage import (
 )
 from src.train.run.bank import save_bank
 from src.train.state import export_sr
+
+
+def test_model_loading_ignores_unused_weights_but_requires_current_weights(tmp_path):
+    model = PairCritic2D(2, (4, 8), 8, 1)
+    state = model.state_dict()
+    state["local_output.weight"] = torch.ones(1, 8, 1, 1)
+    state["local_output.bias"] = torch.zeros(1)
+    path = tmp_path / "critic.pt"
+    torch.save(state, path)
+    restored = PairCritic2D(2, (4, 8), 8, 1)
+    storage.load_model(path, restored)
+    torch.testing.assert_close(restored.state_dict(), model.state_dict())
+    assert "local_output.weight" in state
+    del state["output.weight"]
+    torch.save(state, path)
+    with pytest.raises(RuntimeError, match="Missing key.*output.weight"):
+        storage.load_model(path, restored)
 
 
 def test_label_volume_round_trip(tmp_path: Path) -> None:
