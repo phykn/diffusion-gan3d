@@ -113,15 +113,16 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     assert sr_dir.name.endswith("_sr_refine")
     common_files = {
         "train.yaml",
-        "data_manifest.json",
         "generator.pt",
-        "metrics.jsonl",
         "checkpoints",
         "tensorboard",
     }
     for directory in (base_dir, sr_dir):
         assert common_files <= {path.name for path in directory.iterdir()}
-        assert resolve_checkpoint(directory).is_file()
+        assert resolve_checkpoint(directory).name == "step_00000001.pt"
+        assert (directory / "checkpoints/generator_00000001.pt").is_file()
+        assert not (directory / "data_manifest.json").exists()
+        assert not (directory / "metrics.jsonl").exists()
         assert list(directory.glob("critic_*.pt"))
         events = EventAccumulator(str(directory / "tensorboard")).Reload()
         assert events.Scalars("loss/generator")[0].step == 1
@@ -194,7 +195,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
             "--input",
             str(out / "lr_probs.pt"),
             "--weight",
-            str(resumed / "generator.pt"),
+            str(resumed / "checkpoints/generator_00000002.pt"),
             "--out",
             str(out2),
             "--no-view",

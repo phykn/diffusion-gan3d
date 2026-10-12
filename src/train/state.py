@@ -102,7 +102,7 @@ def _restore_state(trainer, payload: dict) -> None:
     trainer.path_maps = path_maps
 
 
-def export_sr(trainer, path):
+def export_sr(trainer, path, *, overwrite=True):
     torch_save(
         {
             "format": "diffusion-gan3d.sr",
@@ -111,4 +111,5 @@ def export_sr(trainer, path):
             "model": trainer.ema_denoiser.state_dict(),
         },
         path,
+        overwrite=overwrite,
     )

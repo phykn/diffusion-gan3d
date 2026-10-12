@@ -24,7 +24,10 @@ The web backend calls `LowResolutionAPI`.
 `Trainer.step` owns optimizer and EMA updates. `collect_metrics` in
 `src/train/metrics.py` assembles the step result, converts tensor diagnostics to
 plain values, and marks unavailable anchor-boundary measurements. It does not
-update training state. The run loop writes those results to JSONL and TensorBoard.
+update training state. The run loop writes every metric and diagnostic to
+TensorBoard, including zero-valued inactive metrics. Unavailable measurements
+are recorded as NaN gaps. Experiment scripts use `scripts/common/metrics.py` to
+read the full scalar history by step, converting those gaps back to `None`.
 
 `Trainer.settings` holds runtime settings; its `loss` field holds the generator
 objective settings assembled once in `src/build/trainer.py`. Read settings from

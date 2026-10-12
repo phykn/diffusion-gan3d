@@ -162,19 +162,34 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
     scalars = {
         "loss/generator": metrics.generator,
         "loss/generator_total": metrics.generator_total,
+        "loss/generator_global": metrics.generator_global,
+        "loss/generator_local": metrics.generator_local,
         "loss/critic": metrics.critic,
+        "loss/critic_global": metrics.critic_global,
+        "loss/critic_local": metrics.critic_local,
         "loss/r1": metrics.r1,
         "loss/generator_connectivity": metrics.generator_connectivity,
         "loss/critic_connectivity": metrics.critic_connectivity,
         "loss/connectivity_r1": metrics.connectivity_r1,
         "loss/normal_transition": metrics.normal_transition_loss,
         "loss/anchor": metrics.anchor_loss,
+        "loss/anchor_coarse": metrics.anchor_coarse_loss,
+        "loss/anchor_pixel": metrics.anchor_pixel_loss,
         "loss/vf": metrics.vf_loss,
+        "conditioning/vf_active": metrics.vf_active,
+        "conditioning/anchor_planes": metrics.anchor_planes,
+        "conditioning/anchor_accuracy": metrics.anchor_accuracy,
+        "conditioning/anchor_conflict_rate": metrics.anchor_conflict_rate,
+        "conditioning/anchor_shared": metrics.anchor_shared,
         "conditioning/anchor_fraction": metrics.anchor_input_active_fraction,
         "conditioning/vf_fraction": metrics.vf_active_fraction,
         "conditioning/anchor_ramp": metrics.anchor_ramp,
         "conditioning/connectivity_ramp": metrics.connectivity_ramp,
         "sampling/transition": metrics.transition,
+        "sampling/volume_size": metrics.volume_size,
+        "sampling/domain": metrics.domain,
+        "anchor/neighbor_agreement": metrics.anchor_neighbor_agreement,
+        "anchor/neighbor_excess_jump": metrics.anchor_neighbor_excess_jump,
         f"timestep/{metrics.transition}/generator": metrics.generator,
         f"timestep/{metrics.transition}/critic": metrics.critic,
         **{
@@ -184,10 +199,6 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         **metrics.diagnostics,
     }
 
-    if metrics.anchor_planes:
-        scalars["conditioning/anchor_planes"] = metrics.anchor_planes
-        scalars["conditioning/anchor_accuracy"] = metrics.anchor_accuracy
-
     for tag, value in scalars.items():
-        if value is not None:
-            writer.add_scalar(tag, value, step)
+        # Unavailable measurements remain visible as gaps at their recorded steps.
+        writer.add_scalar(tag, float("nan") if value is None else value, step)

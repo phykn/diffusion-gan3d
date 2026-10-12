@@ -18,6 +18,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from scripts.common.metrics import read_metrics
 from src.api import LowResolutionAPI, PlaneAnchor, SuperResolutionAPI
 from src.build.trainer import build_trainer
 from src.config.files import save_yaml
@@ -185,14 +186,11 @@ def main():
         api = LowResolutionAPI(out / "generator.pt", device=args.device)
         validation, _ = evaluate(api, crops, out, [100, 101])
         del api
-        records = [
-            json.loads(line)
-            for line in (out / "metrics.jsonl").read_text().splitlines()
-        ]
+        records = read_metrics(out / "tensorboard")
         skips = sum(
             value
             for row in records
-            for key, value in row["diagnostics"].items()
+            for key, value in row.items()
             if key.startswith("skipped/")
         )
         report["variants"][name] = {
@@ -201,7 +199,7 @@ def main():
             "resume_completed_next_step": resumed,
             "skipped_updates": skips,
             "validation": validation,
-            "last_loss": records[-1]["generator_total"],
+            "last_loss": records[-1]["loss/generator_total"],
         }
         (root / "report.json").write_text(
             json.dumps(report, indent=2), encoding="utf-8"
@@ -213,7 +211,9 @@ def main():
     base = root / "index_r1"
     sr_cfg = load_train_config("config/train/sr.yaml", "sr")
     sr_cfg["data"] = copy.deepcopy(reference["data"])
-    sr_cfg["model"]["generator"].update(channels=8, blocks=2)
+    sr_cfg["model"]["generator"].update(
+        channels=[8, 16, 32], embedding_channels=32, latent_channels=16
+    )
     sr_cfg["model"]["critic"].update(
         channels=[8, 16, 32], plane_groups=[["xy", "xz", "yz"]]
     )
@@ -222,7 +222,7 @@ def main():
     sr_cfg["train"].update(
         total_steps=args.sr_steps,
         weights_every_steps=args.sr_steps,
-        slices_per_plane=4,
+        slice_pairs_per_plane=4,
     )
     save_yaml(root / "sr.yaml", sr_cfg)
     sr_run = run_sr_train(
@@ -252,12 +252,10 @@ def main():
         "held_out_lr_seeds": [200, 201],
         "checks": sr_checks,
     }
-    sr_records = [
-        json.loads(line) for line in (sr_run / "metrics.jsonl").read_text().splitlines()
-    ]
+    sr_records = read_metrics(sr_run / "tensorboard")
     report["sr"]["skipped_updates"] = {
         key: sum(row.get(key, 0) for row in sr_records)
-        for key in sr_records[0]
+        for key in {tag for row in sr_records for tag in row}
         if key.startswith("skipped/")
     }
     report["complete"] = True

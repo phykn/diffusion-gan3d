@@ -24,7 +24,6 @@ from src.prepare.resize import resize_crop
 from src.train.checkpoint import resolve_checkpoint
 from src.train.loss.anchor import SoftAnchorLoss
 from src.train.run.bank import refresh_bank
-from src.train.run.loop import describe_data
 from src.train.run.low_res import run_low_res_train
 from src.train.run.source import file_hash
 from src.train.run.sr import run_sr_train
@@ -661,7 +660,6 @@ def test_profile_sr_training_refresh_and_geometry_artifacts(tmp_path):
         run_dir=tmp_path / "trained",
         device="cpu",
     )
-    assert (run / "data_manifest.json").is_file()
     banks = sorted(run.glob("lr_bank/step_*.pt"))
     assert len(banks) == 2
     for path in banks:
@@ -738,9 +736,6 @@ def test_measured_transition_training_keeps_replay_but_never_scores_it(
     assert second.generator_connectivity == second.normal_transition_loss == 0
     assert trainer.updates["connectivity"] == 0
     assert all(p.grad is None for p in trainer.connectivity_critic.parameters())
-    metadata = describe_data(trainer)
-    assert metadata["connectivity_reference"] is None
-    assert metadata["real_transition_reference"] == "measured_2d"
     save_training(tmp_path / "training.pt", trainer)
     restored = build_trainer(cfg, torch.device("cpu"))
     resume_training(restored, torch.load(tmp_path / "training.pt", weights_only=True))

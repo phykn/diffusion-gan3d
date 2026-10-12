@@ -1,6 +1,8 @@
 import copy
+import json
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import Mock
 
 import numpy as np
@@ -8,6 +10,8 @@ import pytest
 import torch
 from PIL import Image
 
+from scripts.common.metrics import read_metrics
+from scripts.experiments import critic_inputs, training_stability
 from src.build.model import build_models
 from src.build.trainer import build_trainer
 from src.config.files import save_yaml
@@ -351,3 +355,69 @@ def test_amp_skip_is_reported_without_updating_parameters():
     scaler.update()
     assert parameter.item() == 1
     assert diagnostics["skipped/generator"] == 1
+
+
+def test_critic_input_report_reads_tensorboard_training_metrics(tmp_path):
+    torch.set_num_threads(1)
+    report = critic_inputs.compare(
+        small_config(tmp_path), tmp_path / "comparison", [13], 2, torch.device("cpu")
+    )
+    assert [run["mode"] for run in report["runs"]] == ["pair", "single"]
+    for run in report["runs"]:
+        log_dir = Path(run["metrics"])
+        assert log_dir.name == "tensorboard"
+        assert not (log_dir.parent / "metrics.jsonl").exists()
+        records = read_metrics(log_dir)
+        assert [row["step"] for row in records] == [1, 2]
+        assert run["mean_input_gradients"]
+        for tag, mean in run["mean_input_gradients"].items():
+            values = [row[tag] for row in records if tag in row]
+            assert mean == pytest.approx(sum(values) / len(values))
+
+
+def test_stability_report_reads_lr_and_sr_tensorboard_metrics(tmp_path, monkeypatch):
+    def tiny_config(path, stage="low_res"):
+        cfg = load_train_config(f"tests/fixtures/config/train/{stage}.yaml", stage)
+        cfg["data"].update(crop_size=128, lo_res_size=8, hi_res_size=16)
+        cfg["model"]["diffusion"]["num_steps"] = 2
+        cfg["model"]["gradient_checkpointing"] = False
+        cfg["train"]["mixed_precision"] = False
+        return cfg
+
+    image = tmp_path / "sample.png"
+    Image.fromarray((np.indices((128, 384)).sum(0) % 2).astype(np.uint8)).save(image)
+    root = tmp_path / "stability"
+    monkeypatch.setattr(training_stability, "load_train_config", tiny_config)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "training_stability.py",
+            "--image",
+            str(image),
+            "--run-dir",
+            str(root),
+            "--steps",
+            "2",
+            "--sr-steps",
+            "2",
+            "--device",
+            "cpu",
+        ],
+    )
+    training_stability.main()
+    report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+    assert report["complete"] is True
+    assert len(report["variants"]) == 3
+    assert not list(root.rglob("metrics.jsonl"))
+    for name, variant in report["variants"].items():
+        records = read_metrics(root / name / "tensorboard")
+        assert [row["step"] for row in records] == [1, 2]
+        assert variant["last_loss"] == records[-1]["loss/generator_total"]
+        assert variant["resume_completed_next_step"] is True
+        assert variant["skipped_updates"] == 0
+    sr_records = read_metrics(root / "sr/tensorboard")
+    assert [row["step"] for row in sr_records] == [1, 2]
+    assert report["sr"]["skipped_updates"]
+    for tag, total in report["sr"]["skipped_updates"].items():
+        assert total == sum(row.get(tag, 0) for row in sr_records)

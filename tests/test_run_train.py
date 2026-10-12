@@ -1,4 +1,3 @@
-import json
 import os
 import signal
 import subprocess
@@ -56,7 +55,6 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
         return metrics
 
     trainer.step = step
-    monkeypatch.setattr("src.train.run.loop.describe_data", lambda _: {"sources": []})
     monkeypatch.setattr(
         "src.train.run.loop.save_weights",
         lambda trainer, path, stage: exports.append(
@@ -79,17 +77,13 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
         )
 
     expected_steps = [2, 3, 4] if interrupt else [2, 3, 4, 5]
-    records = [
-        json.loads(line)
-        for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
-    ]
-    assert [record["step"] for record in records] == expected_steps
+    assert not (tmp_path / "metrics.jsonl").exists()
+    assert not (tmp_path / "data_manifest.json").exists()
     assert [index + 1 for index in trained] == expected_steps
     assert prepared == ([1, 2, 3] if interrupt else [1, 2, 3, 4])
     events = EventAccumulator(str(tmp_path / "tensorboard")).Reload()
     assert [value.step for value in events.Scalars("loss/generator")] == expected_steps
     assert load_yaml(tmp_path / "train.yaml") == trainer.cfg
-    assert json.loads((tmp_path / "data_manifest.json").read_text()) == {"sources": []}
     assert checkpoints == [(stage, step) for step in ([2, 4] if interrupt else [2, 4, 5])]
     assert exports == [
         (3, ".", stage),
@@ -181,7 +175,7 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
     write_metrics(writer, 10, metrics)
 
     tags = {call.args[0] for call in writer.add_scalar.call_args_list}
-    assert tags == {
+    assert tags >= {
         "loss/generator",
         "loss/generator_total",
         "loss/critic",
@@ -362,7 +356,12 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
         assert payload["step"] == step
         assert payload["format"] == "diffusion-gan3d.lr.train"
         assert payload["generator_optim"]["state"]
+        assert checkpoint.name == f"step_{step:08d}.pt"
         assert checkpoint.with_suffix(".complete").is_file()
+        exported = __import__("torch").load(
+            checkpoint.with_name(f"generator_{step:08d}.pt"), weights_only=True
+        )
+        __import__("torch").testing.assert_close(exported, payload["ema"])
     assert not list((run_dirs[0] / "checkpoints").glob("*/generator.pt"))
     values = __import__("torch").load(weights, weights_only=True)
     assert values

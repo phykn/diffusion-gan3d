@@ -1,8 +1,9 @@
 # Run and inspect
 
 Run from the project root with the environment activated. `--weight` accepts a run
-directory or its `generator.pt`. Each inspection saves results in `run/checks/`
-and opens a viewer; add `--no-view` for files only.
+directory, its `generator.pt`, or a step-specific EMA export under `checkpoints/`.
+Each inspection saves results in `run/checks/` and opens a viewer; add `--no-view`
+for files only.
 
 | Script | Purpose | Weights |
 | --- | --- | --- |
@@ -39,11 +40,19 @@ Script 06 uses SR guidance `1.0` unless overridden. Its saved LR source is hash-
 
 ## Save and resume
 
-`generator.pt` is for inference. Training checkpoints under `checkpoints/` include
-optimizer state; keep their matching `.complete` files. `weights_every_steps`
-overwrites exports, `archive_every_steps` creates checkpoints, and `structure_every_steps`
-controls diagnostics. Completion and Ctrl+C at a completed step also save progress.
-Load exports after writing has finished.
+The run's `generator.pt` is for inference; root generator and critic exports are
+overwritten at `weights_every_steps`. At `archive_every_steps`, `checkpoints/`
+receives `step_00000100.pt` (training state, including optimizers) and
+`generator_00000100.pt` (EMA inference weights) for step 100. Both files are closed
+before `step_00000100.complete` is written; keep this completion marker for resume.
+Existing files for the same step are never overwritten. Older checkpoint names
+with numeric suffixes can still be loaded.
+
+Completion and Ctrl+C at a completed step also save progress. `structure_every_steps`
+controls diagnostics. Load exports after writing has finished. All training metrics
+and diagnostics are stored in `tensorboard/`; view them with
+`tensorboard --logdir run/my-lr-run/tensorboard`. No data manifest or JSONL training
+log is written. Data fingerprints needed for resume remain in training checkpoints.
 
 Resume requires the current checkpoint schema, including `path_maps` (an empty
 list when no paths have moved). LR checkpoints also require the connectivity model,

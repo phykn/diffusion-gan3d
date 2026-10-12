@@ -14,6 +14,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from scripts.common.metrics import read_metrics
 from src.build.trainer import build_trainer
 from src.config.train import load_train_config
 from src.train.run.loop import run_train
@@ -79,13 +80,10 @@ def compare(cfg, root, seeds, steps, device):
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             elapsed = time.monotonic() - started
-            rows = [
-                json.loads(row)
-                for row in (out / "metrics.jsonl").read_text().splitlines()
-            ]
+            rows = read_metrics(out / "tensorboard")
             sensitivities = {}
             for row in rows:
-                for key, value in row["diagnostics"].items():
+                for key, value in row.items():
                     if key.startswith("generator_input_gradient/"):
                         sensitivities.setdefault(key, []).append(value)
             report["runs"].append(
@@ -101,7 +99,7 @@ def compare(cfg, root, seeds, steps, device):
                     "mean_input_gradients": {
                         k: float(np.mean(v)) for k, v in sensitivities.items()
                     },
-                    "metrics": str((out / "metrics.jsonl").resolve()),
+                    "metrics": str((out / "tensorboard").resolve()),
                 }
             )
             (root / "report.json").write_text(
