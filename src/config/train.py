@@ -182,14 +182,8 @@ def validate_sr_config(cfg: dict) -> dict:
         "slice_pairs_per_plane",
         "weights_every_steps",
     ):
-        value = cfg["train"][name]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise ValueError(f"train.{name} must be a positive integer.")
-    archive = cfg["train"]["archive_every_steps"]
-    if archive is not None and (type(archive) is not int or archive < 1):
-        raise ValueError(
-            "train.archive_every_steps must be a positive integer or null."
-        )
+        if name not in cfg["train"]:
+            raise ValueError(f"train.{name} is required for SR training.")
     count = cfg["lr_bank"]["samples_per_domain"]
     if isinstance(count, bool) or not isinstance(count, int) or count < 1:
         raise ValueError("lr_bank.samples_per_domain must be a positive integer.")

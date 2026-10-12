@@ -307,6 +307,27 @@ def test_sr_archive_interval_rejects_invalid_values(archive):
         validate_sr_config(cfg)
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "total_steps",
+        "volume_batch_size",
+        "real_batch_size",
+        "slice_pairs_per_plane",
+        "weights_every_steps",
+    ],
+)
+@pytest.mark.parametrize("value", [None, 0, True, 1.5])
+def test_sr_requires_valid_training_values(name, value):
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
+    if value is None:
+        del cfg["train"][name]
+    else:
+        cfg["train"][name] = value
+    with pytest.raises(ValueError, match=rf"train\.{name}"):
+        validate_sr_config(cfg)
+
+
 def test_sr_validation_returns_resolved_config_without_mutating_input():
     cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     del cfg["optim"]["critic_lr"]

@@ -7,6 +7,7 @@
 | Input images or resolutions | [config/data/](../config/data/), [RealDataset](../src/data/dataset.py) |
 | Network architecture | [src/model/](../src/model/), [model assembly](../src/build/model.py) |
 | Training step or objective | [Trainer](../src/train/trainer.py), [losses](../src/train/loss/) |
+| Step metrics and TensorBoard tags | [metrics](../src/train/metrics.py) |
 | SR bank fractions or height coordinates | [bank validation](../src/data/bank.py), [SR assembly](../src/build/sr.py) |
 | Logging, checkpoints, or resume | [run lifecycle](../src/train/run/), [training state](../src/train/state.py) |
 | Generation, tiling, or SR | [public API](../src/api.py), [src/predict/](../src/predict/) |
@@ -20,6 +21,11 @@ then `src/build/` assembles data, models, and the trainer. `Trainer.step` owns u
 the shared plane/connectivity critic objective and R1/R2 input penalties.
 The web backend calls `LowResolutionAPI`.
 
+`Trainer.step` owns optimizer and EMA updates. `collect_metrics` in
+`src/train/metrics.py` assembles the step result, converts tensor diagnostics to
+plain values, and marks unavailable anchor-boundary measurements. It does not
+update training state. The run loop writes those results to JSONL and TensorBoard.
+
 `Trainer.settings` holds runtime settings; its `loss` field holds the generator
 objective settings assembled once in `src/build/trainer.py`. Read settings from
 these objects instead of copying them onto the trainer or rebuilding them per step.
@@ -31,6 +37,9 @@ these objects instead of copying them onto the trainer or rebuilding them per st
   LR/HR grids use voxels. `DataResolution` names these units explicitly.
 - `config/` holds user presets, `src/config/` resolves and validates them,
   and `src/build/` constructs runtime objects. Backend config contains HTTP limits.
+  Both training stages validate shared numeric settings in `src/config/values.py`;
+  `validate_sr_config` also resolves SR geometry, requires training fields, and
+  validates SR source/bank settings.
 - LR inference reads the run's `train.yaml` and `config/gen.yaml` generation defaults.
   SR reads settings embedded in its weight export; resume reads checkpoint settings.
 - `src/train/state.py` owns checkpoint formats. Preserve frozen-LR source checks
