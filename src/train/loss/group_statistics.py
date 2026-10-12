@@ -72,7 +72,8 @@ def compute_group_statistics_loss(
                         allowance = (
                             allowance + (ref_a - ref_b).abs().sum((-2, -1)) * 0.5
                         )
-                    penalty = (error - allowance).clamp_min(0)
+                    # ReLU has zero gradient at the allowance boundary as well.
+                    penalty = (error - allowance).relu()
                     errors.append(
                         (error.reshape(len(probs), -1).mean(1) * active).sum() / count
                     )

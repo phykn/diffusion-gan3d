@@ -95,13 +95,50 @@ def test_tolerance_and_inactive_anchors_have_zero_gradient():
     assert batch.grad[0].abs().sum() > 0 and batch.grad[1].abs().sum() == 0
 
 
-def test_sr_coarse_anisotropy_is_an_allowance_and_never_receives_gradients():
+@pytest.mark.parametrize("preserve_height", [False, True])
+@pytest.mark.parametrize("position", ["below", "equal", "above"])
+def test_tolerance_boundary_has_zero_gradient_until_error_exceeds_allowance(
+    preserve_height, position
+):
+    probs = (lamella(2) * 0.5 + 0.25).requires_grad_()
+    error, _ = compute_group_statistics_loss(
+        probs, SIDES, 1, 0, preserve_height=preserve_height
+    )
+    (expected_grad,) = torch.autograd.grad(error, probs)
+    assert error > 0 and expected_grad.abs().sum() > 0
+    tolerance = error.detach()
+    if position != "equal":
+        target = float("inf") if position == "below" else 0.0
+        tolerance = torch.nextafter(tolerance, tolerance.new_tensor(target))
+    loss, logs = compute_group_statistics_loss(
+        probs, SIDES, 1, tolerance.item(), preserve_height=preserve_height
+    )
+    torch.testing.assert_close(
+        logs["group_statistics/xz_yz/gap1/difference"], error, rtol=0, atol=0
+    )
+    loss.backward()
+    if position == "above":
+        assert loss > 0
+        torch.testing.assert_close(loss, error - tolerance, rtol=0, atol=0)
+        torch.testing.assert_close(probs.grad, expected_grad, rtol=0, atol=0)
+    else:
+        assert loss == 0
+        assert torch.equal(probs.grad, torch.zeros_like(probs))
+
+
+@pytest.mark.parametrize("preserve_height", [False, True])
+def test_sr_coarse_anisotropy_is_an_allowance_and_never_receives_gradients(
+    preserve_height,
+):
     coarse = lamella(2, 4).requires_grad_()
     probs = resize_phases(coarse.detach(), (8, 8, 8)).requires_grad_()
     assert compute_group_statistics_loss(probs, SIDES, 3, 0)[0] > 0
-    loss, _ = compute_group_statistics_loss(probs, SIDES, 3, 0, coarse=coarse)
+    loss, _ = compute_group_statistics_loss(
+        probs, SIDES, 3, 0, preserve_height=preserve_height, coarse=coarse
+    )
     assert loss == 0
     loss.backward()
+    assert torch.equal(probs.grad, torch.zeros_like(probs))
     assert coarse.grad is None
     isotropic = torch.full_like(coarse, 0.5)
     assert compute_group_statistics_loss(probs, SIDES, 3, 0, coarse=isotropic)[0] > 0
