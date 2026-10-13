@@ -68,4 +68,39 @@ and creates a new run directory. Both training commands accept `--path-map OLD N
 when files move; repeat it for separate data/run roots. Copy the original data and
 completed artifacts. SR also needs its unchanged frozen LR weights/config and saved bank.
 
+## Anchor-neighborhood loss benchmark
+
+The paired benchmark checks loss, gradients and diagnostics against the loop
+reference from commit `0dce898`, then times forward and forward-plus-backward
+separately. Inputs and anchors are created before timing; implementation order
+alternates, and CUDA timings synchronize the device. Use a fresh output path.
+
+```powershell
+& .\.venv\Scripts\python.exe scripts/experiments/benchmark_anchor_neighborhood.py --device cpu --threads 1 --warmup 3 --repeats 21 --output run/checks/anchor-neighborhood/benchmark.json
+```
+
+On 2026-10-13, Windows / PyTorch 2.14.0 CPU, one thread, batch size 1 and three
+phases gave these **forward-plus-backward medians** over 21 paired repeats:
+
+| Volume | Anchor axes | Radius | Loop | Batched | Speedup |
+| --- | --- | --- | --- | --- | --- |
+| 32³ | xy | 2 | 45.48 ms | 6.03 ms | 7.54× |
+| 32³ | xy, xz, yz | 4 | 337.15 ms | 48.51 ms | 6.95× |
+| 64³ | xy, xz, yz | 2 | 281.56 ms | 154.91 ms | 1.82× |
+
+Background load caused substantial timing variation; these are local loss
+measurements, not whole-training-step or GPU speedups. JSON includes every sample,
+min/max, environment and reference hash. The recorded local result is
+`run/checks/anchor-neighborhood-20261013/benchmark.json`; `run/` is not committed.
+Use `--device cuda` to measure a CUDA installation. Correctness tests retain the
+loop reference and cover FP32/FP16/BF16, partial and overlapping anchors, all axes,
+CFG dropout, fixed endpoints, and absent far references. CUDA autocast is tested
+only when CUDA is available.
+
+Training defaults are defined in [defaults.py](../src/config/defaults.py).
+`normalize_train_config` fills active settings before assembly. The shared LR/SR
+trainer receives inactive options through `get_trainer_sections`; those options
+stay out of saved YAML, preserving the stage-specific schema. The builder reads
+resolved values without per-key fallbacks, including explicit zero values.
+
 [Back to README](../README.md)

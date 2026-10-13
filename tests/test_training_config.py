@@ -2,9 +2,11 @@ import copy
 from pathlib import Path
 
 import pytest
+import torch
 
 import src.config.train as config_module
 from src.build.data import build_augmentation
+from src.build.trainer import _build_settings
 from src.config.data import validate_sr_source
 from src.config.files import load_yaml, save_yaml
 from src.config.train import (
@@ -13,6 +15,162 @@ from src.config.train import (
     validate_sr_config,
 )
 from src.train.run.sr import run_sr_train
+
+
+@pytest.mark.parametrize(
+    "stage,path,field,default",
+    [
+        (
+            "low_res",
+            "conditioning.anchor.probability",
+            "anchor_training_probability",
+            0.0,
+        ),
+        ("low_res", "conditioning.anchor.bank_capacity", "anchor_bank_capacity", 4),
+        ("low_res", "conditioning.anchor.plane_spacing", "anchor_plane_spacing", 16),
+        (
+            "low_res",
+            "conditioning.anchor.borrowed_plane_probability",
+            "anchor_shared_axis_probability",
+            0.2,
+        ),
+        (
+            "low_res",
+            "conditioning.dropout_probability_per_case",
+            "cfg_drop_each_probability",
+            0.05,
+        ),
+        ("low_res", "loss.anchor_pixel_weight", "anchor_pixel_loss_weight", 0.0),
+        (
+            "low_res",
+            "loss.anchor_continuity_weight",
+            "loss.anchor_continuity_weight",
+            0.1,
+        ),
+        (
+            "low_res",
+            "loss.anchor_neighborhood_weight",
+            "loss.anchor_neighborhood_weight",
+            0.1,
+        ),
+        (
+            "low_res",
+            "loss.anchor_neighborhood_radius",
+            "loss.anchor_neighborhood_radius",
+            2,
+        ),
+        ("low_res", "loss.volume_fraction_weight", "loss.vf_weight", 0.0),
+        ("low_res", "loss.spatial_profile_weight", "loss.profile_weight", 1.0),
+        (
+            "low_res",
+            "conditioning.spatial_profile.num_bins",
+            "loss.profile_bins",
+            16,
+        ),
+        ("low_res", "loss.connectivity.max_slice_gap", "connectivity_max_gap", 1),
+        (
+            "low_res",
+            "loss.connectivity.windows_per_plane",
+            "connectivity_windows_per_plane",
+            4,
+        ),
+        (
+            "low_res",
+            "loss.connectivity.real_transition_weight",
+            "loss.real_transition_weight",
+            0.1,
+        ),
+        ("sr", "loss.downsample_consistency_weight", "loss.consistency_weight", 0.0),
+        ("sr", "loss.downsample_mse_tolerance", "loss.consistency_tolerance", 0.005),
+        (
+            "sr",
+            "conditioning.coarse_corruption_probability",
+            "coarse_corruption_probability",
+            0.5,
+        ),
+        (
+            "sr",
+            "conditioning.coarse_corruption_strength",
+            "coarse_corruption_strength",
+            0.2,
+        ),
+    ],
+)
+def test_builder_uses_canonical_defaults_and_preserves_resolved_values(
+    monkeypatch, stage, path, field, default
+):
+    raw = load_yaml(f"tests/fixtures/config/train/{stage}.yaml")
+    section = raw
+    *parents, key = path.split(".")
+    for parent in parents:
+        section = section.setdefault(parent, {})
+    section.pop(key, None)
+    before = copy.deepcopy(raw)
+
+    def read(cfg):
+        settings = _build_settings(cfg, torch.device("cpu"))
+        for name in field.split("."):
+            settings = getattr(settings, name)
+        return settings
+
+    resolved = normalize_train_config(raw, stage)
+    assert read(resolved) == default
+    changed = 3 if type(default) is int else 0.13
+    monkeypatch.setitem(config_module.STAGE_DEFAULTS[stage], path, changed)
+    assert read(normalize_train_config(raw, stage)) == changed
+    # A saved, resolved config is unaffected by later default changes.
+    assert read(normalize_train_config(resolved, stage)) == default
+    section[key] = default
+    assert read(normalize_train_config(raw, stage)) == default
+    section.pop(key)
+    assert raw == before
+
+
+@pytest.mark.parametrize("stage", ("low_res", "sr"))
+def test_runtime_inactive_sections_do_not_mutate_or_broaden_saved_config(stage):
+    cfg = load_train_config(f"tests/fixtures/config/train/{stage}.yaml", stage)
+    before = copy.deepcopy(cfg)
+    settings = _build_settings(cfg, torch.device("cpu"))
+    conditioning, loss = config_module.get_trainer_sections(cfg)
+    assert cfg == before
+    assert normalize_train_config(cfg, stage) == cfg
+    if stage == "sr":
+        assert "anchor" not in cfg["conditioning"]
+        assert "anchor_neighborhood_weight" not in cfg["loss"]
+        assert settings.loss.anchor_neighborhood_weight == 0
+        assert settings.anchor_training_probability == 0
+        assert settings.connectivity_start_step == settings.connectivity_ramp_steps == 0
+        conditioning["anchor"]["probability"] = 0.9
+        assert config_module.get_trainer_sections(cfg)[0]["anchor"]["probability"] == 0
+    else:
+        assert "downsample_consistency_weight" not in cfg["loss"]
+        assert settings.loss.consistency_weight == 0
+        assert settings.coarse_corruption_probability == 0
+        loss["downsample_consistency_weight"] = 123
+        assert (
+            config_module.get_trainer_sections(cfg)[1]["downsample_consistency_weight"]
+            == 0
+        )
+    assert cfg == before
+
+
+@pytest.mark.parametrize(
+    "stage,path",
+    [
+        ("low_res", "loss.anchor_neighborhood_weight"),
+        ("low_res", "conditioning.anchor.bank_capacity"),
+        ("sr", "conditioning.coarse_corruption_probability"),
+    ],
+)
+def test_builder_requires_resolved_active_options(stage, path):
+    cfg = load_train_config(f"tests/fixtures/config/train/{stage}.yaml", stage)
+    section = cfg
+    *parents, key = path.split(".")
+    for parent in parents:
+        section = section[parent]
+    del section[key]
+    with pytest.raises(KeyError, match=key):
+        _build_settings(cfg, torch.device("cpu"))
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])

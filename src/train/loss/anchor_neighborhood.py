@@ -9,9 +9,7 @@ def compute_anchor_neighborhood_loss(
     radius: int,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     zero = probs.sum(dtype=torch.float32) * 0.0
-    totals = [
-        [zero, zero.detach(), zero.detach(), zero.detach()] for _ in range(radius)
-    ]
+    totals = [zero.expand(radius)] + [zero.detach().expand(radius) for _ in range(3)]
     far_pairs, reference_axes = zero.detach(), zero.detach()
     active = (
         range(len(probs))
@@ -59,27 +57,39 @@ def compute_anchor_neighborhood_loss(
                 supported = count > 0
                 far_pairs = far_pairs + count
                 reference_axes = reference_axes + supported
-                for index in sorted(candidates):
-                    for gap in range(radius):
-                        mask = (distance[index] == gap) & eligible[index] & supported
-                        joint, pixels = _pair_joint(
-                            values, observed, fixed, index, mask
-                        )
-                        tv = (joint - target).abs().sum() * 0.5
-                        penalty = (tv - tolerance - torch.finfo(tv.dtype).eps).relu()
-                        loss_sum, tv_sum, tolerance_sum, pairs = totals[gap]
-                        totals[gap] = [
-                            loss_sum + penalty * pixels,
-                            tv_sum + tv.detach() * pixels,
-                            tolerance_sum + tolerance * pixels,
-                            pairs + pixels,
-                        ]
+                if not candidates:
+                    continue
+                index = torch.tensor(sorted(candidates), device=probs.device)
+                gaps = torch.arange(radius, device=probs.device)
+                mask = (
+                    (distance[index, None] == gaps[None, :, None, None])
+                    & eligible[index, None]
+                    & supported
+                ).flatten(2)
+                positions = torch.stack((index, index + 1))
+                # Gather before casting so half-precision endpoint gradients are
+                # rounded separately, as in the original per-pair computation.
+                endpoints = torch.where(
+                    fixed[positions, None],
+                    observed[:, positions].movedim(0, 2).float().add(1).mul(0.5),
+                    values[:, positions].movedim(0, 2).float(),
+                ).flatten(3)
+                joints, pixels = _pair_joints(endpoints[0], endpoints[1], mask)
+                tv = (joints - target).abs().sum((-2, -1)) * 0.5
+                penalty = (tv - tolerance - torch.finfo(tv.dtype).eps).relu()
+                totals = [
+                    totals[0] + (penalty * pixels).sum(0),
+                    totals[1] + (tv.detach() * pixels).sum(0),
+                    totals[2] + (tolerance * pixels).sum(0),
+                    totals[3] + pixels.sum(0),
+                ]
     diagnostics = {
         "anchor_neighborhood/far_pairs": far_pairs,
         "anchor_neighborhood/reference_axes": reference_axes,
     }
     losses, valid = [], []
-    for gap, (loss_sum, tv_sum, tolerance_sum, pairs) in enumerate(totals):
+    for gap in range(radius):
+        loss_sum, tv_sum, tolerance_sum, pairs = (total[gap] for total in totals)
         loss = loss_sum / pairs.clamp_min(1)
         losses.append(loss)
         valid.append(pairs > 0)
@@ -97,34 +107,30 @@ def compute_anchor_neighborhood_loss(
     ), diagnostics
 
 
-def _pair_joint(values, observed, fixed, index, mask):
-    left, right = (
-        torch.where(
-            fixed[position],
-            observed[:, position].float().add(1).mul(0.5),
-            values[:, position].float(),
-        )
-        for position in (index, index + 1)
-    )
-    count = mask.sum(dtype=torch.float32)
-    joint = torch.einsum("chw,dhw,hw->cd", left, right, mask.float())
-    return joint / count.clamp_min(1), count
+def _pair_joints(left, right, mask):
+    # Pairs and distance masks are separate batch dimensions; retain each joint
+    # until after TV/ReLU, since a joint pooled across pairs changes the loss.
+    counts = mask.sum(-1, dtype=torch.float32)
+    weighted = left[:, None] * mask[:, :, None]
+    joints = weighted @ right[:, None].transpose(-1, -2)
+    return joints / counts.clamp_min(1)[..., None, None], counts
 
 
 @torch.no_grad()
 def _far_reference(values, observed, fixed, mask):
-    joints, counts = [], []
-    for index in range(len(mask)):
-        joint, count = _pair_joint(values, observed, fixed, index, mask[index])
-        joints.append(joint)
-        counts.append(count)
-    if not joints:
+    planes = (
+        torch.where(fixed[None], observed.float().add(1).mul(0.5), values.float())
+        .movedim(1, 0)
+        .flatten(2)
+    )
+    if not len(mask):
         return (
-            values.new_zeros((values.shape[0], values.shape[0]), dtype=torch.float32),
-            values.new_zeros((), dtype=torch.float32),
-            values.new_zeros((), dtype=torch.float32),
+            planes.new_zeros((planes.shape[1], planes.shape[1])),
+            planes.new_zeros(()),
+            planes.new_zeros(()),
         )
-    joints, counts = torch.stack(joints), torch.stack(counts)
+    joints, counts = _pair_joints(planes[:-1], planes[1:], mask.flatten(1)[:, None])
+    joints, counts = joints[:, 0], counts[:, 0]
     count = counts.sum()
     total = (joints * counts[:, None, None]).sum(0)
     target = total / count.clamp_min(1)

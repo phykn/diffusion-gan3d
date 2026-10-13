@@ -127,7 +127,10 @@ Python 의존성 감사에서도 Windows 관련 moderate 취약점 2건을 수�
   겹치는 순간 bank 저장량의 약 두 배가 필요하다. `generate_probs()`가 CPU로 반환하므로
   bank 전체가 GPU에 누적된다는 의심은 배제했다.
 - [anchor_neighborhood.py](../src/train/loss/anchor_neighborhood.py): 평면·거리·영역을
-  순회하는 손실의 비용은 실제 설정별 profile이 필요하다.
+  순회하던 손실은 후속 작업에서 쌍·거리 통계를 텐서 연산으로 묶었다.
+  [비교 벤치마크](checks.md#anchor-neighborhood-loss-benchmark)에 기존 구현과의
+  손실·기울기·지표 비교 및 CPU 측정 결과를 기록했다. 실제 학습 스텝과 GPU에서의
+  기여도는 별도 profile이 필요하다.
 - [06_check_hr.py](../scripts/06_check_hr.py): HR coarse-error 계산에는 여전히 전체
   phase 채널 변환이 있다. 미리보기 개선이 모든 진단 메모리를 제한하는 것은 아니다.
 - [VolumeViewer.vue:57](../frontend/src/components/VolumeViewer.vue#L57): 고정 ray sampling과

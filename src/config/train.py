@@ -10,7 +10,7 @@ from src.config.data import (
     get_plane_groups,
     get_resolution,
 )
-from src.config.defaults import STAGE_DEFAULTS, TRAIN_DEFAULTS
+from src.config.defaults import INACTIVE_DEFAULTS, STAGE_DEFAULTS, TRAIN_DEFAULTS
 from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml
 from src.config.schema import validate_config_keys
 from src.config.values import validate_training_values
@@ -79,13 +79,7 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     cfg["stage"] = stage
     if "split" in cfg.get("data", {}):
         cfg["data"]["split"] = resolve_split(cfg["data"]["split"], PROJECT_ROOT)
-    for path, value in (TRAIN_DEFAULTS | STAGE_DEFAULTS[stage]).items():
-        target = cfg
-        *sections, key = path.split(".")
-        for section in sections:
-            target = target.setdefault(section, {})
-        if key not in target:
-            target[key] = prepare_yaml(value)
+    _fill_defaults(cfg, TRAIN_DEFAULTS | STAGE_DEFAULTS[stage])
     nickname = cfg["nickname"]
     if nickname is None:
         nickname = ""
@@ -140,7 +134,7 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
             raise ValueError(
                 "loss.anchor_neighborhood_radius must be a positive integer."
             )
-        gap = cfg["loss"]["connectivity"].get("max_slice_gap", 1)
+        gap = cfg["loss"]["connectivity"]["max_slice_gap"]
         if type(gap) is not int or gap < 1:
             raise ValueError(
                 "loss.connectivity.max_slice_gap must be a positive integer."
@@ -163,6 +157,27 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         optim["critic_lr"] = optim["generator_lr"]
     validate_training_values(cfg)
     return cfg
+
+
+def _fill_defaults(cfg: dict, defaults: Mapping) -> None:
+    for path, value in defaults.items():
+        target = cfg
+        *sections, key = path.split(".")
+        for section in sections:
+            target = target.setdefault(section, {})
+        if key not in target:
+            target[key] = prepare_yaml(value)
+
+
+def get_trainer_sections(cfg: Mapping) -> tuple[dict, dict]:
+    """Complete normalized conditioning/loss for the shared LR/SR trainer.
+
+    Inactive options are runtime-only; do not broaden the stage's YAML schema
+    or mutate the resolved snapshot used for resume validation.
+    """
+    sections = prepare_yaml({"conditioning": cfg["conditioning"], "loss": cfg["loss"]})
+    _fill_defaults(sections, INACTIVE_DEFAULTS[cfg["stage"]])
+    return sections["conditioning"], sections["loss"]
 
 
 def validate_sr_config(cfg: dict) -> dict:

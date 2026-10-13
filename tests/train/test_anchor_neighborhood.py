@@ -2,6 +2,9 @@ from dataclasses import replace
 
 import pytest
 import torch
+from anchor_neighborhood_reference import (
+    compute_anchor_neighborhood_loss as reference_loss,
+)
 
 from src.anchor import PlaneAnchor, encode_anchors
 from src.prepare.resize import phase_channels
@@ -173,3 +176,83 @@ def test_half_precision_large_pair_counts_stay_finite():
     loss.backward()
     assert torch.isfinite(volume.grad).all()
     assert volume.grad.abs().sum() > 0
+
+
+def compare_reference(volume, condition, radius):
+    expected_input = volume.detach().clone().requires_grad_()
+    actual_input = volume.detach().clone().requires_grad_()
+    expected, expected_logs = reference_loss(expected_input, condition, radius)
+    actual, actual_logs = compute_anchor_neighborhood_loss(
+        actual_input, condition, radius
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-7, rtol=2e-5)
+    assert actual_logs.keys() == expected_logs.keys()
+    for key in expected_logs:
+        # Counts are exact; floating reductions may differ in summation order.
+        atol = 0 if key.endswith(("pairs", "axes")) else 2e-7
+        rtol = 0 if atol == 0 else 2e-5
+        torch.testing.assert_close(
+            actual_logs[key], expected_logs[key], atol=atol, rtol=rtol, msg=key
+        )
+        assert not actual_logs[key].requires_grad
+    expected.backward()
+    actual.backward()
+    # A nonzero FP16/BF16 gradient can round to the adjacent representable value.
+    rtol = {torch.float32: 2e-5, torch.float16: 2e-3, torch.bfloat16: 2e-2}[
+        volume.dtype
+    ]
+    torch.testing.assert_close(
+        actual_input.grad, expected_input.grad, atol=2e-8, rtol=rtol
+    )
+    assert condition.image.grad is None
+    return actual, actual_input.grad
+
+
+@pytest.mark.parametrize("axis", (0, 1, 2))
+@pytest.mark.parametrize("radius", (1, 2, 4))
+@pytest.mark.parametrize("dtype", (torch.float32, torch.float16, torch.bfloat16))
+def test_batched_joints_match_loop_loss_gradients_and_all_metrics(axis, radius, dtype):
+    rng = torch.Generator().manual_seed(527)
+    plane = torch.randn(2, 3, 1, 7, 9, generator=rng).softmax(1)
+    volume = plane.expand(-1, -1, 15, -1, -1).clone()
+    volume[:, :, 4:8] = volume[:, :, 4:8].roll(1, 1)
+    volume = volume.movedim(2, axis + 2)
+    condition = make_condition(
+        volume, indices=(5, 6), axis=axis, position=(1, 2), patch=(5, 6)
+    )
+    # Include a crossing, fixed plane and unequal per-volume visible roots.
+    cross_axis = (axis + 1) % 3
+    cross = make_condition(volume, indices=(2,), axis=cross_axis)
+    mask = condition.mask | cross.mask
+    image = torch.where(condition.mask, condition.image, cross.image)
+    roots = condition.axis_masks | cross.axis_masks
+    roots[1, axis].flatten()[::3] = False
+    condition = replace(
+        condition,
+        image=image.to(dtype).detach().requires_grad_(),
+        mask=mask,
+        axis_masks=roots,
+        regions=condition.regions * 2 + cross.regions,
+    )
+    loss, gradient = compare_reference(volume.to(dtype), condition, radius)
+    assert loss > 0
+    assert gradient.abs().sum() > 0
+    assert gradient.masked_select(mask.expand_as(gradient)).abs().sum() == 0
+
+
+@pytest.mark.parametrize("length,radius", ((1, 2), (2, 1), (4, 2), (9, 1), (9, 12)))
+@pytest.mark.parametrize("active", (None, (0,), ()))
+def test_batched_joints_match_loop_for_boundaries_and_dropout(length, radius, active):
+    rng = torch.Generator().manual_seed(83)
+    volume = torch.randn(2, 3, length, 4, 5, generator=rng).softmax(1)
+    condition = make_condition(volume, indices=(0, length - 1))
+    condition = replace(condition, active_batches=active)
+    compare_reference(volume, condition, radius)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_batched_joints_match_loop_under_cuda_autocast():
+    volume = seam_volume(soft=True).cuda().half()
+    condition = make_condition(volume)
+    with torch.autocast("cuda", dtype=torch.float16):
+        compare_reference(volume, condition, 2)

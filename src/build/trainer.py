@@ -13,6 +13,7 @@ from src.config.data import get_resolution, get_sr_plane_groups
 from src.config.train import (
     get_schedule_steps,
     get_sr_resolution,
+    get_trainer_sections,
     normalize_train_config,
 )
 from src.data.provenance import fingerprint_data
@@ -80,7 +81,7 @@ def build_trainer(
     if connectivity_critic is not None:
         connectivity_critic = connectivity_critic.to(device)
     ema = build_ema(denoiser)
-    initial_weights = train.get("initial_weights")
+    initial_weights = None if sr else train["initial_weights"]
     if initial_weights is not None:
         root = Path(initial_weights)
         load_model(root / "generator.pt", denoiser)
@@ -139,21 +140,20 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
     train = cfg["train"]
     data = cfg["data"]
     generator = cfg["model"]["generator"]
-    loss = cfg["loss"]
-    conditioning = cfg["conditioning"]
-    profile = conditioning.get("spatial_profile", {"enabled": False, "num_bins": 16})
-    anchor = conditioning.get("anchor", {})
-    connectivity = loss.get("connectivity", {})
+    conditioning, loss = get_trainer_sections(cfg)
+    profile = conditioning["spatial_profile"]
+    anchor = conditioning["anchor"]
+    connectivity = loss["connectivity"]
     statistics = loss["group_statistics"]
     optim = cfg["optim"]
-    anchor_start_step, anchor_ramp_steps = (
-        (0, 0) if sr else get_schedule_steps(anchor, "conditioning.anchor")
+    anchor_start_step, anchor_ramp_steps = get_schedule_steps(
+        anchor, "conditioning.anchor"
     )
-    connectivity_start, connectivity_ramp = (
-        (0, 0) if sr else get_schedule_steps(connectivity, "loss.connectivity")
+    connectivity_start, connectivity_ramp = get_schedule_steps(
+        connectivity, "loss.connectivity"
     )
     if (
-        anchor.get("probability", 0.0) > 0.0
+        anchor["probability"] > 0.0
         and anchor_start_step < train["total_steps"]
         and train["volume_batch_size"] > train["real_batch_size"]
     ):
@@ -173,17 +173,17 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         profile_settings=profile,
         loss=DenoiserLossSettings(
             connectivity_local_weight=loss["connectivity_local_weight"],
-            connectivity_weight=connectivity.get("adversarial_weight", 0.0),
-            real_transition_weight=connectivity.get("real_transition_weight", 0.0),
-            anchor_continuity_weight=loss.get("anchor_continuity_weight", 0.0),
-            anchor_neighborhood_weight=loss.get("anchor_neighborhood_weight", 0.0),
-            anchor_neighborhood_radius=loss.get("anchor_neighborhood_radius", 2),
-            vf_weight=loss.get("volume_fraction_weight", 0.0),
-            profile_bins=profile.get("num_bins", 16),
-            profile_weight=loss.get("spatial_profile_weight", 0.0),
-            profile_gradient_weight=loss.get("spatial_profile_gradient_weight", 0.0),
-            consistency_weight=loss.get("downsample_consistency_weight", 0.0),
-            consistency_tolerance=loss.get("downsample_mse_tolerance", 0.0),
+            connectivity_weight=connectivity["adversarial_weight"],
+            real_transition_weight=connectivity["real_transition_weight"],
+            anchor_continuity_weight=loss["anchor_continuity_weight"],
+            anchor_neighborhood_weight=loss["anchor_neighborhood_weight"],
+            anchor_neighborhood_radius=loss["anchor_neighborhood_radius"],
+            vf_weight=loss["volume_fraction_weight"],
+            profile_bins=profile["num_bins"],
+            profile_weight=loss["spatial_profile_weight"],
+            profile_gradient_weight=loss["spatial_profile_gradient_weight"],
+            consistency_weight=loss["downsample_consistency_weight"],
+            consistency_tolerance=loss["downsample_mse_tolerance"],
             num_phases=data["num_phases"],
             group_statistics_weight=statistics["weight"],
             group_statistics_max_gap=statistics["max_gap"],
@@ -199,27 +199,25 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         ema_decay=optim["ema_decay"],
         r1_gamma=loss["r1_weight"],
         r1_interval=loss["r1_every_steps"],
-        anchor_training_probability=anchor.get("probability", 0.0),
+        anchor_training_probability=anchor["probability"],
         anchor_start_step=anchor_start_step,
         anchor_ramp_steps=anchor_ramp_steps,
-        anchor_pixel_loss_weight=loss.get("anchor_pixel_weight", 0.0),
-        anchor_shared_axis_probability=anchor.get("borrowed_plane_probability", 0.0),
-        anchor_bank_capacity=anchor.get("bank_capacity", 0),
-        anchor_plane_spacing=anchor.get("plane_spacing", 1),
+        anchor_pixel_loss_weight=loss["anchor_pixel_weight"],
+        anchor_shared_axis_probability=anchor["borrowed_plane_probability"],
+        anchor_bank_capacity=anchor["bank_capacity"],
+        anchor_plane_spacing=anchor["plane_spacing"],
         structure_every_steps=train["structure_every_steps"],
         group_statistics_start_step=statistics["start_step"],
         group_statistics_ramp_steps=statistics["ramp_steps"],
-        connectivity_max_gap=connectivity.get("max_slice_gap", 1),
+        connectivity_max_gap=connectivity["max_slice_gap"],
         connectivity_start_step=connectivity_start,
         connectivity_ramp_steps=connectivity_ramp,
-        connectivity_windows_per_plane=connectivity.get("windows_per_plane", 1),
+        connectivity_windows_per_plane=connectivity["windows_per_plane"],
         domain_dropout=1.0 - conditioning["domain_keep_probability"],
-        cfg_drop_each_probability=conditioning.get("dropout_probability_per_case", 0.0),
+        cfg_drop_each_probability=conditioning["dropout_probability_per_case"],
         latent_channels=generator["latent_channels"],
         amp_enabled=train["mixed_precision"] and device.type == "cuda",
         r2_gamma=loss["r2_weight"],
-        coarse_corruption_probability=conditioning.get(
-            "coarse_corruption_probability", 0.0
-        ),
-        coarse_corruption_strength=conditioning.get("coarse_corruption_strength", 0.0),
+        coarse_corruption_probability=conditioning["coarse_corruption_probability"],
+        coarse_corruption_strength=conditioning["coarse_corruption_strength"],
     )
