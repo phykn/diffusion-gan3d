@@ -42,18 +42,25 @@ def comparison(low, high, phases, path, show):
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # Match the field of view; the baseline adds no generated structure.
-    nearest = F.interpolate(low[None, None].float(), size=high.shape, mode="nearest")[
-        0, 0
-    ].long()
     fig, panels = plt.subplots(3, 3, figsize=(10, 10))
     for row, (title, volume) in enumerate(
-        (("LR", low), ("Nearest baseline", nearest), ("Generated HR", high))
+        (("LR", low), ("Nearest baseline", high), ("Generated HR", high))
     ):
         for axis, plane in enumerate(("xy", "xz", "yz")):
             index = volume.shape[axis] // 2
+            if row == 1:
+                # The three displayed planes match 3D nearest interpolation
+                # without allocating a second complete HR volume.
+                source_index = index * low.shape[axis] // high.shape[axis]
+                image = low.select(axis, source_index)
+                size = tuple(n for a, n in enumerate(high.shape) if a != axis)
+                image = F.interpolate(
+                    image[None, None].float(), size=size, mode="nearest"
+                )[0, 0]
+            else:
+                image = volume.select(axis, index)
             panels[row, axis].imshow(
-                volume.select(axis, index).numpy(),
+                image.numpy(),
                 cmap="gray",
                 vmin=0,
                 vmax=max(1, phases - 1),

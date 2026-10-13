@@ -37,12 +37,25 @@ class Diffusion(nn.Module):
         alpha_bars = log_alpha_bars.exp()
         alphas = torch.ones_like(alpha_bars)
         alphas[1:] = (log_alpha_bars[1:] - log_alpha_bars[:-1]).exp()
-        betas = 1.0 - alphas
+        betas = torch.zeros_like(alphas)
+        betas[1:] = -(log_alpha_bars[1:] - log_alpha_bars[:-1]).expm1()
+        variances = -log_alpha_bars.expm1()
+        clean_coef = betas[1:] * alpha_bars[:-1].sqrt() / variances[1:]
+        current_coef = alphas[1:].sqrt() * variances[:-1] / variances[1:]
+        posterior_variance = betas[1:] * variances[:-1] / variances[1:]
 
         self.timesteps = timesteps
         self.register_buffer("alpha_bars", alpha_bars.to(torch.float32))
         self.register_buffer("alphas", alphas.to(torch.float32))
         self.register_buffer("betas", betas.to(torch.float32))
+        # Form differences and ratios before rounding near-one schedule values.
+        for name, values in (
+            ("noise_std", variances.sqrt()),
+            ("posterior_clean_coef", clean_coef),
+            ("posterior_current_coef", current_coef),
+            ("posterior_variance", posterior_variance),
+        ):
+            self.register_buffer(name, values.to(torch.float32), persistent=False)
 
     def add_noise(
         self,
@@ -78,9 +91,17 @@ class Diffusion(nn.Module):
             step_noise = self.validate_shape("step_noise", step_noise, clean)
 
         states = transitions + 1
-        alpha = self.extract(self.alphas, states, clean)
-        beta = self.extract(self.betas, states, clean)
-        current = alpha.sqrt() * previous + beta.sqrt() * step_noise
+        dtype = (
+            torch.float32
+            if clean.dtype in (torch.float16, torch.bfloat16)
+            else clean.dtype
+        )
+        alpha = self.extract(self.alphas, states, clean, dtype=dtype)
+        beta = self.extract(self.betas, states, clean, dtype=dtype)
+        current = (
+            alpha.sqrt().to(clean.dtype) * previous
+            + beta.sqrt().to(clean.dtype) * step_noise
+        )
         return previous, current
 
     def sample_posterior(
@@ -113,7 +134,7 @@ class Diffusion(nn.Module):
             noise = self.validate_shape("noise", noise, current)
 
         active = active.reshape((-1,) + (1,) * (current.ndim - 1))
-        sample = mean + variance.sqrt() * noise
+        sample = mean + variance.sqrt().to(current.dtype) * noise
         return torch.where(active, sample, pred)
 
     @torch.no_grad()
@@ -165,7 +186,8 @@ class Diffusion(nn.Module):
             noise = self.validate_shape("noise", noise, clean)
 
         alpha_bar = self.extract(self.alpha_bars, states, clean)
-        return alpha_bar.sqrt() * clean + (1.0 - alpha_bar).sqrt() * noise
+        std = self.extract(self.noise_std, states, clean)
+        return alpha_bar.sqrt() * clean + std * noise
 
     def get_posterior(
         self,
@@ -173,18 +195,17 @@ class Diffusion(nn.Module):
         pred: torch.Tensor,
         transitions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        states = transitions + 1
-
-        alpha_bar_prev = self.extract(self.alpha_bars, transitions, current)
-        alpha_bar_curr = self.extract(self.alpha_bars, states, current)
-        alpha = self.extract(self.alphas, states, current)
-        beta = self.extract(self.betas, states, current)
-        denom = (1.0 - alpha_bar_curr).clamp_min(torch.finfo(current.dtype).tiny)
-
-        clean_coef = beta * alpha_bar_prev.sqrt() / denom
-        current_coef = alpha.sqrt() * (1.0 - alpha_bar_prev) / denom
+        clean_coef = self.extract(self.posterior_clean_coef, transitions, current)
+        current_coef = self.extract(self.posterior_current_coef, transitions, current)
         mean = clean_coef * pred + current_coef * current
-        variance = (beta * (1.0 - alpha_bar_prev) / denom).clamp_min(0)
+        dtype = (
+            torch.float32
+            if current.dtype in (torch.float16, torch.bfloat16)
+            else current.dtype
+        )
+        variance = self.extract(
+            self.posterior_variance, transitions, current, dtype=dtype
+        )
         return mean, variance
 
     @staticmethod
@@ -192,10 +213,11 @@ class Diffusion(nn.Module):
         values: torch.Tensor,
         timesteps: torch.Tensor,
         ref: torch.Tensor,
+        dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         coeff = values.to(
             device=ref.device,
-            dtype=ref.dtype,
+            dtype=ref.dtype if dtype is None else dtype,
         ).index_select(0, timesteps.to(ref.device, dtype=torch.long))
         return coeff.reshape((ref.shape[0],) + (1,) * (ref.ndim - 1))
 

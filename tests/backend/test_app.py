@@ -149,6 +149,19 @@ def test_generate_can_return_raw_labels(client: TestClient) -> None:
     assert len(response.content) == 4 * 4 * 4
 
 
+@pytest.mark.parametrize("seed", [2**64, 2**100, True, 1.5])
+def test_generate_rejects_invalid_seed_before_inference(client, service, seed):
+    response = client.post("/generate", json={"seed": seed})
+    assert response.status_code == 422
+    assert not service.calls
+
+
+def test_generate_accepts_largest_torch_seed(client, service):
+    response = client.post("/generate", json={"seed": 2**64 - 1})
+    assert response.status_code == 200
+    assert service.calls[0]["seed"] == 2**64 - 1
+
+
 def test_metrics_are_opt_in_and_remain_under_generation_lock(client, monkeypatch):
     calls = []
 

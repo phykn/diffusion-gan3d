@@ -33,15 +33,16 @@ class ChannelNorm3D(nn.Module):
             self.register_parameter("shift", None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dtype = x.dtype
+        if dtype in (torch.float16, torch.bfloat16):
+            x = x.float()
         var, mean = torch.var_mean(
             x,
             dim=1,
             keepdim=True,
             correction=0,
         )
-        mean = mean.to(dtype=x.dtype)
-        inv_std = torch.rsqrt(var + self.eps).to(dtype=x.dtype)
-        x = (x - mean) * inv_std
+        x = ((x - mean) * torch.rsqrt(var + self.eps)).to(dtype=dtype)
         if self.scale is None:
             return x
         shape = (1, -1, 1, 1, 1)

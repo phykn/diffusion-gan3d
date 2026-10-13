@@ -69,7 +69,7 @@ class GenerateRequest(BaseModel):
     size: Dimension | None = None
     vf: list[Probability] | None = Field(default=None, max_length=256)
     domain: int | None = Field(default=None, ge=0)
-    seed: int | None = Field(default=None, ge=0)
+    seed: int | None = Field(default=None, ge=0, le=2**64 - 1, strict=True)
     guidance: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     anchor_strength: Probability | None = None
     height_origin: float = Field(default=0.0, ge=0, allow_inf_nan=False)

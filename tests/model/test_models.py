@@ -9,6 +9,20 @@ from src.model.denoiser import ChannelNorm3D, Denoiser3D
 from src.model.layers import AdaptiveNorm
 
 
+def test_channel_norm_preserves_large_half_precision_features():
+    inputs = torch.tensor([-1000.0, 500.0, 1000.0, -500.0], dtype=torch.float16)
+    inputs = inputs.reshape(1, 4, 1, 1, 1).requires_grad_()
+    norm = ChannelNorm3D(4, affine=False)
+    output = norm(inputs)
+    expected = norm(inputs.detach().float()).to(inputs.dtype)
+
+    assert output.dtype == inputs.dtype
+    assert torch.allclose(output, expected, atol=1e-3, rtol=1e-3)
+    output[:, 0].sum().backward()
+    assert bool(torch.isfinite(inputs.grad).all())
+    assert bool((inputs.grad != 0).any())
+
+
 def _denoiser(
     *,
     checkpointing: bool = False,

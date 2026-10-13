@@ -28,6 +28,38 @@ def test_vp_schedule_is_monotonic() -> None:
     assert bool(torch.all((process.betas[1:] > 0) & (process.betas[1:] < 1)))
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_small_schedule_preserves_noise_and_posterior(dtype) -> None:
+    process = Diffusion(4, beta_min=0.0, beta_max=1e-8)
+    clean = torch.zeros(1, 1, dtype=dtype)
+    noisy = process.add_noise(clean, 2, noise=torch.ones_like(clean))
+    expected = (-torch.expm1(torch.tensor(-1.25e-9, dtype=torch.float64))).sqrt()
+    assert torch.allclose(noisy.float(), expected.float().reshape(1, 1), rtol=0.01)
+
+    current = torch.ones_like(clean)
+    sample = process.sample_posterior(
+        current, current, 1, noise=torch.zeros_like(current)
+    )
+    assert torch.allclose(sample.float(), torch.ones_like(sample).float(), rtol=0.01)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_small_schedule_preserves_markov_step_noise(dtype) -> None:
+    process = Diffusion(4, beta_min=0.0, beta_max=1e-8)
+    clean = torch.zeros(1, 1, dtype=dtype)
+    previous, current = process.sample_pair(
+        clean,
+        0,
+        previous_noise=torch.zeros_like(clean),
+        step_noise=torch.ones_like(clean),
+    )
+    expected = (-torch.expm1(torch.tensor(-3.125e-10, dtype=torch.float64))).sqrt()
+
+    assert torch.equal(previous, clean)
+    assert current.dtype == dtype
+    assert torch.allclose(current.float(), expected.float().reshape(1, 1), rtol=0.01)
+
+
 def test_sample_pair_uses_correlated_markov_transition() -> None:
     process = Diffusion(6)
     clean = torch.linspace(-1.0, 1.0, 2 * 2 * 3 * 3).reshape(2, 2, 3, 3)

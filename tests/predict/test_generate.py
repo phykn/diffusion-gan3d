@@ -368,10 +368,11 @@ def test_unit_guidance_uses_one_conditioned_prediction_per_transition() -> None:
     assert all(call.vf is not None for call in model.calls)
 
 
-def test_volume_fraction_normalization_handles_large_finite_values() -> None:
+@pytest.mark.parametrize("weight", (3e38, 1e308))
+def test_volume_fraction_normalization_handles_large_finite_values(weight) -> None:
     generator = _generator(_ControlledModel(), Diffusion(1))
 
-    vf = generator.prepare_vf((3e38, 3e38, 3e38))
+    vf = generator.prepare_vf((weight, weight, weight))
 
     assert vf is not None
     assert torch.all(vf > 0)

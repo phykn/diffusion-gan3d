@@ -224,10 +224,11 @@ class Generator:
             raise ValueError("vf values must be finite.")
         if bool((values < 0).any()):
             raise ValueError("vf values must be non-negative.")
-        total = values.sum()
-        if total == 0:
+        maximum = values.max()
+        if maximum == 0:
             raise ValueError("vf sum must not be zero.")
-        return (values / total).to(torch.float32).unsqueeze(0)
+        values = values / maximum
+        return (values / values.sum()).to(torch.float32).unsqueeze(0)
 
     @torch.no_grad()
     def _sample_clean(

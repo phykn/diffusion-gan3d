@@ -5,14 +5,14 @@ from src.plane import AXES
 LABEL_CHUNK_ELEMENTS = 1024**2
 
 
-def _label_chunks(values):
+def _label_chunks(values, num_phases=None):
     # Split views before conversion, including for non-contiguous input. A
     # flatten/reshape of the full input could itself allocate another volume.
     pending = [values]
     while pending:
         part = pending.pop()
         if part.numel() <= LABEL_CHUNK_ELEMENTS:
-            yield phase_labels(part)
+            yield phase_labels(part, num_phases)
         else:
             axis = max(range(part.ndim), key=lambda axis: part.shape[axis])
             pending.extend(part.split((part.shape[axis] + 1) // 2, dim=axis))
@@ -78,9 +78,15 @@ def phase_fraction(values, phase: int = 0) -> float:
 
 
 def phase_fractions(values, num_phases: int) -> torch.Tensor:
-    labels = phase_labels(values, num_phases).reshape(-1)
-    counts = torch.bincount(labels, minlength=num_phases)
-    return counts.to(torch.float64).div(labels.numel())
+    values = torch.as_tensor(values)
+    counts = None
+    for labels in _label_chunks(values, num_phases):
+        chunk_counts = torch.bincount(labels.reshape(-1), minlength=num_phases)
+        if counts is None:
+            counts = chunk_counts
+        else:
+            counts.add_(chunk_counts)
+    return counts.to(torch.float64).div(values.numel())
 
 
 def voxel_accuracy(actual, expected) -> float:

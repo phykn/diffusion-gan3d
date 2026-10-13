@@ -54,10 +54,30 @@ function parseLabelPng(buffer) {
   return { ...header, compressed: joinBytes(compressedRows) }
 }
 
-async function inflate(bytes) {
+async function inflate(bytes, expectedSize) {
   if (typeof DecompressionStream === 'undefined') throw new Error('This browser cannot decode PNG label data.')
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'))
-  return new Uint8Array(await new Response(stream).arrayBuffer())
+  const reader = stream.getReader()
+  const chunks = []
+  let size = 0
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      size += value.length
+      if (size > expectedSize) {
+        throw new Error('PNG pixel data does not match its declared dimensions.')
+      }
+      chunks.push(value)
+    }
+    return joinBytes(chunks)
+  } finally {
+    try {
+      await reader.cancel()
+    } finally {
+      reader.releaseLock()
+    }
+  }
 }
 
 function paeth(left, above, upperLeft) {
@@ -106,8 +126,12 @@ export async function decodePngLabels(buffer) {
   const channels = png.colorType === 2 ? 3 : 1
   const rowBytes = Math.ceil(png.width * channels * png.bitDepth / 8)
   const bytesPerPixel = Math.max(1, Math.ceil(channels * png.bitDepth / 8))
-  const decoded = await inflate(png.compressed)
-  if (png.width < 1 || png.height < 1 || decoded.length !== (rowBytes + 1) * png.height) {
+  const expectedSize = (rowBytes + 1) * png.height
+  if (png.width < 1 || png.height < 1 || !Number.isSafeInteger(expectedSize)) {
+    throw new Error('PNG pixel data does not match its declared dimensions.')
+  }
+  const decoded = await inflate(png.compressed, expectedSize)
+  if (decoded.length !== expectedSize) {
     throw new Error('PNG pixel data does not match its declared dimensions.')
   }
   const labels = new Uint8Array(png.width * png.height)

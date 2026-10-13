@@ -8,6 +8,8 @@ psutil
 PyYAML
 scipy
 tensorboard
+# TensorBoard dependency: fixes Windows device-path denial of service.
+Werkzeug>=3.1.9
 torch
 torch-fidelity
 torchmetrics

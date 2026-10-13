@@ -5,6 +5,7 @@ from itertools import product
 
 import torch
 
+from src.anchor import anchor_probabilities
 from src.prepare.resize import phase_channels
 
 
@@ -178,13 +179,15 @@ def validate_base_anchors(base, anchors, shape, margin) -> VolumeCondition | Non
         if parts is None:
             continue
         source, target = parts
-        image = anchor.image.cpu()
-        expected = (
-            phase_channels(image[None], base.clean.shape[1])[0]
-            if image.ndim == 2
-            else image.float()
-        )
-        expected = expected[(slice(None), *(target[a] for a in axes))] * 2 - 1
+        image = anchor.image[(..., *(target[a] for a in axes))]
+        expected = anchor_probabilities(
+            image,
+            1,
+            base.clean.shape[1],
+            torch.device("cpu"),
+            torch.float32,
+            validate=True,
+        )[0] * 2 - 1
         known = base.clean[(0, slice(None), *source)].squeeze(axis + 1)
         if not torch.allclose(known, expected, atol=1e-5, rtol=0):
             raise ValueError("anchor conflicts with the preserved base region.")
