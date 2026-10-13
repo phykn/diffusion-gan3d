@@ -33,6 +33,8 @@ class DenoiserLossSettings:
     group_statistics_tolerance: float = 0.01
     preserve_height: bool = False
     anchor_continuity_weight: float = 0.0
+    anchor_neighborhood_weight: float = 0.0
+    anchor_neighborhood_radius: int = 2
 
 
 def denoiser_objective(
@@ -101,6 +103,17 @@ def denoiser_objective(
         total = total + contribution
         diagnostics["loss/anchor_continuity"] = batch.anchor_continuity_loss.detach()
         diagnostics["anchor_continuity/contribution"] = contribution.detach()
+    if batch.anchor_neighborhood_loss is not None:
+        contribution = (
+            batch.anchor_ramp
+            * settings.anchor_neighborhood_weight
+            * batch.anchor_neighborhood_loss
+        )
+        total = total + contribution
+        diagnostics["loss/anchor_neighborhood"] = (
+            batch.anchor_neighborhood_loss.detach()
+        )
+        diagnostics["anchor_neighborhood/contribution"] = contribution.detach()
     if (
         settings.group_statistics_weight > 0
         and batch.transition == 0

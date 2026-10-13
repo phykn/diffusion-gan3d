@@ -68,6 +68,7 @@ class DenoiserBatch:
     coarse_target: torch.Tensor | None = None
     real_transition_loss: torch.Tensor | None = None
     anchor_continuity_loss: torch.Tensor | None = None
+    anchor_neighborhood_loss: torch.Tensor | None = None
     observed_axes: tuple[int, ...] | None = None
     group_statistics_ramp: float = 1.0
 

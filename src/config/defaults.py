@@ -35,6 +35,8 @@ STAGE_DEFAULTS = {
         "loss.spatial_profile_weight": 1.0,
         "loss.spatial_profile_gradient_weight": 0.0,
         "loss.anchor_continuity_weight": 0.1,
+        "loss.anchor_neighborhood_weight": 0.1,
+        "loss.anchor_neighborhood_radius": 2,
         "conditioning.dropout_probability_per_case": 0.05,
         "conditioning.anchor.start_step": 0,
         "conditioning.anchor.ramp_steps": 500,

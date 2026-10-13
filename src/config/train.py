@@ -135,6 +135,11 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         raise ValueError("loss.group_statistics.max_gap must be a positive integer.")
     get_schedule_steps(statistics, "loss.group_statistics")
     if stage == "low_res":
+        radius = cfg["loss"]["anchor_neighborhood_radius"]
+        if type(radius) is not int or radius < 1:
+            raise ValueError(
+                "loss.anchor_neighborhood_radius must be a positive integer."
+            )
         gap = cfg["loss"]["connectivity"].get("max_slice_gap", 1)
         if type(gap) is not int or gap < 1:
             raise ValueError(

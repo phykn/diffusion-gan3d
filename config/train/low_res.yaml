@@ -31,6 +31,8 @@ loss:
 
   anchor_pixel_weight: 0.05
   anchor_continuity_weight: 0.1
+  anchor_neighborhood_weight: 0.1
+  anchor_neighborhood_radius: 2
   volume_fraction_weight: 1.0
 
   group_statistics:

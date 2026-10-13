@@ -27,6 +27,7 @@ from src.train.conditioning import ConditionSampler
 from src.train.ema import update_ema
 from src.train.loss.anchor import SoftAnchorLoss
 from src.train.loss.anchor_continuity import compute_anchor_continuity_loss
+from src.train.loss.anchor_neighborhood import compute_anchor_neighborhood_loss
 from src.train.loss.denoiser import DenoiserLossSettings, denoiser_objective
 from src.train.loss.gan import (
     active_groups,
@@ -396,7 +397,10 @@ class Trainer:
         statistics = (
             self._transition_statistics(prepared)
             if continuity
-            or (self.settings.loss.real_transition_weight > 0 and prepared.transition == 0)
+            or (
+                self.settings.loss.real_transition_weight > 0
+                and prepared.transition == 0
+            )
             else None
         )
         return DenoiserBatch(
@@ -432,6 +436,9 @@ class Trainer:
                 else None
             ),
             observed_axes=tuple(self.streams[prepared.domain]),
+            anchor_neighborhood_loss=self._anchor_neighborhood_loss(
+                prepared, clean_probs
+            ),
             group_statistics_ramp=prepared.group_statistics_ramp,
         )
 
@@ -456,6 +463,22 @@ class Trainer:
             self.settings.connectivity_max_gap,
             prepared.model_conditions.get("height"),
         )
+        self.diagnostics.update(diagnostics)
+        return loss
+
+    def _anchor_neighborhood_loss(self, prepared, clean_probs):
+        selection = prepared.selection
+        if selection is None or selection.condition is None:
+            return None
+        with torch.set_grad_enabled(
+            torch.is_grad_enabled()
+            and self.settings.loss.anchor_neighborhood_weight > 0
+        ):
+            loss, diagnostics = compute_anchor_neighborhood_loss(
+                clean_probs,
+                self.visible_anchor(selection.condition, prepared.presence.anchor),
+                self.settings.loss.anchor_neighborhood_radius,
+            )
         self.diagnostics.update(diagnostics)
         return loss
 

@@ -1049,6 +1049,80 @@ def test_anchor_continuity_updates_x0_at_every_transition_and_records_metrics(
         assert record[key] == pytest.approx(metrics.diagnostics[key])
 
 
+@pytest.mark.parametrize("transition", (0, 1))
+@pytest.mark.parametrize("replay", (False, True))
+@pytest.mark.parametrize("weight", (0.0, 0.2))
+def test_anchor_neighborhood_covers_all_transitions_and_logs_with_zero_weight(
+    tmp_path, transition, replay, weight
+):
+    torch.manual_seed(17)
+    trainer, _, _ = _conditioning_trainer(anchored=True)
+    trainer.settings = replace(
+        trainer.settings,
+        loss=replace(trainer.settings.loss, anchor_neighborhood_weight=weight),
+    )
+    trainer.conditions.settings = trainer.settings
+    if replay:
+        trainer.step(0, transition=0)
+    original_update = trainer.update_denoiser
+
+    def check_gradient(batch):
+        assert batch.anchor_neighborhood_loss is not None
+        assert batch.anchor_neighborhood_loss.requires_grad == (weight > 0)
+        if weight > 0:
+            (gradient,) = torch.autograd.grad(
+                batch.anchor_neighborhood_loss, batch.logits, retain_graph=True
+            )
+            assert gradient.abs().sum() > 0
+            assert gradient[batch.anchor.mask.expand_as(gradient)].abs().sum() == 0
+        return original_update(batch)
+
+    with patch.object(trainer, "update_denoiser", side_effect=check_gradient):
+        metrics = trainer.step(int(replay), transition=transition)
+    assert (metrics.anchor_planes > 1) == replay
+    assert metrics.diagnostics["loss/anchor_neighborhood"] > 0
+    assert metrics.diagnostics["anchor_neighborhood/contribution"] == pytest.approx(
+        weight * metrics.anchor_ramp * metrics.diagnostics["loss/anchor_neighborhood"]
+    )
+    with SummaryWriter(tmp_path) as writer:
+        write_metrics(writer, 2, metrics)
+    (record,) = read_metrics(tmp_path)
+    for key in (
+        "loss/anchor_neighborhood",
+        "anchor_neighborhood/contribution",
+        "anchor_neighborhood/far_pairs",
+        "anchor_neighborhood/distance0/tv",
+        "anchor_neighborhood/distance1/loss",
+        "anchor_neighborhood/distance1/tolerance",
+        "anchor_neighborhood/distance1/pairs",
+    ):
+        assert record[key] == pytest.approx(metrics.diagnostics[key])
+
+
+def test_zero_neighborhood_weight_preserves_training_and_generated_samples():
+    torch.manual_seed(29)
+    baseline, _, _ = _conditioning_trainer(anchored=True)
+    trainer = copy.deepcopy(baseline)
+    assert trainer.settings.loss.anchor_neighborhood_weight == 0
+    torch.manual_seed(31)
+    with patch.object(baseline, "_anchor_neighborhood_loss", return_value=None):
+        expected = baseline.step(0, transition=1)
+    torch.manual_seed(31)
+    actual = trainer.step(0, transition=1)
+    assert actual.generator == expected.generator
+    for name, value in baseline.denoiser.state_dict().items():
+        assert torch.equal(trainer.denoiser.state_dict()[name], value)
+    for name, value in baseline.ema_denoiser.state_dict().items():
+        assert torch.equal(trainer.ema_denoiser.state_dict()[name], value)
+    torch.manual_seed(37)
+    prepared = baseline.prepare_step(1, transition=0)
+    torch.manual_seed(41)
+    expected_pair = baseline.generate_pair(0, prepared.model_conditions, 8)
+    torch.manual_seed(41)
+    actual_pair = trainer.generate_pair(0, prepared.model_conditions, 8)
+    assert all(torch.equal(left, right) for left, right in zip(expected_pair, actual_pair))
+
+
 def test_vf_total_variation_uses_raw_prediction() -> None:
     trainer, _, _ = _conditioning_trainer(anchored=True)
     batches = trainer.conditions.get_batches(0)

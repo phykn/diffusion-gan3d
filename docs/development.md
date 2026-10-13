@@ -98,6 +98,36 @@ directional height matching, and TensorBoard output. They establish the objectiv
 and gradient behavior, not trained 3D reconstruction quality. Existing weights
 need further training for this loss to affect generation.
 
+## LR anchor neighborhood transitions
+
+`loss.anchor_neighborhood_weight` controls the same-volume neighborhood objective
+(default `0.1`). `loss.anchor_neighborhood_radius` is the number of adjacent pair
+layers on each normal side (default `2`). Distance `0` includes the anchor plane;
+distance `1` compares its immediate neighbor with the next plane. Distances use
+the closest endpoint to a visible anchor, in LR voxels. Both settings are LR-only.
+
+The objective runs on the selected transition's x0 prediction at every t and uses
+the anchor ramp. Measured and replay anchors both define neighborhoods. Fixed
+endpoints use detached condition fractions; only voxel pairs with both endpoints
+fixed are excluded. Overlapping regions count each voxel pair once per axis.
+Partial anchors restrict statistics to their projected coverage. Reference pairs
+are outside all same-axis neighborhoods within that coverage, separately for each
+volume and axis; an axis without reference pairs contributes nothing.
+
+Each adjacent plane pair supplies an oriented joint phase matrix. The detached
+reference is the voxel-count-weighted mean of far-pair matrices. The allowance is
+their weighted mean TV against leave-one-out reference means; a single reference
+pair has zero allowance. The loss is positive TV excess above that allowance,
+with a float32 epsilon at the boundary. Pair losses are weighted by valid voxel
+counts within each distance; available distances are averaged equally.
+
+TensorBoard records `loss/anchor_neighborhood`,
+`anchor_neighborhood/contribution`, and
+`anchor_neighborhood/distanceN/{loss,tv,tolerance,pairs}` even when the weight is
+zero. `far_pairs` counts reference voxel pairs and `reference_axes` counts supported
+volume-axis combinations. Zero pair counts mark unavailable distances. A zero
+weight avoids constructing an additional gradient graph for these diagnostics.
+
 ## Contracts to preserve
 
 - Volumes use `(z, y, x)` axes. Crop/height coordinates use source pixels;
