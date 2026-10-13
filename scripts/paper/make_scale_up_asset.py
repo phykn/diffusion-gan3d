@@ -32,7 +32,7 @@ from provenance import (
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
-from src.predict.tiling.sampler import TiledGenerator
+from src.predict.tiling.generator import TiledGenerator
 
 BLOCKS = (3, 3, 3)
 SCALE_MARGIN = 0

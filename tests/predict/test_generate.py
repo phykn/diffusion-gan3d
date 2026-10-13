@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,8 +17,9 @@ from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.predict.generator import Generator
 from src.predict.tiling.fusion import get_axis_windows, make_fusion
+from src.predict.tiling.generator import TiledGenerator
 from src.predict.tiling.layout import crop_output, make_tiles
-from src.predict.tiling.sampler import TiledGenerator
+from src.predict.tiling.sampler import TileSampler
 from src.predict.tiling.state import TileBuffer, VolumeState
 from src.storage import save_model
 from src.train.ema import build_ema
@@ -925,11 +926,11 @@ def test_boundary_tiles_use_only_real_volume_values(
 ) -> None:
     scaled = TiledGenerator(_generator(_PaddingModel(), Diffusion(1)))
 
-    def fill_ones(state: VolumeState, tiles: object) -> None:
+    def fill_ones(self, state: VolumeState, tiles: object) -> None:
         del tiles
         state.values.fill_(1.0)
 
-    monkeypatch.setattr(scaled, "fill_noise", fill_ones)
+    monkeypatch.setattr(TileSampler, "fill_noise", fill_ones)
     probs = scaled.generate_probs(
         shape=(9, 7, 5),
         overlap=1,
@@ -1149,7 +1150,7 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
         current.values.device,
     )
 
-    scaled.step(
+    TileSampler(scaled.generator).step(
         current,
         next_state,
         tiles,
@@ -1196,7 +1197,7 @@ def test_circular_slab_matches_full_weighted_fusion(shape, overlap):
         weights[region] += window
     expected.div_(weights)
     for _ in range(2):
-        scaled.step(
+        TileSampler(scaled.generator).step(
             current,
             next_state,
             tiles,
@@ -1255,7 +1256,7 @@ def test_boundary_tile_reads_only_bounded_context() -> None:
         current.values.device,
     )
 
-    scaled.step(
+    TileSampler(scaled.generator).step(
         current,
         next_state,
         tiles,
@@ -1419,7 +1420,8 @@ def test_base_condition_blends_the_transition() -> None:
     state = VolumeState(3, plan.shape, torch.device("cpu"))
     state.values.zero_()
 
-    scaled.condition_base(state, condition, torch.ones_like(condition.clean))
+    condition = replace(condition, clean=torch.ones_like(condition.clean))
+    condition.condition(state, Diffusion(1), time=0, block_size=3)
 
     blended = state.read(condition.region).float()
     torch.testing.assert_close(

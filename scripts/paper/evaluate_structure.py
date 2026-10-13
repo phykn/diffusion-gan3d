@@ -37,7 +37,7 @@ from src.evaluate.fid import compute_fid
 from src.evaluate.kid import compute_kid
 from src.evaluate.label import phase_fraction
 from src.evaluate.tortuosity import tortuosity
-from src.predict.tiling.sampler import TiledGenerator
+from src.predict.tiling.generator import TiledGenerator
 from src.storage import save_volume
 
 SEEDS = (0, 1, 2, 3)

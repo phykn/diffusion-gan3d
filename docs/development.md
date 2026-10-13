@@ -42,11 +42,20 @@ SR coarse inputs. `Trainer.prepare_step` selects the active critics and asks the
 sampler for a `StepPreparation`, including sampling diagnostics. Checkpoint state
 includes the sampler's replay bank and next-anchor choice through `train/state.py`.
 
-LR and SR inference supply conditions for each tile to the shared tiling sampler.
-The LR provider builds anchors, height, and phase profiles; the SR provider builds
-coarse inputs and height. The shared loop owns diffusion, global buffers, and
-tile fusion. `src/random.py` scopes seeded inference and KID evaluation to the CPU
-and selected CUDA device, restoring the caller's random state on exit.
+[TiledGenerator](../src/predict/tiling/generator.py) prepares LR geometry,
+anchors, height, and phase profiles. [SR tiling](../src/predict/sr/tiled.py)
+prepares coarse inputs and height. Both call
+[TileSampler](../src/predict/tiling/sampler.py), which owns state allocation,
+noise initialization, diffusion, fusion, and the final CPU output. Changes to
+that lifecycle belong in the sampler; stage-specific conditions stay with their
+provider. Existing-volume conditioning belongs to `VolumeCondition`.
+
+[LR memory estimates](../src/predict/memory.py) and
+[SR memory estimates](../src/predict/sr/memory.py) are checked before sampling.
+They share tile-buffer and model-workspace calculations, using the actual tile
+shape; SR additionally budgets coarse interpolation and label conversion.
+`src/random.py` scopes seeded inference and KID evaluation to the CPU and
+selected CUDA device, restoring the caller's random state on exit.
 
 ## LR anchor continuity
 

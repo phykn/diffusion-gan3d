@@ -5,7 +5,12 @@ import psutil
 import torch
 
 from src.predict.convert import label_chunk_depth
-from src.predict.memory import cuda_memory_budget, require_memory, workspace_bytes
+from src.predict.memory import (
+    cuda_memory_budget,
+    require_memory,
+    tile_buffer_bytes,
+    workspace_bytes,
+)
 from src.predict.tiling.layout import parse_shape
 
 
@@ -111,7 +116,7 @@ def estimate_sr_memory(
             + (4 * tile_voxels if shared else (tile_voxels if not labels else 0))
         )
         + 4 * (3 * num_phases + 2) * tile_voxels,
-        model_tile_bytes=4 * (12 * num_phases + 4) * tile_voxels,
+        model_tile_bytes=tile_buffer_bytes(num_phases, expanded),
         # A full-block prediction is cropped into a separate contiguous output.
         output_bytes=high_voxels if labels else 4 * num_phases * high_voxels,
         cpu_label_bytes=label_workspace if shared else 0,

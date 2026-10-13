@@ -30,7 +30,7 @@ def test_estimate_counts_states_but_bounds_fusion_by_tile_depth():
 
 
 def test_estimate_counts_margin_and_overlap_in_resolved_tiles():
-    from src.predict.tiling.sampler import TiledGenerator
+    from src.predict.tiling.generator import TiledGenerator
 
     gen = SimpleNamespace(
         device=torch.device("cpu"),
@@ -96,3 +96,26 @@ def test_cpu_budget_checked_before_state_allocation(monkeypatch):
         memory.select_storage(
             "cpu", memory.estimate_memory(256, 2, tile_size=32), generator("cpu")
         )
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_rectangular_model_workspace_fits_budget(monkeypatch, device):
+    gen = SimpleNamespace(
+        device=torch.device(device),
+        num_phases=3,
+        model=SimpleNamespace(input=SimpleNamespace(out_channels=32)),
+    )
+    estimate = memory.estimate_memory((16, 32, 256), 3)
+    monkeypatch.setattr(
+        memory.psutil, "virtual_memory", lambda: SimpleNamespace(available=1024**3)
+    )
+    monkeypatch.setattr(memory, "cuda_memory_budget", lambda device: 512 * 1024**2)
+    assert memory.select_storage(device, estimate, gen) == device
+
+
+@pytest.mark.parametrize("field", ["num_phases", "tile_size", "margin", "overlap"])
+def test_memory_estimate_rejects_boolean_geometry(field):
+    kwargs = dict(num_phases=3, tile_size=32, margin=0, overlap=0)
+    kwargs[field] = True
+    with pytest.raises(ValueError):
+        memory.estimate_memory(32, **kwargs)

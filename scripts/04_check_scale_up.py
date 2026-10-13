@@ -31,8 +31,8 @@ from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
 from src.evaluate.label import phase_fractions, voxel_accuracy
 from src.evaluate.seam import SeamQuality, measure_seams
+from src.predict.tiling.generator import TiledGenerator
 from src.predict.tiling.layout import TilePlan
-from src.predict.tiling.sampler import TiledGenerator
 from src.random import seeded_rng
 from src.storage import load_volume, save_volume
 

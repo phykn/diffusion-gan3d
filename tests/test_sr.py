@@ -779,7 +779,7 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
     tmp_path, monkeypatch, guidance
 ):
     import src.predict.tiling.sampler as tiled_sampler
-    from src.predict.tiling.sampler import TiledGenerator
+    from src.predict.tiling.sampler import TileSampler
     from src.predict.tiling.state import VolumeState
 
     cfg = sr_config(tmp_path, scale=2)
@@ -790,7 +790,7 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
     calls, writes = [], {}
     final_writes = torch.zeros(16, 12, 12, dtype=torch.int32)
     active = None
-    original_step, original_write = TiledGenerator.step, VolumeState.write
+    original_step, original_write = TileSampler.step, VolumeState.write
     original_output = tiled_sampler.write_output
 
     def step(sampler, *args, **kwargs):
@@ -830,7 +830,7 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
     def forbidden(*args, **kwargs):
         pytest.fail("an independent tile reverse chain was started")
 
-    monkeypatch.setattr(TiledGenerator, "step", step)
+    monkeypatch.setattr(TileSampler, "step", step)
     monkeypatch.setattr(VolumeState, "write", write)
     monkeypatch.setattr(tiled_sampler, "write_output", write_output)
     monkeypatch.setattr(api.generator, "predict", predict)

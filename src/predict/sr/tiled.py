@@ -1,10 +1,9 @@
 from dataclasses import replace
 
-import torch
 import torch.nn.functional as F
 
 from src.predict.tiling.layout import make_plan, make_tiles
-from src.predict.tiling.sampler import TiledGenerator
+from src.predict.tiling.sampler import TileSampler
 from src.predict.volume_condition import prepare_base
 from src.prepare.resize import coarse_region, resize_phases
 
@@ -33,12 +32,9 @@ def refine_tiled(
         margin=margin,
     )
     tiles = make_tiles(plan)
-    sampler = TiledGenerator(api.generator)
     known = prepare_base(
         base, api.num_phases, shape, margin, base_offset, 0, base is not None
     )
-    current, next_state = sampler.make_states(plan, "cpu")
-    sampler.fill_noise(current, tiles)
 
     def conditions(tile, index):
         origin = tuple(part.start - margin for part in tile.source)
@@ -59,22 +55,13 @@ def refine_tiled(
             result["height"] = height
         return result
 
-    probabilities = output_kind == "probabilities"
-    output = torch.empty(
-        (api.num_phases, *shape) if probabilities else shape,
-        dtype=torch.float32 if probabilities else torch.uint8,
-    )
-    sampler.sample(
-        current,
-        next_state,
+    return TileSampler(api.generator).sample(
         tiles,
         plan,
         base=known,
         vf=None,
         domain=domain,
-        output=output,
-        progress=False,
+        probabilities=output_kind == "probabilities",
         guidance=guidance,
         tile_conditions=conditions,
     )
-    return output

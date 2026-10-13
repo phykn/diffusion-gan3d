@@ -19,7 +19,7 @@ from src.data.source import infer_height_extents
 from src.model.diffusion import Diffusion
 from src.predict.generator import Generator
 from src.predict.sr.inference import SuperResolutionAPI
-from src.predict.tiling.sampler import TiledGenerator
+from src.predict.tiling.generator import TiledGenerator
 from src.prepare.resize import resize_crop
 from src.train.checkpoint import resolve_checkpoint
 from src.train.loss.anchor import SoftAnchorLoss

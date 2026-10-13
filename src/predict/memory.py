@@ -20,6 +20,10 @@ class MemoryEstimate:
     base_bytes: int = 0
 
     @property
+    def tile_shape(self) -> tuple[int, int, int]:
+        return tuple(min(size, self.tile_size) for size in self.generation_shape)
+
+    @property
     def storage_bytes(self) -> int:
         return self.state_bytes + self.fusion_bytes
 
@@ -41,15 +45,24 @@ def estimate_memory(
     base_shape=None,
 ) -> MemoryEstimate:
     shape = parse_shape(shape)
-    if not isinstance(num_phases, int) or num_phases < 1:
+    if (
+        isinstance(num_phases, bool)
+        or not isinstance(num_phases, int)
+        or num_phases < 1
+    ):
         raise ValueError("num_phases must be a positive integer.")
-    if not isinstance(margin, int) or margin < 0:
+    if isinstance(margin, bool) or not isinstance(margin, int) or margin < 0:
         raise ValueError("margin must be a non-negative integer.")
     generation_shape = tuple(size + 2 * margin for size in shape)
     tile_size = max(generation_shape) if tile_size is None else tile_size
-    if not isinstance(tile_size, int) or tile_size < 1:
+    if isinstance(tile_size, bool) or not isinstance(tile_size, int) or tile_size < 1:
         raise ValueError("tile_size must be a positive integer.")
-    if not isinstance(overlap, int) or overlap < 0 or 2 * overlap >= tile_size:
+    if (
+        isinstance(overlap, bool)
+        or not isinstance(overlap, int)
+        or overlap < 0
+        or 2 * overlap >= tile_size
+    ):
         raise ValueError("overlap must satisfy 0 <= 2 * overlap < tile_size.")
     stride = tile_size - 2 * overlap
     tile_shape = tuple(min(size, tile_size) for size in generation_shape)
@@ -67,8 +80,7 @@ def estimate_memory(
         * (num_phases + 1)
         * min(tile_size, generation_shape[0])
         * math.prod(generation_shape[1:]),
-        # Upload/download, prediction, weighting and posterior scratch tensors.
-        buffer_bytes=4 * (12 * num_phases + 4) * math.prod(tile_shape),
+        buffer_bytes=tile_buffer_bytes(num_phases, tile_shape),
         output_bytes=(
             4 * num_phases * math.prod(shape)
             if probabilities
@@ -78,6 +90,11 @@ def estimate_memory(
         if base_shape is not None
         else 0,
     )
+
+
+def tile_buffer_bytes(num_phases: int, shape: tuple[int, int, int]) -> int:
+    # Upload/download, prediction, weighting and posterior scratch tensors.
+    return 4 * (12 * num_phases + 4) * math.prod(shape)
 
 
 def workspace_bytes(generator, tile_size: int | tuple[int, int, int]) -> int:
@@ -115,7 +132,7 @@ def select_storage(storage: str, estimate: MemoryEstimate, generator) -> str:
     device = generator.device
     if storage == "cuda" and device.type != "cuda":
         raise ValueError("storage='cuda' requires a CUDA generator.")
-    reserve = workspace_bytes(generator, estimate.tile_size)
+    reserve = workspace_bytes(generator, estimate.tile_shape)
     gpu_budget = 0
     if device.type == "cuda":
         # The driver reports allocator-cached blocks as used even though this
