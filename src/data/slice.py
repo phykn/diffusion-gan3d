@@ -400,21 +400,38 @@ def _seam_sites(fixed, regions, rows):
     for flip in (0, 1):
         planes = fixed.transpose(1, 2) if flip else fixed
         clear = ~planes.any(2).unfold(0, rows, 1).any(-1)
-        selected = torch.zeros_like(clear)
+        below = torch.zeros_like(clear)
+        above = torch.zeros_like(clear)
         for region in regions:
+            span = (
+                slice(region.col, region.col + region.width)
+                if flip
+                else slice(region.row, region.row + region.height)
+            )
             if region.index >= rows:
-                span = (
-                    slice(region.col, region.col + region.width)
-                    if flip
-                    else slice(region.row, region.row + region.height)
-                )
-                selected[region.index - rows, span] = True
-        for sites, mask in (
-            (near_sites, selected & clear),
-            (far_sites, far_starts[:, None] & clear),
+                below[region.index - rows, span] = True
+            if region.index + rows < length:
+                above[region.index + 1, span] = True
+        far = far_starts[:, None] & clear
+        for sites, mask, step in (
+            (near_sites, below & clear, -1),
+            (near_sites, above & clear, 1),
+            (far_sites, far, -1),
+            (far_sites, far, 1),
         ):
             found = mask.nonzero()
-            sites.append(torch.cat((torch.full_like(found[:, :1], flip), found), 1))
+            if step < 0:
+                found[:, 0] += rows - 1
+            sites.append(
+                torch.cat(
+                    (
+                        torch.full_like(found[:, :1], flip),
+                        found,
+                        torch.full_like(found[:, :1], step),
+                    ),
+                    1,
+                )
+            )
     return torch.cat(near_sites), torch.cat(far_sites)
 
 
@@ -423,10 +440,12 @@ def _gather_bands(volume, axis, sites, rows):
     offsets = torch.arange(rows, device=sites.device)
     bands = []
     for flip in (0, 1):
-        _, starts, positions = sites[sites[:, 0] == flip].unbind(1)
+        _, starts, positions, steps = sites[sites[:, 0] == flip].unbind(1)
         planes = values.transpose(2, 3) if flip else values
         bands.append(
-            planes[:, starts[:, None] + offsets, positions[:, None]].movedim(0, 1)
+            planes[
+                :, starts[:, None] + steps[:, None] * offsets, positions[:, None]
+            ].movedim(0, 1)
         )
     return torch.cat(bands)
 

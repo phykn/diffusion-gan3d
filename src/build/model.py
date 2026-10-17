@@ -160,6 +160,7 @@ def build_seam_critic(cfg: dict) -> SeamCritic2D | None:
         embedding_channels=cfg["model"]["generator"]["embedding_channels"],
         num_domains=len(get_domains(cfg["data"])),
         gradient_checkpointing=cfg["model"]["gradient_checkpointing"],
+        time_scale=get_time_scale(cfg),
     )
     network.pyramid_min_size = critic["pyramid_min_size"]
     return network

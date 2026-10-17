@@ -242,6 +242,7 @@ class SeamCritic2D(CriticBase):
         embedding_channels: int,
         num_domains: int,
         gradient_checkpointing: bool = False,
+        time_scale: float = 1.0,
     ) -> None:
         super().__init__(
             input_channels=num_phases,
@@ -251,11 +252,19 @@ class SeamCritic2D(CriticBase):
             gradient_checkpointing=gradient_checkpointing,
         )
         self.axis_embedding = nn.Embedding(3, embedding_channels)
+        self.time_embedding = SinusoidalEmbedding(embedding_channels)
+        self.time_scale = time_scale
+        self.time_mlp = nn.Sequential(
+            nn.Linear(embedding_channels, embedding_channels),
+            nn.SiLU(),
+            nn.Linear(embedding_channels, embedding_channels),
+        )
 
     def forward(
         self,
         bands: torch.Tensor,
         axes: torch.Tensor,
+        time: torch.Tensor,
         domain: torch.Tensor,
     ) -> CriticScores:
         if bands.ndim != 4:
@@ -263,7 +272,13 @@ class SeamCritic2D(CriticBase):
         if axes.shape != (bands.shape[0],):
             raise ValueError("axes must have shape [B].")
         axes = axes.to(device=bands.device, dtype=torch.long)
-        embedding = self.axis_embedding(axes).to(dtype=bands.dtype)
+        axis_embedding = self.axis_embedding(axes).to(dtype=bands.dtype)
+        time_embedding = self.time_mlp(
+            self.time_embedding(time.to(device=bands.device) * self.time_scale).to(
+                dtype=bands.dtype
+            )
+        )
+        embedding = (axis_embedding + time_embedding) * INV_SQRT_TWO
         return self.score(bands, embedding, domain)
 
 

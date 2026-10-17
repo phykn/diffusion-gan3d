@@ -289,7 +289,9 @@ class Trainer:
             critic_connectivity, connectivity_r1 = 0.0, 0.0
             critic_connectivity_global, critic_connectivity_local = 0.0, 0.0
         if self.seam_critic is not None and self.settings.loss.anchor_seam_weight > 0.0:
-            self.update_seam_critic(seam_real, seam_fake, prepared.critic_domains)
+            self.update_seam_critic(
+                transition, seam_real, seam_fake, prepared.critic_domains
+            )
         denoiser_update = self.update_denoiser(
             self._make_denoiser_batch(
                 prepared=prepared,
@@ -961,6 +963,7 @@ class Trainer:
 
     def update_seam_critic(
         self,
+        transition: int,
         real: BandBatch,
         fake: BandBatch,
         domains: dict[int, int],
@@ -975,10 +978,16 @@ class Trainer:
         fake_values = fake.values.detach().float().requires_grad_(apply_r2)
         with self.autocast(self.settings.amp_enabled and not regularize):
             real_score = self.seam_critic(
-                real_values, real.axes, self.get_axis_domains(domains, real.axes)
+                real_values,
+                real.axes,
+                self.make_time(transition, len(real)),
+                self.get_axis_domains(domains, real.axes),
             )
             fake_score = self.seam_critic(
-                fake_values, fake.axes, self.get_axis_domains(domains, fake.axes)
+                fake_values,
+                fake.axes,
+                self.make_time(transition, len(fake)),
+                self.get_axis_domains(domains, fake.axes),
             )
             losses = critic_objective(
                 real_score,

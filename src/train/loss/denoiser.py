@@ -123,8 +123,14 @@ def denoiser_objective(
         and settings.anchor_seam_weight > 0.0
     ):
         fake = batch.seam_fake
+        time = torch.full(
+            (len(fake),),
+            batch.transition,
+            device=fake.values.device,
+            dtype=torch.long,
+        )
         seam = get_generator_loss(
-            seam_critic(fake.values, fake.axes, batch.seam_domains)
+            seam_critic(fake.values, fake.axes, time, batch.seam_domains)
         ).global_loss
         contribution = batch.anchor_ramp * settings.anchor_seam_weight * seam
         total = total + contribution
