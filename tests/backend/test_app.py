@@ -84,7 +84,9 @@ def client(
         "measure_volume",
         lambda _volume, device: VolumeMetrics(porosity=0.25, tortuosity=1.5),
     )
-    return TestClient(create_app(inference=service, config=load_server_config(SERVER_CONFIG)))
+    return TestClient(
+        create_app(inference=service, config=load_server_config(SERVER_CONFIG))
+    )
 
 
 def test_health_reports_loaded_device(client: TestClient) -> None:
@@ -133,7 +135,7 @@ def test_generate_returns_tiff_volume(
     assert response.headers["x-volume-shape"] == "4,4,4"
     assert response.headers["x-porosity"] == "0.25"
     assert response.headers["x-tortuosity"] == "1.5"
-    assert response.headers["x-tortuosity-axis"] == "1"
+    assert response.headers["x-tortuosity-axis"] == "0"
     volume = tifffile.imread(BytesIO(response.content))
     assert volume.shape == (4, 4, 4)
     assert volume.dtype == torch.empty((), dtype=torch.uint8).numpy().dtype
@@ -320,7 +322,9 @@ def test_create_app_requires_one_inference_source(service: FakeInference) -> Non
     with pytest.raises(ValueError, match="weights are required"):
         create_app(config=load_server_config(SERVER_CONFIG))
     with pytest.raises(ValueError, match="cannot be provided together"):
-        create_app("generator.pt", inference=service, config=load_server_config(SERVER_CONFIG))
+        create_app(
+            "generator.pt", inference=service, config=load_server_config(SERVER_CONFIG)
+        )
 
 
 @pytest.mark.parametrize("exception", [MemoryError, torch.OutOfMemoryError])
@@ -377,7 +381,9 @@ def test_memory_preflight_rejects_before_inference(client, service, monkeypatch)
 
 
 def test_oversized_body_is_rejected_before_json_decoding(service):
-    config = load_server_config(SERVER_CONFIG).model_copy(update={"max_request_bytes": 32})
+    config = load_server_config(SERVER_CONFIG).model_copy(
+        update={"max_request_bytes": 32}
+    )
     client = TestClient(create_app(inference=service, config=config))
     assert client.post("/generate", content=b" " * 33).status_code == 413
     assert not service.calls
@@ -388,7 +394,9 @@ def test_slow_downloads_bound_retained_results_without_holding_generation(
     service, format
 ):
     app = create_app(
-        inference=service, config=load_server_config(SERVER_CONFIG), max_inflight_downloads=2
+        inference=service,
+        config=load_server_config(SERVER_CONFIG),
+        max_inflight_downloads=2,
     )
     generate = next(route.endpoint for route in app.routes if route.path == "/generate")
     scope = {"type": "http", "method": "POST", "headers": []}
@@ -445,7 +453,9 @@ def test_slow_downloads_bound_retained_results_without_holding_generation(
 )
 def test_failed_generation_returns_download_slot(service, monkeypatch, failure):
     app = create_app(
-        inference=service, config=load_server_config(SERVER_CONFIG), max_inflight_downloads=1
+        inference=service,
+        config=load_server_config(SERVER_CONFIG),
+        max_inflight_downloads=1,
     )
     client = TestClient(app)
 
@@ -498,7 +508,9 @@ def test_prepare_uses_configured_image_limit(service):
 
 
 def test_apps_keep_independent_download_limits(service):
-    cfg = load_server_config(SERVER_CONFIG).model_copy(update={"max_inflight_downloads": 1})
+    cfg = load_server_config(SERVER_CONFIG).model_copy(
+        update={"max_inflight_downloads": 1}
+    )
     first = create_app(inference=service, config=cfg)
     second = create_app(inference=service, config=load_server_config(SERVER_CONFIG))
     assert first.state.download_slots.acquire(blocking=False)

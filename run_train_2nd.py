@@ -1,8 +1,7 @@
 import argparse
 from pathlib import Path
 
-import torch
-
+from src.device import default_device
 from src.train.run.sr import run_sr_train
 
 
@@ -32,8 +31,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--device",
-        choices=("cpu", "cuda"),
-        default="cuda" if torch.cuda.is_available() else "cpu",
+        choices=("cpu", "cuda", "mps"),
+        default=default_device(),
     )
     parser.add_argument(
         "--run-dir",

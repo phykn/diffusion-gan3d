@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+from src.device import adaptive_pool
 from src.model.layers import (
     INV_SQRT_THREE,
     INV_SQRT_TWO,
@@ -525,10 +526,10 @@ class Denoiser3D(nn.Module):
         mask: torch.Tensor,
         output_size: Sequence[int],
     ) -> torch.Tensor:
-        coverage = F.adaptive_avg_pool3d(mask, output_size)
-        pooled_values = F.adaptive_avg_pool3d(values, output_size)
+        coverage = adaptive_pool(mask, output_size)
+        pooled_values = adaptive_pool(values, output_size)
         # Keep input strength in both the values and coverage at every scale.
-        strength = F.adaptive_max_pool3d(mask, output_size)
+        strength = adaptive_pool(mask, output_size, maximum=True)
         pooled_values = (
             pooled_values / coverage.clamp_min(torch.finfo(values.dtype).eps) * strength
         )

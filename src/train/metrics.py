@@ -3,6 +3,7 @@ from dataclasses import dataclass, field, fields, is_dataclass, replace
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from src.device import wide_dtype
 from src.plane import PLANES
 from src.train.batch import DenoiserUpdate, StepPreparation
 
@@ -133,10 +134,9 @@ def materialize_metrics(value):
     if not tensors:
         return value
     device = tensors[0].device
+    dtype = wide_dtype(device)
     values = iter(
-        torch.stack([t.to(device=device, dtype=torch.float64) for t in tensors])
-        .cpu()
-        .tolist()
+        torch.stack([t.to(device=device, dtype=dtype) for t in tensors]).cpu().tolist()
     )
 
     def rebuild(item):

@@ -256,9 +256,9 @@ def test_connectivity_uses_axis_critic_domain_for_shared_context() -> None:
         center_slots=torch.ones(3, dtype=torch.long),
     )
 
-    domains = Trainer.get_connectivity_domains(
+    domains = Trainer.get_axis_domains(
         critic_domains={0: 0, 1: NULL_DOMAIN, 2: NULL_DOMAIN},
-        triplets=triplets,
+        axes=triplets.axes,
     )
 
     assert domains.tolist() == [0, NULL_DOMAIN, NULL_DOMAIN]
@@ -1120,7 +1120,9 @@ def test_zero_neighborhood_weight_preserves_training_and_generated_samples():
     expected_pair = baseline.generate_pair(0, prepared.model_conditions, 8)
     torch.manual_seed(41)
     actual_pair = trainer.generate_pair(0, prepared.model_conditions, 8)
-    assert all(torch.equal(left, right) for left, right in zip(expected_pair, actual_pair))
+    assert all(
+        torch.equal(left, right) for left, right in zip(expected_pair, actual_pair)
+    )
 
 
 def test_vf_total_variation_uses_raw_prediction() -> None:
@@ -1172,6 +1174,7 @@ def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) 
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
     )
     trainer.connectivity_critic = nn.Linear(2, 1)
+    trainer.seam_critic = nn.Linear(2, 1)
     trainer.settings.loss.connectivity_weight = 0.0
     trainer.settings.loss.real_transition_weight = 0.0
     trainer.step = Mock(side_effect=KeyboardInterrupt)
@@ -1225,6 +1228,7 @@ def test_fit_separates_weight_updates_and_checkpoint_archives(
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
     )
     trainer.connectivity_critic = nn.Linear(2, 1)
+    trainer.seam_critic = nn.Linear(2, 1)
     trainer.settings.loss.connectivity_weight = 0.0
     trainer.settings.loss.real_transition_weight = 0.0
     trainer.completed_steps = 0

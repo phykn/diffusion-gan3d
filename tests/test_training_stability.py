@@ -67,14 +67,22 @@ def test_lr_checkpoint_restores_training_state_without_rng(
     cfg["model"]["critic"]["input_mode"] = mode
     cfg["conditioning"]["dropout_probability_per_case"] = 0
     cfg["loss"]["connectivity"].update(adversarial_weight=0.25, ramp_steps=0)
+    cfg["loss"].update(anchor_seam_weight=0.25, anchor_seam_rows=1)
     trainer = build_trainer(cfg, torch.device("cpu"))
     trainer.step(0, transition=0)
     path = tmp_path / "training.pt"
     save_training(path, trainer)
     payload = torch.load(path, weights_only=True)
     assert payload["format"] == "diffusion-gan3d.lr.train"
-    assert {"connectivity", "connectivity_optim"} <= payload.keys()
-    assert set(payload["updates"]) == {*trainer.critics, "generator", "connectivity"}
+    assert {"connectivity", "connectivity_optim", "seam", "seam_optim"} <= (
+        payload.keys()
+    )
+    assert set(payload["updates"]) == {
+        *trainer.critics,
+        "generator",
+        "connectivity",
+        "seam",
+    }
     assert (
         not {"streams", "torch_rng", "cuda_rng", "numpy_rng", "python_rng"}
         & payload.keys()
@@ -104,6 +112,12 @@ def test_lr_checkpoint_restores_training_state_without_rng(
         restored.connectivity_optim.state_dict(),
         trainer.connectivity_optim.state_dict(),
     )
+    torch.testing.assert_close(
+        restored.seam_critic.state_dict(), trainer.seam_critic.state_dict()
+    )
+    torch.testing.assert_close(
+        restored.seam_optim.state_dict(), trainer.seam_optim.state_dict()
+    )
     for name, value in weights.items():
         torch.testing.assert_close(
             restored.denoiser.state_dict()[name], value, rtol=0, atol=0
@@ -120,6 +134,7 @@ def test_lr_checkpoint_restores_training_state_without_rng(
         key.startswith("input_gradient/") for row in metrics for key in row.diagnostics
     )
     assert restored.updates["connectivity"] > 0
+    assert restored.updates["seam"] > trainer.updates["seam"]
     assert any(row.generator_connectivity > 0 for row in metrics)
     assert any(row.critic_connectivity > 0 for row in metrics)
     for row in metrics:

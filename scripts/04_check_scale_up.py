@@ -29,6 +29,7 @@ from scripts.common.diagnostic import (
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
+from src.device import default_device
 from src.evaluate.label import phase_fractions, voxel_accuracy
 from src.evaluate.seam import SeamQuality, measure_seams
 from src.predict.tiling.generator import TiledGenerator
@@ -129,7 +130,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     )
     parser.add_argument(
         "--device",
-        choices=("cpu", "cuda"),
+        choices=("cpu", "cuda", "mps"),
         help="Default: CUDA when available, otherwise CPU.",
     )
     parser.add_argument("--seed", type=int, default=0)
@@ -273,9 +274,7 @@ def main() -> None:
             "--gt requires active anchors (--count > 0 and --anchor-strength > 0)."
         )
 
-    device = torch.device(
-        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    device = torch.device(args.device or default_device())
     weight = args.weight
     print(f"\nWeights : {weight.resolve()}", flush=True)
 

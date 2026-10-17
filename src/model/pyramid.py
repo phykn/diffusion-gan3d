@@ -1,4 +1,4 @@
-import torch.nn.functional as F
+from src.device import adaptive_pool
 
 
 def area_pyramid(images, min_size=16):
@@ -6,7 +6,5 @@ def area_pyramid(images, min_size=16):
         raise ValueError("pyramid_min_size must be an integer of at least two.")
     yield images
     while min(images.shape[-2:]) >= 2 * min_size:
-        images = F.interpolate(
-            images, size=tuple(n // 2 for n in images.shape[-2:]), mode="area"
-        )
+        images = adaptive_pool(images, tuple(n // 2 for n in images.shape[-2:]))
         yield images

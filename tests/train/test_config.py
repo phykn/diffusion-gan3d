@@ -1,11 +1,13 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
+from PIL import Image
 
 import src.config.generation as config_module
 from src.config.files import find_saved_config, load_yaml, save_yaml
 from src.config.generation import GenerationSettings, load_generation_settings
-from src.config.train import get_schedule_steps
+from src.config.train import get_schedule_steps, load_train_config
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -36,6 +38,27 @@ def test_find_saved_config_walks_from_numbered_checkpoint(tmp_path: Path) -> Non
     weight.write_bytes(b"weights")
 
     assert find_saved_config(weight) == config.resolve()
+
+
+def test_saved_yaml_without_height_extents_recovers_them_from_images(
+    tmp_path: Path,
+) -> None:
+    folders = {}
+    for plane, shape in (("xy", (8, 8)), ("xz", (12, 8)), ("yz", (12, 8))):
+        folder = tmp_path / plane
+        folder.mkdir()
+        Image.fromarray(np.zeros(shape, dtype=np.uint8)).save(folder / "0.png")
+        folders[plane] = [str(folder)]
+    data = {"domains": {0: folders}, "num_phases": 2, "crop_size": 8, "lo_res_size": 8}
+    config = tmp_path / "train.yaml"
+    save_yaml(config, {"data": data, "conditioning": {"height_enabled": True}})
+    assert load_train_config(config)["data"]["height_extents"] == {0: 12}
+    assert "height_extents" not in load_yaml(config)["data"]
+    save_yaml(config, {"data": data})
+    assert "height_extents" not in load_train_config(config)["data"]
+    data["height_extents"] = {0: 10}
+    save_yaml(config, {"data": data, "conditioning": {"height_enabled": True}})
+    assert load_train_config(config)["data"]["height_extents"] == {0: 10}
 
 
 def test_generation_settings_use_gen_yaml(

@@ -13,6 +13,7 @@ from scripts.common.cli import check_parser, resolve_weight, result_directory
 from src.config.data import validate_sr_source
 from src.config.files import load_yaml
 from src.config.train import normalize_train_config
+from src.device import default_device
 from src.predict.inference import LowResolutionAPI
 from src.predict.sr.inference import SuperResolutionAPI
 from src.prepare.resize import downsample, phase_channels
@@ -99,8 +100,8 @@ def main(argv=None):
     )
     parser.add_argument(
         "--device",
-        choices=("cpu", "cuda"),
-        default="cuda" if torch.cuda.is_available() else "cpu",
+        choices=("cpu", "cuda", "mps"),
+        default=default_device(),
     )
     parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)

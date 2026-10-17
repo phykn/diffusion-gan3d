@@ -11,6 +11,8 @@ def save_training(path: str | Path, trainer) -> None:
         format="diffusion-gan3d.lr.train",
         connectivity=trainer.connectivity_critic.state_dict(),
         connectivity_optim=trainer.connectivity_optim.state_dict(),
+        seam=trainer.seam_critic.state_dict(),
+        seam_optim=trainer.seam_optim.state_dict(),
         use_multi_anchor_next=trainer.conditions.use_multi_anchor_next,
         anchor_bank=trainer.conditions.anchor_bank.entries,
     )
@@ -36,9 +38,19 @@ def resume_training(trainer, payload: dict) -> None:
         or "connectivity" not in payload["updates"]
     ):
         raise ValueError("Connectivity training state is incomplete.")
+    seam = {"seam", "seam_optim"} & payload.keys()
+    if not seam and "seam" not in payload["updates"]:
+        if actual["loss"]["anchor_seam_weight"] > 0.0:
+            raise ValueError("Seam training state is missing.")
+        payload = {**payload, "updates": {**payload["updates"], "seam": 0}}
+    elif len(seam) < 2 or "seam" not in payload["updates"]:
+        raise ValueError("Seam training state is incomplete.")
     _restore_state(trainer, payload)
     trainer.connectivity_critic.load_state_dict(payload["connectivity"])
     trainer.connectivity_optim.load_state_dict(payload["connectivity_optim"])
+    if seam:
+        trainer.seam_critic.load_state_dict(payload["seam"])
+        trainer.seam_optim.load_state_dict(payload["seam_optim"])
     trainer.conditions.use_multi_anchor_next = payload["use_multi_anchor_next"]
     trainer.conditions.anchor_bank.entries = payload["anchor_bank"]
 

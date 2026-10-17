@@ -2,6 +2,7 @@ import numpy as np
 import scipy.ndimage as ndi
 import torch
 
+from src.device import wide_dtype
 from src.evaluate.label import phase_labels
 
 _CONNECTIVITY = ndi.generate_binary_structure(3, 1)
@@ -14,7 +15,7 @@ def transition_counts(previous, current, num_phases: int) -> torch.Tensor:
         raise ValueError("transition labels must have the same shape.")
     pairs = previous.reshape(-1) * num_phases + current.reshape(-1)
     counts = torch.bincount(pairs, minlength=num_phases * num_phases)
-    return counts.reshape(num_phases, num_phases).to(torch.float64)
+    return counts.reshape(num_phases, num_phases).to(wide_dtype(counts.device))
 
 
 def transition_tv(first, second) -> float:
@@ -37,8 +38,9 @@ def continuation_delta(first, second) -> float | None:
 
 
 def _transition_matrices(first, second) -> tuple[torch.Tensor, torch.Tensor]:
-    first = torch.as_tensor(first, dtype=torch.float64)
-    second = torch.as_tensor(second, dtype=torch.float64, device=first.device)
+    first = torch.as_tensor(first)
+    first = first.to(wide_dtype(first.device))
+    second = torch.as_tensor(second, dtype=first.dtype, device=first.device)
     if (
         first.ndim != 2
         or first.shape[0] != first.shape[1]

@@ -103,6 +103,7 @@ class ConditionSampler:
             anchor_ramp=0.0,
             connectivity_ramp=0.0,
             coarse_target=low,
+            coarse_mask=(coarse == low).all(1, keepdim=True),
             diagnostics={
                 "coarse_corruption_mse": (coarse - low).square().mean(),
                 "coarse_corruption_level": level.mean(),

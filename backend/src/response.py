@@ -159,7 +159,7 @@ def volume_response(
                 if metrics.tortuosity is None
                 else f"{metrics.tortuosity:.8g}",
                 "X-Pore-Phase": "0",
-                "X-Tortuosity-Axis": "1",
+                "X-Tortuosity-Axis": "0",
             }
         )
     if format == "raw":

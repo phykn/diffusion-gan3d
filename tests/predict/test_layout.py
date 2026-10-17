@@ -11,10 +11,14 @@ def test_snapped_starts_and_owned_regions_share_generation_geometry():
     assert plan.seams == ((6, 8), (), ())
     tiles = make_tiles(plan)
     assert [tile.source[0] for tile in tiles] == [
-        slice(0, 8), slice(4, 12), slice(5, 13)
+        slice(0, 8),
+        slice(4, 12),
+        slice(5, 13),
     ]
     assert [tile.target[0] for tile in tiles] == [
-        slice(0, 6), slice(6, 8), slice(8, 13)
+        slice(0, 6),
+        slice(6, 8),
+        slice(8, 13),
     ]
 
 

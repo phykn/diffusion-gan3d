@@ -20,8 +20,8 @@ def test_preserved_base_accepts_matching_anchor_formats(axis, kind, full_plane):
         image = torch.nn.functional.one_hot(image.long(), 3).permute(2, 0, 1).float()
     if kind.startswith("batched"):
         image = image.unsqueeze(0)
-    position = (0, 0) if full_plane else tuple(
-        p for a, p in enumerate((1, 2, 3)) if a != axis
+    position = (
+        (0, 0) if full_plane else tuple(p for a, p in enumerate((1, 2, 3)) if a != axis)
     )
     anchor = PlaneAnchor(image, axis, index, position)
 
@@ -32,5 +32,8 @@ def test_preserved_base_accepts_matching_anchor_formats(axis, kind, full_plane):
         conflicting[..., 0, :, :] = 1
     with pytest.raises(ValueError, match="conflicts"):
         validate_base_anchors(
-            base, (PlaneAnchor(conflicting, axis, anchor.index, position),), (6, 7, 8), 1
+            base,
+            (PlaneAnchor(conflicting, axis, anchor.index, position),),
+            (6, 7, 8),
+            1,
         )

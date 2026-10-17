@@ -144,7 +144,9 @@ def test_explicit_partial_anchor_position_preserves_all_global_axes(
     assert api.scaled.calls[0]["anchors"] == (anchor,)
 
 
-def test_seed_is_reproducible_without_changing_caller_rng(api: LowResolutionAPI) -> None:
+def test_seed_is_reproducible_without_changing_caller_rng(
+    api: LowResolutionAPI,
+) -> None:
     first = api.generate(seed=7)
     second = api.generate(seed=7)
     assert torch.equal(first, second)

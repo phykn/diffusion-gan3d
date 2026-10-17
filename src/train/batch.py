@@ -4,7 +4,7 @@ from typing import Literal
 import torch
 
 from src.anchor import AnchorCondition
-from src.data.slice import TripletBatch
+from src.data.slice import BandBatch, TripletBatch
 
 
 @dataclass(frozen=True)
@@ -66,9 +66,12 @@ class DenoiserBatch:
     fake_profiles: dict[int, torch.Tensor] = field(default_factory=dict)
     profile: torch.Tensor | None = None
     coarse_target: torch.Tensor | None = None
+    coarse_mask: torch.Tensor | None = None
     real_transition_loss: torch.Tensor | None = None
     anchor_continuity_loss: torch.Tensor | None = None
     anchor_neighborhood_loss: torch.Tensor | None = None
+    seam_fake: BandBatch | None = None
+    seam_domains: torch.Tensor | None = None
     observed_axes: tuple[int, ...] | None = None
     group_statistics_ramp: float = 1.0
 
@@ -86,6 +89,7 @@ class StepPreparation:
     anchor_ramp: float
     connectivity_ramp: float = 1.0
     coarse_target: torch.Tensor | None = None
+    coarse_mask: torch.Tensor | None = None
     group_statistics_ramp: float = 1.0
     diagnostics: dict[str, torch.Tensor] = field(default_factory=dict)
 

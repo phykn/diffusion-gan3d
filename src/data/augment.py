@@ -25,7 +25,9 @@ def augment_volumes(
     for volume, choice in zip(volumes, choices, strict=True):
         order = orders[choice // flip_count]
         volume = volume.permute(0, *(axis + 1 for axis in order))
-        flips = [axis for bit, axis in enumerate(axes) if choice % flip_count & (1 << bit)]
+        flips = [
+            axis for bit, axis in enumerate(axes) if choice % flip_count & (1 << bit)
+        ]
         result.append(volume.flip(flips) if flips else volume)
     return torch.stack(result)
 
@@ -82,6 +84,16 @@ class CriticAugment:
                     allowed = set(range(8)) if flips else set(range(4))
                 self.plane_transforms[get_axis(plane)] = tuple(sorted(allowed))
         self._index_cache: dict[tuple[torch.device, int, int], torch.Tensor] = {}
+
+    @property
+    def rotated_axes(self) -> tuple[int, ...]:
+        if self.plane_transforms is None or self.prob <= 0.0:
+            return ()
+        return tuple(
+            axis
+            for axis, allowed in self.plane_transforms.items()
+            if any(index % 2 for index in allowed)
+        )
 
     def apply_together(
         self,

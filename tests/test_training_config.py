@@ -59,6 +59,8 @@ from src.train.run.sr import run_sr_train
             "loss.anchor_neighborhood_radius",
             2,
         ),
+        ("low_res", "loss.anchor_seam_weight", "loss.anchor_seam_weight", 0.0),
+        ("low_res", "loss.anchor_seam_rows", "loss.anchor_seam_rows", 4),
         ("low_res", "loss.volume_fraction_weight", "loss.vf_weight", 0.0),
         ("low_res", "loss.spatial_profile_weight", "loss.profile_weight", 1.0),
         (
@@ -255,6 +257,34 @@ def test_anchor_neighborhood_weight_is_validated(value):
 def test_anchor_neighborhood_radius_is_validated(value):
     with pytest.raises(ValueError, match="anchor_neighborhood_radius"):
         normalize_train_config({"loss": {"anchor_neighborhood_radius": value}})
+
+
+@pytest.mark.parametrize("value", (0, -1, 0.5, True, None))
+def test_anchor_seam_rows_must_be_a_positive_integer(value):
+    with pytest.raises(ValueError, match="anchor_seam_rows"):
+        normalize_train_config({"loss": {"anchor_seam_rows": value}})
+
+
+@pytest.mark.parametrize("value", (-0.1, float("nan"), True))
+def test_anchor_seam_weight_must_be_finite_and_non_negative(value):
+    with pytest.raises(ValueError, match="anchor_seam_weight"):
+        normalize_train_config({"loss": {"anchor_seam_weight": value}})
+
+
+@pytest.mark.parametrize("weight", (0, 0.37))
+def test_anchor_seam_settings_are_explicit_and_lr_only(weight):
+    defaults = normalize_train_config({})["loss"]
+    assert (defaults["anchor_seam_weight"], defaults["anchor_seam_rows"]) == (0, 4)
+    settings = {"anchor_seam_weight": weight, "anchor_seam_rows": 2}
+    cfg = normalize_train_config({"loss": settings})
+    assert all(cfg["loss"][key] == value for key, value in settings.items())
+    assert normalize_train_config(cfg) == cfg
+    for key, value in settings.items():
+        with pytest.raises(ValueError, match=key):
+            normalize_train_config({"loss": {key: value}}, "sr")
+        assert key not in normalize_train_config({}, "sr")["loss"]
+    sr = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
+    assert _build_settings(sr, torch.device("cpu")).loss.anchor_seam_weight == 0
 
 
 @pytest.mark.parametrize("weight", (0, 0.37))

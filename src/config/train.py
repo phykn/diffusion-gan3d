@@ -1,4 +1,4 @@
-"""Resolve presets or saved run settings; the resolved dict is saved as train.yaml."""
+"""Resolve presets or saved run settings."""
 
 import math
 from collections.abc import Mapping, Sequence
@@ -14,6 +14,7 @@ from src.config.defaults import INACTIVE_DEFAULTS, STAGE_DEFAULTS, TRAIN_DEFAULT
 from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml
 from src.config.schema import validate_config_keys
 from src.config.values import validate_training_values
+from src.data.source import fill_height_extents
 from src.data.split import resolve_split
 from src.plane import PLANE_DIRECTIONS, PLANES
 
@@ -25,7 +26,7 @@ def load_train_config(
     if data is not None:
         cfg["data"] = str(data)
     cfg, external_data = load_external_data(cfg)
-    return normalize_loaded_train_config(cfg, stage, external_data)
+    return fill_height_extents(normalize_loaded_train_config(cfg, stage, external_data))
 
 
 def load_external_data(cfg: dict) -> tuple[dict, bool]:
@@ -134,6 +135,9 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
             raise ValueError(
                 "loss.anchor_neighborhood_radius must be a positive integer."
             )
+        rows = cfg["loss"]["anchor_seam_rows"]
+        if type(rows) is not int or rows < 1:
+            raise ValueError("loss.anchor_seam_rows must be a positive integer.")
         gap = cfg["loss"]["connectivity"]["max_slice_gap"]
         if type(gap) is not int or gap < 1:
             raise ValueError(

@@ -17,6 +17,7 @@ from scripts.common.cli import (
 from scripts.common.diagnostic import show_napari
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
+from src.device import default_device
 from src.plane import PLANES
 from src.random import seeded_rng
 from src.storage import save_volume
@@ -48,7 +49,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--device",
-        choices=("cpu", "cuda"),
+        choices=("cpu", "cuda", "mps"),
         help="Default: CUDA when available, otherwise CPU.",
     )
     parser.add_argument("--seed", type=int, default=0)
@@ -62,9 +63,7 @@ def main() -> None:
     if args.guidance is None:
         args.guidance = load_generation_settings().guidance
 
-    device = torch.device(
-        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    device = torch.device(args.device or default_device())
     weight = args.weight
     print(f"\nWeights : {weight.resolve()}", flush=True)
 

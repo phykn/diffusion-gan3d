@@ -347,3 +347,102 @@ def _relation_indices(
     if index - 2 * gap >= 0:
         return index - 2 * gap, index - gap, index
     return None
+
+
+@dataclass(frozen=True)
+class BandBatch:
+    values: torch.Tensor
+    axes: torch.Tensor
+
+    def __len__(self) -> int:
+        return self.values.shape[0]
+
+
+def sample_seam_bands(
+    volume: torch.Tensor,
+    condition: AnchorCondition | None,
+    rows: int,
+    generator: torch.Generator | None = None,
+) -> tuple[BandBatch, BandBatch]:
+    if type(rows) is not int or rows < 1:
+        raise ValueError("rows must be a positive integer.")
+    reference = volume.detach()
+    near, far = [], []
+    active = (
+        ()
+        if condition is None
+        else range(volume.shape[0])
+        if condition.active_batches is None
+        else condition.active_batches
+    )
+    for batch in active:
+        for axis in AXES:
+            regions = [region for region in condition.regions if region.axis == axis]
+            fixed = condition.mask[batch, 0].movedim(axis, 0)
+            if not regions or fixed.shape[0] <= rows:
+                continue
+            near_sites, far_sites = _seam_sites(fixed, regions, rows)
+            if not len(near_sites) or not len(far_sites):
+                continue
+            keep = torch.randperm(len(far_sites), generator=generator)
+            far_sites = far_sites[keep[: len(near_sites)].to(far_sites.device)]
+            near.append((_gather_bands(volume[batch], axis, near_sites, rows), axis))
+            far.append((_gather_bands(reference[batch], axis, far_sites, rows), axis))
+    return _band_batch(far, volume, rows), _band_batch(near, volume, rows)
+
+
+def _seam_sites(fixed, regions, rows):
+    length = fixed.shape[0]
+    indices = torch.tensor([region.index for region in regions], device=fixed.device)
+    distance = (torch.arange(length, device=fixed.device)[:, None] - indices).abs()
+    far_starts = (distance.amin(1) > rows).unfold(0, rows, 1).all(-1)
+    near_sites, far_sites = [], []
+    for flip in (0, 1):
+        planes = fixed.transpose(1, 2) if flip else fixed
+        clear = ~planes.any(2).unfold(0, rows, 1).any(-1)
+        selected = torch.zeros_like(clear)
+        for region in regions:
+            if region.index >= rows:
+                span = (
+                    slice(region.col, region.col + region.width)
+                    if flip
+                    else slice(region.row, region.row + region.height)
+                )
+                selected[region.index - rows, span] = True
+        for sites, mask in (
+            (near_sites, selected & clear),
+            (far_sites, far_starts[:, None] & clear),
+        ):
+            found = mask.nonzero()
+            sites.append(torch.cat((torch.full_like(found[:, :1], flip), found), 1))
+    return torch.cat(near_sites), torch.cat(far_sites)
+
+
+def _gather_bands(volume, axis, sites, rows):
+    values = volume.movedim(axis + 1, 1)
+    offsets = torch.arange(rows, device=sites.device)
+    bands = []
+    for flip in (0, 1):
+        _, starts, positions = sites[sites[:, 0] == flip].unbind(1)
+        planes = values.transpose(2, 3) if flip else values
+        bands.append(
+            planes[:, starts[:, None] + offsets, positions[:, None]].movedim(0, 1)
+        )
+    return torch.cat(bands)
+
+
+def _band_batch(parts, volume, rows):
+    if not parts:
+        return BandBatch(
+            values=volume.new_empty((0, volume.shape[1], rows, volume.shape[-1])),
+            axes=torch.empty(0, device=volume.device, dtype=torch.long),
+        )
+    return BandBatch(
+        values=torch.cat([values for values, _ in parts]),
+        axes=torch.cat(
+            [
+                torch.full((len(values),), axis, device=volume.device)
+                for values, axis in parts
+            ]
+        ),
+    )

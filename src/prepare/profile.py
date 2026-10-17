@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 
+from src.device import wide_dtype
+
 
 def rebin_profile(values, size):
     if type(size) is not int or size < 1 or values.ndim != 3 or values.numel() == 0:
@@ -9,12 +11,11 @@ def rebin_profile(values, size):
     depth = values.shape[-1]
     if size == depth:
         return values
-    edges = torch.linspace(
-        0, depth, size + 1, device=values.device, dtype=torch.float64
-    )
+    dtype = wide_dtype(values.device)
+    edges = torch.linspace(0, depth, size + 1, device=values.device, dtype=dtype)
     indices = edges.long().clamp_max(depth - 1)
     # Double precision avoids cancellation when subtracting nearby large integrals.
-    cumulative = F.pad(values.cumsum(-1, dtype=torch.float64), (1, 0))
+    cumulative = F.pad(values.cumsum(-1, dtype=dtype), (1, 0))
     integral = cumulative.index_select(-1, indices) + values.index_select(
         -1, indices
     ) * (edges - indices)

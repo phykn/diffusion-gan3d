@@ -56,6 +56,12 @@ def collect_image_groups(data: dict) -> ImageGroups:
     return domains
 
 
+def fill_height_extents(cfg: dict) -> dict:
+    if cfg["conditioning"]["height_enabled"] and "height_extents" not in cfg["data"]:
+        cfg["data"]["height_extents"] = infer_height_extents(cfg["data"])
+    return cfg
+
+
 def infer_height_extents(data: dict) -> dict[int, int | None]:
     extents = {}
     for domain, planes in collect_image_groups(data).items():

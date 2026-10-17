@@ -8,7 +8,7 @@ from src.build.data import (
     build_datasets,
     build_stream,
 )
-from src.build.model import build_diffusion, build_models
+from src.build.model import build_diffusion, build_models, build_seam_critic
 from src.config.data import get_resolution, get_sr_plane_groups
 from src.config.train import (
     get_schedule_steps,
@@ -76,10 +76,13 @@ def build_trainer(
     settings = _build_settings(cfg, device)
     critic_augment = build_augmentation(cfg)
     denoiser, critics, connectivity_critic = build_models(cfg)
+    seam_critic = build_seam_critic(cfg)
     denoiser = denoiser.to(device)
     critics = critics.to(device)
     if connectivity_critic is not None:
         connectivity_critic = connectivity_critic.to(device)
+    if seam_critic is not None:
+        seam_critic = seam_critic.to(device)
     ema = build_ema(denoiser)
     initial_weights = None if sr else train["initial_weights"]
     if initial_weights is not None:
@@ -90,11 +93,22 @@ def build_trainer(
             path = root / f"critic_{plane}.pt"
             load_model(path, critic_model)
         load_model(root / "critic_c.pt", connectivity_critic)
+        if (root / "critic_s.pt").is_file():
+            load_model(root / "critic_s.pt", seam_critic)
     denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
         denoiser,
         critics,
         connectivity_critic,
         cfg,
+    )
+    seam_optim = (
+        None
+        if seam_critic is None
+        else torch.optim.Adam(
+            seam_critic.parameters(),
+            lr=cfg["optim"]["critic_lr"],
+            betas=tuple(cfg["optim"]["adam_betas"]),
+        )
     )
     datasets = build_datasets(cfg, high_resolution=sr)
     streams = {
@@ -121,6 +135,8 @@ def build_trainer(
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,
             connectivity_optim=connectivity_optim,
+            seam_critic=seam_critic,
+            seam_optim=seam_optim,
             scaler=torch.amp.GradScaler("cuda", enabled=settings.amp_enabled),
             device=device,
             critic_augment=critic_augment,
@@ -178,6 +194,8 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
             anchor_continuity_weight=loss["anchor_continuity_weight"],
             anchor_neighborhood_weight=loss["anchor_neighborhood_weight"],
             anchor_neighborhood_radius=loss["anchor_neighborhood_radius"],
+            anchor_seam_weight=loss["anchor_seam_weight"],
+            anchor_seam_rows=loss["anchor_seam_rows"],
             vf_weight=loss["volume_fraction_weight"],
             profile_bins=profile["num_bins"],
             profile_weight=loss["spatial_profile_weight"],

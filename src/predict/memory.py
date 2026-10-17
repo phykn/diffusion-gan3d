@@ -152,7 +152,7 @@ def select_storage(storage: str, estimate: MemoryEstimate, generator) -> str:
     cpu_required = estimate.output_bytes + estimate.buffer_bytes + estimate.base_bytes
     if storage == "cpu":
         cpu_required += estimate.storage_bytes
-    if device.type == "cpu":
+    if device.type != "cuda":
         cpu_required += reserve
     cpu_budget = int(psutil.virtual_memory().available * 0.8)
     require_memory(cpu_required, cpu_budget, "RAM")

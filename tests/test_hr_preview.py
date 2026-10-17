@@ -12,9 +12,9 @@ def test_hr_preview_only_resizes_displayed_planes(tmp_path, monkeypatch):
     )
     low = (torch.arange(3 * 5 * 7).reshape(3, 5, 7) % 3).long()
     high = torch.zeros(8, 12, 16, dtype=torch.uint8)
-    reference = F.interpolate(
-        low[None, None].float(), size=high.shape, mode="nearest"
-    )[0, 0]
+    reference = F.interpolate(low[None, None].float(), size=high.shape, mode="nearest")[
+        0, 0
+    ]
     interpolate = F.interpolate
     calls = []
 

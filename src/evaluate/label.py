@@ -1,5 +1,6 @@
 import torch
 
+from src.device import wide_dtype
 from src.plane import AXES
 
 LABEL_CHUNK_ELEMENTS = 1024**2
@@ -86,7 +87,7 @@ def phase_fractions(values, num_phases: int) -> torch.Tensor:
             counts = chunk_counts
         else:
             counts.add_(chunk_counts)
-    return counts.to(torch.float64).div(values.numel())
+    return counts.to(wide_dtype(counts.device)).div(values.numel())
 
 
 def voxel_accuracy(actual, expected) -> float:
@@ -94,4 +95,4 @@ def voxel_accuracy(actual, expected) -> float:
     expected = phase_labels(expected).to(actual.device)
     if actual.shape != expected.shape:
         raise ValueError("actual and expected labels must have the same shape.")
-    return float((actual == expected).to(torch.float64).mean())
+    return float((actual == expected).to(wide_dtype(actual.device)).mean())

@@ -9,6 +9,7 @@ from src.config.data import get_resolution
 from src.config.files import find_saved_config
 from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
+from src.device import check_device, default_device
 from src.predict.memory import estimate_memory, select_storage
 from src.predict.tiling.generator import TiledGenerator
 from src.predict.tiling.layout import parse_shape
@@ -29,7 +30,7 @@ class LowResolutionAPI:
         weights: str | Path,
         device: str | torch.device | None = None,
     ) -> None:
-        self.device = _resolve_device(device)
+        self.device = check_device(default_device() if device is None else device)
         self.weights = resolve_weights(weights)
         self.settings = load_generation_settings()
         cfg = load_train_config(find_saved_config(self.weights))
@@ -95,7 +96,7 @@ class LowResolutionAPI:
     def check_memory(self, estimate, *, storage="auto", tiled=True):
         # A direct reverse chain holds its entire state on the model device.
         if not tiled:
-            storage = self.device.type
+            storage = "cuda" if self.device.type == "cuda" else "cpu"
         return select_storage(storage, estimate, self.generator)
 
     def generate(
@@ -238,19 +239,6 @@ def _validate_generation_options(
     if not tiled and (storage != "auto" or overlap is not None):
         raise ValueError("storage and overlap apply only to scale-up.")
     return tiled
-
-
-def _resolve_device(device: str | torch.device | None) -> torch.device:
-    resolved = torch.device(
-        device
-        if device is not None
-        else ("cuda" if torch.cuda.is_available() else "cpu")
-    )
-    if resolved.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available.")
-    if resolved.type not in {"cpu", "cuda"}:
-        raise ValueError("device must be CPU or CUDA.")
-    return resolved
 
 
 def _validate_anchors(anchors: Sequence[PlaneAnchor]) -> tuple[PlaneAnchor, ...]:
