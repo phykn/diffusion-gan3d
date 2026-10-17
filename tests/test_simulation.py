@@ -147,7 +147,10 @@ def test_placed_particle_axes_follow_height_without_overlap():
         label = volume[particle.center]
         radius = float(np.prod(axes) ** (1 / 3))
         assert radius == pytest.approx((3 if label == 2 else 2) * scales[center[0]])
-        reconstructed[tuple((make_offsets(axes) + center).T)] += 1
+        positions = make_offsets(axes) + center
+        # Particles may cross the padded edge; only their inside voxels exist.
+        inside = ((positions >= 0) & (positions < volume.shape)).all(1)
+        reconstructed[tuple(positions[inside].T)] += 1
     assert reconstructed.max() == 1
     np.testing.assert_array_equal(reconstructed.astype(bool), occupied)
 
@@ -171,3 +174,28 @@ def test_gradient_export_records_truth_and_physical_axis(tmp_path):
     truth = tifffile.imread(result.volumes[0])
     with Image.open(result.slices[1][8]) as image:
         np.testing.assert_array_equal(image, truth[:, 8, :])
+
+
+def test_jammed_packing_has_no_boundary_density_profile():
+    # A hard wall or unwrapped pruning made boundary slabs ~0.05 denser here.
+    geometry = {**GEOMETRY, "size": 48, "big_radius": 4, "big_elongation": 3.0}
+    geometry.update(big_vf=0.5, small_vf=0.0)
+    differences = []
+    with pytest.warns(UserWarning, match="jammed"):
+        for seed in range(20):
+            volume = pack(**geometry, rng=np.random.default_rng(seed))
+            big = (volume == 2).mean(axis=(1, 2))
+            edges = np.r_[big[:6], big[-6:]].mean()
+            differences.append(edges - big[18:30].mean())
+    assert abs(np.mean(differences)) < 0.02
+
+
+def test_seeded_export_is_repeatable_and_records_measured_fractions(tmp_path):
+    first = _config(tmp_path / "first", 1)
+    second = _config(tmp_path / "second", 1)
+    first["output"]["seed"] = second["output"]["seed"] = 5
+    volumes = [tifffile.imread(generate(cfg).volumes[0]) for cfg in (first, second)]
+    np.testing.assert_array_equal(*volumes)
+    metadata = yaml.safe_load((tmp_path / "first" / "simulation.yaml").read_text())
+    assert metadata["seed"] == 5
+    assert metadata["measured"][0]["big_vf"] == pytest.approx((volumes[0] == 2).mean())

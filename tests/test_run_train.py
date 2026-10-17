@@ -463,3 +463,14 @@ def test_dataset_check_script_accepts_one_axis(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_second_interrupt_stops_the_step_at_once(capsys):
+    from src.train.run.loop import deferred_sigint
+
+    with deferred_sigint() as stop:
+        signal.raise_signal(signal.SIGINT)
+        assert stop.is_set()
+        with pytest.raises(KeyboardInterrupt):
+            signal.raise_signal(signal.SIGINT)
+    assert "press Ctrl+C again" in capsys.readouterr().out

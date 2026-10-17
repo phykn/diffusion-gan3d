@@ -30,7 +30,7 @@ from provenance import (
     validate_output_paths,
 )
 
-from src.build.predict import load_generator
+from src.build.predict import load_generator, resolve_weights
 from src.config.generation import load_generation_settings
 from src.evaluate.connectivity import percolating_fractions
 from src.evaluate.fid import compute_fid
@@ -75,7 +75,7 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    weights = args.weight.resolve()
+    weights = resolve_weights(args.weight)
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
     generator = load_generator(weights, device=device)
@@ -83,6 +83,11 @@ def main() -> None:
     scaled_shape = TiledGenerator(generator).shape_from_blocks(
         SCALE_BLOCKS, settings.overlap
     )
+    if patch_size != 128 or tuple(scaled_shape) != (352, 352, 352):
+        raise ValueError(
+            f"condition labels require 128³ direct and 352³ scaled volumes, "
+            f"got {patch_size}³ and {tuple(scaled_shape)}."
+        )
     generation = {
         "conditions": list(CONDITIONS),
         "seeds": list(SEEDS),
@@ -115,6 +120,8 @@ def main() -> None:
         )
         generation_times = load_generation_times(RAW_CSV)
     else:
+        # A stale manifest must not vouch for volumes overwritten by this run.
+        MANIFEST.unlink(missing_ok=True)
         generation_times = generate_volumes(
             generator,
             domain=args.domain,

@@ -18,7 +18,7 @@ from src.model.diffusion import Diffusion
 from src.predict.generator import Generator
 from src.predict.tiling.fusion import get_axis_windows, make_fusion
 from src.predict.tiling.generator import TiledGenerator
-from src.predict.tiling.layout import crop_output, make_tiles
+from src.predict.tiling.layout import make_tiles
 from src.predict.tiling.sampler import TileSampler
 from src.predict.tiling.state import TileBuffer, VolumeState
 from src.storage import save_model
@@ -104,6 +104,8 @@ def test_ema_weights_generate_categorical_volume(
     assert conditioned.shape == (8, 8, 8)
     assert conditioned.dtype == torch.uint8
     assert int(conditioned.max()) < cfg["data"]["num_phases"]
+    from_run = load_generator(run_dir, device=torch.device("cpu"))
+    assert from_run.patch_size == generator.patch_size
 
 
 def test_generator_loads_numbered_checkpoint_with_run_config(tmp_path: Path) -> None:
@@ -828,15 +830,6 @@ def test_scaled_generation_uses_model_derived_outer_margin() -> None:
     assert plan.generation_shape == (48, 48, 48)
     assert plan.margin == 8
     assert plan.tile_count == 8
-
-
-def test_crop_output_keeps_the_requested_rectangular_center() -> None:
-    volume = torch.arange(7 * 8 * 9).reshape(7, 8, 9)
-
-    cropped = crop_output(volume, (3, 4, 5), 2)
-
-    assert torch.equal(cropped, volume[2:5, 2:6, 2:7])
-    assert cropped.untyped_storage().data_ptr() != volume.untyped_storage().data_ptr()
 
 
 def test_overlapping_tiles_read_the_same_unchanged_global_state() -> None:

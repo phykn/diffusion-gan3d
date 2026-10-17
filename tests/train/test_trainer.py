@@ -602,13 +602,12 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         measured.append(selection.measured)
         return original_sample_vf(batches, selection, owned_axes)
 
-    def track_critics(transition, fake, batches, step, domain, **kwargs):
+    def track_critics(transition, fake, batches, domain, **kwargs):
         critic_batch_ids.extend(id(batches.images[axis]) for axis in (0, 1, 2))
         return original_update_critics(
             transition,
             fake,
             batches,
-            step,
             domain,
             **kwargs,
         )
@@ -1214,7 +1213,7 @@ def test_fit_separates_weight_updates_and_checkpoint_archives(
 ) -> None:
     monkeypatch.setattr(
         "src.train.run.loop.save_training",
-        lambda path, trainer: torch.save({"step": trainer.completed_steps}, path),
+        lambda trainer, path: torch.save({"step": trainer.completed_steps}, path),
     )
     trainer = object.__new__(Trainer)
     trainer.settings = SimpleNamespace(loss=SimpleNamespace())

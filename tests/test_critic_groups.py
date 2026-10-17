@@ -77,9 +77,9 @@ def test_isotropic_shared_connectivity_critic_receives_axis_ids(tmp_path):
         )
     finally:
         hook.remove()
-    assert len(received) == 2  # Forward and reversed triplets both retain axis IDs.
-    for actual in received:
-        torch.testing.assert_close(actual, axes)
+    # Forward and reversed triplets are scored together and both keep axis IDs.
+    assert len(received) == 1
+    torch.testing.assert_close(received[0], axes.repeat(2))
 
 
 @pytest.mark.parametrize("groups", GROUPS)
@@ -157,7 +157,6 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
         0,
         SampledPairs(fake),
         RealBatch({axis: (pair[0] + 1) * 0.5 for axis, pair in real.items()}),
-        0,
         {axis: 0 for axis in range(3)},
     )
     for name, axes in trainer.critic_groups.items():

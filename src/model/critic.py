@@ -23,6 +23,14 @@ class CriticScores:
     levels: tuple["CriticScores", ...] = ()
 
 
+def _select(scores: CriticScores, part: slice) -> CriticScores:
+    return CriticScores(
+        scores.logits_global[part],
+        None if scores.logits_local is None else scores.logits_local[part],
+        tuple(_select(level, part) for level in scores.levels),
+    )
+
+
 class GroupNorm(nn.GroupNorm):
     def __init__(self, channels: int, affine: bool = True) -> None:
         super().__init__(self.choose_groups(channels), channels, affine=affine)
@@ -334,15 +342,18 @@ class ConnectivityCritic2D(CriticBase):
                 "axes must contain only 0, 1, or 2 and gaps must be positive."
             )
 
-        forward = self.score_once(triplets, axes, gaps, domain, height, profile)
-        reverse = self.score_once(
-            triplets.flip(1),
-            axes,
-            gaps,
-            domain,
-            None if height is None else height.flip(1),
-            None if profile is None else profile.flip(1),
+        # Score both slab orders in one pass; normalization is per sample.
+        both = self.score_once(
+            torch.cat((triplets, triplets.flip(1))),
+            axes.repeat(2),
+            gaps.repeat(2),
+            domain.repeat(2),
+            None if height is None else torch.cat((height, height.flip(1))),
+            None if profile is None else torch.cat((profile, profile.flip(1))),
         )
+        count = len(axes)
+        forward = _select(both, slice(None, count))
+        reverse = _select(both, slice(count, None))
         directed = (
             axes == self.directed_axis
             if self.directed_axis is not None

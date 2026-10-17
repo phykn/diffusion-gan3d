@@ -113,3 +113,18 @@ def test_tortuosity_measures_a_straight_channel_along_the_thickness_axis():
 
     assert tortuosity(volume, phase=0, axis=0, device="cpu") == pytest.approx(1.0)
     assert tortuosity(volume, phase=0, axis=1, device="cpu") == np.inf
+
+
+@pytest.mark.parametrize("blocked", [True, False])
+def test_tortuosity_is_infinite_without_a_spanning_path(monkeypatch, blocked):
+    class Solver:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("the solver cannot converge without a path.")
+
+    monkeypatch.setattr(tau, "Solver", Solver)
+    volume = np.zeros((6, 4, 4), dtype=np.uint8)
+    if blocked:
+        volume[3] = 1
+    else:
+        volume[:] = 1
+    assert tortuosity(volume, phase=0, axis=0, device="cpu") == float("inf")

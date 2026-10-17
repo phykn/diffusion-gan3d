@@ -17,14 +17,3 @@ def phase_profile(values, phases, bins=None):
     else:
         raise ValueError("expected batched 3D labels or phase fractions.")
     return result if bins is None else rebin_profile(result, bins)
-
-
-def compare_profiles(prediction, target):
-    if prediction.shape != target.shape:
-        raise ValueError("profiles must describe the same height bins and phases.")
-    error = prediction.float() - target.to(prediction)
-    return {
-        "mae": error.abs().mean(),
-        "rmse": error.square().mean().sqrt(),
-        "max_error": error.abs().max(),
-    }

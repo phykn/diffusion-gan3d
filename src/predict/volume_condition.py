@@ -40,7 +40,7 @@ def resolve_offset(offset, shape, base_shape):
         if not 0 <= value <= limit:
             raise ValueError(f"base_offset axis {axis} must be between 0 and {limit}.")
         result.append(value)
-    return tuple(result), tuple(value is not None for value in values)
+    return tuple(result)
 
 
 def phase_fractions(volume, num_phases):
@@ -133,7 +133,7 @@ def prepare_base(volume, num_phases, shape, margin, offset, shell, preserve):
             raise ValueError("setting base_offset or preserve_base requires base.")
         return None
     base_shape = volume_shape(volume)
-    position, explicit = resolve_offset(offset, shape, base_shape)
+    position = resolve_offset(offset, shape, base_shape)
     clean = phase_fractions(volume, num_phases).mul_(2).sub_(1)
     region = tuple(
         slice(margin + p, margin + p + n) for p, n in zip(position, base_shape)
@@ -142,15 +142,16 @@ def prepare_base(volume, num_phases, shape, margin, offset, shell, preserve):
     for axis, n in enumerate(base_shape):
         weights = torch.ones(n)
         width = min(shell, (n - 1) // 2)
-        if not preserve and width and shape[axis] + 2 * margin > n:
+        if not preserve and width:
             ramp = (
                 (torch.arange(1, width + 1).div(width + 1) * (math.pi / 2))
                 .sin()
                 .square()
             )
-            if not explicit[axis] or position[axis] > 0:
+            # Blend only faces with generated output beyond them.
+            if position[axis] > 0:
                 weights[:width] = ramp
-            if not explicit[axis] or position[axis] + n < shape[axis]:
+            if position[axis] + n < shape[axis]:
                 weights[-width:] = ramp.flip(0)
         axes.append(weights)
     weight = axes[0][:, None, None] * axes[1][None, :, None] * axes[2][None, None, :]

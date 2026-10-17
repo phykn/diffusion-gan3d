@@ -22,7 +22,7 @@ from src.train.run.bank import (
     publish_bank,
     refresh_bank,
 )
-from src.train.run.loop import make_run_dir, run_train, saved_config
+from src.train.run.loop import check_run_dir, make_run_dir, run_train, saved_config
 from src.train.run.source import (
     file_hash,
     read_source_config,
@@ -47,6 +47,7 @@ def run_sr_train(
     if base_weights is not None and resume is not None:
         raise ValueError("base_weights cannot change on resume.")
     device = check_device(device)
+    check_run_dir(run_dir)
     payload = None
     if resume:
         if config is not None or data is not None:

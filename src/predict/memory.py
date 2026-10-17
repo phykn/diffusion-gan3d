@@ -27,12 +27,6 @@ class MemoryEstimate:
     def storage_bytes(self) -> int:
         return self.state_bytes + self.fusion_bytes
 
-    @property
-    def total_bytes(self) -> int:
-        return (
-            self.storage_bytes + self.buffer_bytes + self.output_bytes + self.base_bytes
-        )
-
 
 def estimate_memory(
     shape,

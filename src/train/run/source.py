@@ -51,7 +51,7 @@ def read_source_config(
     if remapper:
         cfg = remapper.config(cfg)
     return (
-        normalize_loaded_train_config(cfg, "low_res", external_data),
+        normalize_loaded_train_config(cfg, "low_res"),
         data_sha256,
     )
 

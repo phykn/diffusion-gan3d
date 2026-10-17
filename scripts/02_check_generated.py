@@ -8,6 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
+    add_device_argument,
     add_height_arguments,
     check_parser,
     height_options,
@@ -17,7 +18,7 @@ from scripts.common.cli import (
 from scripts.common.diagnostic import show_napari
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
-from src.device import default_device
+from src.device import check_device
 from src.plane import PLANES
 from src.random import seeded_rng
 from src.storage import save_volume
@@ -47,11 +48,7 @@ def main() -> None:
         action="store_true",
         help="show the complete 3D phase volume in Napari",
     )
-    parser.add_argument(
-        "--device",
-        choices=("cpu", "cuda", "mps"),
-        help="Default: CUDA when available, otherwise CPU.",
-    )
+    add_device_argument(parser)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--no-view", action="store_true", help="Save without opening a viewer."
@@ -63,7 +60,7 @@ def main() -> None:
     if args.guidance is None:
         args.guidance = load_generation_settings().guidance
 
-    device = torch.device(args.device or default_device())
+    device = check_device(args.device)
     weight = args.weight
     print(f"\nWeights : {weight.resolve()}", flush=True)
 

@@ -68,6 +68,14 @@ def compute_vf(
     return torch.stack(counts).sum(0).div(total)
 
 
+def check_labels(values, num_phases: int | None = None) -> torch.Tensor:
+    """Validate labels chunk by chunk and return them without an int64 copy."""
+    values = torch.as_tensor(values)
+    for _ in _label_chunks(values, num_phases):
+        pass
+    return values
+
+
 def phase_fraction(values, phase: int = 0) -> float:
     if type(phase) is not int or phase < 0:
         raise ValueError("phase must be a non-negative integer.")

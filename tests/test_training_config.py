@@ -13,6 +13,7 @@ from src.config.train import (
     load_train_config,
     normalize_train_config,
     validate_sr_config,
+    validate_training_settings,
 )
 from src.train.run.sr import run_sr_train
 
@@ -375,6 +376,23 @@ def test_data_selection_and_snapshot_are_independent_of_cwd(tmp_path, monkeypatc
     assert load_yaml(preset)["data"] == "missing.yaml"
 
 
+def test_embedded_data_folders_resolve_against_the_project_root(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    preset = tmp_path / "experiment.yaml"
+    data = {
+        "domains": {0: {"xy": ["images"]}},
+        "num_phases": 3,
+        "crop_size": 256,
+        "lo_res_size": 64,
+    }
+    save_yaml(preset, {"stage": "low_res", "data": data})
+    monkeypatch.setattr(config_module, "PROJECT_ROOT", root)
+    monkeypatch.chdir(tmp_path)
+    cfg = load_train_config(preset)
+    assert cfg["data"]["domains"][0]["xy"] == [str((root / "images").resolve())]
+
+
 @pytest.mark.parametrize(
     "old",
     [{"anchor": {}}, {"data": {"num_phase": 3}}, {"model": {"grad_checkpoint": True}}],
@@ -631,6 +649,10 @@ def test_obsolete_and_unknown_config_keys_fail_with_full_path(section, key):
         ("train.weights_every_steps", 0),
         ("train.archive_every_steps", -1),
         ("train.num_workers", -1),
+        ("loss.r1_every_steps", 0),
+        ("loss.r1_every_steps", 2.0),
+        ("model.diffusion.beta_min", "1e-1"),
+        ("model.diffusion.beta_max", 0.05),
     ],
 )
 def test_shared_training_values_fail_during_normalization(stage, path, value):
@@ -685,3 +707,50 @@ def test_supported_phase_and_probability_boundaries(phases):
     )
     assert cfg["data"]["num_phases"] == phases
     assert normalize_train_config(cfg) == cfg
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+@pytest.mark.parametrize("path", ["loss.r1_weight", "train.total_steps"])
+def test_missing_training_setting_names_its_key(tmp_path, stage, path):
+    cfg = load_yaml(f"tests/fixtures/config/train/{stage}.yaml")
+    section, key = path.split(".")
+    cfg[section].pop(key, None)
+    preset = tmp_path / "train.yaml"
+    save_yaml(preset, cfg)
+    cfg = load_train_config(preset, stage)
+    with pytest.raises(ValueError, match=f"missing required setting.*{path}"):
+        if stage == "sr":
+            validate_sr_config(cfg)
+        else:
+            validate_training_settings(cfg)
+
+
+@pytest.mark.parametrize("stage", ["low_res", "sr"])
+def test_existing_run_directory_is_rejected_before_setup(tmp_path, monkeypatch, stage):
+    import src.train.run.low_res as low_res_module
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("setup ran before the run directory was checked")
+
+    monkeypatch.setattr(low_res_module, "build_trainer", forbidden)
+    monkeypatch.setattr(config_module, "load_yaml", forbidden)
+    run = tmp_path / "run"
+    run.mkdir()
+    runner = run_sr_train if stage == "sr" else low_res_module.run_low_res_train
+    with pytest.raises(FileExistsError, match="already exists"):
+        runner(run_dir=run)
+
+
+def test_numbers_read_as_text_explain_the_yaml_spelling():
+    with pytest.raises(ValueError, match=r"got str '1e-4' \(write 1\.0e-4"):
+        normalize_train_config({"optim": {"generator_lr": "1e-4"}})
+
+
+@pytest.mark.parametrize(
+    "path", ["conditioning.anchor.bank_capacity", "loss.connectivity.windows_per_plane"]
+)
+def test_lr_sampler_sizes_fail_during_normalization(path):
+    section, *rest = path.split(".")
+    cfg = {section: {rest[0]: {rest[1]: 0}}}
+    with pytest.raises(ValueError, match=rest[1]):
+        normalize_train_config(cfg)

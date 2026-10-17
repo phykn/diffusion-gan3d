@@ -86,6 +86,22 @@ class Denoiser3DTest(unittest.TestCase):
         self.assertTrue(bool(torch.isfinite(inputs.grad).all()))
         self.assertGreater(float(inputs.grad.abs().sum()), 0)
 
+    def test_profile_input_matches_scaled_first_level_channels(self):
+        model = Denoiser3D(
+            3, 2, (2, 4), 8, 4, 1, height_enabled=True, profile_enabled=True
+        )
+        inputs = torch.randn(1, 3, 4, 4, 4)
+        time, latent, domain = torch.zeros(1), torch.zeros(1, 4), _domain(inputs)
+        output = model(
+            inputs,
+            time,
+            latent,
+            domain,
+            height=torch.zeros(1, 1, 4, 4, 4),
+            profile=torch.full((1, 3, 4), 1 / 3),
+        )
+        self.assertEqual(output.shape, inputs.shape)
+
     def test_3d_norm_is_independent_at_each_spatial_position(self):
         norm = ChannelNorm3D(4)
         inputs = torch.randn(2, 4, 3, 4, 5)

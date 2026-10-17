@@ -142,7 +142,7 @@ class Denoiser3D(nn.Module):
         self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv3d(num_phases, channels[0], 3, padding=1)
         self.profile_input = (
-            nn.Conv3d(num_phases, base_channels, 3, padding=1, bias=False)
+            nn.Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
             if profile_enabled
             else None
         )

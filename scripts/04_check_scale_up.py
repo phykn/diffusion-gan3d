@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
+    add_device_argument,
     add_height_arguments,
     check_parser,
     height_options,
@@ -22,6 +23,7 @@ from scripts.common.cli import (
     save_preview,
 )
 from scripts.common.diagnostic import (
+    format_percent,
     select_display_index,
     select_indices,
     show_napari,
@@ -29,7 +31,7 @@ from scripts.common.diagnostic import (
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
-from src.device import default_device
+from src.device import check_device
 from src.evaluate.label import phase_fractions, voxel_accuracy
 from src.evaluate.seam import SeamQuality, measure_seams
 from src.predict.tiling.generator import TiledGenerator
@@ -56,7 +58,6 @@ class ScaleAssessment:
     base_match: float | None
     base_interior_match: float | None
     scaled_accuracy: float | None
-    interior_quality: SeamQuality | None
 
 
 def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
@@ -128,11 +129,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
         action="store_true",
         help="skip interactive visualization",
     )
-    parser.add_argument(
-        "--device",
-        choices=("cpu", "cuda", "mps"),
-        help="Default: CUDA when available, otherwise CPU.",
-    )
+    add_device_argument(parser)
     parser.add_argument("--seed", type=int, default=0)
     add_height_arguments(parser)
     args = parser.parse_args()
@@ -202,7 +199,7 @@ def assess_result(
     vfs = phase_fractions(volume, num_phases)
     base = base_result.volume
     if base is None:
-        return ScaleAssessment(quality, vfs, None, None, None, None, None)
+        return ScaleAssessment(quality, vfs, None, None, None, None)
 
     start = tuple((size - patch_size) // 2 for size in volume.shape)
     region = tuple(slice(index, index + patch_size) for index in start)
@@ -226,27 +223,6 @@ def assess_result(
             base_result.indices,
             AXIS,
         )
-    boundaries = tuple(
-        (
-            tuple(
-                index
-                for index in (
-                    start[axis] + shell,
-                    region[axis].stop - shell,
-                )
-                if 0 < index < volume.shape[axis]
-            )
-            if volume.shape[axis] > patch_size
-            else ()
-        )
-        for axis in range(3)
-    )
-    interior_quality = measure_seams(
-        volume,
-        boundaries,
-        stats.overlap,
-        num_phases,
-    )
     return ScaleAssessment(
         quality,
         vfs,
@@ -254,7 +230,6 @@ def assess_result(
         base_match,
         base_interior_match,
         scaled_accuracy,
-        interior_quality,
     )
 
 
@@ -274,7 +249,7 @@ def main() -> None:
             "--gt requires active anchors (--count > 0 and --anchor-strength > 0)."
         )
 
-    device = torch.device(args.device or default_device())
+    device = check_device(args.device)
     weight = args.weight
     print(f"\nWeights : {weight.resolve()}", flush=True)
 
@@ -352,13 +327,13 @@ def main() -> None:
     print(f"Seam TV         : {format_axes(quality.transition_tv)}")
     print(f"Seam continuity : {format_axes(quality.continuation_delta)}")
     if base is not None:
-        print(f"Base interior   : {format_score(base_interior_match)}")
+        print(f"Base interior   : {format_percent(base_interior_match)}")
         if target is None:
-            print(f"Whole base      : {format_score(base_match)}")
+            print(f"Whole base      : {format_percent(base_match)}")
         else:
             print(
                 "Anchor match   : "
-                f"{format_score(base_acc)} → {format_score(scaled_acc)}"
+                f"{format_percent(base_acc)} → {format_percent(scaled_acc)}"
             )
 
     performance = f"Elapsed : {elapsed:.1f} s"
@@ -668,10 +643,6 @@ def format_phases(values: torch.Tensor) -> str:
     return "  ".join(
         f"phase {phase}: {float(value):.2%}" for phase, value in enumerate(values)
     )
-
-
-def format_score(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2%}"
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import { MAX_BLOCKS, MIN_BLOCKS, normalizeBlock, normalizeSeed } from '../input-
 const props = defineProps({
   file: File,
   health: Object,
+  healthError: String,
   busy: Boolean,
   ready: Boolean,
   status: String,
@@ -18,6 +19,7 @@ const plane = defineModel('plane', { type: Number, default: 0 })
 const domain = defineModel('domain', { type: Number, default: 0 })
 const heightOrigin = defineModel('heightOrigin', { type: Number, default: 0 })
 const heightExtent = defineModel('heightExtent', { type: Number, default: null })
+const measureTortuosity = defineModel('measureTortuosity', { type: Boolean, default: true })
 const emit = defineEmits(['select-file', 'generate'])
 const dragging = ref(false)
 
@@ -106,13 +108,17 @@ function setBlock(index, event) {
           :max="MAX_BLOCKS"
           step="1"
           :disabled="busy"
-          @input="setBlock(index, $event)"
+          @change="setBlock(index, $event)"
         >
       </label>
     </div>
     <label class="number-control">
       <span>Seed</span>
-      <input :value="seed" type="number" min="0" step="1" :disabled="busy" @input="setSeed">
+      <input :value="seed" type="number" min="0" step="1" :disabled="busy" @change="setSeed">
+    </label>
+    <label class="number-control" title="Solved on the server before the volume is sent; slow for large volumes.">
+      <span>Tortuosity</span>
+      <input v-model="measureTortuosity" class="toggle" type="checkbox" :disabled="busy">
     </label>
     <button class="primary-button" type="button" :disabled="!ready" @click="emit('generate')">
       {{ busy ? 'RUNNING…' : 'RUN' }}
@@ -125,11 +131,11 @@ function setBlock(index, event) {
       </div>
       <div>
         <dt>Tortuosity</dt>
-        <dd>{{ Number.isFinite(tortuosity) ? tortuosity.toFixed(3) : '—' }}</dd>
+        <dd>{{ tortuosity === Infinity ? '∞' : Number.isFinite(tortuosity) ? tortuosity.toFixed(3) : '—' }}</dd>
       </div>
     </dl>
     <div class="server-state" :class="{ ready: health }">
-      <span></span>{{ health ? `Inference ready · ${health.device}` : 'Connecting to inference…' }}
+      <span></span>{{ health ? `Inference ready · ${health.device}` : healthError || 'Connecting to inference…' }}
     </div>
   </aside>
 </template>

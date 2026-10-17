@@ -17,6 +17,10 @@ def compute_fid(
         raise ValueError("FID batch_size must be a positive integer.")
     if min(len(real), len(generated)) < 2:
         raise ValueError("FID requires at least two real and two generated images.")
+    device = torch.device(device)
+    # The metric accumulates float64 statistics, which MPS cannot hold.
+    if device.type == "mps":
+        device = torch.device("cpu")
     metric = FrechetInceptionDistance(
         feature=feature,
         normalize=False,

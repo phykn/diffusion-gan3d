@@ -5,11 +5,15 @@ import torch
 
 from src.build.trainer import build_trainer
 from src.config.files import PROJECT_ROOT, load_yaml
-from src.config.train import load_train_config, normalize_train_config
+from src.config.train import (
+    load_train_config,
+    normalize_train_config,
+    validate_training_settings,
+)
 from src.device import check_device
 from src.train.checkpoint import resolve_checkpoint
 from src.train.relocate import relocate_checkpoint
-from src.train.run.loop import make_run_dir, run_train, saved_config
+from src.train.run.loop import check_run_dir, make_run_dir, run_train, saved_config
 from src.train.state import resume_training
 
 
@@ -25,6 +29,7 @@ def run_low_res_train(
     if path_map and resume is None:
         raise ValueError("path_map requires --resume.")
     device = check_device(device)
+    check_run_dir(run_dir)
     payload = None
     if resume:
         if config is not None or data is not None:
@@ -50,6 +55,7 @@ def run_low_res_train(
     start = 0 if payload is None else payload["step"]
     if cfg["train"]["total_steps"] <= start:
         raise ValueError("total steps must exceed completed steps.")
+    validate_training_settings(cfg)
 
     build_cfg = copy.deepcopy(cfg)
     if payload:

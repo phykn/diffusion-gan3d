@@ -357,7 +357,7 @@ def test_trainer_schedule_is_independent_of_replay_and_roundtrips_checkpoints(
     assert torch.isfinite(torch.tensor(metrics.generator_total))
     path = tmp_path / "training.pt"
     if stage == "low_res":
-        save_training(path, trainer)
+        save_training(trainer, path)
     else:
         save_sr_training(trainer, path)
     payload = torch.load(path, weights_only=True)

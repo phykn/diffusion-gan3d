@@ -16,6 +16,12 @@ from src.train.state import export_sr, save_sr_training, save_training
 from src.train.trainer import Trainer
 
 
+def check_run_dir(run_dir: Path | None) -> None:
+    """Reject an existing explicit run directory before any expensive setup."""
+    if run_dir is not None and run_dir.expanduser().exists():
+        raise FileExistsError(f"run directory already exists: {run_dir}")
+
+
 def make_run_dir(
     root: Path, stage: str, run_dir: Path | None = None, nickname: str = ""
 ) -> Path:
@@ -75,18 +81,28 @@ def save_checkpoint(trainer, root, stage):
     if stage == "sr":
         save_sr_training(trainer, path)
     else:
-        save_training(path, trainer)
+        save_training(trainer, path)
     save_generator(trainer, generator, stage, overwrite=False)
     complete_checkpoint(path)
 
 
 @contextmanager
 def deferred_sigint():
-    """Let a training step finish before handling a terminal interrupt."""
+    """Let a training step finish before handling a terminal interrupt.
+
+    A second interrupt stops at once; run_train then saves nothing mid-step.
+    """
     requested = Event()
+
+    def interrupt(*_):
+        if requested.is_set():
+            raise KeyboardInterrupt
+        requested.set()
+        tqdm.write("Stopping after the current step; press Ctrl+C again to stop now.")
+
     in_main_thread = current_thread() is main_thread()
     if in_main_thread:
-        previous = signal.signal(signal.SIGINT, lambda *_: requested.set())
+        previous = signal.signal(signal.SIGINT, interrupt)
     try:
         yield requested
     finally:

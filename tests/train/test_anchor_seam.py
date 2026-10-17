@@ -114,6 +114,47 @@ def test_each_step_keeps_a_random_subset_of_bands_per_section_plane():
     assert single.axes.tolist() == [1] * 3 + [2] * 3
 
 
+def composition(batch):
+    pairs = torch.stack((section_rows(batch.values), batch.axes), 1)
+    return sorted(map(tuple, pairs.tolist()))
+
+
+def test_near_and_far_bands_share_section_planes_and_row_directions():
+    anchors = condition(
+        [(0, 8, (16, 16), None), (2, 8, (8, 8), None), (1, 3, (16, 16), None)],
+        size=16,
+    )
+    far, near = bands(coordinates(16), anchors, rows=3, width=8, count=20)
+    assert len(near) and composition(far) == composition(near)
+    assert len(set(composition(near))) > 3
+
+
+def test_section_planes_without_near_bands_have_no_far_bands():
+    far, near = bands(
+        coordinates(16), condition([(0, 8, (16, 6), (0, 4))], size=16), width=8
+    )
+    assert near.axes.unique().tolist() == far.axes.unique().tolist() == [2]
+    assert len(far) == len(near)
+
+
+def test_directed_axis_rows_are_read_upward_on_both_sides():
+    anchors = condition([(0, 5, (8, 8), None), (1, 2, (8, 8), None)])
+    far, near = bands(coordinates(), anchors, directed=0)
+    for batch in (near, far):
+        along_z = section_rows(batch.values) == 0
+        assert along_z.any()
+        steps = batch.values[along_z, 0, 1, 0] - batch.values[along_z, 0, 0, 0]
+        assert (steps == 1).all()
+    near_rows = {
+        tuple(row)
+        for row in near.values[:, 0, :, 0][section_rows(near.values) == 0].tolist()
+    }
+    assert near_rows == {(3.0, 4.0), (6.0, 7.0)}
+    _, undirected = bands(coordinates(), anchors)
+    steps = undirected.values[:, 0, 1, 0] - undirected.values[:, 0, 0, 0]
+    assert set(steps[section_rows(undirected.values) == 0].tolist()) == {-1.0, 1.0}
+
+
 def test_directed_axis_is_never_mirrored_across_a_band():
     anchors = condition([(1, 5, (8, 8), None), (2, 2, (8, 8), None)])
     far, near = bands(coordinates(), anchors, directed=0)
@@ -153,8 +194,8 @@ def test_partial_anchor_keeps_near_bands_inside_the_region():
     assert near.values[:, 2].amin() == 2.0 and near.values[:, 2].amax() == 7.0
     rows = {tuple(row) for row in near.values[:, 1, :, 0].tolist()}
     assert rows == {(3.0, 2.0), (5.0, 6.0)}
-    assert len(far) == 160
-    assert far.values[:, 0].amin() == 0.0 and far.values[:, 2].amin() == 0.0
+    assert len(far) == 12 and far.axes.unique().tolist() == [0]
+    assert torch.equal(section_rows(far.values), section_rows(near.values))
 
 
 def test_partial_anchor_narrower_than_a_band_has_no_near_bands():
@@ -389,7 +430,7 @@ def test_checkpoint_restores_the_seam_critic(tmp_path):
     fixed_anchor(trainer)
     trainer.step(0, transition=0)
     path = tmp_path / "training.pt"
-    save_training(path, trainer)
+    save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     assert {"seam", "seam_optim"} <= payload.keys()
     restored = build_trainer(cfg, torch.device("cpu"))
@@ -409,7 +450,7 @@ def test_checkpoint_from_before_the_seam_critic_starts_a_new_one(tmp_path):
         cfg["loss"].pop(key)
     trainer = build_trainer(cfg, torch.device("cpu"))
     path = tmp_path / "training.pt"
-    save_training(path, trainer)
+    save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     payload.pop("seam")
     payload.pop("seam_optim")
@@ -430,7 +471,7 @@ def test_resume_rejects_incomplete_seam_state(tmp_path, missing):
     cfg = small_config(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
     path = tmp_path / "training.pt"
-    save_training(path, trainer)
+    save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     if missing == "counter":
         payload["updates"].pop("seam")
@@ -444,7 +485,7 @@ def test_active_seam_requires_saved_seam_state(tmp_path):
     cfg = small_config(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
     path = tmp_path / "training.pt"
-    save_training(path, trainer)
+    save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     payload.pop("seam")
     payload.pop("seam_optim")

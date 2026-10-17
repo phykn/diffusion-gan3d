@@ -37,3 +37,15 @@ def test_preserved_base_accepts_matching_anchor_formats(axis, kind, full_plane):
             (6, 7, 8),
             1,
         )
+
+
+def test_base_blending_depends_on_placement_not_on_an_explicit_offset():
+    base = torch.zeros((8, 8, 8), dtype=torch.uint8)
+    centered = prepare_base(base, 3, (12, 8, 8), 2, None, 2, False)
+    explicit = prepare_base(base, 3, (12, 8, 8), 2, (2, 0, 0), 2, False)
+    torch.testing.assert_close(centered.weight, explicit.weight)
+    assert torch.all(centered.weight[0, 0, 4] == 1.0)
+    edges = centered.weight[0, 0, :, 4, 4]
+    assert edges[0] < 1 and edges[-1] < 1
+    at_start = prepare_base(base, 3, (12, 8, 8), 2, (0, 0, 0), 2, False)
+    assert at_start.weight[0, 0, 0, 4, 4] == 1 and at_start.weight[0, 0, -1, 4, 4] < 1

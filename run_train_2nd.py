@@ -12,7 +12,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--config", type=Path, help="Training YAML; defaults to config/train/sr.yaml."
     )
-    parser.add_argument("--data", type=Path, help="Data YAML for a new run.")
+    parser.add_argument(
+        "--data",
+        type=Path,
+        help="Data YAML for a new run, relative to the project root.",
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
         "--base-weights", type=Path, help="Override source.weights in the SR config."
@@ -33,6 +37,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--device",
         choices=("cpu", "cuda", "mps"),
         default=default_device(),
+        help="Compute device; CUDA, then Apple MPS, then CPU when available.",
     )
     parser.add_argument(
         "--run-dir",

@@ -19,18 +19,25 @@ python scripts/04_check_scale_up.py --weight "run/my-lr-run" --blocks 2 2 2 --no
 python scripts/05_check_continuation.py --weight "run/my-lr-run" --anchor image.png --axis 0
 ```
 
-`--blocks D H W` counts tiles along `(z, y, x)`. `--axis 0/1/2` selects `xy/xz/yz`.
+`--blocks D H W` sets the output size along `(z, y, x)` to
+`patch + (n - 1) * (patch - 2 * overlap)` voxels. The tile grid also covers the context
+margin (the denoiser's downsampling factor, 8 voxels for the preset channels), so it can
+hold more tiles than the block count: a 64³ model with overlap 8 turns `--blocks 2 2 2`
+into a 112³ output from a 3 × 3 × 3 grid. The script prints the actual grid.
+`--axis 0/1/2` selects `xy/xz/yz`.
 Anchor demos use generated references by default; supply `--anchor` to script 05
 for a measured boundary image. These comparisons do not establish measured 3D accuracy.
 
 ## Options and outputs
 
-- `--device cpu`, `--seed`, `--domain`: device, repeatable sample, and dataset ID (`02–06`).
+- `--device cpu|cuda|mps`, `--seed`, `--domain`: device (default: CUDA, then MPS, then CPU),
+  repeatable sample, and dataset ID (`02–06`).
 - `--napari`: open a 3D viewer (`02–06`). `--help` lists each script's full options.
 - `--height-origin`, `--height-extent`: Z origin and full source height in **source pixels**.
   Height is the row direction in xz/yz images. Script 05 infers it from its input crop;
   set the extent explicitly when source heights differ.
-- `01` saves a crop PNG; `02–05` save `volume.tiff`, `volume.png`, and `volume.json`.
+- `01` saves a crop PNG; `02–05` save `volume.tiff`, `volume.png`, and `volume.json`;
+  `05` also saves the slice strip `volume_continuation.png` (`--figure` moves it).
   `06` saves LR/HR volumes, `comparison.png`, `report.json`, and optional LR fractions.
 
 LR guidance, anchor strength, and overlap default to [config/gen.yaml](../config/gen.yaml).
@@ -57,10 +64,15 @@ log is written. Data fingerprints needed for resume remain in training checkpoin
 Resume requires the current checkpoint schema, including `path_maps` (an empty
 list when no paths have moved). LR checkpoints also require the connectivity model,
 optimizer, and update counter even when replay losses are disabled. Checkpoints
-missing these fields are rejected; they are not upgraded during loading.
+missing these fields are rejected; they are not upgraded during loading. The one
+exception is the LR seam critic: a checkpoint saved before it existed resumes with a
+fresh seam critic only while `loss.anchor_seam_weight` is `0`. A checkpoint written
+without CUDA mixed precision (CPU or MPS) resumes on CUDA with a fresh AMP loss scale.
+The first Ctrl+C stops after the current step; a second one stops at once without
+saving that partial step.
 
 ```bash
-python run_train_1st.py --resume "run/my-lr-run" --steps 20000 --device cuda
+python run_train_1st.py --resume "run/my-lr-run" --steps 20000
 ```
 
 `--steps` is the total target, including completed steps. Resume uses saved settings

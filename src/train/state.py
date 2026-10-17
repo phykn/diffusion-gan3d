@@ -5,7 +5,7 @@ from src.config.train import normalize_train_config
 from src.storage import torch_save
 
 
-def save_training(path: str | Path, trainer) -> None:
+def save_training(trainer, path: str | Path) -> None:
     payload = _capture_state(trainer)
     payload.update(
         format="diffusion-gan3d.lr.train",
@@ -108,7 +108,10 @@ def _restore_state(trainer, payload: dict) -> None:
     trainer.denoiser_optim.load_state_dict(payload["generator_optim"])
     for group, optimizer in trainer.critic_optims.items():
         optimizer.load_state_dict(payload["critic_optims"][group])
-    trainer.scaler.load_state_dict(payload["scaler"])
+    # Runs without CUDA AMP save an empty scaler state; an enabled scaler then
+    # starts from its initial scale.
+    if payload["scaler"]:
+        trainer.scaler.load_state_dict(payload["scaler"])
     trainer.updates = dict(payload["updates"])
     trainer.completed_steps = payload["step"]
     trainer.path_maps = path_maps

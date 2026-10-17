@@ -22,7 +22,7 @@ from make_assets import OUTPUT_DIR, PHASE_COLORS, ROI_COLOR, SAMPLE_PATH
 from provenance import build_provenance, file_record, validate_output_paths
 
 from src.anchor import PlaneAnchor
-from src.build.predict import load_generator
+from src.build.predict import load_generator, resolve_weights
 from src.config.generation import load_generation_settings
 from src.evaluate.anchor import (
     measure_boundaries,
@@ -30,6 +30,7 @@ from src.evaluate.anchor import (
     measure_slice_smoothness,
 )
 from src.evaluate.label import voxel_accuracy
+from src.random import preserved_rng
 
 SEEDS = (0, 1, 2, 3)
 INTERNAL_AXES = (0, 1, 2)
@@ -50,7 +51,7 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    weights = args.weight.resolve()
+    weights = resolve_weights(args.weight)
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
     anchor_strength = settings.anchor_strength
@@ -226,21 +227,15 @@ def generate_pair(
     margin: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     set_seed(seed, generator.device)
-    cpu_rng = torch.random.get_rng_state()
-    cuda_rng = (
-        torch.cuda.get_rng_state_all() if generator.device.type == "cuda" else None
-    )
     condition = (PlaneAnchor(anchor, axis, index),)
-    generated = generator.generate(
-        anchors=condition,
-        anchor_strength=anchor_strength,
-        guidance=guidance,
-        domain=domain,
-        margin=margin,
-    )
-    torch.random.set_rng_state(cpu_rng)
-    if cuda_rng is not None:
-        torch.cuda.set_rng_state_all(cuda_rng)
+    with preserved_rng(generator.device):
+        generated = generator.generate(
+            anchors=condition,
+            anchor_strength=anchor_strength,
+            guidance=guidance,
+            domain=domain,
+            margin=margin,
+        )
     baseline = generator.generate(
         anchors=(),
         anchor_strength=0.0,

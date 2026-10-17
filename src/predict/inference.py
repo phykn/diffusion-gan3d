@@ -20,7 +20,9 @@ from src.random import seeded_rng
 class LowResolutionAPI:
     """Generate LR label volumes (z, y, x), directly or with overlapping tiles.
 
-    blocks counts tiles along (z, y, x); shape and overlap use LR voxels.
+    blocks sets the output size as patch + (n - 1) * (patch - 2 * overlap)
+    voxels per axis; the tile grid also covers the context margin, so it can
+    hold more tiles than blocks. shape and overlap use LR voxels.
     Height coordinates use source pixels.
     Refinement to HR is a separate SuperResolutionAPI operation.
     """
@@ -58,9 +60,10 @@ class LowResolutionAPI:
             raise ValueError(
                 f"image must be a {self.crop_size} x {self.crop_size} original crop."
             )
+        # Area resizing can round a full cell to 1 + eps; anchors require [0, 1].
         return resize_crop(
             image, get_resolution(self.data).low_res_voxels, self.num_phases
-        )
+        ).clamp_(0.0, 1.0)
 
     def estimate_memory(
         self,
@@ -102,6 +105,7 @@ class LowResolutionAPI:
     def generate(
         self,
         anchors: Sequence[PlaneAnchor] = (),
+        *,
         blocks: int | Sequence[int] | None = None,
         shape: int | Sequence[int] | None = None,
         size: int | None = None,
@@ -168,26 +172,26 @@ class LowResolutionAPI:
 
     def generate_probs(
         self,
-        anchors=(),
-        vf=None,
-        domain=None,
-        seed=None,
-        guidance=None,
-        anchor_strength=None,
-        height_origin=0.0,
-        height_extent=None,
-        vf_profile=None,
+        anchors: Sequence[PlaneAnchor] = (),
         *,
-        size=None,
-        shape=None,
-        blocks=None,
-        overlap=None,
-        storage="auto",
-        progress=False,
-        base=None,
+        blocks: int | Sequence[int] | None = None,
+        shape: int | Sequence[int] | None = None,
+        size: int | None = None,
+        base: torch.Tensor | None = None,
+        vf: Sequence[float] | None = None,
+        domain: int | None = None,
+        seed: int | None = None,
+        guidance: float | None = None,
+        anchor_strength: float | None = None,
+        overlap: int | None = None,
+        storage: str = "auto",
+        progress: bool = False,
+        height_origin: float = 0.0,
         base_offset=None,
-        preserve_base=False,
-    ):
+        preserve_base: bool = False,
+        height_extent: float | None = None,
+        vf_profile: dict | None = None,
+    ) -> torch.Tensor:
         tiled = _validate_generation_options(
             blocks, shape, size, base, base_offset, preserve_base, storage, overlap
         )

@@ -203,6 +203,7 @@ def test_busy_request_is_rejected_without_waiting_or_releasing_owner_lock(
         (MemoryError("serialize allocation"), 413),
         (OSError(errno.ENOSPC, "disk full"), 507),
         (OSError(errno.EACCES, "cannot write"), 500),
+        (ValueError("encoder rejected the volume"), 500),
     ],
 )
 def test_response_preparation_errors_cleanup_file_and_release_lock(
@@ -327,10 +328,17 @@ def test_create_app_requires_one_inference_source(service: FakeInference) -> Non
         )
 
 
-@pytest.mark.parametrize("exception", [MemoryError, torch.OutOfMemoryError])
-def test_cpu_and_cuda_oom_return_413(client, service, monkeypatch, exception):
+@pytest.mark.parametrize(
+    "exception",
+    [
+        MemoryError("allocation failed"),
+        torch.OutOfMemoryError("allocation failed"),
+        RuntimeError("MPS backend out of memory (MPS allocated: 1 GB)"),
+    ],
+)
+def test_cpu_cuda_and_apple_gpu_oom_return_413(client, service, monkeypatch, exception):
     def fail(**kwargs):
-        raise exception("allocation failed")
+        raise exception
 
     monkeypatch.setattr(service, "generate", fail)
     assert client.post("/generate", json={}).status_code == 413

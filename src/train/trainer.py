@@ -214,7 +214,6 @@ class Trainer:
         critic_domains = prepared.critic_domains
         presence = prepared.presence
         selection = prepared.selection
-        self.diagnostics["sampling/reference_passes"] = 0
         (
             previous,
             current,
@@ -269,7 +268,6 @@ class Trainer:
             transition,
             fake,
             real,
-            step,
             critic_domains,
             profile_present=profile_present,
         )
@@ -282,7 +280,6 @@ class Trainer:
             ) = self.update_connectivity_critic(
                 connectivity_real.values,
                 connectivity_fake,
-                step,
                 connectivity_domains,
             )
         else:
@@ -372,14 +369,13 @@ class Trainer:
             if self.settings.profile_settings.get("critic_enabled", False)
             else None
         )
-        profile_present = prepared.presence.vf.to(self.device)
+        if volume_height is not None and profile is not None:
+            field = profile_field(
+                profile * 2 - 1, previous.shape[-3:]
+            ) * prepared.presence.vf.to(self.device).reshape(-1, 1, 1, 1, 1)
+            volume_height = torch.cat((volume_height, field), 1)
         for axis in self.active_axes:
             height = volume_height if axis in real.heights else None
-            if height is not None and profile is not None:
-                field = profile_field(
-                    profile * 2 - 1, previous.shape[-3:]
-                ) * profile_present.reshape(-1, 1, 1, 1, 1)
-                height = torch.cat((height, field), 1)
             pairs = sample_pairs(
                 previous,
                 current,
@@ -550,11 +546,8 @@ class Trainer:
         transition: int | None,
     ) -> StepPreparation:
         self.denoiser.train()
-        self.critics.train()
-        if self.connectivity_critic is not None:
-            self.connectivity_critic.train()
-        if self.seam_critic is not None:
-            self.seam_critic.train()
+        for critic in self.critic_modules():
+            critic.train()
 
         domain = self.conditions.sample_target_domain()
         if self.critic_groups_by_domain is not None:
@@ -583,13 +576,10 @@ class Trainer:
                 step, domain, model_domain, critic_domains, batches, transition
             )
         self.diagnostics.update(prepared.diagnostics)
-        elapsed = step - self.settings.group_statistics_start_step
-        ramp = (
-            0.0
-            if elapsed < 0
-            else min(
-                1.0, (elapsed + 1) / max(self.settings.group_statistics_ramp_steps, 1)
-            )
+        ramp = self.conditions.schedule_ramp(
+            step,
+            self.settings.group_statistics_start_step,
+            self.settings.group_statistics_ramp_steps,
         )
         return replace(prepared, group_statistics_ramp=ramp)
 
@@ -765,12 +755,20 @@ class Trainer:
             )
         return previous, current, logits, prediction
 
+    def regularization(self, name: str) -> tuple[bool, bool, bool]:
+        """Lazy R1/R2 schedule for one critic's next update."""
+        regularize = (self.updates[name] + 1) % self.settings.r1_interval == 0
+        return (
+            regularize,
+            self.settings.r1_gamma > 0.0 and regularize,
+            self.settings.r2_gamma > 0.0 and regularize,
+        )
+
     def update_critics(
         self,
         transition: int,
         fake: SampledPairs,
         batches: RealBatch,
-        step: int,
         domains: dict[int, int],
         profile_present: torch.Tensor | None = None,
     ) -> tuple[list[float], float, float]:
@@ -779,10 +777,7 @@ class Trainer:
         global_sum = 0.0
         groups = active_groups(fake.pairs, self.critic_groups)
         for group, axes in groups.items():
-            count = self.updates[group]
-            regularize = (count + 1) % self.settings.r1_interval == 0
-            apply_r1 = self.settings.r1_gamma > 0.0 and regularize
-            apply_r2 = self.settings.r2_gamma > 0.0 and regularize
+            regularize, apply_r1, apply_r2 = self.regularization(group)
             weight = 1.0 / (len(axes) * len(groups))
             critic = self.critics[group]
             optimizer = self.critic_optims[group]
@@ -904,16 +899,12 @@ class Trainer:
         self,
         real: torch.Tensor,
         fake: TripletBatch,
-        step: int,
         domains: torch.Tensor,
     ) -> tuple[float, float, float, float]:
         if not len(fake):
             return 0.0, 0.0, 0.0, 0.0
 
-        count = self.updates["connectivity"]
-        regularize = (count + 1) % self.settings.r1_interval == 0
-        apply_r1 = self.settings.r1_gamma > 0.0 and regularize
-        apply_r2 = self.settings.r2_gamma > 0.0 and regularize
+        regularize, apply_r1, apply_r2 = self.regularization("connectivity")
         self.connectivity_optim.zero_grad(set_to_none=True)
         real = real.detach().float().requires_grad_(apply_r1)
         fake_values = fake.values.detach().float().requires_grad_(apply_r2)
@@ -973,9 +964,7 @@ class Trainer:
     ) -> None:
         if not len(fake):
             return
-        regularize = (self.updates["seam"] + 1) % self.settings.r1_interval == 0
-        apply_r1 = self.settings.r1_gamma > 0.0 and regularize
-        apply_r2 = self.settings.r2_gamma > 0.0 and regularize
+        regularize, apply_r1, apply_r2 = self.regularization("seam")
         self.seam_optim.zero_grad(set_to_none=True)
         real_values = real.values.detach().float().requires_grad_(apply_r1)
         fake_values = fake.values.detach().float().requires_grad_(apply_r2)
@@ -1022,12 +1011,9 @@ class Trainer:
 
     def update_denoiser(self, batch: DenoiserBatch) -> DenoiserUpdate:
         self.denoiser_optim.zero_grad(set_to_none=True)
-        for critic in self.critics.values():
+        critics = self.critic_modules()
+        for critic in critics:
             critic.requires_grad_(False)
-        if self.connectivity_critic is not None:
-            self.connectivity_critic.requires_grad_(False)
-        if self.seam_critic is not None:
-            self.seam_critic.requires_grad_(False)
         try:
             with self.autocast():
                 losses, diagnostics = denoiser_objective(
@@ -1050,13 +1036,13 @@ class Trainer:
             if self.generator_updated:
                 self.updates["generator"] += 1
         finally:
-            for critic in self.critics.values():
+            for critic in critics:
                 critic.requires_grad_(True)
-            if self.connectivity_critic is not None:
-                self.connectivity_critic.requires_grad_(True)
-            if self.seam_critic is not None:
-                self.seam_critic.requires_grad_(True)
         return losses.detach()
+
+    def critic_modules(self) -> list[nn.Module]:
+        extra = (self.connectivity_critic, self.seam_critic)
+        return [*self.critics.values(), *(m for m in extra if m is not None)]
 
     def make_time(self, transition: int, batch: int) -> torch.Tensor:
         return torch.full(

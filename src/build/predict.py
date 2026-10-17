@@ -23,9 +23,8 @@ def load_generator(
     weights: str | Path,
     device: torch.device,
 ) -> Generator:
-    path = Path(weights).resolve()
-    config = find_saved_config(path)
-    cfg = load_train_config(config)
+    path = resolve_weights(weights)
+    cfg = load_train_config(find_saved_config(path))
     return build_generator(path, cfg, device)
 
 

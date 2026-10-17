@@ -61,7 +61,8 @@ function initialize() {
     initialInteractionScale: 1,
     interactionSampleDistanceFactor: 1,
   })
-  clippingPlane = vtkPlane.newInstance({ normal: [0, 0, -1], origin: [0, 0, 0] })
+  // Keep z >= depth so the cut face points toward both camera presets on -z.
+  clippingPlane = vtkPlane.newInstance({ normal: [0, 0, 1], origin: [0, 0, 0] })
   mapper.addClippingPlane(clippingPlane)
   actor = vtkVolume.newInstance()
   actor.setMapper(mapper)
@@ -119,7 +120,7 @@ function setVolume(values, shape) {
     return
   }
   actor.setVisibility(true)
-  resetClipDepth(shape)
+  resetClipDepth()
   setDefaultView()
 }
 
@@ -129,8 +130,8 @@ function updateClipDepth() {
   renderWindow?.render()
 }
 
-function resetClipDepth(shape) {
-  clipDepth.value = Math.max(0, (shape?.[0] ?? 1) - 1)
+function resetClipDepth() {
+  clipDepth.value = 0
   updateClipDepth()
 }
 
@@ -160,7 +161,7 @@ function setDefaultView() {
   setCamera(false)
 }
 function reset() {
-  resetClipDepth(props.shape)
+  resetClipDepth()
   setCamera(true)
 }
 function togglePhase(phase) {
@@ -177,7 +178,6 @@ function setPhaseColor(phase, event) {
 }
 
 watch(() => props.values, values => setVolume(values, props.shape))
-watch(() => props.shape?.[0], () => resetClipDepth(props.shape), { immediate: true, flush: 'sync' })
 watch(() => props.numPhases, () => {
   ensurePhaseState()
   updateAppearance()

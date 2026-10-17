@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
+    add_device_argument,
     add_height_arguments,
     check_parser,
     height_options,
@@ -27,14 +28,14 @@ from scripts.common.diagnostic import (
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
-from src.device import default_device
+from src.device import check_device
 from src.evaluate.anchor import (
     SliceSmoothness,
     measure_distance_divergence,
     measure_slice_smoothness,
 )
 from src.evaluate.label import voxel_accuracy
-from src.random import seeded_rng
+from src.random import preserved_rng, seeded_rng
 from src.storage import save_volume
 
 
@@ -98,11 +99,7 @@ def main() -> None:
         action="store_true",
         help="skip interactive visualization",
     )
-    parser.add_argument(
-        "--device",
-        choices=("cpu", "cuda", "mps"),
-        help="Default: CUDA when available, otherwise CPU.",
-    )
+    add_device_argument(parser)
     add_height_arguments(parser)
     args = parser.parse_args()
     args = prepare_check(args, __file__)
@@ -116,7 +113,7 @@ def main() -> None:
     )
     anchor_count = args.count if anchor_strength > 0.0 else 0
 
-    device = torch.device(args.device or default_device())
+    device = check_device(args.device)
     weight = args.weight
     print(f"\nWeights : {Path(weight).resolve()}")
 
@@ -151,23 +148,16 @@ def main() -> None:
             print(f"Guidance : strength {anchor_strength:.2f}")
         print("Generating conditioned sample...", flush=True)
 
-        cpu_rng = torch.random.get_rng_state()
-        cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
-        mps_rng = torch.mps.get_rng_state() if device.type == "mps" else None
-
-        gen = generator.generate(
-            anchors=anchors,
-            anchor_strength=anchor_strength,
-            guidance=guidance,
-            domain=args.domain,
-            **height_options(args),
-            margin=generator.default_margin,
-        )
-        torch.random.set_rng_state(cpu_rng)
-        if cuda_rng is not None:
-            torch.cuda.set_rng_state_all(cuda_rng)
-        if mps_rng is not None:
-            torch.mps.set_rng_state(mps_rng)
+        # The baseline below reuses the conditioned sample's noise.
+        with preserved_rng(device):
+            gen = generator.generate(
+                anchors=anchors,
+                anchor_strength=anchor_strength,
+                guidance=guidance,
+                domain=args.domain,
+                **height_options(args),
+                margin=generator.default_margin,
+            )
         print("Generating same-RNG baseline...", flush=True)
         baseline = generator.generate(
             anchors=(),

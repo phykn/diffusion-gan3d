@@ -18,6 +18,24 @@ from src.data.source import fill_height_extents
 from src.data.split import resolve_split
 from src.plane import PLANE_DIRECTIONS, PLANES
 
+# Settings without defaults; partial configs may omit them until training.
+TRAINING_SETTINGS = (
+    "data.domains",
+    "data.num_phases",
+    "data.crop_size",
+    "data.lo_res_size",
+    "model.generator.channels",
+    "model.critic.channels",
+    "model.diffusion.num_steps",
+    "loss.r1_weight",
+    "optim.generator_lr",
+    "train.total_steps",
+    "train.volume_batch_size",
+    "train.real_batch_size",
+    "train.slice_pairs_per_plane",
+    "train.weights_every_steps",
+)
+
 
 def load_train_config(
     path: str | Path, stage: str = "low_res", data: str | Path | None = None
@@ -25,16 +43,9 @@ def load_train_config(
     cfg = load_yaml(path)
     if data is not None:
         cfg["data"] = str(data)
-    cfg, external_data = load_external_data(cfg)
-    return fill_height_extents(normalize_loaded_train_config(cfg, stage, external_data))
-
-
-def load_external_data(cfg: dict) -> tuple[dict, bool]:
-    cfg = dict(cfg)
-    external_data = isinstance(cfg.get("data"), str)
-    if external_data:
+    if isinstance(cfg.get("data"), str):
         cfg["data"] = load_yaml(resolve_external_data_path(cfg["data"]))
-    return cfg, external_data
+    return fill_height_extents(normalize_loaded_train_config(cfg, stage))
 
 
 def resolve_external_data_path(path: str | Path) -> Path:
@@ -44,9 +55,7 @@ def resolve_external_data_path(path: str | Path) -> Path:
     return data_path
 
 
-def normalize_loaded_train_config(
-    cfg: dict, stage: str = "low_res", external_data: bool = False
-) -> dict:
+def normalize_loaded_train_config(cfg: dict, stage: str = "low_res") -> dict:
     if "data" not in cfg:
         raise ValueError(
             "training config must select a data file or embed data settings."
@@ -54,21 +63,21 @@ def normalize_loaded_train_config(
     if stage == "sr" and "guidance" not in cfg.get("lr_bank", {}):
         raise ValueError("SR config must set lr_bank.guidance explicitly.")
     cfg = normalize_train_config(cfg, stage)
-    if external_data:
-        for folders in get_domains(cfg["data"]).values():
-            for paths in folders.values():
-                if isinstance(paths, (str, bytes)) or not isinstance(paths, Sequence):
-                    raise TypeError("plane folders must be a sequence of paths.")
-        cfg["data"]["domains"] = {
-            domain: {
-                plane: [
-                    str((PROJECT_ROOT / Path(path).expanduser()).resolve())
-                    for path in paths
-                ]
-                for plane, paths in planes.items()
-            }
-            for domain, planes in cfg["data"]["domains"].items()
+    # Relative folders follow the project root, like every other config path.
+    for folders in get_domains(cfg["data"]).values():
+        for paths in folders.values():
+            if isinstance(paths, (str, bytes)) or not isinstance(paths, Sequence):
+                raise TypeError("plane folders must be a sequence of paths.")
+    cfg["data"]["domains"] = {
+        domain: {
+            plane: [
+                str((PROJECT_ROOT / Path(path).expanduser()).resolve())
+                for path in paths
+            ]
+            for plane, paths in planes.items()
         }
+        for domain, planes in cfg["data"]["domains"].items()
+    }
     return cfg
 
 
@@ -163,6 +172,34 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     return cfg
 
 
+def validate_training_settings(cfg: Mapping) -> None:
+    """Check settings used only by training, before data or models are built."""
+    _require_settings(cfg, TRAINING_SETTINGS, " for training")
+    train = cfg["train"]
+    conditioning, _ = get_trainer_sections(cfg)
+    anchor = conditioning["anchor"]
+    start, _ = get_schedule_steps(anchor, "conditioning.anchor")
+    if train["volume_batch_size"] > train["real_batch_size"]:
+        if anchor["probability"] > 0.0 and start < train["total_steps"]:
+            raise ValueError(
+                "train.volume_batch_size must not exceed train.real_batch_size when "
+                "anchor training is enabled."
+            )
+        if conditioning["height_enabled"]:
+            raise ValueError(
+                "height conditioning requires real_batch_size >= volume_batch_size."
+            )
+
+
+def _require_settings(cfg: Mapping, paths: Sequence[str], purpose: str = "") -> None:
+    for path in paths:
+        target = cfg
+        for key in path.split("."):
+            if not isinstance(target, Mapping) or key not in target:
+                raise ValueError(f"missing required setting{purpose}: {path}")
+            target = target[key]
+
+
 def _fill_defaults(cfg: dict, defaults: Mapping) -> None:
     for path, value in defaults.items():
         target = cfg
@@ -199,15 +236,11 @@ def validate_sr_config(cfg: dict) -> dict:
     cfg["model"]["critic"]["plane_groups"] = [
         [PLANES[axis] for axis in axes] for axes in groups.values()
     ]
-    for name in (
-        "total_steps",
-        "volume_batch_size",
-        "real_batch_size",
-        "slice_pairs_per_plane",
-        "weights_every_steps",
-    ):
-        if name not in cfg["train"]:
-            raise ValueError(f"train.{name} is required for SR training.")
+    validate_training_settings(cfg)
+    if "samples_per_domain" not in cfg["lr_bank"]:
+        raise ValueError(
+            "missing required setting for training: lr_bank.samples_per_domain"
+        )
     count = cfg["lr_bank"]["samples_per_domain"]
     if isinstance(count, bool) or not isinstance(count, int) or count < 1:
         raise ValueError("lr_bank.samples_per_domain must be a positive integer.")

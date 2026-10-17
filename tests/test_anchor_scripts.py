@@ -25,6 +25,13 @@ from src.storage import save_model
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def weight_file(directory: Path) -> Path:
+    # Scripts resolve --weight before the mocked loader runs.
+    path = directory / "generator.pt"
+    path.touch()
+    return path
+
+
 def test_boundary_continuation_defaults_to_an_unconditioned_reference(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -341,7 +348,7 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
         [
             "03_check_anchor.py",
             "--weight",
-            str(tmp_path / "generator.pt"),
+            str(weight_file(tmp_path)),
             "--domain",
             "1",
             "--count",
@@ -396,7 +403,7 @@ def test_anchor_check_uses_generated_reference_and_same_rng_baseline(
         [
             "03_check_anchor.py",
             "--weight",
-            str(tmp_path / "generator.pt"),
+            str(weight_file(tmp_path)),
             "--seed",
             "17",
             "--axis",
@@ -455,7 +462,7 @@ def test_unconditioned_check_routes_only_domain_condition(
         [
             "02_check_generated.py",
             "--weight",
-            str(tmp_path / "generator.pt"),
+            str(weight_file(tmp_path)),
             "--out",
             str(output_path),
             *extra_args,

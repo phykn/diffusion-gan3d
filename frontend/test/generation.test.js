@@ -106,3 +106,46 @@ test('XY sections require an explicit Z extent when the model has mixed heights'
   assert.equal(state.error.value, true)
   assert.match(state.status.value, /full Z extent/)
 })
+
+test('health checks retry until the server answers and report the outage', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let attempts = 0
+  t.mock.method(globalThis, 'fetch', async path => {
+    assert.equal(path, '/health')
+    attempts += 1
+    if (attempts < 3) throw new TypeError('connection refused')
+    return Response.json({ crop_size: 1, num_phases: 2 })
+  })
+  let state
+  const app = renderer.createApp({
+    setup() {
+      state = useGeneration(ref(null))
+      return () => null
+    },
+  })
+  app.mount({})
+  t.after(() => app.unmount())
+  await settle()
+  assert.equal(state.health.value, null)
+  assert.match(state.healthError.value, /unreachable/)
+  state.selectFile({ name: 'section.png' })
+  assert.match(state.healthError.value, /unreachable/)
+  t.mock.timers.tick(500)
+  await settle()
+  t.mock.timers.tick(1000)
+  await settle()
+  assert.equal(attempts, 3)
+  assert.equal(state.health.value.crop_size, 1)
+  assert.equal(state.healthError.value, '')
+})
+
+test('unchecking tortuosity skips the server metric', async t => {
+  let body
+  const { state } = await mount(t, async options => {
+    body = JSON.parse(options.body)
+    return volume()
+  })
+  state.measureTortuosity.value = false
+  await state.generate()
+  assert.equal(body.include_metrics, false)
+})

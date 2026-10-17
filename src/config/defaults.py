@@ -3,6 +3,7 @@ TRAIN_DEFAULTS = {
     "optim.ema_decay": 0.999,
     "train.mixed_precision": True,
     "train.structure_every_steps": 100,
+    "train.archive_every_steps": None,
     "model.critic.pyramid_min_size": 16,
     "model.critic.input_mode": "single",
     "conditioning.height_enabled": False,
@@ -57,7 +58,6 @@ STAGE_DEFAULTS = {
         "train.initial_weights": None,
     },
     "sr": {
-        "train.archive_every_steps": None,
         "loss.downsample_mse_tolerance": 0.005,
         "loss.downsample_consistency_weight": 0.0,
         "lr_bank.refresh_every_steps": 1000,

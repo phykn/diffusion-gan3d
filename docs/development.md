@@ -8,6 +8,7 @@
 | Network architecture | [src/model/](../src/model/), [model assembly](../src/build/model.py) |
 | Training step or objective | [Trainer](../src/train/trainer.py), [losses](../src/train/loss/) |
 | Training data, anchors, or condition sampling | [ConditionSampler](../src/train/conditioning.py), [step inputs](../src/train/batch.py) |
+| Plane pairs, connectivity triplets, or seam bands | [section sampling](../src/data/slice.py) |
 | Step metrics and TensorBoard tags | [metrics](../src/train/metrics.py) |
 | SR bank fractions or height coordinates | [bank validation](../src/data/bank.py), [SR assembly](../src/build/sr.py) |
 | Logging, checkpoints, or resume | [run lifecycle](../src/train/run/), [training state](../src/train/state.py) |
@@ -20,14 +21,15 @@
 Training runs from `run_train_1st.py` / `run_train_2nd.py` through `src/train/run/`,
 then `src/build/` assembles data, models, and the trainer.
 `train/loss/denoiser.py` owns the generator objective, and `train/loss/gan.py` owns
-the shared plane/connectivity critic objective and R1/R2 input penalties.
+the shared plane, connectivity, and seam critic objective and R1/R2 input penalties.
 The web backend calls `LowResolutionAPI`.
 
 `Trainer.step` owns optimizer and EMA updates. `collect_metrics` in
 `src/train/metrics.py` assembles the step result, converts tensor diagnostics to
 plain values, and marks unavailable anchor-boundary measurements. It does not
 update training state. The run loop writes every metric and diagnostic to
-TensorBoard, including zero-valued inactive metrics. Unavailable measurements
+TensorBoard, including zero-valued inactive metrics, except where a section below
+says an objective records tags only while enabled. Unavailable measurements
 are recorded as NaN gaps. Experiment scripts use `scripts/common/metrics.py` to
 read the full scalar history by step, converting those gaps back to `None`.
 
@@ -55,7 +57,8 @@ provider. Existing-volume conditioning belongs to `VolumeCondition`.
 They share tile-buffer and model-workspace calculations, using the actual tile
 shape; SR additionally budgets coarse interpolation and label conversion.
 `src/random.py` scopes seeded inference and KID evaluation to the CPU and
-selected CUDA device, restoring the caller's random state on exit.
+selected CUDA or MPS device, restoring the caller's random state on exit;
+`preserved_rng` replays the same noise for same-noise baselines.
 
 ## LR anchor continuity
 
@@ -137,15 +140,44 @@ zero. `far_pairs` counts reference voxel pairs and `reference_axes` counts suppo
 volume-axis combinations. Zero pair counts mark unavailable distances. A zero
 weight avoids constructing an additional gradient graph for these diagnostics.
 
+## LR anchor seam critic
+
+`loss.anchor_seam_weight` enables an adversarial seam objective (default `0`, off);
+`loss.anchor_seam_rows` is the band height in LR voxels (default `4`). Both are LR-only.
+`sample_seam_bands` in `src/data/slice.py` cuts bands of that many rows from the
+selected transition's x0 prediction, starting next to each visible anchor on both
+normal sides and running away from it. Bands are `patch_size // 2` voxels wide and
+must avoid fixed voxels. Far bands come from the same prediction, more than `rows`
+voxels from every same-axis anchor.
+
+`SeamCritic2D` scores a band from its section plane, diffusion time, and domain. It
+treats far bands as real and near bands as fake, so it compares generated content
+next to an anchor with generated content elsewhere, not with measured 3D data. The
+generator receives its adversarial loss on near bands, scaled by the anchor ramp.
+Near and far bands are drawn with equal counts for each anchor axis and section
+plane, at most `slice_pairs_per_plane` per plane, so neither the plane label nor the
+row orientation can tell them apart. With height conditioning, bands whose rows run
+along z are read upward and the width direction is never mirrored across z.
+
+The LR seam critic is always built, so `critic_s.pt` is saved and LR checkpoints hold
+`seam` and `seam_optim` even at weight `0`. Unlike the neighborhood diagnostics, seam
+tags are recorded only while the weight is positive: `loss/anchor_seam`,
+`loss/critic_anchor_seam`,
+`anchor_seam/{contribution,near_bands,far_bands,near_score,far_score,r1}`, and
+`r2/anchor_seam` when R2 applies. Regression tests are in
+`tests/train/test_anchor_seam.py`.
+
 ## Contracts to preserve
 
 - Volumes use `(z, y, x)` axes. Crop/height coordinates use source pixels;
   LR/HR grids use voxels. `DataResolution` names these units explicitly.
 - `config/` holds user presets, `src/config/` resolves and validates them,
   and `src/build/` constructs runtime objects. Backend config contains HTTP limits.
-  Both training stages validate shared numeric settings in `src/config/values.py`;
-  `validate_sr_config` also resolves SR geometry, requires training fields, and
-  validates SR source/bank settings.
+  Both training stages validate shared numeric settings in `src/config/values.py`.
+  `validate_training_settings` checks settings without defaults and batch-size
+  constraints before data or models are built; `validate_sr_config` also resolves SR
+  geometry and validates SR source/bank settings. Relative paths in YAML resolve
+  against the project root, including `train.initial_weights`.
 - LR inference reads the run's `train.yaml` and `config/gen.yaml` generation defaults.
   SR reads settings embedded in its weight export; resume reads checkpoint settings.
 - `src/train/state.py` owns checkpoint formats. Preserve frozen-LR source checks
@@ -163,7 +195,12 @@ weight avoids constructing an additional gradient graph for these diagnostics.
   extents to one value per sample and keeps existing per-sample tensors connected
   to bank refresh updates.
 - Measured 2D observations and generated replay references have distinct roles.
-  Preserve that distinction in losses, metadata, and evaluation claims.
+  Preserve that distinction in losses, metadata, and evaluation claims. The seam
+  critic's "real" bands are generated far bands, not measured data.
+- `simul/` packs particles with periodic y/x boundaries (and z when the radius has no
+  height gradient), so the exported volumes have no boundary density profile. Random
+  packing can jam below the configured fractions; `simulation.yaml` records the
+  measured fractions and the optional `output.seed`.
 
 Tiled fusion still uses buffers spanning the output's H/W plane; memory estimates
 include them. A disconnected web client does not cancel ongoing model computation.
@@ -179,8 +216,9 @@ python -m ruff check .
 ```
 
 Frontend checks, from `frontend/`: `npm ci`, `npm test`, and `npm run build`.
-CUDA tests skip when a GPU is unavailable. Passing CPU tests does not establish
-CUDA/AMP behavior or trained reconstruction quality. For algorithm changes, compare
+CUDA tests skip without a CUDA GPU and Apple GPU tests skip without MPS. Mixed
+precision runs only on CUDA. Passing CPU tests does not establish CUDA/AMP behavior
+or trained reconstruction quality. For algorithm changes, compare
 training state and generated samples at fixed seeds as well as running regression tests.
 
 [Back to README](../README.md)

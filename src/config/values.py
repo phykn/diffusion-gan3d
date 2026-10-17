@@ -4,7 +4,13 @@ from src.phase import validate_num_phases
 
 
 def _number(value, name, maximum=None, *, exclusive=False):
-    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+    if type(value) not in (int, float):
+        # PyYAML reads exponents without a decimal point, such as 1e-4, as text.
+        hint = " (write 1.0e-4, not 1e-4)" if isinstance(value, str) else ""
+        raise ValueError(
+            f"{name} must be a number, got {type(value).__name__} {value!r}{hint}."
+        )
+    if not math.isfinite(value) or value < 0:
         raise ValueError(f"{name} must be finite and non-negative.")
     if maximum is not None and (value >= maximum if exclusive else value > maximum):
         end = ")" if exclusive else "]"
@@ -58,6 +64,27 @@ def validate_training_values(cfg):
         for name, value in values.items():
             if name.endswith("_weight") or name == "downsample_mse_tolerance":
                 _number(value, f"{section}.{name}")
+    interval = cfg["loss"]["r1_every_steps"]
+    if type(interval) is not int or interval < 1:
+        raise ValueError("loss.r1_every_steps must be a positive integer.")
+    anchor = conditioning.get("anchor", {})
+    connectivity = cfg["loss"].get("connectivity", {})
+    for name, value in (
+        ("conditioning.anchor.bank_capacity", anchor.get("bank_capacity", 1)),
+        ("conditioning.anchor.plane_spacing", anchor.get("plane_spacing", 1)),
+        (
+            "loss.connectivity.windows_per_plane",
+            connectivity.get("windows_per_plane", 1),
+        ),
+    ):
+        if type(value) is not int or value < 1:
+            raise ValueError(f"{name} must be a positive integer.")
+    diffusion = cfg.get("model", {}).get("diffusion", {})
+    beta_min, beta_max = diffusion["beta_min"], diffusion["beta_max"]
+    _number(beta_min, "model.diffusion.beta_min")
+    _number(beta_max, "model.diffusion.beta_max")
+    if beta_min >= beta_max:
+        raise ValueError("model.diffusion.beta_min must be below beta_max.")
     statistics = cfg["loss"]["group_statistics"]
     _number(statistics["weight"], "loss.group_statistics.weight")
     _number(statistics["tolerance"], "loss.group_statistics.tolerance", 1)

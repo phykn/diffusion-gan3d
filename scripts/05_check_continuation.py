@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
+    add_device_argument,
     add_height_arguments,
     check_parser,
     height_options,
@@ -28,7 +29,7 @@ from src.build.predict import load_generator
 from src.config.files import find_saved_config
 from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
-from src.device import default_device
+from src.device import check_device
 from src.evaluate.anchor import (
     measure_boundaries,
     measure_distance_divergence,
@@ -36,7 +37,7 @@ from src.evaluate.anchor import (
 )
 from src.evaluate.label import voxel_accuracy
 from src.prepare.resize import resize_crop
-from src.random import seeded_rng
+from src.random import preserved_rng, seeded_rng
 from src.storage import save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
@@ -63,25 +64,23 @@ def main() -> None:
     parser.add_argument(
         "--out", type=Path, help="TIFF path; default: a new directory under run/checks"
     )
-    parser.add_argument("--figure", type=Path, help="optional slice-strip PNG path")
+    parser.add_argument(
+        "--figure", type=Path, help="Slice-strip PNG; default: <out>_continuation.png."
+    )
     parser.add_argument(
         "--napari",
         action="store_true",
         help="inspect the generated volume and condition input in Napari",
     )
     parser.add_argument("--no-view", action="store_true")
-    parser.add_argument(
-        "--device",
-        choices=("cpu", "cuda", "mps"),
-        help="Default: CUDA when available, otherwise CPU.",
-    )
+    add_device_argument(parser)
     add_height_arguments(parser, origin_default=None)
     args = parser.parse_args()
     args = prepare_check(args, __file__)
     if args.figure is None:
         args.figure = args.out.with_name(args.out.stem + "_continuation.png")
 
-    device = torch.device(args.device or default_device())
+    device = check_device(args.device)
     generator = load_generator(args.weight, device=device)
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
@@ -132,22 +131,16 @@ def main() -> None:
 
         print("Generating boundary-conditioned volume...", flush=True)
 
-        cpu_rng = torch.random.get_rng_state()
-        cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
-        mps_rng = torch.mps.get_rng_state() if device.type == "mps" else None
-        generated = generator.generate(
-            anchors=(anchor,),
-            anchor_strength=anchor_strength,
-            guidance=guidance,
-            domain=args.domain,
-            **height_options(args),
-            margin=generator.default_margin,
-        )
-        torch.random.set_rng_state(cpu_rng)
-        if cuda_rng is not None:
-            torch.cuda.set_rng_state_all(cuda_rng)
-        if mps_rng is not None:
-            torch.mps.set_rng_state(mps_rng)
+        # The baseline below reuses the conditioned sample's noise.
+        with preserved_rng(device):
+            generated = generator.generate(
+                anchors=(anchor,),
+                anchor_strength=anchor_strength,
+                guidance=guidance,
+                domain=args.domain,
+                **height_options(args),
+                margin=generator.default_margin,
+            )
         print("Generating same-RNG baseline...", flush=True)
         baseline = generator.generate(
             anchors=(),
@@ -169,16 +162,15 @@ def main() -> None:
         args.axis,
         index,
     )
-    if args.figure is not None or (not args.no_view and not args.napari):
-        render_strip(
-            generated,
-            anchor_labels,
-            args.axis,
-            args.side,
-            generator.num_phases,
-            output=args.figure,
-            show=not args.no_view and not args.napari,
-        )
+    render_strip(
+        generated,
+        anchor_labels,
+        args.axis,
+        args.side,
+        generator.num_phases,
+        output=args.figure,
+        show=not args.no_view and not args.napari,
+    )
     if args.napari and not args.no_view:
         show_napari(generated)
 

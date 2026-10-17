@@ -18,7 +18,7 @@ Examples from the [recorded experiments](PAPER.md); their settings differ from c
 
 ## Quick start
 
-Use Python 3.11+ and a PyTorch build suited to your CUDA environment.
+Use Python 3.11+ and a PyTorch build suited to your GPU (CUDA or Apple MPS) or CPU.
 Run commands from the project root in the activated environment.
 
 ```bash
@@ -37,14 +37,16 @@ The default data preset includes `data/sample.png`. To use your own images, edit
 
 ```bash
 python scripts/01_check_dataset.py --no-view
-python run_train_1st.py --run-dir "run/my-lr-run" --device cuda
+python run_train_1st.py --run-dir "run/my-lr-run"
 python scripts/02_check_generated.py --weight "run/my-lr-run" --no-view
 ```
 
 Use a new `--run-dir` for each training run, then pass that directory to `--weight`.
 The [LR (low-resolution) preset](config/train/low_res.yaml) controls training; weights and resolved settings
 are saved in the run directory, and inspection images/TIFF volumes in `run/checks/`.
-Use `--device cpu` for training or generation without CUDA.
+Training, inspection, and Python generation use CUDA, then Apple MPS, then CPU,
+whichever is available first; pass `--device cpu` (or `cuda`, `mps`) to choose.
+Mixed precision applies only on CUDA.
 
 ## Super-resolution (optional)
 
@@ -52,7 +54,7 @@ Stage 2 trains a separate model using frozen stage-1 volumes and real high-resol
 Configure the [SR preset](config/train/sr.yaml), then run:
 
 ```bash
-python run_train_2nd.py --base-weights "run/my-lr-run" --run-dir "run/my-sr-run" --device cuda
+python run_train_2nd.py --base-weights "run/my-lr-run" --run-dir "run/my-sr-run"
 python scripts/06_check_hr.py --weight "run/my-sr-run" --no-view
 ```
 
@@ -71,12 +73,20 @@ npm run dev
 ```
 
 Open the URL printed by Vite to select a section, crop an anchor, and generate a volume.
+If the backend uses another `--host` or `--port`, start Vite with
+`API_URL=http://HOST:PORT npm run dev`. To skip Vite, run `npm run build` first; a backend
+started afterwards serves the built page at its own address (default http://127.0.0.1:8000).
 [backend/config.yaml](backend/config.yaml) controls HTTP resource limits.
+Tortuosity is solved on the server before the volume is sent; untick it in the sidebar
+to speed up large volumes. Porosity is always computed in the browser.
 
 ## Working with the code
 
 - Training starts at [run_train_1st.py](run_train_1st.py) and [run_train_2nd.py](run_train_2nd.py).
 - Python generation starts at [src/api.py](src/api.py): `LowResolutionAPI`, `PlaneAnchor`, and `SuperResolutionAPI`.
+  `LowResolutionAPI.generate` returns labels and `generate_probs` phase fractions; both take
+  `anchors` positionally and every other option by keyword, such as
+  `api.generate_probs(shape=(96, 64, 64), seed=1)`.
 - See the [code map and checks](docs/development.md) for implementation locations and test commands.
 - See [run and inspection notes](docs/checks.md) for anchors, tiled generation, saved outputs, and resume.
 

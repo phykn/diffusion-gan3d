@@ -58,6 +58,22 @@ def checkpoint_rng():
         yield
 
 
+def test_checkpoint_without_amp_resumes_with_an_enabled_scaler(tmp_path):
+    cfg = small_config(tmp_path)
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    trainer.step(0, transition=0)
+    path = tmp_path / "training.pt"
+    save_training(trainer, path)
+    payload = torch.load(path, weights_only=True)
+    assert payload["scaler"] == {}
+    # A CUDA host enables the scaler for the same saved settings.
+    restored = build_trainer(cfg, torch.device("cpu"))
+    restored.scaler = torch.amp.GradScaler("cpu", enabled=True)
+    resume_training(restored, payload)
+    assert restored.completed_steps == 1
+    assert restored.scaler.get_scale() == torch.amp.GradScaler("cpu").get_scale()
+
+
 @pytest.mark.parametrize("mode", ["single", "pair"])
 def test_lr_checkpoint_restores_training_state_without_rng(
     tmp_path, mode, checkpoint_rng
@@ -71,7 +87,7 @@ def test_lr_checkpoint_restores_training_state_without_rng(
     trainer = build_trainer(cfg, torch.device("cpu"))
     trainer.step(0, transition=0)
     path = tmp_path / "training.pt"
-    save_training(path, trainer)
+    save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     assert payload["format"] == "diffusion-gan3d.lr.train"
     assert {"connectivity", "connectivity_optim", "seam", "seam_optim"} <= (
@@ -160,7 +176,7 @@ def test_lr_resume_rejects_incomplete_connectivity_state(tmp_path, active, missi
     cfg["loss"]["connectivity"].update(adversarial_weight=float(active))
     trainer = build_trainer(cfg, torch.device("cpu"))
     path = tmp_path / "training.pt"
-    save_training(path, trainer)
+    save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     if missing in ("connectivity", "all"):
         payload.pop("connectivity")
@@ -179,7 +195,7 @@ def test_lr_resume_requires_path_map_history_before_loading_weights(tmp_path):
     cfg = small_config(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
     path = tmp_path / "training.pt"
-    save_training(path, trainer)
+    save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     payload.pop("path_maps")
     restored = build_trainer(cfg, torch.device("cpu"))
@@ -193,7 +209,7 @@ def test_lr_resume_rejects_changed_images_or_training_contract(tmp_path):
     cfg = small_config(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
     path = tmp_path / "training.pt"
-    save_training(path, trainer)
+    save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     changed = copy.deepcopy(cfg)
     changed["loss"]["r2_weight"] = 0.2
@@ -214,7 +230,7 @@ def test_lr_resume_rejects_mismatched_groups_before_loading_weights(
     cfg = small_config(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
     path = tmp_path / "training.pt"
-    save_training(path, trainer)
+    save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     if change == "missing":
         payload[field].pop(next(iter(payload[field])))
@@ -360,9 +376,9 @@ def test_connectivity_regularization_counts_its_own_updates(tmp_path):
         torch.ones(2, dtype=torch.long),
     )
     domains = torch.zeros(2, dtype=torch.long)
-    trainer.update_connectivity_critic(values + 0.1, fake, 15, domains)
+    trainer.update_connectivity_critic(values + 0.1, fake, domains)
     assert trainer.diagnostics["regularization/connectivity"] == 0
-    trainer.update_connectivity_critic(values + 0.1, fake, 101, domains)
+    trainer.update_connectivity_critic(values + 0.1, fake, domains)
     assert trainer.diagnostics["regularization/connectivity"] == 1
     assert trainer.updates["connectivity"] == 2
 

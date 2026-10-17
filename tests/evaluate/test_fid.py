@@ -59,6 +59,29 @@ def test_fid_scores_real_and_generated_images(
     assert [real_flag for _, real_flag in metric.updates] == [True, False]
 
 
+def test_fid_accumulates_apple_gpu_requests_on_the_cpu(monkeypatch):
+    devices = []
+
+    class FakeMetric:
+        def __init__(self, **kwargs):
+            pass
+
+        def to(self, device):
+            devices.append(torch.device(device))
+            return self
+
+        def update(self, images, *, real):
+            devices.append(images.device)
+
+        def compute(self):
+            return torch.tensor(1.0)
+
+    monkeypatch.setattr(fid_module, "FrechetInceptionDistance", FakeMetric)
+    images = np.zeros((2, 4, 4), dtype=np.uint8)
+    assert compute_fid(images, images, "mps", 64) == 1.0
+    assert devices == [torch.device("cpu")] * 3
+
+
 def test_prepare_images_preserves_input_and_scales_normalized_grayscale() -> None:
     sections = np.asarray((((0.0, 0.5), (1.0, 0.25)),), dtype=np.float32)
     original = sections.copy()

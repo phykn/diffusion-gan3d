@@ -19,6 +19,8 @@ const {
   status,
   error,
   health,
+  healthError,
+  measureTortuosity,
   result,
   ready,
   invalidateResult,
@@ -36,8 +38,10 @@ const {
       v-model:domain="domain"
       v-model:height-origin="heightOrigin"
       v-model:height-extent="heightExtent"
+      v-model:measure-tortuosity="measureTortuosity"
       :file
       :health
+      :health-error="healthError"
       :busy
       :ready
       :status

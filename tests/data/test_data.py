@@ -36,6 +36,30 @@ class LabelTransformTest(unittest.TestCase):
             self.assertTrue(torch.equal(item["image"].argmax(0), torch.full((8, 8), 2)))
             self.assertEqual(item["source_shape"].tolist(), [8, 8])
 
+    def test_labels_are_checked_across_the_whole_image_and_name_the_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "image.png"
+            image = np.zeros((8, 8), dtype=np.uint8)
+            image[-1, -1] = 2
+            _save_image(path, image)
+            dataset = RealDataset([[path]], crop_size=2, patch_size=2, num_phases=2)
+            with patch("numpy.random.randint", side_effect=(0, 0)):
+                with self.assertRaisesRegex(ValueError, r"found 2: .*image\.png"):
+                    dataset[path]
+
+    def test_decoded_sources_are_reused_until_the_file_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "image.png"
+            _save_image(path, np.zeros((8, 8), dtype=np.uint8))
+            dataset = RealDataset([[path]], crop_size=8, patch_size=8, num_phases=3)
+            first = dataset.decode(path.resolve())
+            self.assertIs(dataset.decode(path.resolve()), first)
+            self.assertFalse(first.flags.writeable)
+            _save_image(path, np.full((8, 12), 1, dtype=np.uint8))
+            updated = dataset.decode(path.resolve())
+            self.assertEqual(updated.shape, (8, 12))
+            self.assertTrue((updated == 1).all())
+
     def test_random_crop_returns_source_origin(self):
         image = np.arange(36, dtype=np.uint8).reshape(6, 6)
         dataset = RealDataset([["unused"]], crop_size=3, patch_size=3, num_phases=36)

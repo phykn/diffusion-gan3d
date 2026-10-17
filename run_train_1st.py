@@ -30,11 +30,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--steps", type=int, help="Total target steps, including completed steps."
     )
-    parser.add_argument("--data", type=Path, help="Data YAML; overrides config.data.")
+    parser.add_argument(
+        "--data",
+        type=Path,
+        help="Data YAML relative to the project root; overrides config.data.",
+    )
     parser.add_argument(
         "--device",
         choices=("cuda", "mps", "cpu"),
         default=default_device(),
+        help="Compute device; CUDA, then Apple MPS, then CPU when available.",
     )
     parser.add_argument(
         "--run-dir",

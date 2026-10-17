@@ -24,6 +24,9 @@ def main() -> None:
     slice_count = sum(len(paths) for paths in export.slices.values())
     print(f"Volumes : {len(export.volumes)}")
     print(f"Slices  : {slice_count}")
+    for key in ("big_vf", "small_vf"):
+        mean = sum(item[key] for item in export.measured) / len(export.measured)
+        print(f"{key:<8}: {mean:.3f} measured, {cfg['geometry'][key]} target")
     print(f"Output  : {cfg['output']['data_dir']}")
 
 

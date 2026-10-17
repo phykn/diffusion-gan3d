@@ -2,6 +2,19 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { generateVolume, getHealth, prepareImage } from './api.js'
 import { createRequestGate, normalizeBlocks, normalizeSeed } from './input-state.js'
 
+const HEALTH_RETRY_MS = 500
+const HEALTH_RETRY_MAX_MS = 5000
+
+function wait(delay, signal) {
+  return new Promise(resolve => {
+    const timer = setTimeout(resolve, delay)
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer)
+      resolve()
+    }, { once: true })
+  })
+}
+
 export function useGeneration(cropEditor) {
   const cropReady = ref(false)
   const file = ref(null)
@@ -15,6 +28,8 @@ export function useGeneration(cropEditor) {
   const status = ref('')
   const error = ref(false)
   const health = ref(null)
+  const healthError = ref('')
+  const measureTortuosity = ref(true)
   const result = ref(null)
   const ready = computed(() => Boolean(
     file.value && cropReady.value && health.value && !busy.value,
@@ -22,15 +37,20 @@ export function useGeneration(cropEditor) {
   const gate = createRequestGate()
   const controller = new AbortController()
 
+  // The backend may start after the page; keep retrying until it answers.
   onMounted(async () => {
-    try {
-      health.value = await getHealth(controller.signal)
-      plane.value = health.value.height_enabled ? 1 : 0
-      heightExtent.value = health.value.height_extents?.[domain.value] ?? null
-    } catch {
-      if (controller.signal.aborted) return
-      error.value = true
-      status.value = 'Could not connect to the inference server.'
+    for (let delay = HEALTH_RETRY_MS; !controller.signal.aborted; delay = Math.min(delay * 2, HEALTH_RETRY_MAX_MS)) {
+      try {
+        health.value = await getHealth(controller.signal)
+        healthError.value = ''
+        plane.value = health.value.height_enabled ? 1 : 0
+        heightExtent.value = health.value.height_extents?.[domain.value] ?? null
+        return
+      } catch {
+        if (controller.signal.aborted) return
+        healthError.value = 'Inference server unreachable · retrying'
+        await wait(delay, controller.signal)
+      }
     }
   })
   onBeforeUnmount(() => {
@@ -86,6 +106,7 @@ export function useGeneration(cropEditor) {
       if (!gate.accepts(token)) return
       const next = await generateVolume(
         image, requestSeed, requestBlocks, controller.signal, conditions,
+        { tortuosity: measureTortuosity.value },
       )
       if (gate.accepts(token)) result.value = next
     } catch (reason) {
@@ -110,6 +131,8 @@ export function useGeneration(cropEditor) {
     status,
     error,
     health,
+    healthError,
+    measureTortuosity,
     result,
     ready,
     invalidateResult,

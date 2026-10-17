@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from src.build.model import build_diffusion, build_sr_model
 from src.build.predict import resolve_weights
 from src.config.train import get_sr_resolution, normalize_train_config
+from src.device import check_device, default_device
 from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 from src.predict.generator import Generator, GuidedDenoiser
 from src.predict.sr.memory import check_sr_memory, estimate_sr_memory
@@ -20,8 +21,10 @@ from src.random import seeded_rng
 class SuperResolutionAPI:
     """Refine an LR label/fraction volume into HR voxels using separate SR weights."""
 
-    def __init__(self, weights: str | Path, device: str | torch.device = "cpu"):
-        self.device = torch.device(device)
+    def __init__(
+        self, weights: str | Path, device: str | torch.device | None = None
+    ) -> None:
+        self.device = check_device(default_device() if device is None else device)
         self.weights = resolve_weights(weights)
         payload = torch.load(self.weights, map_location="cpu", weights_only=True)
         if payload.get("format") != "diffusion-gan3d.sr":
@@ -106,7 +109,7 @@ class SuperResolutionAPI:
         if base is None and base_offset is not None:
             raise ValueError("base_offset requires base.")
         if base is not None:
-            base_offset, _ = resolve_offset(base_offset, shape, volume_shape(base))
+            base_offset = resolve_offset(base_offset, shape, volume_shape(base))
         guidance = self.generator.validate_guidance(guidance)
         if margin is None:
             margin = self.generator.default_margin

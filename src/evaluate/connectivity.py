@@ -3,7 +3,7 @@ import scipy.ndimage as ndi
 import torch
 
 from src.device import wide_dtype
-from src.evaluate.label import phase_labels
+from src.evaluate.label import check_labels, phase_labels
 
 _CONNECTIVITY = ndi.generate_binary_structure(3, 1)
 
@@ -61,7 +61,7 @@ def _transition_matrices(first, second) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def percolating_fractions(volume, phase: int = 1) -> tuple[float, float, float]:
-    labels = phase_labels(volume)
+    labels = check_labels(volume)
     if labels.ndim != 3 or any(size < 2 for size in labels.shape):
         raise ValueError("volume must be a 3D array with at least two voxels per axis.")
     mask = (labels == phase).detach().cpu().numpy()

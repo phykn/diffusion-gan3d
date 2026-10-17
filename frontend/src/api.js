@@ -9,10 +9,18 @@ async function request(path, body, signal) {
   })
   if (!response.ok) {
     const problem = await response.json().catch(() => ({}))
-    const detail = typeof problem.detail === 'string' ? problem.detail : `HTTP ${response.status}`
-    throw new Error(detail)
+    throw new Error(errorDetail(response, problem.detail))
   }
   return response
+}
+
+function errorDetail(response, detail) {
+  if (typeof detail === 'string') return detail
+  // FastAPI reports request validation failures as a list of {loc, msg}.
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map(item => item?.msg ?? String(item)).join('; ')
+  }
+  return `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`
 }
 
 export async function getHealth(signal) {
@@ -27,11 +35,23 @@ export async function prepareImage(image, signal) {
 function readMetric(headers, name) {
   const value = headers.get(name)
   if (value === null || value.trim() === '' || value === 'unavailable') return null
+  // A phase without a spanning path has infinite tortuosity.
+  if (value === 'inf') return Infinity
   const number = Number(value)
   return Number.isFinite(number) ? number : null
 }
 
-export async function generateVolume(image, seed, blocks, signal, conditions = {}) {
+function phaseFraction(values, phase) {
+  let count = 0
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === phase) count += 1
+  }
+  return values.length ? count / values.length : null
+}
+
+export async function generateVolume(
+  image, seed, blocks, signal, conditions = {}, { tortuosity = true } = {},
+) {
   const { axis = 0, domain = 0, height_origin, height_extent } = conditions
   const response = await request('/generate', {
     anchors: [{ image, axis, index: 0, position: [0, 0] }],
@@ -40,7 +60,8 @@ export async function generateVolume(image, seed, blocks, signal, conditions = {
     seed,
     ...(blocks.some(value => value > 1) ? { blocks } : {}),
     format: 'raw',
-    include_metrics: true,
+    // The server solves tortuosity before streaming; porosity is counted here.
+    include_metrics: tortuosity,
   }, signal)
   const shape = response.headers.get('X-Volume-Shape')?.split(',').map(Number)
   const size = shape?.reduce((total, value) => total * value, 1)
@@ -56,7 +77,7 @@ export async function generateVolume(image, seed, blocks, signal, conditions = {
   return {
     shape,
     values,
-    porosity: readMetric(response.headers, 'X-Porosity'),
+    porosity: phaseFraction(values, 0),
     tortuosity: readMetric(response.headers, 'X-Tortuosity'),
   }
 }

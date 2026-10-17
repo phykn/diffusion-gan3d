@@ -3,10 +3,11 @@ import pytest
 import torch
 from PIL import Image
 
+import src.build.trainer as trainer_module
 from src.build.trainer import build_trainer
 from src.config.data import get_domains
 from src.config.train import load_train_config
-from src.data.slice import sample_slices
+from src.data.slice import sample_pairs
 from src.plane import PLANES, get_axis
 from src.storage import save_model
 
@@ -30,13 +31,14 @@ def test_numeric_and_named_aliases_cannot_duplicate_a_plane():
 @pytest.mark.parametrize("plane,axis", [("xy", 0), ("xz", 1), ("yz", 2)])
 def test_named_slices_have_the_correct_normal_and_in_plane_directions(plane, axis):
     vol = torch.arange(3 * 4 * 5).reshape(1, 1, 3, 4, 5)
-    slices = sample_slices(vol, get_axis(plane), 6)
     expected = vol[0].unbind(axis + 1)
+    slices, _ = sample_pairs(vol, vol, get_axis(plane), 6, expected[0].shape[-2:])
     for image in slices:
         assert any(torch.equal(image, section) for section in expected)
 
 
-def test_initial_weights_load_by_plane(tmp_path):
+@pytest.mark.parametrize("relative", [False, True])
+def test_initial_weights_load_by_plane(tmp_path, monkeypatch, relative):
     torch.set_num_threads(1)
     images = tmp_path / "images"
     images.mkdir()
@@ -66,6 +68,11 @@ def test_initial_weights_load_by_plane(tmp_path):
         name = plane
         save_model(weights / f"critic_{name}.pt", source.critics[plane])
     cfg["train"]["initial_weights"] = str(weights)
+    if relative:
+        # Like other config paths, relative weights follow the project root.
+        monkeypatch.setattr(trainer_module, "PROJECT_ROOT", tmp_path)
+        monkeypatch.chdir(images)
+        cfg["train"]["initial_weights"] = "weights"
     restored = build_trainer(cfg, torch.device("cpu"))
     for plane in PLANES:
         for key, value in source.critics[plane].state_dict().items():

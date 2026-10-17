@@ -10,11 +10,13 @@ from src.build.data import (
 )
 from src.build.model import build_diffusion, build_models, build_seam_critic
 from src.config.data import get_resolution, get_sr_plane_groups
+from src.config.files import PROJECT_ROOT
 from src.config.train import (
     get_schedule_steps,
     get_sr_resolution,
     get_trainer_sections,
     normalize_train_config,
+    validate_training_settings,
 )
 from src.data.provenance import fingerprint_data
 from src.data.source import infer_height_extents
@@ -66,6 +68,7 @@ def build_trainer(
     cfg: dict, device: torch.device, bank=None, bank_origins=None, bank_extents=None
 ) -> Trainer:
     cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
+    validate_training_settings(cfg)
     sr = cfg["stage"] == "sr"
     if sr != (bank is not None):
         raise ValueError("only SR training requires a coarse bank.")
@@ -86,7 +89,7 @@ def build_trainer(
     ema = build_ema(denoiser)
     initial_weights = None if sr else train["initial_weights"]
     if initial_weights is not None:
-        root = Path(initial_weights)
+        root = PROJECT_ROOT / Path(initial_weights).expanduser()
         load_model(root / "generator.pt", denoiser)
         load_model(root / "generator.pt", ema)
         for plane, critic_model in critics.items():
@@ -168,22 +171,6 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
     connectivity_start, connectivity_ramp = get_schedule_steps(
         connectivity, "loss.connectivity"
     )
-    if (
-        anchor["probability"] > 0.0
-        and anchor_start_step < train["total_steps"]
-        and train["volume_batch_size"] > train["real_batch_size"]
-    ):
-        raise ValueError(
-            "train.volume_batch_size must not exceed train.real_batch_size when "
-            "anchor training is enabled."
-        )
-    if (
-        conditioning["height_enabled"]
-        and train["volume_batch_size"] > train["real_batch_size"]
-    ):
-        raise ValueError(
-            "height conditioning requires real_batch_size >= volume_batch_size."
-        )
     return TrainerSettings(
         height_data=data if conditioning["height_enabled"] else None,
         profile_settings=profile,

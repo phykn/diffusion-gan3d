@@ -71,7 +71,7 @@ def extend_hr(
     base_shape = volume_shape(base)
     if base_shape is None:
         raise ValueError("HR extension requires base.")
-    position, _ = resolve_offset(base_offset, shape, base_shape)
+    position = resolve_offset(base_offset, shape, base_shape)
     if any(n % scale for n in (*shape, *base_shape, *position)):
         raise ValueError(
             "HR shape, base shape and base_offset must align with the SR scale."

@@ -8,8 +8,9 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.cli import check_parser, resolve_weight, result_directory
+from scripts.common.cli import check_parser, result_directory
 from src.build.data import build_datasets
+from src.build.predict import resolve_weights
 from src.config.files import find_saved_config, load_yaml
 from src.config.train import load_train_config
 from src.plane import PLANES
@@ -51,7 +52,7 @@ def main() -> None:
     if args.no_view:
         plt.switch_backend("Agg")
     config = (
-        find_saved_config(resolve_weight(args.weight))
+        find_saved_config(resolve_weights(args.weight))
         if args.weight
         else args.config or DEFAULT_CONFIG
     )

@@ -15,11 +15,28 @@ test('generation sends a prepared boundary anchor and decodes volume metadata', 
       include_metrics: true,
     })
     return new Response(new Uint8Array([0, 1]), { headers: {
-      'X-Volume-Shape': '2,1,1', 'X-Porosity': '0.5', 'X-Tortuosity': 'unavailable',
+      'X-Volume-Shape': '2,1,1', 'X-Tortuosity': 'unavailable',
     } })
   })
   const result = await generateVolume(image, 7, [2, 1, 1])
   assert.deepEqual(result, { shape: [2, 1, 1], values: new Uint8Array([0, 1]), porosity: 0.5, tortuosity: null })
+})
+
+test('porosity is counted locally when the server skips tortuosity', async t => {
+  t.mock.method(globalThis, 'fetch', async (path, options) => {
+    assert.equal(JSON.parse(options.body).include_metrics, false)
+    return new Response(new Uint8Array([0, 0, 0, 1]), { headers: { 'X-Volume-Shape': '4,1,1' } })
+  })
+  const result = await generateVolume([[0]], 0, [1, 1, 1], undefined, {}, { tortuosity: false })
+  assert.equal(result.porosity, 0.75)
+  assert.equal(result.tortuosity, null)
+})
+
+test('a phase without a spanning path reports infinite tortuosity', async t => {
+  t.mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array([1]), {
+    headers: { 'X-Volume-Shape': '1,1,1', 'X-Tortuosity': 'inf' },
+  }))
+  assert.equal((await generateVolume([[0]], 0, [1, 1, 1])).tortuosity, Infinity)
 })
 
 test('single-block requests omit tiled geometry', async t => {
@@ -72,6 +89,15 @@ test('preparation preserves fractional channels and forwards cancellation', asyn
 })
 
 test('structured validation failures produce readable errors', async t => {
-  t.mock.method(globalThis, 'fetch', async () => Response.json({ detail: [{ msg: 'invalid' }] }, { status: 422 }))
-  await assert.rejects(prepareImage([[0]]), /HTTP 422/)
+  t.mock.method(globalThis, 'fetch', async () => Response.json(
+    { detail: [{ msg: 'value too large' }, { msg: 'missing field' }] }, { status: 422 },
+  ))
+  await assert.rejects(prepareImage([[0]]), /value too large; missing field/)
+})
+
+test('plain-text server errors keep their status text', async t => {
+  t.mock.method(globalThis, 'fetch', async () => new Response('Internal Server Error', {
+    status: 500, statusText: 'Internal Server Error',
+  }))
+  await assert.rejects(prepareImage([[0]]), /HTTP 500 Internal Server Error/)
 })

@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -9,6 +10,35 @@ from torch.utils.data import Dataset
 from src.data.split import training_origin
 from src.plane import get_axis
 from src.prepare.resize import resize_crop
+
+# Decoding dominates crop cost for large sources. Entries are keyed by file
+# state, so a rewritten image is decoded again. Each worker has its own cache.
+DECODE_CACHE_BYTES = 256 * 1024**2
+_decoded: OrderedDict[tuple[str, int, int], tuple[np.ndarray, int]] = OrderedDict()
+
+
+def read_labels(path: Path) -> tuple[np.ndarray, int]:
+    """Return a read-only 2D uint8 label image and its largest label."""
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    if key in _decoded:
+        _decoded.move_to_end(key)
+        return _decoded[key]
+    with Image.open(path) as img:
+        if getattr(img, "n_frames", 1) != 1:
+            raise ValueError(f"training images must contain one 2D frame: {path}")
+        data = np.asarray(img)
+    try:
+        RealDataset.check_image(data)
+    except ValueError as exc:
+        raise ValueError(f"{str(exc).rstrip('.')}: {path}") from None
+    data.flags.writeable = False
+    entry = (data, int(data.max()))
+    if data.nbytes <= DECODE_CACHE_BYTES:
+        _decoded[key] = entry
+        while sum(image.nbytes for image, _ in _decoded.values()) > DECODE_CACHE_BYTES:
+            _decoded.popitem(last=False)
+    return entry
 
 
 class RealDataset(Dataset[dict]):
@@ -67,11 +97,13 @@ class RealDataset(Dataset[dict]):
         }
 
     def decode(self, path: Path) -> np.ndarray:
-        with Image.open(path) as img:
-            if getattr(img, "n_frames", 1) != 1:
-                raise ValueError(f"training images must contain one 2D frame: {path}")
-            data = np.asarray(img)
-        return self.check_image(np.array(data, copy=True))
+        image, largest = read_labels(path)
+        if largest >= self.num_phases:
+            raise ValueError(
+                f"phase labels must be in [0, {self.num_phases - 1}], "
+                f"found {largest}: {path}"
+            )
+        return image
 
     def crop_with_origin(
         self, img: np.ndarray, excluded: Sequence[int] | None = None

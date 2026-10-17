@@ -5,7 +5,9 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
+from src.build.predict import resolve_weights
 from src.config.files import PROJECT_ROOT
+from src.device import default_device
 
 
 def check_parser(script, description):
@@ -23,9 +25,13 @@ def parse_unit_interval(value: str) -> float:
     return parsed
 
 
-def resolve_weight(path):
-    path = Path(path).expanduser().resolve()
-    return path / "generator.pt" if path.is_dir() else path
+def add_device_argument(parser):
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda", "mps"),
+        default=default_device(),
+        help="Compute device; CUDA, then Apple MPS, then CPU when available.",
+    )
 
 
 def add_height_arguments(parser, origin_default=0.0):
@@ -59,7 +65,7 @@ def result_directory(name):
 def prepare_check(args, script):
     if args.no_view:
         plt.switch_backend("Agg")
-    args.weight = resolve_weight(args.weight)
+    args.weight = resolve_weights(args.weight)
     if args.out is None:
         args.out = result_directory(Path(script).stem) / "volume.tiff"
     args.out = args.out.expanduser().resolve()

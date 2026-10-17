@@ -16,7 +16,7 @@ from src.predict import memory
 from src.predict.memory import estimate_memory, select_storage, workspace_bytes
 from src.prepare.profile import rebin_profile
 from src.prepare.resize import resize_phases
-from src.random import seeded_rng
+from src.random import preserved_rng, seeded_rng
 from src.train.metrics import materialize_metrics
 from src.train.step import step_optimizer
 
@@ -119,6 +119,23 @@ def test_apple_gpu_storage_counts_its_workspace_in_unified_memory(monkeypatch):
     )
     with pytest.raises(MemoryError, match="RAM"):
         select_storage("cpu", estimate, generator)
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "mps", marks=pytest.mark.skipif(not MPS, reason="MPS unavailable")
+        ),
+    ],
+)
+def test_preserved_rng_replays_noise_drawn_inside_the_block(device):
+    device = torch.device(device)
+    with preserved_rng(device):
+        first = (torch.rand(4), torch.rand(4, device=device).cpu())
+    second = (torch.rand(4), torch.rand(4, device=device).cpu())
+    assert all(torch.equal(a, b) for a, b in zip(first, second))
 
 
 @pytest.mark.skipif(not MPS, reason="MPS unavailable")

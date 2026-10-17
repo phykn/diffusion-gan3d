@@ -15,7 +15,7 @@ from src.build.model import build_sr_model
 from src.build.sr import build_sr_trainer
 from src.config.data import get_resolution
 from src.config.train import get_sr_resolution, load_train_config
-from src.data.slice import sample_slices
+from src.data.slice import sample_pairs
 from src.predict.inference import LowResolutionAPI
 from src.predict.sr.extension import coarsen_volume, extend_hr
 from src.predict.sr.inference import SuperResolutionAPI
@@ -86,7 +86,7 @@ def test_sr_expands_home_in_weight_paths(tmp_path, monkeypatch, weights):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
-    api = SuperResolutionAPI(weights)
+    api = SuperResolutionAPI(weights, "cpu")
 
     assert api.weights == path.resolve()
     assert api.num_phases == cfg["data"]["num_phases"]
@@ -359,7 +359,7 @@ def test_consistency_has_gradient_and_a_dead_zone():
 def test_axis_slicing_keeps_channel_and_plane_semantics():
     volume = torch.arange(2 * 3 * 4 * 5 * 6).reshape(2, 3, 4, 5, 6).float()
     for axis, shape in enumerate(((5, 6), (4, 6), (4, 5))):
-        planes = sample_slices(volume, axis, 7)
+        planes, _ = sample_pairs(volume, volume, axis, 7, shape)
         assert planes.shape == (7, 3, *shape)
         assert torch.equal(planes[:, 1] - planes[:, 0], torch.full((7, *shape), 120.0))
 
@@ -428,7 +428,7 @@ def test_sr_training_restores_state_without_rng(tmp_path):
     assert restored.completed_steps == 2
     path = tmp_path / "model.pt"
     export_sr(restored, path)
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     assert api.super_resolve(bank[0][0]).shape == (12, 12, 12)
 
 
@@ -438,7 +438,7 @@ def test_predict_fractional_shape_seed_and_tiled_coverage(tmp_path, scale):
     cfg = sr_config(tmp_path, scale)
     path = tmp_path / "model.pt"
     export_model(path, cfg)
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     low = torch.randint(3, (12, 14, 16))
     rng = torch.get_rng_state().clone()
     expected = tuple(int(n * scale) for n in low.shape)
@@ -472,7 +472,7 @@ def test_multidomain_and_invalid_inference_contract(tmp_path):
     cfg["data"]["domains"][1] = {"xy": cfg["data"]["domains"][0]["xy"]}
     path = tmp_path / "model.pt"
     export_model(path, cfg)
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     low = torch.zeros(8, 8, 8, dtype=torch.uint8)
     with pytest.raises(ValueError, match="domain is required"):
         api.super_resolve(low)
@@ -495,7 +495,7 @@ def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
     cfg = sr_config(tmp_path, scale=2)
     path = tmp_path / "model.pt"
     export_model(path, cfg)
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     low = torch.zeros(8, 8, 8, dtype=torch.uint8)
     if fractions:
         low = torch.ones(3, 8, 8, 8) / 3
@@ -519,7 +519,7 @@ def test_sr_tiled_refinement_uses_bounded_shared_fusion(tmp_path, monkeypatch):
     cfg = sr_config(tmp_path, scale=2)
     path = tmp_path / "model.pt"
     export_model(path, cfg)
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     low = torch.zeros(8, 8, 8, dtype=torch.uint8)
     buffers = []
     original = tiled_module.make_fusion
@@ -549,7 +549,7 @@ def test_sr_labels_match_probabilities_and_use_correct_budget(
     cfg = sr_config(tmp_path, scale=2)
     path = tmp_path / "model.pt"
     export_model(path, cfg)
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     low = torch.randint(3, (6, 6, 6))
     options = dict(seed=13, margin=2, tile_size=8 if tiled else None, overlap=2)
     expected = api.predict_probs(low, **options).argmax(0).to(torch.uint8)
@@ -590,7 +590,7 @@ def test_sr_shared_sampling_keeps_final_precision_and_fractional_base(
     cfg = sr_config(tmp_path, scale=2)
     path = tmp_path / "model.pt"
     export_model(path, cfg)
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     expected = torch.tensor([0.33332, 0.33335, 0.33333])
 
     def predict(current, *args, **kwargs):
@@ -755,7 +755,7 @@ def test_tiled_coarse_and_height_share_global_coordinates_with_margin(tmp_path):
     cfg["data"]["height_extents"] = {0: 40}
     path = tmp_path / "sr.pt"
     export_model(path, cfg)
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     low = torch.rand(3, 12, 8, 8).softmax(0)
     heights = []
 
@@ -788,7 +788,7 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
     cfg["model"]["diffusion"]["num_steps"] = 3
     path = tmp_path / "sr.pt"
     export_model(path, cfg)
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     calls, writes = [], {}
     final_writes = torch.zeros(16, 12, 12, dtype=torch.int32)
     active = None
@@ -857,7 +857,7 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
 def test_tiled_sr_rejects_misaligned_hr_lattice(tmp_path, tile, overlap, margin):
     path = tmp_path / "sr.pt"
     export_model(path, sr_config(tmp_path, scale=4))
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     with pytest.raises(ValueError, match="multiples of the LR/HR scale"):
         api.predict_probs(
             torch.zeros(8, 8, 8, dtype=torch.uint8),
@@ -893,7 +893,7 @@ def test_sr_runs_full_reverse_chain_and_training_uses_matching_hr_slices(tmp_pat
     assert trainer.denoiser.coarse_input.weight.grad.abs().sum() > 0
     path = tmp_path / "sr.pt"
     export_sr(trainer, path)
-    api = SuperResolutionAPI(path)
+    api = SuperResolutionAPI(path, "cpu")
     with patch.object(api.model, "forward", wraps=api.model.forward) as forward:
         api.predict_probs(bank[0][0], margin=0)
     assert [int(call.args[1][0]) for call in forward.call_args_list] == [2, 1, 0]
@@ -910,7 +910,9 @@ def test_wrong_artifact_kind_and_explicit_scale_setting_are_rejected(tmp_path):
     path = tmp_path / "training.pt"
     torch.save({"format": "diffusion-gan3d.sr.train"}, path)
     with pytest.raises(ValueError, match="use exported SR weights"):
-        SuperResolutionAPI(path)
+        SuperResolutionAPI(path, "cpu")
+    with pytest.raises(ValueError, match="CPU, CUDA or MPS"):
+        SuperResolutionAPI(path, "meta")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")

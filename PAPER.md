@@ -62,7 +62,7 @@ $$
 
 The reverse process follows denoising diffusion GANs [16,17] with ten transitions. The U-Net channel widths are 16, 32, 64, and 64; its condition embedding has 128 channels and its stochastic latent has 64 channels.
 
-Because no paired 3D target exists, an axis-specific 2D critic evaluates section pairs cut from generated volumes against real section pairs. Each critic contains a global and local head. The experiments use one image distribution for all three axes.
+Because no paired 3D target exists, an axis-specific 2D critic evaluates section pairs cut from generated volumes against real section pairs. In these experiments each critic contained a global and local head; current plane critics use only the global head. The experiments use one image distribution for all three axes.
 
 ### 3.3 Soft multiscale anchor conditioning
 

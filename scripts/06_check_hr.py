@@ -9,11 +9,17 @@ import torch.nn.functional as F
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.cli import check_parser, resolve_weight, result_directory
+from scripts.common.cli import (
+    add_device_argument,
+    add_height_arguments,
+    check_parser,
+    result_directory,
+)
+from src.build.predict import resolve_weights
 from src.config.data import validate_sr_source
 from src.config.files import load_yaml
 from src.config.train import normalize_train_config
-from src.device import default_device
+from src.evaluate.label import phase_fractions
 from src.predict.inference import LowResolutionAPI
 from src.predict.sr.inference import SuperResolutionAPI
 from src.prepare.resize import downsample, phase_channels
@@ -98,17 +104,10 @@ def main(argv=None):
         type=Path,
         help="Output directory; default: a new directory under run/checks.",
     )
-    parser.add_argument(
-        "--device",
-        choices=("cpu", "cuda", "mps"),
-        default=default_device(),
-    )
+    add_device_argument(parser)
     parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--height-origin", type=float, default=0.0)
-    parser.add_argument(
-        "--height-extent", type=float, help="Full source height in pixels."
-    )
+    add_height_arguments(parser)
     parser.add_argument("--lr-guidance", type=float)
     parser.add_argument("--guidance", type=float, default=1.0, help="SR guidance.")
     parser.add_argument(
@@ -131,7 +130,7 @@ def main(argv=None):
         "--no-view", action="store_true", help="Save results without opening a viewer."
     )
     args = parser.parse_args(argv)
-    weight = resolve_weight(args.weight or latest_sr())
+    weight = resolve_weights(args.weight or latest_sr())
     payload = torch.load(weight, map_location="cpu", weights_only=True)
     if payload.get("format") != "diffusion-gan3d.sr":
         raise ValueError("--weight must be an exported SR generator.pt.")
@@ -153,7 +152,7 @@ def main(argv=None):
     else:
         stored_source = cfg.get("source", {}).get("weights")
         if args.lr_weight:
-            lr_weight = resolve_weight(args.lr_weight)
+            lr_weight = resolve_weights(args.lr_weight)
         elif stored_source:
             lr_weight = Path(stored_source)
             if not lr_weight.is_absolute():
@@ -203,7 +202,14 @@ def main(argv=None):
         save_probabilities(low, root / "lr_probs.pt")
     low_probs = low[None] if low.ndim == 4 else phase_channels(low[None], sr.num_phases)
     # This compares categorical output occupancy, not an unknown HR ground truth.
-    coarse = downsample(phase_channels(high[None], sr.num_phases), low.shape[-3:])
+    # One phase at a time avoids a full-size HR one-hot volume.
+    coarse_error = sum(
+        (downsample((high == p)[None, None].float(), low.shape[-3:]) - low_probs[:, p])
+        .abs()
+        .sum()
+        .item()
+        for p in range(sr.num_phases)
+    )
     report = {
         "sr_weights": str(weight),
         "lr_weights": str(lr_weight) if lr_weight else None,
@@ -222,10 +228,8 @@ def main(argv=None):
         "sr_guidance": args.guidance,
         "lr_guidance": args.lr_guidance,
         "lr_phase_fractions": low_probs.mean((0, 2, 3, 4)).tolist(),
-        "hr_label_phase_fractions": [
-            (high == p).float().mean().item() for p in range(sr.num_phases)
-        ],
-        "hr_label_coarse_mae": (coarse - low_probs).abs().mean().item(),
+        "hr_label_phase_fractions": phase_fractions(high, sr.num_phases).tolist(),
+        "hr_label_coarse_mae": coarse_error / low_probs.numel(),
         "has_measured_3d_reference": False,
     }
     (root / "report.json").write_text(

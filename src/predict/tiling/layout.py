@@ -3,8 +3,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from itertools import pairwise, product
 
-import torch
-
 
 @dataclass(frozen=True)
 class TilePlan:
@@ -90,18 +88,6 @@ def output_plan(
         seams=seams,
         generation_shape=plan.generation_shape or plan.shape,
     )
-
-
-def crop_output(
-    volume: torch.Tensor,
-    output_shape: tuple[int, int, int],
-    margin: int,
-) -> torch.Tensor:
-    if margin == 0:
-        return volume
-    region = tuple(slice(margin, margin + size) for size in output_shape)
-    leading = (slice(None),) * (volume.ndim - 3)
-    return volume[leading + region].clone()
 
 
 def axis_starts(size: int, tile_size: int, stride: int) -> tuple[int, ...]:

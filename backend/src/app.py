@@ -93,16 +93,23 @@ def create_app(
         response_owns_slot = False
         try:
             inference = app.state.inference
-            volume = _generate_volume(inference, request, config)
-            response = DownloadResponse(
-                volume_response(
+            try:
+                volume = _generate_volume(inference, request, config)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            try:
+                content = volume_response(
                     volume,
                     request.format,
                     device=inference.device,
                     include_metrics=request.include_metrics,
-                ),
-                app.state.download_slots.release,
-            )
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"could not prepare volume response: {exc}",
+                ) from exc
+            response = DownloadResponse(content, app.state.download_slots.release)
             response_owns_slot = True
             return response
         except (MemoryError, torch.OutOfMemoryError) as exc:
@@ -110,8 +117,14 @@ def create_app(
                 status_code=413,
                 detail=f"generation exceeds available memory: {exc}",
             ) from exc
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            # MPS reports exhaustion as a plain RuntimeError.
+            if "out of memory" not in str(exc):
+                raise
+            raise HTTPException(
+                status_code=413,
+                detail=f"generation exceeds available memory: {exc}",
+            ) from exc
         except OSError as exc:
             raise HTTPException(
                 status_code=507 if exc.errno == errno.ENOSPC else 500,

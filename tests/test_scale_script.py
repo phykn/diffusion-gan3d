@@ -9,6 +9,13 @@ from src.config.generation import GenerationSettings
 from src.predict.tiling.layout import TilePlan
 
 
+def weight_file(directory: Path) -> Path:
+    # Scripts resolve --weight before the mocked loader runs.
+    path = directory / "generator.pt"
+    path.touch()
+    return path
+
+
 def make_plan() -> TilePlan:
     return TilePlan(
         shape=(8, 8, 8),
@@ -31,7 +38,7 @@ def test_gt_requires_a_positive_anchor_count(
     argv = [
         "04_check_scale_up.py",
         "--weight",
-        str(tmp_path / "generator.pt"),
+        str(weight_file(tmp_path)),
         "--gt",
         str(tmp_path / "gt.tiff"),
     ]
@@ -82,7 +89,8 @@ def test_main_prints_plan_before_scaled_generation(
             self.stats = plan
             return torch.zeros(plan.shape, dtype=torch.uint8)
 
-    weights = tmp_path / "run" / "generator.pt"
+    (tmp_path / "run").mkdir()
+    weights = weight_file(tmp_path / "run")
     scaled = FakeScaled()
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
     monkeypatch.setattr(
@@ -190,7 +198,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
         [
             "04_check_scale_up.py",
             "--weight",
-            str(tmp_path / "generator.pt"),
+            str(weight_file(tmp_path)),
             "--domain",
             "2",
             "--count",

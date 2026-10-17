@@ -17,7 +17,7 @@ from make_assets import OUTPUT_DIR
 from provenance import build_provenance, file_record, validate_output_paths
 
 from src.anchor import PlaneAnchor
-from src.build.predict import load_generator
+from src.build.predict import load_generator, resolve_weights
 from src.config.generation import load_generation_settings
 from src.evaluate.label import voxel_accuracy
 
@@ -37,7 +37,7 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    weights = args.weight.resolve()
+    weights = resolve_weights(args.weight)
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
     anchor_strength = settings.anchor_strength

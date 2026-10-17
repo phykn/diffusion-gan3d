@@ -28,13 +28,6 @@ class LocatedTriplets:
     relations: tuple[tuple[int, int, int], ...] = ()
 
 
-def sample_slices(volume: torch.Tensor, axis: int, count: int) -> torch.Tensor:
-    planes = volume.movedim(axis + 2, 1)
-    planes = planes.flatten(0, 1)
-    indices = torch.randint(planes.shape[0], (count,), device=volume.device)
-    return planes[indices]
-
-
 def sample_pairs(
     previous: torch.Tensor,
     current: torch.Tensor,
@@ -385,6 +378,12 @@ def sample_seam_bands(
             if not regions or fixed.shape[0] <= rows:
                 continue
             near_sites, far_sites = _seam_sites(fixed, regions, rows, width)
+            if axis == directed_axis:
+                # Read height-direction rows upward to keep their physical order.
+                far_sites = far_sites[far_sites[:, -1] > 0]
+                down = near_sites[:, -1] < 0
+                near_sites[down, 1] -= rows - 1
+                near_sites[down, -1] = 1
             if not len(near_sites) or not len(far_sites):
                 continue
             for sites, found in ((near, near_sites), (far, far_sites)):
@@ -394,10 +393,55 @@ def sample_seam_bands(
                         1,
                     )
                 )
+    near = torch.cat(near) if near else None
+    far = torch.cat(far) if far else None
+    near_keep, far_keep = _matched_sites(near, far, count, generator)
     return (
-        _band_batch(volume.detach(), far, rows, width, count, directed_axis, generator),
-        _band_batch(volume, near, rows, width, count, directed_axis, generator),
+        _band_batch(
+            volume.detach(), far, far_keep, rows, width, directed_axis, generator
+        ),
+        _band_batch(volume, near, near_keep, rows, width, directed_axis, generator),
     )
+
+
+def _band_labels(sites: torch.Tensor) -> torch.Tensor:
+    lead = (sites[:, 1] == 0).long()
+    return torch.where(sites[:, 2].bool(), 3 - sites[:, 1] - lead, lead)
+
+
+def _matched_sites(near, far, count, generator):
+    """Draw near and far bands with equal counts per anchor axis and section plane.
+
+    The critic sees only the section plane, so near and far must also share
+    the orientation of rows within it, which the anchor axis determines.
+    """
+    if near is None:
+        empty = torch.empty(0, dtype=torch.long)
+        return empty, empty
+    near_keys = (near[:, 1] * 3 + _band_labels(near)).cpu()
+    far_keys = (far[:, 1] * 3 + _band_labels(far)).cpu()
+    near_keep, far_keep = [], []
+    for label in AXES:
+        pool, far_pools = [], {}
+        for axis in AXES:
+            key = 3 * axis + label
+            near_index = (near_keys == key).nonzero().flatten()
+            far_index = (far_keys == key).nonzero().flatten()
+            available = min(len(near_index), len(far_index))
+            if available:
+                order = torch.randperm(len(near_index), generator=generator)
+                pool.append(near_index[order[:available]])
+                far_pools[key] = far_index
+        if not pool:
+            continue
+        pool = torch.cat(pool)
+        chosen = pool[torch.randperm(len(pool), generator=generator)[:count]]
+        near_keep.append(chosen)
+        for key, far_index in far_pools.items():
+            taken = int((near_keys[chosen] == key).sum())
+            order = torch.randperm(len(far_index), generator=generator)
+            far_keep.append(far_index[order[:taken]])
+    return torch.cat(near_keep), torch.cat(far_keep)
 
 
 def _seam_sites(fixed, regions, rows, width):
@@ -451,22 +495,16 @@ def _seam_sites(fixed, regions, rows, width):
     return torch.cat(near_sites), torch.cat(far_sites)
 
 
-def _band_batch(volume, parts, rows, width, count, directed_axis, generator):
-    if not parts:
+def _band_batch(volume, sites, keep, rows, width, directed_axis, generator):
+    if not len(keep):
         return BandBatch(
             values=volume.new_empty((0, volume.shape[1], rows, width)),
             axes=torch.empty(0, device=volume.device, dtype=torch.long),
         )
-    sites = torch.cat(parts)
-    lead = (sites[:, 1] == 0).long()
-    labels = torch.where(sites[:, 2].bool(), 3 - sites[:, 1] - lead, lead).cpu()
-    order = torch.randperm(len(sites), generator=generator)
-    keep = torch.cat([order[labels[order] == label][:count] for label in AXES])
-    batch, axis, flip, start, position, span, step = sites[
-        keep.to(sites.device)
-    ].unbind(1)
-    lead = lead[keep.to(sites.device)]
-    labels = labels[keep].to(sites.device)
+    sites = sites[keep.to(sites.device)]
+    batch, axis, flip, start, position, span, step = sites.unbind(1)
+    lead = (axis == 0).long()
+    labels = _band_labels(sites)
     mirror = (torch.rand(len(keep), generator=generator) < 0.5).to(sites.device)
     if directed_axis is not None:
         mirror &= 3 - axis - labels != directed_axis
