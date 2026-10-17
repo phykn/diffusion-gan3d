@@ -364,6 +364,7 @@ def sample_seam_bands(
     rows: int,
     width: int,
     count: int,
+    directed_axis: int | None = None,
     generator: torch.Generator | None = None,
 ) -> tuple[BandBatch, BandBatch]:
     for name, value in (("rows", rows), ("width", width), ("count", count)):
@@ -394,8 +395,8 @@ def sample_seam_bands(
                     )
                 )
     return (
-        _band_batch(volume.detach(), far, rows, width, count, generator),
-        _band_batch(volume, near, rows, width, count, generator),
+        _band_batch(volume.detach(), far, rows, width, count, directed_axis, generator),
+        _band_batch(volume, near, rows, width, count, directed_axis, generator),
     )
 
 
@@ -450,31 +451,35 @@ def _seam_sites(fixed, regions, rows, width):
     return torch.cat(near_sites), torch.cat(far_sites)
 
 
-def _band_batch(volume, parts, rows, width, count, generator):
+def _band_batch(volume, parts, rows, width, count, directed_axis, generator):
     if not parts:
         return BandBatch(
             values=volume.new_empty((0, volume.shape[1], rows, width)),
             axes=torch.empty(0, device=volume.device, dtype=torch.long),
         )
     sites = torch.cat(parts)
-    keep = torch.randperm(len(sites), generator=generator)[:count]
-    mirror = torch.rand(len(keep), generator=generator) < 0.5
+    lead = (sites[:, 1] == 0).long()
+    labels = torch.where(sites[:, 2].bool(), 3 - sites[:, 1] - lead, lead).cpu()
+    order = torch.randperm(len(sites), generator=generator)
+    keep = torch.cat([order[labels[order] == label][:count] for label in AXES])
     batch, axis, flip, start, position, span, step = sites[
         keep.to(sites.device)
     ].unbind(1)
+    lead = lead[keep.to(sites.device)]
+    labels = labels[keep].to(sites.device)
+    mirror = (torch.rand(len(keep), generator=generator) < 0.5).to(sites.device)
+    if directed_axis is not None:
+        mirror &= 3 - axis - labels != directed_axis
     lines = (
         start[:, None, None]
         + step[:, None, None] * torch.arange(rows, device=sites.device)[:, None]
     )
     offsets = torch.arange(width, device=sites.device)
-    offsets = torch.where(
-        mirror.to(sites.device)[:, None], width - 1 - offsets, offsets
-    )
+    offsets = torch.where(mirror[:, None], width - 1 - offsets, offsets)
     across = (span[:, None] + offsets)[:, None]
     flip = flip[:, None, None].bool()
     first = torch.where(flip, across, position[:, None, None])
     second = torch.where(flip, position[:, None, None], across)
-    lead = (axis == 0).long()
     coordinates = [
         torch.where(
             axis[:, None, None] == dim,
@@ -484,7 +489,4 @@ def _band_batch(volume, parts, rows, width, count, generator):
         for dim in AXES
     ]
     values = volume[(batch[:, None, None], slice(None), *coordinates)]
-    return BandBatch(
-        values=values.permute(0, 3, 1, 2),
-        axes=torch.where(flip[:, 0, 0], 3 - axis - lead, lead),
-    )
+    return BandBatch(values=values.permute(0, 3, 1, 2), axes=labels)

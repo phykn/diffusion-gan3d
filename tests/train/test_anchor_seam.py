@@ -42,15 +42,26 @@ def condition(anchors, size=8, batch=1):
     )
 
 
-def bands(volume, anchors, rows=2, width=4, count=1000, seed=0):
+def bands(volume, anchors, rows=2, width=4, count=1000, seed=0, directed=None):
     return sample_seam_bands(
-        volume, anchors, rows, width, count, torch.Generator().manual_seed(seed)
+        volume,
+        anchors,
+        rows,
+        width,
+        count,
+        directed,
+        torch.Generator().manual_seed(seed),
     )
 
 
 def section_axes(values):
     flat = values.flatten(2)
     return (flat == flat[:, :, :1]).all(2).float().argmax(1)
+
+
+def section_rows(values):
+    rows = values[:, :, 1, 0] - values[:, :, 0, 0]
+    return rows.abs().argmax(1)
 
 
 def test_near_bands_start_next_to_the_anchor_on_both_sides():
@@ -92,12 +103,27 @@ def test_bands_span_half_a_patch_from_a_random_start_and_mirror():
         assert set(lines.amin(1).tolist()) == set(range(7))
 
 
-def test_each_step_keeps_a_random_subset_of_bands():
-    anchors = condition([(0, 5, (8, 8), None)])
+def test_each_step_keeps_a_random_subset_of_bands_per_section_plane():
+    anchors = condition([(0, 5, (8, 8), None), (1, 2, (8, 8), None)])
     far, near = bands(coordinates(), anchors, count=3)
-    assert len(near) == len(far) == 3
+    for batch in (near, far):
+        assert batch.axes.tolist() == [0] * 3 + [1] * 3 + [2] * 3
     _, other = bands(coordinates(), anchors, count=3, seed=1)
     assert not torch.equal(near.values, other.values)
+    _, single = bands(coordinates(), condition([(0, 5, (8, 8), None)]), count=3)
+    assert single.axes.tolist() == [1] * 3 + [2] * 3
+
+
+def test_directed_axis_is_never_mirrored_across_a_band():
+    anchors = condition([(1, 5, (8, 8), None), (2, 2, (8, 8), None)])
+    far, near = bands(coordinates(), anchors, directed=0)
+    for batch in (near, far):
+        across = 3 - batch.axes - section_rows(batch.values)
+        lines = batch.values[torch.arange(len(batch)), across, 0]
+        steps = lines[:, 1] - lines[:, 0]
+        assert (steps[across == 0] == 1).all()
+        assert set(steps[across != 0].tolist()) == {-1.0, 1.0}
+        assert (across == 0).any()
 
 
 def test_bands_with_fixed_voxels_are_discarded():
@@ -270,18 +296,18 @@ def test_seam_critic_and_generator_loss_train_from_the_selected_transition(
 
     def record(volume, *args):
         sampled.append(volume)
-        assert args[2:] == (4, 2)
+        assert args[2:] == (4, 2, None)
         return sample_seam_bands(volume, *args)
 
     monkeypatch.setattr("src.train.trainer.sample_seam_bands", record)
     metrics = trainer.step(0, transition=1)
     assert sampled and sampled[0].requires_grad
     assert len(times) == 3
-    assert all(time.tolist() == [1, 1] for time in times)
+    assert all(time.tolist() == [1] * 4 for time in times)
     diagnostics = metrics.diagnostics
     assert trainer.updates["seam"] == 1
-    assert diagnostics["anchor_seam/near_bands"] == 2
-    assert diagnostics["anchor_seam/far_bands"] == 2
+    assert diagnostics["anchor_seam/near_bands"] == 4
+    assert diagnostics["anchor_seam/far_bands"] == 4
     for key in (
         "loss/critic_anchor_seam",
         "loss/anchor_seam",

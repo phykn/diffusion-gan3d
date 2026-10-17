@@ -682,6 +682,7 @@ class Trainer:
             self.settings.loss.anchor_seam_rows,
             self.settings.patch_size // 2,
             self.settings.slice_pairs_per_axis,
+            0 if self.settings.loss.preserve_height else None,
         )
         if enabled:
             self.diagnostics["anchor_seam/near_bands"] = len(fake)
