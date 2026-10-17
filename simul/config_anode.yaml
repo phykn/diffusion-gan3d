@@ -1,0 +1,22 @@
+# Battery-anode-like test set: 0 pore, 1 graphite flake, 2 silicon.
+# z is the electrode thickness; z=0 is the image top of xz/yz slices.
+# A *_vf list gives fractions at evenly spaced heights from top to bottom.
+output:
+  data_dir: data/generated/simul_anode
+  count: 2
+  seed: 0
+
+geometry:
+  kind: anode
+  size: 256
+
+  graphite_radius: 24      # in-plane semi-axis
+  graphite_aspect: 0.3     # thickness / in-plane radius
+  graphite_tilt: 15        # std of flake tilt from the y/x plane, degrees
+  graphite_vf: [0.45, 0.45, 0.42, 0.34, 0.22]
+
+  silicon_radius: 7
+  silicon_vf: [0.0, 0.0, 0.03, 0.12, 0.30]
+
+  size_spread: 0.2         # lognormal sigma of radii
+  min_section: 20          # smallest particle section (voxels) in any x/y/z slice

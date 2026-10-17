@@ -199,3 +199,75 @@ def test_seeded_export_is_repeatable_and_records_measured_fractions(tmp_path):
     metadata = yaml.safe_load((tmp_path / "first" / "simulation.yaml").read_text())
     assert metadata["seed"] == 5
     assert metadata["measured"][0]["big_vf"] == pytest.approx((volumes[0] == 2).mean())
+
+
+ANODE = {
+    "kind": "anode",
+    "size": 32,
+    "graphite_radius": 6,
+    "graphite_aspect": 0.35,
+    "graphite_tilt": 10,
+    "graphite_vf": 0.3,
+    "silicon_radius": 2,
+    "silicon_vf": [0.0, 0.2],
+    "size_spread": 0.1,
+    "min_section": 6,
+}
+
+
+def test_anode_export_follows_silicon_height_profile(tmp_path):
+    cfg = {"output": {"data_dir": tmp_path / "anode", "count": 1, "seed": 0}}
+    cfg["geometry"] = ANODE
+    result = generate(cfg)
+    volume = tifffile.imread(result.volumes[0])
+    assert set(np.unique(volume)) == {0, 1, 2}
+    silicon = (volume == 2).mean(axis=(1, 2))
+    assert silicon[-8:].mean() > 4 * silicon[:8].mean()
+    metadata = yaml.safe_load((tmp_path / "anode" / "simulation.yaml").read_text())
+    assert metadata["geometry"]["kind"] == "anode"
+    assert set(metadata["measured"][0]) == {"graphite_vf", "silicon_vf"}
+
+
+def test_anode_flakes_are_flat_along_thickness():
+    from simul.src.anode import graphite_shapes
+
+    shapes = graphite_shapes(10, 0.3, 0.0, 0.0, 1.0, np.random.default_rng(0))
+    offsets, _ = shapes[0]
+    extent = offsets.max(0) - offsets.min(0)
+    assert extent[0] < 0.5 * extent[1:].max()
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [("graphite_vf", [0.5, 1.2]), ("silicon_vf", [[0.1]]), ("graphite_aspect", 0)],
+)
+def test_invalid_anode_geometry_is_rejected(tmp_path, field, value):
+    cfg = {"output": {"data_dir": tmp_path / "anode", "count": 1}}
+    cfg["geometry"] = {**ANODE, field: value}
+    with pytest.raises(ValueError, match=field):
+        generate(cfg)
+    assert not (tmp_path / "anode").exists()
+
+
+def test_unknown_geometry_kind_is_rejected(tmp_path):
+    cfg = {"output": {"data_dir": tmp_path / "x", "count": 1}}
+    cfg["geometry"] = {**GEOMETRY, "kind": "foam"}
+    with pytest.raises(ValueError, match="kind"):
+        generate(cfg)
+
+
+def test_anode_shape_sections_have_no_specks():
+    from scipy import ndimage
+
+    from simul.src.anode import flake_rotation, make_shape
+
+    rng = np.random.default_rng(3)
+    axes = np.asarray((3.0, 10.0, 7.0))
+    offsets, _ = make_shape(axes, flake_rotation(30.0, rng), 12)
+    mask = np.zeros((25, 25, 25), dtype=bool)
+    mask[tuple((offsets + 12).T)] = True
+    for axis in range(3):
+        for layer in np.moveaxis(mask, axis, 0):
+            labels, count = ndimage.label(layer)
+            assert count <= 1
+            assert count == 0 or layer.sum() >= 12

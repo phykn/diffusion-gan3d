@@ -18,22 +18,19 @@ Examples from the [recorded experiments](PAPER.md); their settings differ from c
 
 ## Quick start
 
-Use Python 3.11+ and a PyTorch build suited to your GPU (CUDA or Apple MPS) or CPU.
-Run commands from the project root in the activated environment.
+Use Python 3.11+ with a PyTorch build for your GPU (CUDA or Apple MPS) or CPU.
 
 ```bash
 git clone https://github.com/phykn/diffusion-gan3d.git
 cd diffusion-gan3d
 python -m venv .venv
-# Activate: source .venv/bin/activate (Linux/macOS)
-# PowerShell: .\.venv\Scripts\Activate.ps1
+source .venv/bin/activate   # PowerShell: .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
-The default data preset includes `data/sample.png`. To use your own images, edit
-[config/data/default.yaml](config/data/default.yaml): each input must be a single
-2D uint8 frame containing phase IDs from `0` to `num_phases - 1`.
-`crop_size` is measured in source pixels; `lo_res_size` and `hi_res_size` are voxel grid sizes.
+Input images are set in [config/data/default.yaml](config/data/default.yaml) (default:
+`data/sample.png`). Each must be a 2D uint8 image of phase IDs `0` to `num_phases - 1`.
+`crop_size` is in source pixels; `lo_res_size` and `hi_res_size` are voxel grid sizes.
 
 ```bash
 python scripts/01_check_dataset.py --no-view
@@ -41,17 +38,15 @@ python run_train_1st.py --run-dir "run/my-lr-run"
 python scripts/02_check_generated.py --weight "run/my-lr-run" --no-view
 ```
 
-Use a new `--run-dir` for each training run, then pass that directory to `--weight`.
-The [LR (low-resolution) preset](config/train/low_res.yaml) controls training; weights and resolved settings
-are saved in the run directory, and inspection images/TIFF volumes in `run/checks/`.
-Training, inspection, and Python generation use CUDA, then Apple MPS, then CPU,
-whichever is available first; pass `--device cpu` (or `cuda`, `mps`) to choose.
-Mixed precision applies only on CUDA.
+[config/train/low_res.yaml](config/train/low_res.yaml) controls training. Use a new
+`--run-dir` per run; it stores weights and resolved settings, while inspection results
+go to `checks/`. The device is CUDA, then MPS, then CPU unless `--device` is given;
+mixed precision runs only on CUDA.
 
 ## Super-resolution (optional)
 
-Stage 2 trains a separate model using frozen stage-1 volumes and real high-resolution sections.
-Configure the [SR preset](config/train/sr.yaml), then run:
+Stage 2 trains a separate model from frozen stage-1 volumes and real high-resolution
+sections ([config/train/sr.yaml](config/train/sr.yaml)):
 
 ```bash
 python run_train_2nd.py --base-weights "run/my-lr-run" --run-dir "run/my-sr-run"
@@ -60,7 +55,7 @@ python scripts/06_check_hr.py --weight "run/my-sr-run" --no-view
 
 ## Web interface
 
-Use an LR run. Start the backend, then the frontend in another terminal (Node.js required):
+Start the backend with an LR run, then the frontend in another terminal (Node.js required):
 
 ```bash
 python backend/run.py --weight "run/my-lr-run"
@@ -72,25 +67,17 @@ npm ci
 npm run dev
 ```
 
-Open the URL printed by Vite to select a section, crop an anchor, and generate a volume.
-If the backend uses another `--host` or `--port`, start Vite with
-`API_URL=http://HOST:PORT npm run dev`. To skip Vite, run `npm run build` first; a backend
-started afterwards serves the built page at its own address (default http://127.0.0.1:8000).
-[backend/config.yaml](backend/config.yaml) controls HTTP resource limits.
-Tortuosity is solved on the server before the volume is sent; untick it in the sidebar
-to speed up large volumes. Porosity is always computed in the browser.
+Open the URL Vite prints. For a non-default backend address, use
+`API_URL=http://HOST:PORT npm run dev`; after `npm run build`, the backend serves the page
+itself (default http://127.0.0.1:8000). HTTP limits are in
+[backend/config.yaml](backend/config.yaml).
 
-## Working with the code
+## Python API
 
-- Training starts at [run_train_1st.py](run_train_1st.py) and [run_train_2nd.py](run_train_2nd.py).
-- Python generation starts at [src/api.py](src/api.py): `LowResolutionAPI`, `PlaneAnchor`, and `SuperResolutionAPI`.
-  `LowResolutionAPI.generate` returns labels and `generate_probs` phase fractions; both take
-  `anchors` positionally and every other option by keyword, such as
-  `api.generate_probs(shape=(96, 64, 64), seed=1)`.
-- See the [code map and checks](docs/development.md) for implementation locations and test commands.
-- See [run and inspection notes](docs/checks.md) for anchors, tiled generation, saved outputs, and resume.
+[src/api.py](src/api.py) provides `LowResolutionAPI`, `PlaneAnchor`, and `SuperResolutionAPI`.
+`generate` returns labels and `generate_probs` phase fractions, for example
+`api.generate_probs(shape=(96, 64, 64), seed=1)`.
 
-Current behavior is defined by the code and presets; [PAPER.md](PAPER.md) records specific experiments.
 Generated volumes are plausible samples, not measurements of an unknown 3D specimen.
 
 [MIT License](LICENSE)

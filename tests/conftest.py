@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
+import scripts.common.cli as check_cli
 import src.config.generation as generation_config
 
 
@@ -21,3 +22,9 @@ def isolated_generation_presets(monkeypatch):
     monkeypatch.setattr(
         generation_config, "PROJECT_ROOT", Path(__file__).parent / "fixtures"
     )
+
+
+@pytest.fixture(autouse=True)
+def isolated_check_results(monkeypatch, tmp_path):
+    # Inspection scripts default to <project>/checks; keep test runs out of it.
+    monkeypatch.setattr(check_cli, "PROJECT_ROOT", tmp_path)

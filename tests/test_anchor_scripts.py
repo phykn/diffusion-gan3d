@@ -695,7 +695,7 @@ def test_weight_directory_alone_saves_manual_check_results(
     monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(sys, "argv", [filename, "--weight", str(run_dir), "--no-view"])
     module.main()
-    results = list((tmp_path / "run/checks").glob("*/volume.tiff"))
+    results = list((tmp_path / "checks").glob("*/volume.tiff"))
     assert len(results) == 1
     output = results[0]
     assert output.with_suffix(".png").is_file()

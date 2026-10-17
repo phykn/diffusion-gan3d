@@ -102,7 +102,7 @@ def main(argv=None):
     parser.add_argument(
         "--out",
         type=Path,
-        help="Output directory; default: a new directory under run/checks.",
+        help="Output directory; default: a new directory under checks/.",
     )
     add_device_argument(parser)
     parser.add_argument("--domain", type=int, default=0)

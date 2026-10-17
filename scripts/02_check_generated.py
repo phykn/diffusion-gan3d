@@ -41,7 +41,7 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=Path,
-        help="TIFF path; default: a new directory under run/checks",
+        help="TIFF path; default: a new directory under checks/",
     )
     parser.add_argument(
         "--napari",

@@ -38,7 +38,7 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=Path,
-        help="Preview PNG; default: a new directory under run/checks.",
+        help="Preview PNG; default: a new directory under checks/.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-view", action="store_true")

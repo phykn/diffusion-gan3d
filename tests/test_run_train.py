@@ -453,6 +453,8 @@ def test_dataset_check_script_accepts_one_axis(tmp_path: Path) -> None:
             str(config),
             "--domain",
             "0",
+            "--out",
+            str(tmp_path / "crops.png"),
         ],
         cwd=PROJECT_ROOT,
         env=environment,

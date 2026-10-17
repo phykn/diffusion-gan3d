@@ -89,7 +89,7 @@ def main():
     if args.steps < 2 or args.sr_steps < 1:
         raise ValueError("at least two LR steps and one SR step are required.")
     torch.set_num_threads(1)
-    root = args.run_dir or Path("run") / datetime.now().strftime(
+    root = args.run_dir or Path("checks") / datetime.now().strftime(
         "%Y%m%d-%H%M%S-stability"
     )
     if args.continue_run and args.run_dir is None:

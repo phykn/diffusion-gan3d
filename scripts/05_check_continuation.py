@@ -62,7 +62,7 @@ def main() -> None:
     )
     parser.add_argument("--guidance", type=float)
     parser.add_argument(
-        "--out", type=Path, help="TIFF path; default: a new directory under run/checks"
+        "--out", type=Path, help="TIFF path; default: a new directory under checks/"
     )
     parser.add_argument(
         "--figure", type=Path, help="Slice-strip PNG; default: <out>_continuation.png."

@@ -7,10 +7,27 @@ import tifffile
 import yaml
 from PIL import Image
 
+from simul.src.anode import GRAPHITE, SILICON, check_anode, pack_anode
 from simul.src.geometry import check_geometry, pack
 from src.plane import AXES
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253
+
+# geometry.kind -> (defaults, check, pack, measured fraction name -> label)
+STRUCTURES = {
+    "particles": (
+        {"big_elongation": 1.0, "radius_gradient": [1.0, 1.0]},
+        check_geometry,
+        pack,
+        {"big_vf": 2, "small_vf": 1},
+    ),
+    "anode": (
+        {"size_spread": 0.0, "min_section": 0},
+        check_anode,
+        pack_anode,
+        {"graphite_vf": GRAPHITE, "silicon_vf": SILICON},
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -22,8 +39,13 @@ class Export:
 
 def generate(cfg: dict) -> Export:
     output = cfg["output"]
-    geometry = {"big_elongation": 1.0, "radius_gradient": [1.0, 1.0], **cfg["geometry"]}
-    check_geometry(**geometry)
+    geometry = dict(cfg["geometry"])
+    kind = geometry.pop("kind", "particles")
+    if kind not in STRUCTURES:
+        raise ValueError(f"geometry kind must be one of {sorted(STRUCTURES)}.")
+    defaults, check, pack_volume, fractions = STRUCTURES[kind]
+    geometry = {**defaults, **geometry}
+    check(**geometry)
     count = output["count"]
     if type(count) is not int or count < 1:
         raise ValueError("output count must be a positive integer.")
@@ -41,14 +63,14 @@ def generate(cfg: dict) -> Export:
     for idx in range(count):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            vol = pack(**geometry, rng=rng)
+            vol = pack_volume(**geometry, rng=rng)
         jammed |= bool(caught)
         stem = f"volume_{idx:03d}"
         path = vol_dir / f"{stem}.tiff"
         tifffile.imwrite(path, vol)
         volumes.append(path)
         measured.append(
-            {"big_vf": float((vol == 2).mean()), "small_vf": float((vol == 1).mean())}
+            {key: float((vol == label).mean()) for key, label in fractions.items()}
         )
 
         for axis in AXES:
@@ -73,7 +95,7 @@ def generate(cfg: dict) -> Export:
     (root / "simulation.yaml").write_text(
         yaml.safe_dump(
             {
-                "geometry": geometry,
+                "geometry": {"kind": kind, **geometry},
                 "height_axis": "z",
                 "count": count,
                 "seed": seed,

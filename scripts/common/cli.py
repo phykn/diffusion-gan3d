@@ -56,7 +56,6 @@ def height_options(args):
 def result_directory(name):
     return (
         PROJECT_ROOT
-        / "run"
         / "checks"
         / (datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_" + name)
     )
