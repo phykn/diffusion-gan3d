@@ -28,6 +28,7 @@ from src.build.predict import load_generator
 from src.config.files import find_saved_config
 from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
+from src.device import default_device
 from src.evaluate.anchor import (
     measure_boundaries,
     measure_distance_divergence,
@@ -71,7 +72,7 @@ def main() -> None:
     parser.add_argument("--no-view", action="store_true")
     parser.add_argument(
         "--device",
-        choices=("cpu", "cuda"),
+        choices=("cpu", "cuda", "mps"),
         help="Default: CUDA when available, otherwise CPU.",
     )
     add_height_arguments(parser, origin_default=None)
@@ -80,9 +81,7 @@ def main() -> None:
     if args.figure is None:
         args.figure = args.out.with_name(args.out.stem + "_continuation.png")
 
-    device = torch.device(
-        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    device = torch.device(args.device or default_device())
     generator = load_generator(args.weight, device=device)
     settings = load_generation_settings()
     guidance = settings.guidance if args.guidance is None else args.guidance
@@ -135,6 +134,7 @@ def main() -> None:
 
         cpu_rng = torch.random.get_rng_state()
         cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
+        mps_rng = torch.mps.get_rng_state() if device.type == "mps" else None
         generated = generator.generate(
             anchors=(anchor,),
             anchor_strength=anchor_strength,
@@ -146,6 +146,8 @@ def main() -> None:
         torch.random.set_rng_state(cpu_rng)
         if cuda_rng is not None:
             torch.cuda.set_rng_state_all(cuda_rng)
+        if mps_rng is not None:
+            torch.mps.set_rng_state(mps_rng)
         print("Generating same-RNG baseline...", flush=True)
         baseline = generator.generate(
             anchors=(),

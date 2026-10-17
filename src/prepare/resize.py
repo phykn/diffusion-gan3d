@@ -3,6 +3,8 @@ import math
 import torch
 import torch.nn.functional as F
 
+from src.device import adaptive_pool, wide_dtype
+
 
 def scaled_size(size: int, scale: float) -> int:
     if isinstance(size, bool) or not isinstance(size, int) or size < 1:
@@ -62,7 +64,7 @@ def resize_phases(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
         return probs
     reduced = tuple(min(new, old) for new, old in zip(shape, source, strict=True))
     if reduced != source and all(old % new == 0 for old, new in zip(source, reduced)):
-        probs = F.interpolate(probs, size=reduced, mode="area")
+        probs = adaptive_pool(probs, reduced)
     else:
         for axis, size in enumerate(reduced, 2):
             if size != probs.shape[axis]:
@@ -78,9 +80,10 @@ def resize_phases(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
 
 def _resize_fraction_axis(probs, axis, size):
     source = probs.shape[axis]
-    edges = torch.arange(size + 1, device=probs.device, dtype=torch.float64)
+    dtype = wide_dtype(probs.device)
+    edges = torch.arange(size + 1, device=probs.device, dtype=dtype)
     edges = edges * source / size
-    cells = torch.arange(source, device=probs.device, dtype=torch.float64)
+    cells = torch.arange(source, device=probs.device, dtype=dtype)
     overlap = (
         torch.minimum(edges[1:, None], cells + 1)
         - torch.maximum(edges[:-1, None], cells)

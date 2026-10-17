@@ -21,9 +21,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--device",
-        choices=("cpu", "cuda"),
+        choices=("cpu", "cuda", "mps"),
         default=None,
-        help="inference device; defaults to CUDA when available",
+        help="inference device; defaults to CUDA or MPS when available",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--host", default="127.0.0.1")

@@ -6,7 +6,7 @@ from tqdm import trange
 from src.build.data import build_datasets
 from src.build.predict import build_generator
 from src.config.data import get_domains
-from src.config.files import save_yaml
+from src.device import empty_cache
 from src.prepare.profile import image_profile
 from src.storage import torch_save
 from src.train.run import source as _source
@@ -27,7 +27,6 @@ def publish_bank(payload: dict, cfg: dict, run_dir: Path, step: int) -> None:
         if key not in {"bank", "bank_sha256"}
     }
     cfg["source"].update(save_bank(run_dir, step, payload))
-    save_yaml(run_dir / "train.yaml", cfg)
 
 
 def create_bank(cfg: dict, device: torch.device) -> dict:
@@ -62,8 +61,7 @@ def create_bank(cfg: dict, device: torch.device) -> dict:
             ]
         )
     del generator
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+    empty_cache(device)
     return {
         "format": "diffusion-gan3d.lr-bank",
         "volumes": bank,
@@ -102,8 +100,7 @@ def refresh_bank(
         if payload.get("conditions") is not None:
             payload["conditions"][domain][index] = recorded
     del generator
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+    empty_cache(device)
 
 
 def model_bank_condition(record):

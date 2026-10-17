@@ -5,7 +5,7 @@ import torch
 from src.build.data import build_augmentation
 from src.build.sr import build_sr_trainer
 from src.config.data import validate_sr_source
-from src.config.files import PROJECT_ROOT, find_saved_config
+from src.config.files import PROJECT_ROOT, find_saved_config, load_yaml
 from src.config.train import (
     get_sr_resolution,
     load_train_config,
@@ -13,7 +13,8 @@ from src.config.train import (
     validate_sr_config,
 )
 from src.data.bank import load_bank
-from src.data.source import infer_height_extents
+from src.data.source import fill_height_extents, infer_height_extents
+from src.device import check_device
 from src.train.checkpoint import resolve_checkpoint
 from src.train.relocate import relocate_checkpoint
 from src.train.run.bank import (
@@ -21,7 +22,7 @@ from src.train.run.bank import (
     publish_bank,
     refresh_bank,
 )
-from src.train.run.loop import make_run_dir, run_train
+from src.train.run.loop import make_run_dir, run_train, saved_config
 from src.train.run.source import (
     file_hash,
     read_source_config,
@@ -45,9 +46,7 @@ def run_sr_train(
         raise ValueError("path_map requires --resume.")
     if base_weights is not None and resume is not None:
         raise ValueError("base_weights cannot change on resume.")
-    device = torch.device(device)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available.")
+    device = check_device(device)
     payload = None
     if resume:
         if config is not None or data is not None:
@@ -56,13 +55,13 @@ def run_sr_train(
             )
         if bank_size is not None:
             raise ValueError("--bank-size cannot change on resume.")
-        payload = torch.load(
-            resolve_checkpoint(resume), map_location="cpu", weights_only=True
-        )
+        checkpoint = resolve_checkpoint(resume)
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
         if payload.get("format") != "diffusion-gan3d.sr.train":
             raise ValueError("resume requires an SR training checkpoint.")
         payload = relocate_checkpoint(payload, path_map)
         cfg = normalize_train_config(payload["config"], "sr")
+        source = saved_config(checkpoint, payload)
         bank_path = Path(cfg["source"]["bank"])
         if file_hash(bank_path) != cfg["source"]["bank_sha256"]:
             raise ValueError("LR bank changed since the checkpoint was saved.")
@@ -73,16 +72,20 @@ def run_sr_train(
         )
         bank_payload = load_bank(bank_path)
     else:
-        cfg = load_train_config(
-            config or PROJECT_ROOT / "config/train/sr.yaml",
-            "sr",
-            data=data,
-        )
+        path = config or PROJECT_ROOT / "config/train/sr.yaml"
+        source = load_yaml(path)
+        if data is not None:
+            source["data"] = str(data)
+        cfg = load_train_config(path, "sr", data=data)
         prepare_source(cfg, base_weights)
+        if base_weights is not None:
+            source.setdefault("source", {})["weights"] = str(base_weights)
         if bank_size is not None:
             cfg["lr_bank"]["samples_per_domain"] = bank_size
+            source.setdefault("lr_bank", {})["samples_per_domain"] = bank_size
     if steps is not None:
         cfg["train"]["total_steps"] = steps
+        source.setdefault("train", {})["total_steps"] = steps
     cfg = validate_sr_config(cfg)
     build_augmentation(cfg)
     if payload and cfg["train"]["total_steps"] <= payload["step"]:
@@ -118,6 +121,7 @@ def run_sr_train(
         checkpoint_every=cfg["train"]["archive_every_steps"],
         start_step=trainer.completed_steps,
         before_step=before_step,
+        config=source,
     )
 
     return run_dir
@@ -137,6 +141,7 @@ def prepare_source(cfg: dict, base_weights: Path | None) -> None:
     if base_path.is_dir():
         base_path = base_path / "generator.pt"
     base_cfg, data_sha256 = read_source_config(find_saved_config(base_path))
+    fill_height_extents(base_cfg)
     if cfg["conditioning"]["height_enabled"]:
         cfg["data"]["height_extents"] = infer_height_extents(cfg["data"])
     cfg["data"] = validate_sr_source(cfg["data"], base_cfg["data"])

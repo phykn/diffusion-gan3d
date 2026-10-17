@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from src.data.augment import CriticAugment
 from src.prepare.height import height_field
 from src.prepare.resize import phase_channels
 from src.train.batch import RealBatch
@@ -135,6 +136,7 @@ def test_transition_targets_exclude_borrowed_domain_planes():
     )
     trainer.streams = {0: {0: None}, 1: {1: None}}
     trainer.diagnostics = {}
+    trainer.critic_augment = CriticAugment()
     volume = torch.zeros(1, 2, 4, 4, 4)
     volume[:, 0] = 1
     own = volume[:, :, 0]
@@ -176,3 +178,100 @@ def test_cached_statistics_preserve_real_loss_and_generated_gradients(height_ena
     second = torch.autograd.grad(cached, active)
     for a, b in zip(first, second, strict=True):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def test_rotated_planes_share_pooled_row_and_column_targets():
+    labels = torch.arange(6).remainder(2)[None, :, None].expand(2, -1, 6)
+    images = phase_channels(labels, 2)
+    plain = transition_statistics({0: images, 1: images}, 2)
+    pooled = transition_statistics({0: images, 1: images}, 2, rotations=(0,))
+    for gap in (1, 2):
+        rows, cols = plain[0, 2, gap].values, plain[0, 3, gap].values
+        assert torch.equal(rows.mean((0, 1)), cols.mean((0, 1))) == (gap == 2)
+        transposed = phase_pairs(images.transpose(2, 3), 2, gap)
+        for dim in (2, 3):
+            torch.testing.assert_close(
+                pooled[0, dim, gap].values, torch.cat((rows, transposed), 1)
+            )
+            torch.testing.assert_close(
+                pooled[1, dim, gap].values, plain[1, dim, gap].values
+            )
+        torch.testing.assert_close(
+            pooled[0, 2, gap].values.mean((0, 1)),
+            (rows.mean((0, 1)) + cols.mean((0, 1))) * 0.5,
+        )
+
+
+def test_rotated_targets_apply_to_the_real_transition_loss():
+    labels = torch.arange(6).remainder(2)[None, :, None].expand(2, -1, 6)
+    images = phase_channels(labels, 2)
+    exact, _ = compute_real_transition_loss({0: images}, {0: images}, 1)
+    pooled, diagnostics = compute_real_transition_loss(
+        {0: images}, {0: images}, 1, rotations=(0,)
+    )
+    rotated, _ = compute_real_transition_loss(
+        {0: images}, {0: images.transpose(2, 3)}, 1, rotations=(0,)
+    )
+    assert exact == 0
+    assert pooled > 0
+    torch.testing.assert_close(rotated, pooled)
+    torch.testing.assert_close(
+        diagnostics["real_transition/y/gap1"], diagnostics["real_transition/x/gap1"]
+    )
+
+
+def test_height_conditioned_statistics_ignore_rotation():
+    real = {1: torch.rand(2, 2, 6, 6).softmax(1)}
+    heights = {1: height_field((6, 6), 0, [0, 1], 1, 16)}
+    plain = transition_statistics(real, 2, heights)
+    rotated = transition_statistics(real, 2, heights, rotations=(1,))
+    assert plain.keys() == rotated.keys()
+    for key, stats in plain.items():
+        torch.testing.assert_close(rotated[key].values, stats.values)
+        torch.testing.assert_close(rotated[key].low, stats.low)
+
+
+@pytest.mark.parametrize(
+    "planes,probability,expected",
+    [
+        (None, 1.0, ()),
+        ({"xy": {"flip_axes": ["x"], "rotate_90": True}}, 0.0, ()),
+        (
+            {
+                "xy": {"flip_axes": ["x", "y"], "rotate_90": True},
+                "xz": {"flip_axes": ["x", "z"], "rotate_90": False},
+                "yz": {"flip_axes": [], "rotate_90": True},
+            },
+            0.5,
+            (0, 2),
+        ),
+    ],
+)
+def test_critic_augmentation_reports_rotated_planes(planes, probability, expected):
+    assert CriticAugment(planes, probability).rotated_axes == expected
+
+
+def test_trainer_transition_targets_use_rotating_augmentation_planes():
+    trainer = object.__new__(Trainer)
+    trainer.settings = SimpleNamespace(
+        loss=SimpleNamespace(real_transition_weight=1.0),
+        connectivity_max_gap=1,
+        slice_pairs_per_axis=4,
+    )
+    trainer.streams = {0: {0: None}}
+    trainer.diagnostics = {}
+    trainer.critic_augment = CriticAugment({"xy": {"flip_axes": [], "rotate_90": True}})
+    labels = torch.arange(4).remainder(2)[None, :, None].expand(2, -1, 4)
+    images = phase_channels(labels, 2)
+    prepared = SimpleNamespace(
+        transition=0,
+        domain=0,
+        model_conditions={},
+        real=RealBatch(images={0: images}, domains={0: 0}),
+    )
+    statistics = trainer._transition_statistics(prepared)
+    torch.testing.assert_close(statistics[0, 2, 1].values, statistics[0, 3, 1].values)
+    volume = images[:1, :, None].expand(-1, -1, 4, -1, -1)
+    assert trainer._real_transition_loss(prepared, volume, statistics) > 0
+    trainer.critic_augment = CriticAugment()
+    assert trainer._real_transition_loss(prepared, volume) == 0

@@ -49,9 +49,7 @@ class Tile:
     margins: tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
 
 
-def make_plan(
-    shape: tuple[int, int, int], tile_size: int, overlap: int
-) -> TilePlan:
+def make_plan(shape: tuple[int, int, int], tile_size: int, overlap: int) -> TilePlan:
     """Build grid geometry from validated generation-space dimensions."""
     stride = tile_size - 2 * overlap
     lengths = tuple(min(size, tile_size) for size in shape)

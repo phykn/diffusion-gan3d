@@ -2,6 +2,8 @@ import math
 
 import torch
 
+from src.device import wide_dtype
+
 
 def input_gradient_norms(loss: torch.Tensor, inputs: tuple[torch.Tensor, ...]):
     active = tuple(value for value in inputs if value.requires_grad)
@@ -38,7 +40,10 @@ def step_optimizer(optimizer, scaler, diagnostics: dict, name: str) -> bool:
     ]
     if not grads:
         raise RuntimeError(f"{name} has no gradients.")
-    norm = float(torch.stack([g.norm(dtype=torch.float64) for g in grads]).norm())
+    dtype = wide_dtype(grads[0].device)
+    norm = float(
+        torch.stack([torch.linalg.vector_norm(g, dtype=dtype) for g in grads]).norm()
+    )
     finite = math.isfinite(norm)
     diagnostics[f"gradient/{name}"] = norm if finite else None
     diagnostics[f"skipped/{name}"] = int(not finite)

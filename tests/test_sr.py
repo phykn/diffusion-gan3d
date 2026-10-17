@@ -660,6 +660,8 @@ def test_sr_loss_targets_clean_coarse_while_model_receives_corrupted_input(tmp_p
         call.kwargs["coarse"][:, 1].eq(1).all() for call in forward.call_args_list
     )
     assert consistency.call_args.args[1][:, 0].eq(1).all()
+    mask = consistency.call_args.args[3]
+    assert mask.shape == (1, 1, 8, 8, 8) and not mask.any()
 
 
 def test_fractional_consistency_does_not_sharpen_coarse():
@@ -957,3 +959,87 @@ def test_sr_cuda_amp_checkpointing_and_cfg_inference(tmp_path):
     )
     assert torch.isfinite(tiled).all()
     torch.testing.assert_close(tiled.sum(0), torch.ones(16, 16, 16), atol=2e-6, rtol=0)
+
+
+def test_consistency_ignores_masked_low_resolution_voxels():
+    low = phase_channels(torch.randint(3, (2, 4, 4, 4)), 3)
+    high = torch.nn.functional.interpolate(low, scale_factor=2).requires_grad_()
+    changed = low.clone()
+    changed[:, :, :2] = changed[:, :, :2].roll(1, 1)
+    mask = torch.ones(2, 1, 4, 4, 4, dtype=torch.bool)
+    mask[:, :, :2] = False
+    full, full_error = consistency_loss(high, changed, 0)
+    masked, masked_error = consistency_loss(high, changed, 0, mask)
+    assert full > 0 and full_error > 0
+    assert masked == 0 and masked_error == 0
+    mask[:, :, 2:] = False
+    loss, error = consistency_loss(high, low, 0, mask)
+    assert loss == 0 and error == 0
+    loss.backward()
+    assert high.grad.abs().sum() == 0
+
+
+def test_masked_consistency_matches_the_mean_over_kept_voxels():
+    torch.manual_seed(3)
+    low = torch.rand(1, 3, 4, 4, 4).softmax(1)
+    high = torch.rand(1, 3, 8, 8, 8).softmax(1)
+    mask = torch.rand(1, 1, 4, 4, 4) < 0.5
+    _, error = consistency_loss(high, low, 0, mask)
+    squared = (downsample(high, (4, 4, 4)) - low).square()
+    expected = squared.permute(0, 2, 3, 4, 1)[mask[:, 0]].mean()
+    torch.testing.assert_close(error, expected)
+    _, unmasked = consistency_loss(high, low, 0, torch.ones_like(mask))
+    torch.testing.assert_close(unmasked, squared.mean())
+
+
+def test_sr_condition_mask_keeps_only_voxels_matching_the_clean_coarse(tmp_path):
+    cfg = sr_config(tmp_path)
+    bank = {0: phase_channels(torch.randint(3, (2, 8, 8, 8)), 3)}
+    trainer = build_sr_trainer(cfg, bank, torch.device("cpu"))
+
+    def corrupt(low, *args):
+        corrupted = low.clone()
+        corrupted[:, :, :3] = phase_channels(
+            torch.zeros(len(low), 3, 8, 8, dtype=torch.long), 3
+        )
+        return corrupted, low.new_ones(len(low))
+
+    with (
+        patch(
+            "src.train.conditioning.augment_volumes", side_effect=lambda low, **kw: low
+        ),
+        patch("src.train.conditioning.corrupt_coarse", side_effect=corrupt),
+    ):
+        prepared = trainer.prepare_step(0, transition=0)
+    low = prepared.coarse_target
+    expected = torch.ones(len(low), 1, 8, 8, 8, dtype=torch.bool)
+    expected[:, :, :3] = low[:, :1, :3] == 1
+    assert prepared.coarse_mask.dtype == torch.bool
+    assert torch.equal(prepared.coarse_mask, expected)
+    assert not prepared.coarse_mask.all() and prepared.coarse_mask[:, :, :3].any()
+
+
+def test_real_corruption_mask_marks_exactly_the_changed_coarse_voxels(tmp_path):
+    cfg = sr_config(tmp_path)
+    cfg["conditioning"].update(
+        coarse_corruption_probability=1.0, coarse_corruption_strength=1.0
+    )
+    torch.manual_seed(0)
+    bank = {0: phase_channels(torch.randint(3, (2, 8, 8, 8)), 3)}
+    trainer = build_sr_trainer(cfg, bank, torch.device("cpu"))
+    outputs = []
+
+    def capture(*args):
+        outputs.append(corrupt_coarse(*args))
+        return outputs[-1]
+
+    with patch("src.train.conditioning.corrupt_coarse", side_effect=capture):
+        prepared = trainer.prepare_step(0, transition=0)
+    coarse = outputs[0][0]
+    low = prepared.coarse_target
+    expected = (coarse == low).all(1, keepdim=True)
+    assert torch.equal(prepared.coarse_mask, expected)
+    assert prepared.coarse_mask.any() and not prepared.coarse_mask.all()
+    kept = prepared.coarse_mask.expand_as(low)
+    assert torch.equal(coarse[kept], low[kept])
+    assert ((coarse != low).any(1, keepdim=True) == ~prepared.coarse_mask).all()

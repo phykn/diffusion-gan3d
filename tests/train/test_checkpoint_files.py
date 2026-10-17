@@ -26,9 +26,11 @@ def trainer():
         ema_denoiser=ema,
         critics=torch.nn.ModuleDict({"xy": model}),
         connectivity_critic=model,
+        seam_critic=model,
         denoiser_optim=optim,
         critic_optims={"xy": optim},
         connectivity_optim=optim,
+        seam_optim=optim,
         scaler=optim,
         conditions=SimpleNamespace(
             use_multi_anchor_next=False,
@@ -211,9 +213,7 @@ def test_failed_ema_export_does_not_publish_checkpoint_completion(
     assert not (tmp_path / "checkpoints/step_00000002.complete").exists()
 
 
-@pytest.mark.parametrize(
-    "name", ["generator_00000001.pt", "step_00000001.complete"]
-)
+@pytest.mark.parametrize("name", ["generator_00000001.pt", "step_00000001.complete"])
 def test_checkpoint_preserves_existing_companion_files(tmp_path, name):
     path = tmp_path / "checkpoints" / name
     path.parent.mkdir()

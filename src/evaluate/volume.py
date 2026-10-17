@@ -21,7 +21,7 @@ def measure_volume(
         tau = tortuosity(
             volume,
             phase=0,
-            axis=1,
+            axis=0,
             device=device,
         )
     except (RuntimeError, ValueError, ZeroDivisionError):

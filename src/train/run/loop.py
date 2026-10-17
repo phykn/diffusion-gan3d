@@ -8,7 +8,7 @@ from threading import Event, current_thread, main_thread
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.config.files import save_yaml
+from src.config.files import find_saved_config, load_yaml, save_yaml
 from src.storage import save_model, torch_save
 from src.train.checkpoint import complete_checkpoint
 from src.train.metrics import write_metrics
@@ -39,6 +39,13 @@ def make_run_dir(
         return path
 
 
+def saved_config(checkpoint: Path, payload: dict) -> dict:
+    try:
+        return load_yaml(find_saved_config(checkpoint))
+    except FileNotFoundError:
+        return payload["config"]
+
+
 def save_weights(trainer: Trainer, root: Path, stage: str = "low_res") -> None:
     root.mkdir(parents=True, exist_ok=True)
     save_generator(trainer, root / "generator.pt", stage)
@@ -46,6 +53,8 @@ def save_weights(trainer: Trainer, root: Path, stage: str = "low_res") -> None:
         save_model(root / f"critic_{group}.pt", critic)
     if trainer.connectivity_critic is not None:
         save_model(root / "critic_c.pt", trainer.connectivity_critic)
+    if trainer.seam_critic is not None:
+        save_model(root / "critic_s.pt", trainer.seam_critic)
 
 
 def save_generator(trainer, path, stage, overwrite=True):
@@ -93,6 +102,7 @@ def run_train(
     checkpoint_every: int | None = None,
     start_step: int = 0,
     before_step: Callable[[int], None] | None = None,
+    config: dict | None = None,
 ) -> Path:
     for name, value in (
         ("steps", steps),
@@ -108,7 +118,7 @@ def run_train(
         raise ValueError("start_step must be less than total steps.")
     stage = trainer.cfg["stage"]
     root.mkdir(parents=True, exist_ok=True)
-    save_yaml(root / "train.yaml", trainer.cfg)
+    save_yaml(root / "train.yaml", trainer.cfg if config is None else config)
     weights = root / "generator.pt"
     with (
         deferred_sigint() as stop,

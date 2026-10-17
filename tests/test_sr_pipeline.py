@@ -131,15 +131,22 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     assert archived["format"] == "diffusion-gan3d.sr.train"
     assert archived["step"] == 1
     stored = load_yaml(sr_dir / "train.yaml")
-    assert stored["source"]["weights"] == str((base_dir / "generator.pt").resolve())
-    assert Path(stored["source"]["bank"]) == sr_dir / "lr_bank/step_00000000.pt"
+    expected = load_yaml(sr_config)
+    if source_mode == "cli":
+        expected["source"]["weights"] = str(base_dir)
+    assert stored == expected
+    assert stored["data"] == str(data_file)
+    source = archived["config"]["source"]
+    assert source["weights"] == str((base_dir / "generator.pt").resolve())
+    assert Path(source["bank"]) == sr_dir / "lr_bank/step_00000000.pt"
     assert not list(sr_dir.glob("lr_bank*.pt"))
     expected_data = sr_cfg["data"]
-    assert stored["data"]["domains"] == expected_data["domains"]
-    assert "scale_factor" not in stored["data"]
-    assert stored["data"]["hi_res_size"] == int(8 * scale)
-    assert stored["data"]["crop_size"] == 16
-    assert stored["data"]["lo_res_size"] == 8
+    resolved = archived["config"]["data"]
+    assert resolved["domains"] == expected_data["domains"]
+    assert "scale_factor" not in resolved
+    assert resolved["hi_res_size"] == int(8 * scale)
+    assert resolved["crop_size"] == 16
+    assert resolved["lo_res_size"] == 8
     first = torch.load(resolve_checkpoint(sr_dir), weights_only=True)
     assert first["step"] == 1
     resumed = tmp_path / "resumed"
@@ -166,7 +173,10 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     assert Path(second["config"]["source"]["bank"]).parent == resumed / "lr_bank"
     assert Path(first["config"]["source"]["bank"]).is_file()
     assert Path(archived["config"]["source"]["bank"]).is_file()
-    assert load_yaml(resumed / "train.yaml")["source"] == second["config"]["source"]
+    assert load_yaml(resumed / "train.yaml") == {
+        **stored,
+        "train": {**stored["train"], "total_steps": 2},
+    }
     check_hr = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts/06_check_hr.py")
     )["main"]
@@ -219,9 +229,7 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
     source = source_dir / "generator.pt"
     source.write_bytes(b"frozen weights")
     source_config = source_dir / "train.yaml"
-    save_yaml(
-        source_config, load_yaml("tests/fixtures/config/train/low_res.yaml")
-    )
+    save_yaml(source_config, load_yaml("tests/fixtures/config/train/low_res.yaml"))
     old_bank = tmp_path / "lr_bank/step_00000000.pt"
     old_bank.parent.mkdir()
     old_bank.write_bytes(b"original bank")

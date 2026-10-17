@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
@@ -16,6 +17,7 @@ from src.config.files import load_yaml, save_yaml
 from src.plane import PLANES
 from src.train.metrics import Metrics, write_metrics
 from src.train.run.loop import make_run_dir, run_train
+from src.train.run.low_res import run_low_res_train
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -63,7 +65,9 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
     )
     monkeypatch.setattr(
         "src.train.run.loop.save_checkpoint",
-        lambda trainer, path, stage: checkpoints.append((stage, trainer.completed_steps)),
+        lambda trainer, path, stage: checkpoints.append(
+            (stage, trainer.completed_steps)
+        ),
     )
     with pytest.raises(KeyboardInterrupt) if interrupt else nullcontext():
         run_train(
@@ -84,7 +88,9 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
     events = EventAccumulator(str(tmp_path / "tensorboard")).Reload()
     assert [value.step for value in events.Scalars("loss/generator")] == expected_steps
     assert load_yaml(tmp_path / "train.yaml") == trainer.cfg
-    assert checkpoints == [(stage, step) for step in ([2, 4] if interrupt else [2, 4, 5])]
+    assert checkpoints == [
+        (stage, step) for step in ([2, 4] if interrupt else [2, 4, 5])
+    ]
     assert exports == [
         (3, ".", stage),
         (4 if interrupt else 5, ".", stage),
@@ -337,14 +343,14 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     assert stage == "low_res_coarse"
     weights = run_dirs[0] / "generator.pt"
     assert weights.is_file()
-    expected_critics = ("critic_c.pt",) + tuple(
+    expected_critics = ("critic_c.pt", "critic_s.pt") + tuple(
         f"critic_{PLANES[axis]}.pt" for axis in axes
     )
     assert (
         tuple(path.name for path in sorted(run_dirs[0].glob("critic_*.pt")))
         == expected_critics
     )
-    assert (run_dirs[0] / "train.yaml").is_file()
+    assert load_yaml(run_dirs[0] / "train.yaml") == load_yaml(config)
     checkpoints = sorted((run_dirs[0] / "checkpoints").glob("step_*.pt"))
     assert len(checkpoints) == 2
     for step, checkpoint in enumerate(checkpoints, start=1):
@@ -364,6 +370,61 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     assert all(
         isinstance(value, __import__("torch").Tensor) for value in values.values()
     )
+
+
+def test_lr_run_saves_the_supplied_yaml_and_cli_overrides_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    folder = tmp_path / "slices"
+    folder.mkdir()
+    for index in range(2):
+        Image.fromarray(
+            ((np.indices((8, 8)).sum(0) + index) % 3).astype(np.uint8)
+        ).save(folder / f"{index}.png")
+    data = tmp_path / "data.yaml"
+    save_yaml(
+        data,
+        {
+            "domains": {0: {plane: [str(folder)] for plane in PLANES}},
+            "crop_size": 8,
+            "num_phases": 3,
+            "lo_res_size": 8,
+        },
+    )
+    source = load_yaml(PROJECT_ROOT / "tests/fixtures/config/train/low_res.yaml")
+    source["model"]["generator"].update(
+        channels=[4, 8], embedding_channels=8, latent_channels=4
+    )
+    source["model"]["critic"]["channels"] = [4, 8]
+    source["model"]["gradient_checkpointing"] = False
+    source["model"]["diffusion"]["num_steps"] = 2
+    source["train"].update(
+        real_batch_size=2,
+        slice_pairs_per_plane=2,
+        mixed_precision=False,
+        weights_every_steps=1,
+        archive_every_steps=1,
+    )
+    config = tmp_path / "low_res.yaml"
+    save_yaml(config, source)
+    monkeypatch.setattr("src.train.run.low_res.PROJECT_ROOT", tmp_path)
+    first = run_low_res_train(
+        "cpu", config=config, run_dir=tmp_path / "first", steps=1, data=data
+    )
+    expected = {**source, "data": str(data)}
+    expected["train"] = {**source["train"], "total_steps": 1}
+    assert load_yaml(first / "train.yaml") == expected
+    resumed = run_low_res_train(
+        "cpu", resume=first / "checkpoints", run_dir=tmp_path / "resumed", steps=2
+    )
+    expected["train"]["total_steps"] = 2
+    assert load_yaml(resumed / "train.yaml") == expected
+    payload = torch.load(
+        resumed / "checkpoints" / "step_00000002.pt", weights_only=True
+    )
+    assert payload["config"]["data"]["domains"] == {
+        0: {plane: [str(folder.resolve())] for plane in PLANES}
+    }
 
 
 def test_dataset_check_script_accepts_one_axis(tmp_path: Path) -> None:

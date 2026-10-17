@@ -35,12 +35,15 @@ class DenoiserLossSettings:
     anchor_continuity_weight: float = 0.0
     anchor_neighborhood_weight: float = 0.0
     anchor_neighborhood_radius: int = 2
+    anchor_seam_weight: float = 0.0
+    anchor_seam_rows: int = 4
 
 
 def denoiser_objective(
     batch: DenoiserBatch,
     critics,
     connectivity_critic,
+    seam_critic,
     groups: dict[str, tuple[int, ...]],
     anchor_loss,
     settings: DenoiserLossSettings,
@@ -114,6 +117,19 @@ def denoiser_objective(
             batch.anchor_neighborhood_loss.detach()
         )
         diagnostics["anchor_neighborhood/contribution"] = contribution.detach()
+    if (
+        batch.seam_fake is not None
+        and len(batch.seam_fake)
+        and settings.anchor_seam_weight > 0.0
+    ):
+        fake = batch.seam_fake
+        seam = get_generator_loss(
+            seam_critic(fake.values, fake.axes, batch.seam_domains)
+        ).global_loss
+        contribution = batch.anchor_ramp * settings.anchor_seam_weight * seam
+        total = total + contribution
+        diagnostics["loss/anchor_seam"] = seam.detach()
+        diagnostics["anchor_seam/contribution"] = contribution.detach()
     if (
         settings.group_statistics_weight > 0
         and batch.transition == 0
@@ -243,7 +259,10 @@ def profile_loss(batch, settings):
 
 def coarse_loss(batch, settings):
     consistency, error = consistency_loss(
-        batch.clean_probs, batch.coarse_target, settings.consistency_tolerance
+        batch.clean_probs,
+        batch.coarse_target,
+        settings.consistency_tolerance,
+        batch.coarse_mask,
     )
     depth = batch.coarse_target.shape[-3]
     target = phase_profile(batch.coarse_target.detach(), settings.num_phases)

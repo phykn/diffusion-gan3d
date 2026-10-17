@@ -27,6 +27,7 @@ from scripts.common.diagnostic import (
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
+from src.device import default_device
 from src.evaluate.anchor import (
     SliceSmoothness,
     measure_distance_divergence,
@@ -99,7 +100,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--device",
-        choices=("cpu", "cuda"),
+        choices=("cpu", "cuda", "mps"),
         help="Default: CUDA when available, otherwise CPU.",
     )
     add_height_arguments(parser)
@@ -115,9 +116,7 @@ def main() -> None:
     )
     anchor_count = args.count if anchor_strength > 0.0 else 0
 
-    device = torch.device(
-        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    device = torch.device(args.device or default_device())
     weight = args.weight
     print(f"\nWeights : {Path(weight).resolve()}")
 
@@ -154,6 +153,7 @@ def main() -> None:
 
         cpu_rng = torch.random.get_rng_state()
         cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
+        mps_rng = torch.mps.get_rng_state() if device.type == "mps" else None
 
         gen = generator.generate(
             anchors=anchors,
@@ -166,6 +166,8 @@ def main() -> None:
         torch.random.set_rng_state(cpu_rng)
         if cuda_rng is not None:
             torch.cuda.set_rng_state_all(cuda_rng)
+        if mps_rng is not None:
+            torch.mps.set_rng_state(mps_rng)
         print("Generating same-RNG baseline...", flush=True)
         baseline = generator.generate(
             anchors=(),

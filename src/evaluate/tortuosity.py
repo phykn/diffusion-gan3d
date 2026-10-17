@@ -4,6 +4,8 @@ import numpy as np
 import taufactor as tau
 import torch
 
+from src.device import default_device
+
 
 def tortuosity(
     volume,
@@ -18,16 +20,12 @@ def tortuosity(
         values = np.asarray(volume)
 
     conductive = np.moveaxis(values == phase, axis, 0).astype(np.uint8)
-    selected_device = torch.device(
-        device
-        if device is not None
-        else ("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    selected_device = torch.device(default_device() if device is None else device)
     solver = tau.Solver(conductive, device=str(selected_device))
-    value = solver.solve(verbose=False, conv_crit=convergence)
+    solver.solve(verbose=False, conv_crit=convergence)
     if not solver.converged:
         raise RuntimeError("tortuosity solver did not converge.")
-    result = float(np.asarray(value).reshape(-1)[0])
+    result = float(np.asarray(solver.tau).reshape(-1)[0])
     if math.isnan(result) or result <= 0:
         raise RuntimeError("tortuosity solver returned an invalid result.")
     # Positive infinity is meaningful for a phase without a percolating path.

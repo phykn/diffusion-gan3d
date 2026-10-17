@@ -247,7 +247,7 @@ def test_objective_adds_the_ramped_prior_and_preserves_the_real_loss():
     real_loss = batch.clean_probs.sum() * 0 + 0.7
     batch = replace(batch, real_transition_loss=real_loss, connectivity_ramp=0.25)
     settings = replace(settings, real_transition_weight=0.4)
-    update, logs = denoiser_objective(batch, {}, None, ALL, None, settings)
+    update, logs = denoiser_objective(batch, {}, None, None, ALL, None, settings)
     prior, _ = compute_group_statistics_loss(batch.clean_probs, ALL, 3, 0)
     torch.testing.assert_close(update.total, 0.1 * prior + 0.1 * real_loss)
     assert logs["loss/group_statistics"] > 0
@@ -261,13 +261,15 @@ def test_continuity_is_additive_at_every_transition_and_leaves_existing_losses(
 ):
     batch, settings = objective_batch()
     batch = replace(batch, transition=transition, anchor_ramp=0.5)
-    original, logs = denoiser_objective(batch, {}, None, ALL, None, settings)
+    original, logs = denoiser_objective(batch, {}, None, None, ALL, None, settings)
     value = batch.clean_probs.sum() * 0 + 0.7
     batch = replace(batch, anchor_continuity_loss=value)
-    disabled, _ = denoiser_objective(batch, {}, None, ALL, None, settings)
+    disabled, _ = denoiser_objective(batch, {}, None, None, ALL, None, settings)
     torch.testing.assert_close(disabled.total, original.total, rtol=0, atol=0)
     settings = replace(settings, anchor_continuity_weight=0.2)
-    updated, updated_logs = denoiser_objective(batch, {}, None, ALL, None, settings)
+    updated, updated_logs = denoiser_objective(
+        batch, {}, None, None, ALL, None, settings
+    )
     for item in fields(original):
         if item.name != "total":
             torch.testing.assert_close(
@@ -285,14 +287,14 @@ def test_continuity_is_additive_at_every_transition_and_leaves_existing_losses(
 def test_objective_skips_nonfinal_transitions_and_inactive_schedule(change):
     batch, settings = objective_batch()
     batch = replace(batch, **change)
-    update, logs = denoiser_objective(batch, {}, None, ALL, None, settings)
+    update, logs = denoiser_objective(batch, {}, None, None, ALL, None, settings)
     assert update.total == 0 and "loss/group_statistics" not in logs
 
 
 def test_objective_excludes_borrowed_domains_and_active_anchor_cases():
     batch, settings = objective_batch()
     update, _ = denoiser_objective(
-        replace(batch, observed_axes=(2,)), {}, None, ALL, None, settings
+        replace(batch, observed_axes=(2,)), {}, None, None, ALL, None, settings
     )
     assert update.total == 0
     batch = replace(batch, anchor=object(), anchor_present=torch.tensor([True]))
@@ -301,7 +303,7 @@ def test_objective_excludes_borrowed_domains_and_active_anchor_cases():
         zero = batch.clean_probs.sum() * 0
         return SimpleNamespace(total=zero, coarse=zero, pixel=zero, accuracy=zero)
 
-    update, logs = denoiser_objective(batch, {}, None, ALL, anchor_loss, settings)
+    update, logs = denoiser_objective(batch, {}, None, None, ALL, anchor_loss, settings)
     assert update.total == 0 and logs["loss/group_statistics"] == 0
     assert logs["group_statistics/active_fraction"] == 0
 

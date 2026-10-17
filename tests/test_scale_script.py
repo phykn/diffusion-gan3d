@@ -93,6 +93,7 @@ def test_main_prints_plan_before_scaled_generation(
     monkeypatch.setattr(module, "TiledGenerator", lambda _generator: scaled)
     monkeypatch.setattr(module, "show_slices", lambda *args, **kwargs: None)
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         module.sys,
         "argv",
@@ -182,6 +183,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         module.sys,
         "argv",

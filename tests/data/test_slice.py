@@ -42,7 +42,11 @@ def test_focused_pairs_skip_measured_plane_and_empty_anchor_region():
     volume.requires_grad_()
     anchor = encode_anchors(
         [PlaneAnchor(torch.zeros(8, 8, dtype=torch.long), 1, 5)],
-        2, 2, 8, torch.device("cpu"), torch.float32,
+        2,
+        2,
+        8,
+        torch.device("cpu"),
+        torch.float32,
     )
     anchor = replace(
         anchor,
@@ -54,7 +58,11 @@ def test_focused_pairs_skip_measured_plane_and_empty_anchor_region():
     )
     measured = encode_anchors(
         [PlaneAnchor(torch.zeros(8, 8, dtype=torch.long), 0, 2)],
-        2, 2, 8, torch.device("cpu"), torch.float32,
+        2,
+        2,
+        8,
+        torch.device("cpu"),
+        torch.float32,
     )
     measured = replace(measured, active_batches=(1,))
 
@@ -65,7 +73,13 @@ def test_focused_pairs_skip_measured_plane_and_empty_anchor_region():
 
     with patch("src.data.slice.torch.randint", side_effect=choose):
         selected, _ = sample_pairs(
-            volume, volume, 0, 4, 3, anchor=anchor, measured=measured,
+            volume,
+            volume,
+            0,
+            4,
+            3,
+            anchor=anchor,
+            measured=measured,
         )
 
     assert torch.equal(selected[:2, 0].amax((-2, -1)), torch.ones(2))

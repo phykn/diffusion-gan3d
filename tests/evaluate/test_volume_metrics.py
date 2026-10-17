@@ -7,7 +7,7 @@ from src.evaluate.tortuosity import tau
 from src.evaluate.volume import measure_volume
 
 
-def test_measure_volume_uses_phase_zero_and_axis_one(
+def test_measure_volume_uses_phase_zero_and_thickness_axis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     volume = torch.tensor(
@@ -26,7 +26,7 @@ def test_measure_volume_uses_phase_zero_and_axis_one(
 
     assert result.porosity == pytest.approx(0.5)
     assert result.tortuosity == pytest.approx(1.75)
-    assert calls == [(volume, 0, 1, torch.device("cpu"))]
+    assert calls == [(volume, 0, 0, torch.device("cpu"))]
 
 
 def test_measure_volume_marks_failed_tortuosity_unavailable(
@@ -56,7 +56,7 @@ def test_unconverged_solver_keeps_porosity_but_marks_tortuosity_unavailable(
             pass
 
         def solve(self, **kwargs):
-            return np.array([2.75])
+            self.tau = np.array([2.75])
 
     monkeypatch.setattr(tau, "Solver", Solver)
     result = measure_volume(

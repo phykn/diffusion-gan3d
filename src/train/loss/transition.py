@@ -28,7 +28,7 @@ class TransitionStatistics:
 
 
 @torch.no_grad()
-def transition_statistics(real, max_gap, heights=None):
+def transition_statistics(real, max_gap, heights=None, rotations=()):
     """Cache observed row-wise joints, retaining separate crops and directions."""
     statistics = {}
     for axis, images in real.items():
@@ -36,10 +36,24 @@ def transition_statistics(real, max_gap, heights=None):
             heights is not None and (axis not in heights or images.shape[-2] < 2)
         ):
             continue
+        images = images.detach()
+        pooled = {}
         with torch.autocast(device_type=images.device.type, enabled=False):
             for dim in (2, 3):
                 for gap in range(1, min(max_gap + 1, images.shape[dim])):
-                    values = phase_pairs(images.detach(), dim, gap)
+                    if heights is None and axis in rotations:
+                        if gap not in pooled:
+                            pooled[gap] = torch.cat(
+                                [
+                                    phase_pairs(image, 2, gap)
+                                    for image in (images, images.transpose(2, 3))
+                                    if gap < image.shape[2]
+                                ],
+                                1,
+                            )
+                        statistics[axis, dim, gap] = TransitionStatistics(pooled[gap])
+                        continue
+                    values = phase_pairs(images, dim, gap)
                     low = high = None
                     if heights is not None:
                         low, high = height_intervals(heights[axis], dim, gap)
@@ -82,6 +96,7 @@ def compute_real_transition_loss(
     real_heights: dict[int, torch.Tensor] | None = None,
     fake_heights: dict[int, torch.Tensor] | None = None,
     statistics: dict[tuple[int, int, int], TransitionStatistics] | None = None,
+    rotations: tuple[int, ...] = (),
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Match observed in-plane transitions at equal LR-grid separations.
 
@@ -93,7 +108,7 @@ def compute_real_transition_loss(
     height_enabled = fake_heights is not None
     if statistics is None:
         statistics = transition_statistics(
-            real, max_gap, real_heights if height_enabled else None
+            real, max_gap, real_heights if height_enabled else None, rotations
         )
     with torch.autocast(device_type=zero.device.type, enabled=False):
         for axis, generated in fake.items():

@@ -154,7 +154,9 @@ def prepare_base(volume, num_phases, shape, margin, offset, shell, preserve):
                 weights[-width:] = ramp.flip(0)
         axes.append(weights)
     weight = axes[0][:, None, None] * axes[1][None, :, None] * axes[2][None, None, :]
-    return VolumeCondition(clean, torch.randn_like(clean), region, weight[None, None], preserve)
+    return VolumeCondition(
+        clean, torch.randn_like(clean), region, weight[None, None], preserve
+    )
 
 
 def validate_base_anchors(base, anchors, shape, margin) -> VolumeCondition | None:
@@ -180,14 +182,18 @@ def validate_base_anchors(base, anchors, shape, margin) -> VolumeCondition | Non
             continue
         source, target = parts
         image = anchor.image[(..., *(target[a] for a in axes))]
-        expected = anchor_probabilities(
-            image,
-            1,
-            base.clean.shape[1],
-            torch.device("cpu"),
-            torch.float32,
-            validate=True,
-        )[0] * 2 - 1
+        expected = (
+            anchor_probabilities(
+                image,
+                1,
+                base.clean.shape[1],
+                torch.device("cpu"),
+                torch.float32,
+                validate=True,
+            )[0]
+            * 2
+            - 1
+        )
         known = base.clean[(0, slice(None), *source)].squeeze(axis + 1)
         if not torch.allclose(known, expected, atol=1e-5, rtol=0):
             raise ValueError("anchor conflicts with the preserved base region.")

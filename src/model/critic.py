@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+from src.device import adaptive_pool
 from src.model.layers import (
     INV_SQRT_TWO,
     AdaptiveNorm,
@@ -126,11 +127,11 @@ class CriticBase(nn.Module):
         logits_local = None
         if height is not None and self.height_input is not None:
             x = x + self.height_input(
-                F.interpolate(height.to(inputs), size=inputs.shape[-2:], mode="area")
+                adaptive_pool(height.to(inputs), inputs.shape[-2:])
             )
         if profile is not None and self.profile_input is not None:
             x = x + self.profile_input(
-                F.interpolate(profile.to(inputs), size=inputs.shape[-2:], mode="area")
+                adaptive_pool(profile.to(inputs), inputs.shape[-2:])
             )
         for idx, block in enumerate(self.blocks):
             x = self.apply_block(block, x, embedding)
@@ -231,6 +232,39 @@ class PairCritic2D(PlaneCritic2D):
         return super().forward(
             torch.cat((x_previous, x_current), dim=1), time, domain, height, profile
         )
+
+
+class SeamCritic2D(CriticBase):
+    def __init__(
+        self,
+        num_phases: int,
+        channels: Sequence[int],
+        embedding_channels: int,
+        num_domains: int,
+        gradient_checkpointing: bool = False,
+    ) -> None:
+        super().__init__(
+            input_channels=num_phases,
+            channels=channels,
+            embedding_channels=embedding_channels,
+            num_domains=num_domains,
+            gradient_checkpointing=gradient_checkpointing,
+        )
+        self.axis_embedding = nn.Embedding(3, embedding_channels)
+
+    def forward(
+        self,
+        bands: torch.Tensor,
+        axes: torch.Tensor,
+        domain: torch.Tensor,
+    ) -> CriticScores:
+        if bands.ndim != 4:
+            raise ValueError("bands must have shape [B, C, H, W].")
+        if axes.shape != (bands.shape[0],):
+            raise ValueError("axes must have shape [B].")
+        axes = axes.to(device=bands.device, dtype=torch.long)
+        embedding = self.axis_embedding(axes).to(dtype=bands.dtype)
+        return self.score(bands, embedding, domain)
 
 
 class ConnectivityCritic2D(CriticBase):

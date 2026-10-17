@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from src.device import wide_dtype
 from src.evaluate.connectivity import (
     continuation_delta,
     transition_counts,
@@ -51,7 +52,7 @@ def measure_seams(
         inner_counts = torch.zeros(
             num_phases,
             num_phases,
-            dtype=torch.float64,
+            dtype=wide_dtype(vol.device),
             device=vol.device,
         )
         band_counts = {}

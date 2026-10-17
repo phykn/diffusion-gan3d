@@ -5,6 +5,7 @@ from dataclasses import replace
 import torch
 
 from src.anchor import PlaneAnchor, encode_anchors
+from src.device import wide_dtype
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.phase import validate_num_phases
@@ -216,7 +217,7 @@ class Generator:
         values = torch.as_tensor(
             vf,
             device=self.device,
-            dtype=torch.float64,
+            dtype=wide_dtype(self.device),
         )
         if values.shape != (self.num_phases,):
             raise ValueError(f"vf must have shape [{self.num_phases}].")
@@ -260,7 +261,7 @@ class Generator:
             vf_profile, size, domain, height_origin, height_extent, vf
         )
         select_storage(
-            self.device.type,
+            "cuda" if self.device.type == "cuda" else "cpu",
             estimate_memory(
                 size, self.num_phases, margin=margin, probabilities=probabilities
             ),

@@ -1,8 +1,7 @@
 import argparse
 from pathlib import Path
 
-import torch
-
+from src.device import default_device
 from src.train.run.low_res import run_low_res_train
 
 
@@ -12,7 +11,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--config", type=Path, help="Training YAML; defaults to config/train/low_res.yaml."
+        "--config",
+        type=Path,
+        help="Training YAML; defaults to config/train/low_res.yaml.",
     )
     parser.add_argument(
         "--resume",
@@ -32,8 +33,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--data", type=Path, help="Data YAML; overrides config.data.")
     parser.add_argument(
         "--device",
-        choices=("cuda", "cpu"),
-        default="cuda" if torch.cuda.is_available() else "cpu",
+        choices=("cuda", "mps", "cpu"),
+        default=default_device(),
     )
     parser.add_argument(
         "--run-dir",
