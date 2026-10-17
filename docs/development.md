@@ -72,6 +72,19 @@ ramp, and are LR-only.
   fractions at evenly spaced heights, enforced per slice. Order bias alone cannot
   concentrate silicon once graphite fills the pores.
 
+Train on the anode set with [config/train/anode.yaml](../config/train/anode.yaml) (LR) and
+[config/train/anode_sr.yaml](../config/train/anode_sr.yaml) (SR): the stock presets with this
+data and height conditioning, which SR must share with its LR source.
+
+```bash
+python simul/run.py --config simul/config_anode.yaml
+python scripts/01_check_dataset.py --config config/train/anode.yaml --no-view
+python run_train_1st.py --config config/train/anode.yaml --run-dir "run/anode-lr"
+python scripts/02_check_generated.py --weight "run/anode-lr" --no-view
+python run_train_2nd.py --config config/train/anode_sr.yaml --base-weights "run/anode-lr" --run-dir "run/anode-sr"
+python scripts/06_check_hr.py --weight "run/anode-sr" --no-view
+```
+
 ## Checks
 
 ```bash

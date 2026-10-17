@@ -1,0 +1,58 @@
+stage: sr
+nickname: anode
+data: config/data/simul_anode.yaml
+
+source:
+  weights: run/anode-lr  # LR run from config/train/anode.yaml; --base-weights overrides
+
+model:
+  generator:
+    channels: [16, 32, 64, 64]
+
+  critic:
+    input_mode: single  # single: x_t only; pair: x_t and x_{t+1}
+    plane_groups: [[xy], [xz, yz]]  # xy discs differ from xz/yz flakes
+    channels: [32, 64, 128]
+
+  diffusion:
+    num_steps: 10
+
+conditioning:
+  height_enabled: true  # must match the LR source
+
+augmentation:
+  probability: 0.5
+  auto_planes: true
+
+loss:
+  r1_weight: 0.5
+  r2_weight: 0.1
+  r1_every_steps: 8
+
+  downsample_consistency_weight: 10.0
+
+  group_statistics:
+    weight: 0.1
+    max_gap: 8
+    tolerance: 0.01
+    ramp_steps: 5000
+
+optim:
+  generator_lr: 0.0001
+  critic_lr: 0.00005
+
+lr_bank:
+  samples_per_domain: 8
+  guidance: 0.9
+  refresh_every_steps: 500
+
+train:
+  total_steps: 10000
+
+  volume_batch_size: 1
+  real_batch_size: 8
+  slice_pairs_per_plane: 8
+
+  weights_every_steps: 50
+  archive_every_steps: 1250
+  structure_every_steps: 50

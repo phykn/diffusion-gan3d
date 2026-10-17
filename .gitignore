@@ -21,6 +21,7 @@ htmlcov/
 /frontend/dist/
 
 *.bat
+*.command
 
 .DS_Store
 Thumbs.db
