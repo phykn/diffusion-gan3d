@@ -42,89 +42,129 @@ def condition(anchors, size=8, batch=1):
     )
 
 
+def bands(volume, anchors, rows=2, width=4, count=1000, seed=0):
+    return sample_seam_bands(
+        volume, anchors, rows, width, count, torch.Generator().manual_seed(seed)
+    )
+
+
+def section_axes(values):
+    flat = values.flatten(2)
+    return (flat == flat[:, :, :1]).all(2).float().argmax(1)
+
+
 def test_near_bands_start_next_to_the_anchor_on_both_sides():
     volume = coordinates().requires_grad_()
-    far, near = sample_seam_bands(
-        volume, condition([(0, 5, (8, 8), None)]), 2, torch.Generator().manual_seed(0)
-    )
-    assert near.values.shape == (32, 3, 2, 8)
-    assert near.axes.tolist() == [0] * 32
+    far, near = bands(volume, condition([(0, 5, (8, 8), None)]))
+    assert near.values.shape == (160, 3, 2, 4)
     near_rows = [tuple(rows) for rows in near.values[:, 0, :, 0].tolist()]
-    assert near_rows.count((4.0, 3.0)) == near_rows.count((6.0, 7.0)) == 16
+    assert near_rows.count((4.0, 3.0)) == near_rows.count((6.0, 7.0)) == 80
     assert (near.values[:, 0] == near.values[:, 0, :, :1]).all()
     assert near.values.requires_grad
-    assert len(far) == len(near) and not far.values.requires_grad
+    assert not far.values.requires_grad
     far_rows = {tuple(rows) for rows in far.values[:, 0, :, 0].tolist()}
     assert far_rows <= {(0.0, 1.0), (1.0, 2.0), (1.0, 0.0), (2.0, 1.0)}
     assert {rows[0] < rows[1] for rows in far_rows} == {True, False}
 
 
+def test_band_labels_follow_the_section_plane():
+    anchors = condition(
+        [(0, 5, (12, 12), None), (1, 2, (12, 12), None), (2, 9, (12, 12), None)],
+        size=12,
+    )
+    far, near = bands(coordinates(12), anchors)
+    for batch in (near, far):
+        assert batch.axes.unique().tolist() == [0, 1, 2]
+        assert torch.equal(section_axes(batch.values), batch.axes)
+
+
+def test_bands_span_half_a_patch_from_a_random_start_and_mirror():
+    far, near = bands(
+        coordinates(12), condition([(0, 5, (12, 12), None)], size=12), width=6
+    )
+    for batch in (near, far):
+        assert batch.values.shape[-1] == 6
+        across = 3 - batch.axes
+        lines = batch.values[torch.arange(len(batch)), across, 0]
+        steps = lines.diff(dim=1)
+        assert ((steps == 1).all(1) | (steps == -1).all(1)).all()
+        assert set(steps[:, 0].tolist()) == {-1.0, 1.0}
+        assert set(lines.amin(1).tolist()) == set(range(7))
+
+
+def test_each_step_keeps_a_random_subset_of_bands():
+    anchors = condition([(0, 5, (8, 8), None)])
+    far, near = bands(coordinates(), anchors, count=3)
+    assert len(near) == len(far) == 3
+    _, other = bands(coordinates(), anchors, count=3, seed=1)
+    assert not torch.equal(near.values, other.values)
+
+
 def test_bands_with_fixed_voxels_are_discarded():
     anchors = condition([(0, 5, (8, 8), None), (2, 1, (8, 8), None)])
-    far, near = sample_seam_bands(coordinates(), anchors, 2)
-    seam = near.axes == 0
-    assert int(seam.sum()) == 14
-    assert set(near.values[seam, 2].unique().tolist()) == {0, 2, 3, 4, 5, 6, 7}
-    for bands in (near, far):
-        for axis in (0, 2):
-            values = bands.values[bands.axes == axis]
-            assert not (values[:, axis] == anchors.regions[axis // 2].index).any()
-            assert not (
-                values[:, 2 - axis] == anchors.regions[1 - axis // 2].index
-            ).any()
+    far, near = bands(coordinates(), anchors)
+    assert len(near) and len(far)
+    for batch in (near, far):
+        assert not (batch.values[:, 0] == 5).any()
+        assert not (batch.values[:, 2] == 1).any()
 
 
 def test_far_bands_keep_more_than_n_rows_from_every_same_axis_anchor():
     anchors = condition([(0, 2, (12, 12), None), (0, 9, (12, 12), None)], size=12)
-    far, near = sample_seam_bands(coordinates(12), anchors, 2)
-    assert len(near) == 96 and len(far) == 48
+    far, near = bands(coordinates(12), anchors)
     far_rows = {tuple(row) for row in far.values[:, 0, :, 0].tolist()}
     assert far_rows == {(5.0, 6.0), (6.0, 5.0)}
     near_rows = {tuple(row) for row in near.values[:, 0, :, 0].tolist()}
     assert near_rows == {(1.0, 0.0), (3.0, 4.0), (8.0, 7.0), (10.0, 11.0)}
 
 
-def test_partial_anchor_selects_only_crossing_sections():
-    anchors = condition([(1, 4, (2, 3), (1, 5))])
-    _, near = sample_seam_bands(coordinates(), anchors, 1)
-    assert len(near) == 10
-    assert near.values[:, 1].unique().tolist() == [3.0, 5.0]
-    for side in (3.0, 5.0):
-        bands = near.values[near.values[:, 1, 0, 0] == side]
-        z = bands[:, 0, 0]
-        x = bands[:, 2, 0]
-        across_z = (z == z[:, :1]).all(1)
-        assert set(z[across_z, 0].tolist()) == {1.0, 2.0}
-        assert set(x[~across_z, 0].tolist()) == {5.0, 6.0, 7.0}
+def test_partial_anchor_keeps_near_bands_inside_the_region():
+    anchors = condition([(1, 4, (2, 6), (1, 2))])
+    far, near = bands(coordinates(), anchors)
+    assert len(near) == 12
+    assert near.axes.unique().tolist() == [0]
+    assert set(near.values[:, 0].unique().tolist()) == {1.0, 2.0}
+    assert near.values[:, 2].amin() == 2.0 and near.values[:, 2].amax() == 7.0
+    rows = {tuple(row) for row in near.values[:, 1, :, 0].tolist()}
+    assert rows == {(3.0, 2.0), (5.0, 6.0)}
+    assert len(far) == 160
+    assert far.values[:, 0].amin() == 0.0 and far.values[:, 2].amin() == 0.0
+
+
+def test_partial_anchor_narrower_than_a_band_has_no_near_bands():
+    far, near = bands(coordinates(), condition([(1, 4, (2, 3), (1, 5))]))
+    assert len(far) == len(near) == 0
 
 
 def test_anchor_without_enough_rows_or_inactive_batch_has_no_bands():
     volume = coordinates(batch=2)
-    far, near = sample_seam_bands(volume, condition([(0, 3, (8, 8), None)], batch=2), 4)
+    far, near = bands(volume, condition([(0, 3, (8, 8), None)], batch=2), rows=4)
     assert len(far) == len(near) == 0
-    assert near.values.shape == (0, 3, 4, 8)
+    assert near.values.shape == (0, 3, 4, 4)
     anchors = condition([(0, 5, (8, 8), None)], batch=2)
-    _, both = sample_seam_bands(volume, anchors, 2)
+    _, both = bands(volume, anchors)
     anchors = copy.copy(anchors)
     object.__setattr__(anchors, "active_batches", (1,))
-    _, one = sample_seam_bands(volume, anchors, 2)
+    _, one = bands(volume, anchors)
     assert len(both) == 2 * len(one)
-    _, none = sample_seam_bands(volume, None, 2)
+    _, none = bands(volume, None)
     assert len(none) == 0
 
 
 def test_axis_without_far_bands_contributes_no_near_bands():
     anchors = condition([(0, 6, (8, 8), None), (1, 4, (8, 8), None)])
-    far, near = sample_seam_bands(coordinates(), anchors, 4)
+    far, near = bands(coordinates(), anchors, rows=4)
     assert len(far) == len(near) == 0
-    far, near = sample_seam_bands(coordinates(), anchors, 2)
-    assert near.axes.unique().tolist() == far.axes.unique().tolist() == [0, 1]
+    far, near = bands(coordinates(), anchors)
+    assert len(near) and len(far)
 
 
-@pytest.mark.parametrize("rows", (0, -1, 1.5, True))
-def test_band_rows_must_be_a_positive_integer(rows):
-    with pytest.raises(ValueError, match="rows"):
-        sample_seam_bands(coordinates(), None, rows)
+@pytest.mark.parametrize("name", ("rows", "width", "count"))
+@pytest.mark.parametrize("value", (0, -1, 1.5, True))
+def test_band_sizes_must_be_positive_integers(name, value):
+    sizes = {"rows": 2, "width": 4, "count": 2, name: value}
+    with pytest.raises(ValueError, match=name):
+        sample_seam_bands(coordinates(), None, **sizes)
 
 
 def test_seam_critic_scores_bands_by_axis_time_and_domain():
@@ -230,17 +270,18 @@ def test_seam_critic_and_generator_loss_train_from_the_selected_transition(
 
     def record(volume, *args):
         sampled.append(volume)
+        assert args[2:] == (4, 2)
         return sample_seam_bands(volume, *args)
 
     monkeypatch.setattr("src.train.trainer.sample_seam_bands", record)
     metrics = trainer.step(0, transition=1)
     assert sampled and sampled[0].requires_grad
     assert len(times) == 3
-    assert all(time.tolist() == [1] * 32 for time in times)
+    assert all(time.tolist() == [1, 1] for time in times)
     diagnostics = metrics.diagnostics
     assert trainer.updates["seam"] == 1
-    assert diagnostics["anchor_seam/near_bands"] == 32
-    assert diagnostics["anchor_seam/far_bands"] == 32
+    assert diagnostics["anchor_seam/near_bands"] == 2
+    assert diagnostics["anchor_seam/far_bands"] == 2
     for key in (
         "loss/critic_anchor_seam",
         "loss/anchor_seam",
@@ -268,8 +309,7 @@ def test_seam_loss_reaches_the_generator(tmp_path):
     time = trainer.make_time(0, len(fake))
     scores = trainer.seam_critic(fake.values, fake.axes, time, domains)
     scores.logits_global.sum().backward()
-    assert prediction.grad[:, :, 3].abs().sum() > 0
-    assert prediction.grad[:, :, 5].abs().sum() > 0
+    assert prediction.grad[:, :, [3, 5]].abs().sum() > 0
     assert prediction.grad[:, :, :3].abs().sum() == 0
     assert prediction.grad[:, :, 4].abs().sum() == 0
     assert prediction.grad[:, :, 6:].abs().sum() == 0

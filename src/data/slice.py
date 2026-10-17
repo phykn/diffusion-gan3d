@@ -362,11 +362,13 @@ def sample_seam_bands(
     volume: torch.Tensor,
     condition: AnchorCondition | None,
     rows: int,
+    width: int,
+    count: int,
     generator: torch.Generator | None = None,
 ) -> tuple[BandBatch, BandBatch]:
-    if type(rows) is not int or rows < 1:
-        raise ValueError("rows must be a positive integer.")
-    reference = volume.detach()
+    for name, value in (("rows", rows), ("width", width), ("count", count)):
+        if type(value) is not int or value < 1:
+            raise ValueError(f"{name} must be a positive integer.")
     near, far = [], []
     active = (
         ()
@@ -381,17 +383,23 @@ def sample_seam_bands(
             fixed = condition.mask[batch, 0].movedim(axis, 0)
             if not regions or fixed.shape[0] <= rows:
                 continue
-            near_sites, far_sites = _seam_sites(fixed, regions, rows)
+            near_sites, far_sites = _seam_sites(fixed, regions, rows, width)
             if not len(near_sites) or not len(far_sites):
                 continue
-            keep = torch.randperm(len(far_sites), generator=generator)
-            far_sites = far_sites[keep[: len(near_sites)].to(far_sites.device)]
-            near.append((_gather_bands(volume[batch], axis, near_sites, rows), axis))
-            far.append((_gather_bands(reference[batch], axis, far_sites, rows), axis))
-    return _band_batch(far, volume, rows), _band_batch(near, volume, rows)
+            for sites, found in ((near, near_sites), (far, far_sites)):
+                sites.append(
+                    torch.cat(
+                        (found.new_tensor([batch, axis]).expand(len(found), 2), found),
+                        1,
+                    )
+                )
+    return (
+        _band_batch(volume.detach(), far, rows, width, count, generator),
+        _band_batch(volume, near, rows, width, count, generator),
+    )
 
 
-def _seam_sites(fixed, regions, rows):
+def _seam_sites(fixed, regions, rows, width):
     length = fixed.shape[0]
     indices = torch.tensor([region.index for region in regions], device=fixed.device)
     distance = (torch.arange(length, device=fixed.device)[:, None] - indices).abs()
@@ -399,20 +407,27 @@ def _seam_sites(fixed, regions, rows):
     near_sites, far_sites = [], []
     for flip in (0, 1):
         planes = fixed.transpose(1, 2) if flip else fixed
-        clear = ~planes.any(2).unfold(0, rows, 1).any(-1)
+        clear = ~planes.unfold(0, rows, 1).any(-1).unfold(2, width, 1).any(-1)
         below = torch.zeros_like(clear)
         above = torch.zeros_like(clear)
         for region in regions:
-            span = (
-                slice(region.col, region.col + region.width)
+            positions, (low, high) = (
+                (
+                    slice(region.col, region.col + region.width),
+                    (region.row, region.row + region.height),
+                )
                 if flip
-                else slice(region.row, region.row + region.height)
+                else (
+                    slice(region.row, region.row + region.height),
+                    (region.col, region.col + region.width),
+                )
             )
+            spans = slice(low, max(low, high - width + 1))
             if region.index >= rows:
-                below[region.index - rows, span] = True
+                below[region.index - rows, positions, spans] = True
             if region.index + rows < length:
-                above[region.index + 1, span] = True
-        far = far_starts[:, None] & clear
+                above[region.index + 1, positions, spans] = True
+        far = far_starts[:, None, None] & clear
         for sites, mask, step in (
             (near_sites, below & clear, -1),
             (near_sites, above & clear, 1),
@@ -435,33 +450,41 @@ def _seam_sites(fixed, regions, rows):
     return torch.cat(near_sites), torch.cat(far_sites)
 
 
-def _gather_bands(volume, axis, sites, rows):
-    values = volume.movedim(axis + 1, 1)
-    offsets = torch.arange(rows, device=sites.device)
-    bands = []
-    for flip in (0, 1):
-        _, starts, positions, steps = sites[sites[:, 0] == flip].unbind(1)
-        planes = values.transpose(2, 3) if flip else values
-        bands.append(
-            planes[
-                :, starts[:, None] + steps[:, None] * offsets, positions[:, None]
-            ].movedim(0, 1)
-        )
-    return torch.cat(bands)
-
-
-def _band_batch(parts, volume, rows):
+def _band_batch(volume, parts, rows, width, count, generator):
     if not parts:
         return BandBatch(
-            values=volume.new_empty((0, volume.shape[1], rows, volume.shape[-1])),
+            values=volume.new_empty((0, volume.shape[1], rows, width)),
             axes=torch.empty(0, device=volume.device, dtype=torch.long),
         )
+    sites = torch.cat(parts)
+    keep = torch.randperm(len(sites), generator=generator)[:count]
+    mirror = torch.rand(len(keep), generator=generator) < 0.5
+    batch, axis, flip, start, position, span, step = sites[
+        keep.to(sites.device)
+    ].unbind(1)
+    lines = (
+        start[:, None, None]
+        + step[:, None, None] * torch.arange(rows, device=sites.device)[:, None]
+    )
+    offsets = torch.arange(width, device=sites.device)
+    offsets = torch.where(
+        mirror.to(sites.device)[:, None], width - 1 - offsets, offsets
+    )
+    across = (span[:, None] + offsets)[:, None]
+    flip = flip[:, None, None].bool()
+    first = torch.where(flip, across, position[:, None, None])
+    second = torch.where(flip, position[:, None, None], across)
+    lead = (axis == 0).long()
+    coordinates = [
+        torch.where(
+            axis[:, None, None] == dim,
+            lines,
+            torch.where(lead[:, None, None] == dim, first, second),
+        ).expand(-1, rows, width)
+        for dim in AXES
+    ]
+    values = volume[(batch[:, None, None], slice(None), *coordinates)]
     return BandBatch(
-        values=torch.cat([values for values, _ in parts]),
-        axes=torch.cat(
-            [
-                torch.full((len(values),), axis, device=volume.device)
-                for values, axis in parts
-            ]
-        ),
+        values=values.permute(0, 3, 1, 2),
+        axes=torch.where(flip[:, 0, 0], 3 - axis - lead, lead),
     )

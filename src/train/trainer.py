@@ -680,6 +680,8 @@ class Trainer:
             if enabled and anchor is not None
             else None,
             self.settings.loss.anchor_seam_rows,
+            self.settings.patch_size // 2,
+            self.settings.slice_pairs_per_axis,
         )
         if enabled:
             self.diagnostics["anchor_seam/near_bands"] = len(fake)
