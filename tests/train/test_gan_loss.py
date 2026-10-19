@@ -161,8 +161,7 @@ def test_critic_objective_preserves_penalty_weights_and_parameter_gradients(
 
 
 def test_pyramid_averages_losses_after_nonlinearity():
-    critic = PairCritic2D(2, (4, 8), 8, 1)
-    critic.pyramid_min_size = 4
+    critic = PairCritic2D(2, (4, 8), 8, 1, pyramid_min_size=4)
     previous = torch.randn(2, 2, 16, 16, requires_grad=True)
     current = torch.randn_like(previous)
     scores = critic(

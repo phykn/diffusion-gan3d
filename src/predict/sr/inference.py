@@ -12,9 +12,13 @@ from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 from src.predict.generator import Generator, GuidedDenoiser
 from src.predict.sr.memory import check_sr_memory, estimate_sr_memory
 from src.predict.sr.tiled import refine_tiled
-from src.predict.volume_condition import resolve_offset, volume_shape
+from src.predict.volume_condition import (
+    fraction_channels,
+    resolve_offset,
+    volume_shape,
+)
 from src.prepare.height import height_field, resolve_extent
-from src.prepare.resize import phase_channels, resize_phases, scaled_size
+from src.prepare.resize import resize_phases, scaled_size
 from src.random import seeded_rng
 
 
@@ -242,20 +246,7 @@ class SuperResolutionAPI:
             self.generator,
             input_device=low.device,
         )
-        if low.ndim == 3:
-            return phase_channels(low.cpu().unsqueeze(0), self.num_phases)
-        if (
-            not low.dtype.is_floating_point
-            or low.shape[0] != self.num_phases
-            or not torch.isfinite(low).all()
-            or (low < 0).any()
-            or (low > 1).any()
-            or not torch.allclose(low.sum(0), torch.ones_like(low[0]), atol=1e-5)
-        ):
-            raise ValueError(
-                "LR phase fractions must be finite, non-negative and sum to one."
-            )
-        return low.to(device="cpu", dtype=torch.float32).unsqueeze(0)
+        return fraction_channels(low, self.num_phases)
 
     def _refine_block(
         self,

@@ -41,6 +41,30 @@ class AnchorCondition:
         return self.conflicts / self.source_voxels
 
 
+def anchor_origin(
+    anchor: PlaneAnchor, image_shape: Sequence[int], plane_shape: Sequence[int]
+) -> tuple[int, int]:
+    """Top-left (row, col) of an anchor image in its plane; centered by default."""
+    height, width = image_shape
+    if height > plane_shape[0] or width > plane_shape[1]:
+        raise ValueError("anchor.image must fit inside the generated plane.")
+    if anchor.position is None:
+        return (plane_shape[0] - height) // 2, (plane_shape[1] - width) // 2
+    if len(anchor.position) != 2 or any(
+        type(value) is not int for value in anchor.position
+    ):
+        raise ValueError("anchor.position must contain two integer coordinates.")
+    row, col = anchor.position
+    if (
+        row < 0
+        or col < 0
+        or row + height > plane_shape[0]
+        or col + width > plane_shape[1]
+    ):
+        raise ValueError("anchor.position places the image outside the plane.")
+    return row, col
+
+
 def encode_anchors(
     anchors: Sequence[PlaneAnchor],
     batch_size: int,
@@ -106,29 +130,7 @@ def encode_anchors(
         plane_shape = tuple(
             size for axis, size in enumerate(shape) if axis != anchor.axis
         )
-        if height > plane_shape[0] or width > plane_shape[1]:
-            raise ValueError("anchor.image must fit inside the generated plane.")
-
-        if anchor.position is not None and (
-            len(anchor.position) != 2
-            or any(type(value) is not int for value in anchor.position)
-        ):
-            raise ValueError("anchor.position must contain two integer coordinates.")
-        row, col = (
-            anchor.position
-            if anchor.position is not None
-            else (
-                (plane_shape[0] - height) // 2,
-                (plane_shape[1] - width) // 2,
-            )
-        )
-        if (
-            row < 0
-            or col < 0
-            or row + height > plane_shape[0]
-            or col + width > plane_shape[1]
-        ):
-            raise ValueError("anchor.position places the image outside the plane.")
+        row, col = anchor_origin(anchor, (height, width), plane_shape)
 
         image = probs.argmax(1)
 

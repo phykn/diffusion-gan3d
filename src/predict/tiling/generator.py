@@ -3,8 +3,8 @@ from dataclasses import replace
 
 import torch
 
-from src.anchor import PlaneAnchor, encode_anchors
-from src.predict.generator import Generator
+from src.anchor import PlaneAnchor, anchor_origin, encode_anchors
+from src.predict.generator import Generator, profile_feasible
 from src.predict.memory import estimate_memory, select_storage
 from src.predict.tiling.layout import (
     TilePlan,
@@ -241,7 +241,7 @@ class TiledGenerator:
             known[..., depth] += (values[(..., *local)] * mask).sum((-1, -2))
             count[..., depth] += mask.sum((-1, -2))
         free = shape[1] * shape[2] - count
-        if bool(((target < known - 1e-4) | (target > known + free + 1e-4)).any()):
+        if not profile_feasible(target, known, free):
             raise ValueError("profile conflicts with fixed anchors or preserved base.")
         return spec
 
@@ -254,19 +254,10 @@ class TiledGenerator:
                 or not 0 <= anchor.index < shape[anchor.axis]
             ):
                 raise ValueError("anchor.index is outside the generated volume.")
-            height, width = anchor.image.shape[-2:]
             axes = tuple(axis for axis in range(3) if axis != anchor.axis)
-            row, col = anchor.position or tuple(
-                (shape[axis] - length) // 2
-                for axis, length in zip(axes, (height, width))
+            row, col = anchor_origin(
+                anchor, anchor.image.shape[-2:], tuple(shape[axis] for axis in axes)
             )
-            if (
-                row < 0
-                or col < 0
-                or row + height > shape[axes[0]]
-                or col + width > shape[axes[1]]
-            ):
-                raise ValueError("anchor.position places the image outside the plane.")
             placed.append((anchor, axes, row + plan.margin, col + plan.margin))
         result = []
         for tile in tiles:

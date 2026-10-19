@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import torch
 
-from src.anchor import PlaneAnchor, encode_anchors
+from src.anchor import PlaneAnchor, anchor_origin, encode_anchors
 from src.device import wide_dtype
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
@@ -55,6 +55,13 @@ class GuidedDenoiser:
                 else {}
             ),
         )
+
+
+def profile_feasible(target, known, free, tolerance: float = 1e-4) -> bool:
+    """Whether per-slice phase voxel targets fit fixed (known) and free voxels."""
+    return not bool(
+        ((target < known - tolerance) | (target > known + free + tolerance)).any()
+    )
 
 
 class Generator:
@@ -380,9 +387,7 @@ class Generator:
         known = ((anchor.image + 1) * 0.5 * anchor.mask).sum((-1, -2))
         free = shape[1] * shape[2] - anchor.mask.sum((-1, -2))
         target = profile * (shape[1] * shape[2])
-        return not bool(
-            ((target < known - 1e-4) | (target > known + free + 1e-4)).any()
-        )
+        return profile_feasible(target, known, free)
 
     @staticmethod
     def validate_anchor_strength(strength: float) -> float:
@@ -417,14 +422,7 @@ class Generator:
                 4,
             }:
                 continue
-            height, width = anchor.image.shape[-2:]
-            if height > size or width > size:
-                raise ValueError("anchor.image must fit inside the generated plane.")
-            if anchor.position is None:
-                continue
-            row, col = anchor.position
-            if row < 0 or col < 0 or row + height > size or col + width > size:
-                raise ValueError("anchor.position places the image outside the plane.")
+            anchor_origin(anchor, anchor.image.shape[-2:], (size, size))
         if margin == 0:
             return anchors
         return tuple(

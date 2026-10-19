@@ -506,7 +506,7 @@ def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
     def fail(*args, **kwargs):
         pytest.fail("allocated before SR preflight")
 
-    monkeypatch.setattr(sr_module, "phase_channels", fail)
+    monkeypatch.setattr(sr_module, "fraction_channels", fail)
     monkeypatch.setattr(sr_module, "resize_phases", fail)
     monkeypatch.setattr(api, "_predict", fail)
     with pytest.raises(MemoryError, match="SR RAM"):

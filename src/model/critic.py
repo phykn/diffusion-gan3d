@@ -80,16 +80,21 @@ class CriticBase(nn.Module):
         num_domains: int,
         gradient_checkpointing: bool = False,
         local_head: bool = False,
+        *,
+        height_channels: int = 0,
+        profile_channels: int = 0,
+        pyramid_min_size: int = 16,
     ) -> None:
+        """height/profile_channels add optional condition inputs (0 disables)."""
         super().__init__()
         widths = tuple(channels)
         if len(widths) < 2:
             raise ValueError("channels must contain at least two levels.")
 
         self.gradient_checkpointing = gradient_checkpointing
-        self.pyramid_min_size = 16
-        self.height_input = None
-        self.profile_input = None
+        self.pyramid_min_size = pyramid_min_size
+        self.height_input = self._condition_input(height_channels, widths[0])
+        self.profile_input = self._condition_input(profile_channels, widths[0])
         self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv2d(input_channels, widths[0], 3, padding=1)
         self.blocks = nn.ModuleList(
@@ -109,6 +114,12 @@ class CriticBase(nn.Module):
         self.local_output = nn.Conv2d(widths[1], 1, 1) if local_head else None
         self.output_norm = GroupNorm(widths[-1])
         self.output = nn.Linear(widths[-1], 1)
+
+    @staticmethod
+    def _condition_input(channels: int, width: int) -> nn.Conv2d | None:
+        if not channels:
+            return None
+        return nn.Conv2d(channels, width, 3, padding=1, bias=False)
 
     def score(
         self,
@@ -182,6 +193,7 @@ class PlaneCritic2D(CriticBase):
         num_domains: int,
         gradient_checkpointing: bool = False,
         time_scale: float = 1.0,
+        **inputs,
     ) -> None:
         super().__init__(
             input_channels=num_phases,
@@ -189,6 +201,7 @@ class PlaneCritic2D(CriticBase):
             embedding_channels=embedding_channels,
             num_domains=num_domains,
             gradient_checkpointing=gradient_checkpointing,
+            **inputs,
         )
         self.time_embedding = SinusoidalEmbedding(embedding_channels)
         self.time_scale = time_scale
@@ -251,6 +264,7 @@ class SeamCritic2D(CriticBase):
         num_domains: int,
         gradient_checkpointing: bool = False,
         time_scale: float = 1.0,
+        **inputs,
     ) -> None:
         super().__init__(
             input_channels=num_phases,
@@ -258,6 +272,7 @@ class SeamCritic2D(CriticBase):
             embedding_channels=embedding_channels,
             num_domains=num_domains,
             gradient_checkpointing=gradient_checkpointing,
+            **inputs,
         )
         self.axis_embedding = nn.Embedding(3, embedding_channels)
         self.time_embedding = SinusoidalEmbedding(embedding_channels)
@@ -299,6 +314,7 @@ class ConnectivityCritic2D(CriticBase):
         num_domains: int,
         gradient_checkpointing: bool = False,
         directed_axis: int | None = None,
+        **inputs,
     ) -> None:
         super().__init__(
             input_channels=3 * num_phases,
@@ -307,6 +323,7 @@ class ConnectivityCritic2D(CriticBase):
             num_domains=num_domains,
             gradient_checkpointing=gradient_checkpointing,
             local_head=True,
+            **inputs,
         )
         self.axis_embedding = nn.Embedding(3, embedding_channels)
         self.directed_axis = directed_axis

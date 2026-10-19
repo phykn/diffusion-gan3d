@@ -5,7 +5,7 @@ from itertools import product
 
 import torch
 
-from src.anchor import anchor_probabilities
+from src.anchor import anchor_origin, anchor_probabilities
 from src.prepare.resize import phase_channels
 
 
@@ -56,7 +56,9 @@ def fraction_channels(volume, num_phases):
         or (values > 1).any()
         or not torch.allclose(values.sum(0), torch.ones_like(values[0]), atol=1e-5)
     ):
-        raise ValueError("base fractions must be finite, non-negative and sum to one.")
+        raise ValueError(
+            "phase fractions must be finite, non-negative and sum to one per voxel."
+        )
     return values.unsqueeze(0).clone()
 
 
@@ -170,9 +172,7 @@ def validate_base_anchors(base, anchors, shape, margin) -> VolumeCondition | Non
             continue
         axes = tuple(a for a in range(3) if a != axis)
         lengths = anchor.image.shape[-2:]
-        position = anchor.position or tuple(
-            (shape[a] - n) // 2 for a, n in zip(axes, lengths)
-        )
+        position = anchor_origin(anchor, lengths, tuple(shape[a] for a in axes))
         ranges = tuple(
             slice(p + margin, p + margin + n) for p, n in zip(position, lengths)
         )

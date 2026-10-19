@@ -100,52 +100,42 @@ def build_models(
         }
     else:
         groups = get_plane_groups(cfg)
+    height = cfg["conditioning"]["height_enabled"]
+    profile = (
+        cfg["conditioning"].get("spatial_profile", {}).get("critic_enabled", False)
+    )
+    phases = data["num_phases"]
+    shared = dict(
+        num_phases=phases,
+        channels=critic["channels"],
+        embedding_channels=generator["embedding_channels"],
+        num_domains=num_domains,
+        gradient_checkpointing=model["gradient_checkpointing"],
+        pyramid_min_size=critic["pyramid_min_size"],
+    )
     critic_class = PlaneCritic2D if critic["input_mode"] == "single" else PairCritic2D
     critics = nn.ModuleDict(
         {
             group: critic_class(
-                num_phases=data["num_phases"],
-                channels=critic["channels"],
-                embedding_channels=generator["embedding_channels"],
-                num_domains=num_domains,
-                gradient_checkpointing=model["gradient_checkpointing"],
+                **shared,
                 time_scale=get_time_scale(cfg),
+                height_channels=int(height),
+                profile_channels=phases if profile else 0,
             )
             for group in groups
         }
     )
+    # Connectivity triplets stack three slices, so their conditions do too.
     connectivity_critic = (
         None
         if cfg["stage"] == "sr"
         else ConnectivityCritic2D(
-            num_phases=data["num_phases"],
-            channels=critic["channels"],
-            embedding_channels=generator["embedding_channels"],
-            num_domains=num_domains,
-            gradient_checkpointing=model["gradient_checkpointing"],
-            directed_axis=0 if cfg["conditioning"]["height_enabled"] else None,
+            **shared,
+            directed_axis=0 if height else None,
+            height_channels=3 if height else 0,
+            profile_channels=3 * phases if profile else 0,
         )
     )
-    if cfg["conditioning"]["height_enabled"]:
-        for network in critics.values():
-            network.height_input = nn.Conv2d(
-                1, critic["channels"][0], 3, padding=1, bias=False
-            )
-    if cfg["conditioning"]["height_enabled"] and connectivity_critic is not None:
-        connectivity_critic.height_input = nn.Conv2d(
-            3, critic["channels"][0], 3, padding=1, bias=False
-        )
-    if cfg["conditioning"].get("spatial_profile", {}).get("critic_enabled", False):
-        for network in critics.values():
-            network.profile_input = nn.Conv2d(
-                data["num_phases"], critic["channels"][0], 3, padding=1, bias=False
-            )
-        connectivity_critic.profile_input = nn.Conv2d(
-            3 * data["num_phases"], critic["channels"][0], 3, padding=1, bias=False
-        )
-    for network in (*critics.values(), connectivity_critic):
-        if network is not None:
-            network.pyramid_min_size = critic["pyramid_min_size"]
     return denoiser, critics, connectivity_critic
 
 
@@ -154,16 +144,15 @@ def build_seam_critic(cfg: dict) -> SeamCritic2D | None:
     if cfg["stage"] == "sr":
         return None
     critic = cfg["model"]["critic"]
-    network = SeamCritic2D(
+    return SeamCritic2D(
         num_phases=cfg["data"]["num_phases"],
         channels=critic["channels"],
         embedding_channels=cfg["model"]["generator"]["embedding_channels"],
         num_domains=len(get_domains(cfg["data"])),
         gradient_checkpointing=cfg["model"]["gradient_checkpointing"],
         time_scale=get_time_scale(cfg),
+        pyramid_min_size=critic["pyramid_min_size"],
     )
-    network.pyramid_min_size = critic["pyramid_min_size"]
-    return network
 
 
 def build_diffusion(cfg: dict) -> Diffusion:
