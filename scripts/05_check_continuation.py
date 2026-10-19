@@ -22,6 +22,7 @@ from scripts.common.cli import (
 from scripts.common.diagnostic import (
     format_percent,
     format_ratio,
+    generate_with_baseline,
     show_napari,
 )
 from src.anchor import PlaneAnchor
@@ -37,7 +38,7 @@ from src.evaluate.anchor import (
 )
 from src.evaluate.label import voxel_accuracy
 from src.prepare.resize import resize_crop
-from src.random import preserved_rng, seeded_rng
+from src.random import seeded_rng
 from src.storage import save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
@@ -131,24 +132,14 @@ def main() -> None:
 
         print("Generating boundary-conditioned volume...", flush=True)
 
-        # The baseline below reuses the conditioned sample's noise.
-        with preserved_rng(device):
-            generated = generator.generate(
-                anchors=(anchor,),
-                anchor_strength=anchor_strength,
-                guidance=guidance,
-                domain=args.domain,
-                **height_options(args),
-                margin=generator.default_margin,
-            )
-        print("Generating same-RNG baseline...", flush=True)
-        baseline = generator.generate(
-            anchors=(),
-            anchor_strength=0.0,
+        generated, baseline = generate_with_baseline(
+            generator,
+            (anchor,),
+            anchor_strength,
             guidance=guidance,
             domain=args.domain,
-            **height_options(args),
             margin=generator.default_margin,
+            **height_options(args),
         )
 
     save_volume(generated, args.out)

@@ -13,6 +13,8 @@ from scripts.common.cli import (
     add_device_argument,
     add_height_arguments,
     check_parser,
+    non_negative_int,
+    positive_int,
     result_directory,
 )
 from src.build.predict import resolve_weights
@@ -112,14 +114,18 @@ def main(argv=None):
     parser.add_argument("--guidance", type=float, default=1.0, help="SR guidance.")
     parser.add_argument(
         "--tile-size",
-        type=int,
+        type=positive_int,
         help="HR tile edge; default: up to 64, aligned to the SR scale.",
     )
     parser.add_argument(
-        "--overlap", type=int, help="HR overlap; default: scale-aligned up to 8."
+        "--overlap",
+        type=non_negative_int,
+        help="HR overlap; default: scale-aligned up to 8.",
     )
     parser.add_argument(
-        "--margin", type=int, help="HR context margin; default: model context."
+        "--margin",
+        type=non_negative_int,
+        help="HR context margin; default: model context.",
     )
     parser.add_argument(
         "--napari",

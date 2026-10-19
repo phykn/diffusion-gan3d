@@ -25,6 +25,20 @@ def parse_unit_interval(value: str) -> float:
     return parsed
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
 def add_device_argument(parser):
     parser.add_argument(
         "--device",
@@ -35,11 +49,11 @@ def add_device_argument(parser):
 
 
 def add_height_arguments(parser, origin_default=0.0):
+    text = "Output Z origin in source pixels."
+    if origin_default is None:
+        text += " Real xz/yz crops infer it when omitted."
     parser.add_argument(
-        "--height-origin",
-        type=float,
-        default=origin_default,
-        help="Output Z origin in source pixels; real xz/yz crops infer it when omitted.",
+        "--height-origin", type=float, default=origin_default, help=text
     )
     parser.add_argument(
         "--height-extent", type=float, help="Full source Z extent in pixels."

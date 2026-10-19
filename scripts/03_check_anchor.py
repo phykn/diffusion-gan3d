@@ -19,8 +19,10 @@ from scripts.common.cli import (
     save_preview,
 )
 from scripts.common.diagnostic import (
+    anchor_accuracy,
     format_percent,
     format_ratio,
+    generate_with_baseline,
     select_display_index,
     select_indices,
     show_napari,
@@ -35,7 +37,7 @@ from src.evaluate.anchor import (
     measure_slice_smoothness,
 )
 from src.evaluate.label import voxel_accuracy
-from src.random import preserved_rng, seeded_rng
+from src.random import seeded_rng
 from src.storage import save_volume
 
 
@@ -148,36 +150,20 @@ def main() -> None:
             print(f"Guidance : strength {anchor_strength:.2f}")
         print("Generating conditioned sample...", flush=True)
 
-        # The baseline below reuses the conditioned sample's noise.
-        with preserved_rng(device):
-            gen = generator.generate(
-                anchors=anchors,
-                anchor_strength=anchor_strength,
-                guidance=guidance,
-                domain=args.domain,
-                **height_options(args),
-                margin=generator.default_margin,
-            )
-        print("Generating same-RNG baseline...", flush=True)
-        baseline = generator.generate(
-            anchors=(),
-            anchor_strength=0.0,
+        gen, baseline = generate_with_baseline(
+            generator,
+            anchors,
+            anchor_strength,
             guidance=guidance,
             domain=args.domain,
-            **height_options(args),
             margin=generator.default_margin,
+            **height_options(args),
         )
     save_volume(gen, args.out)
     print(f"Saved   : {args.out.resolve()}", flush=True)
     save_preview(gen, args, generator.num_phases)
     gen_slices = get_slices(gen, args.axis)
-    if indices:
-        selected = torch.tensor(indices, dtype=torch.long)
-        target_sel = target_slices.index_select(0, selected)
-        gen_sel = gen_slices.index_select(0, selected)
-        anchor_acc = voxel_accuracy(gen_sel, target_sel)
-    else:
-        anchor_acc = None
+    anchor_acc = anchor_accuracy(gen, target, indices, args.axis)
     index = select_display_index(generator.patch_size, indices)
     target_plane = target_slices[index]
     gen_plane = gen_slices[index]

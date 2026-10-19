@@ -2,7 +2,7 @@
 
 Run from the project root. `--weight` accepts a run directory, its `generator.pt`,
 or an EMA export under `checkpoints/`. Results go to a new folder under `checks/`;
-add `--no-view` to skip the viewer.
+add `--no-view` to skip the viewer in `01–06`.
 
 | Script | Purpose | Weights |
 | --- | --- | --- |
@@ -29,8 +29,10 @@ python scripts/05_check_continuation.py --weight "run/my-lr-run" --anchor image.
 - `07` counts particles tilted each way (`dz/dy`, `dz/dx`, `dy/dx`); generated volumes
   should match `--real` (use `--real-stride 2` for 128-pixel crops at 64 voxels). Training
   logs the same balance as `structure/phase_N/tilt_balance_*`.
-- Guidance, anchor strength (0–1 logit interpolation), and overlap default to
-  [config/gen.yaml](../config/gen.yaml). Anchor demos show controlled generation, not 3D accuracy.
+- In `02–05`, guidance, anchor strength (0–1 logit interpolation), and overlap default to
+  [config/gen.yaml](../config/gen.yaml). In `06`, `--lr-guidance` uses that default,
+  `--guidance` is the SR guidance (default 1.0), and overlap is scale-aligned. Anchor demos
+  show controlled generation, not 3D accuracy.
 
 ## Save and resume
 

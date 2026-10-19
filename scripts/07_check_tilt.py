@@ -8,7 +8,13 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.cli import add_device_argument, check_parser, result_directory
+from scripts.common.cli import (
+    add_device_argument,
+    check_parser,
+    non_negative_int,
+    positive_int,
+    result_directory,
+)
 from src.evaluate.tilt import TILT_PAIRS, tilt_balance
 from src.storage import load_volume
 
@@ -27,11 +33,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--real-stride",
-        type=int,
+        type=positive_int,
         default=1,
         help="Subsample real volumes to the generated voxel scale (2 for 128 -> 64).",
     )
-    parser.add_argument("--samples", type=int, default=6)
+    parser.add_argument("--samples", type=positive_int, default=6)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--guidance", type=float, help="Default: config/gen.yaml.")
@@ -39,7 +45,7 @@ def main() -> None:
         "--phases", type=int, nargs="*", help="Default: every phase except 0."
     )
     parser.add_argument("--threshold", type=float, default=0.05)
-    parser.add_argument("--min-voxels", type=int, default=8)
+    parser.add_argument("--min-voxels", type=non_negative_int, default=8)
     parser.add_argument("--out", type=Path, help="report.json path")
     add_device_argument(parser)
     args = parser.parse_args()

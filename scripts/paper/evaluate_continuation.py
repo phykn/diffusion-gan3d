@@ -21,6 +21,7 @@ from make_anchor_asset import load_center_roi
 from make_assets import OUTPUT_DIR, PHASE_COLORS, ROI_COLOR, SAMPLE_PATH
 from provenance import build_provenance, file_record, validate_output_paths
 
+from scripts.common.diagnostic import generate_with_baseline
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator, resolve_weights
 from src.config.generation import load_generation_settings
@@ -30,7 +31,6 @@ from src.evaluate.anchor import (
     measure_slice_smoothness,
 )
 from src.evaluate.label import voxel_accuracy
-from src.random import preserved_rng
 
 SEEDS = (0, 1, 2, 3)
 INTERNAL_AXES = (0, 1, 2)
@@ -227,23 +227,14 @@ def generate_pair(
     margin: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     set_seed(seed, generator.device)
-    condition = (PlaneAnchor(anchor, axis, index),)
-    with preserved_rng(generator.device):
-        generated = generator.generate(
-            anchors=condition,
-            anchor_strength=anchor_strength,
-            guidance=guidance,
-            domain=domain,
-            margin=margin,
-        )
-    baseline = generator.generate(
-        anchors=(),
-        anchor_strength=0.0,
+    return generate_with_baseline(
+        generator,
+        (PlaneAnchor(anchor, axis, index),),
+        anchor_strength,
         guidance=guidance,
         domain=domain,
         margin=margin,
     )
-    return generated, baseline
 
 
 def measure_case(
@@ -347,20 +338,24 @@ def render(
 ) -> None:
     colors = [to_rgb(color) for color in PHASE_COLORS[:num_phases]]
     cmap = ListedColormap(colors)
-    figure, panels = plt.subplots(2, 7, figsize=(15.5, 4.8), squeeze=False)
+    depth = len(examples[BOUNDARY][1])
+    # Smaller models have fewer slices; skip distances beyond the volume.
+    distances = tuple(
+        dict.fromkeys(d for d in (*DISPLAY_DISTANCES, depth - 1) if d < depth)
+    )
+    columns = 1 + len(distances)
+    figure, panels = plt.subplots(
+        2, columns, figsize=(15.5 * columns / 7, 4.8), squeeze=False
+    )
     for row, condition in enumerate((BOUNDARY, EXTERNAL)):
-        target, volume = examples[condition]
-        slices = volume.movedim(0, 0)
-        distances = (*DISPLAY_DISTANCES, len(slices) - 1)
+        target, slices = examples[condition]
         images = (target, *(slices[distance] for distance in distances))
         titles = (
             ("Generated-control input" if condition == BOUNDARY else "External input"),
-            "Generated d=0",
-            "d=1",
-            "d=4",
-            "d=16",
-            "d=64",
-            f"d={len(slices) - 1}",
+            *(
+                f"Generated d={d}" if index == 0 else f"d={d}"
+                for index, d in enumerate(distances)
+            ),
         )
         for column, (image, title) in enumerate(zip(images, titles, strict=True)):
             panel = panels[row, column]

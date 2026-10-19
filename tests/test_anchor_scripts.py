@@ -309,6 +309,7 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
         patch_size = 4
         num_phases = 3
         default_margin = 8
+        device = torch.device("cpu")
 
         class diffusion:
             timesteps = 10
@@ -384,6 +385,7 @@ def test_anchor_check_uses_generated_reference_and_same_rng_baseline(
         patch_size = 4
         num_phases = 3
         default_margin = 8
+        device = torch.device("cpu")
 
         def generate(self, *, anchors, **_kwargs):
             calls.append((anchors, float(torch.rand(()))))

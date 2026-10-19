@@ -18,11 +18,14 @@ from scripts.common.cli import (
     add_height_arguments,
     check_parser,
     height_options,
+    non_negative_int,
     parse_unit_interval,
+    positive_int,
     prepare_check,
     save_preview,
 )
 from scripts.common.diagnostic import (
+    anchor_accuracy,
     format_percent,
     select_display_index,
     select_indices,
@@ -32,7 +35,7 @@ from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
 from src.device import check_device
-from src.evaluate.label import phase_fractions, voxel_accuracy
+from src.evaluate.label import phase_fractions
 from src.evaluate.seam import SeamQuality, measure_seams
 from src.predict.tiling.generator import TiledGenerator
 from src.predict.tiling.layout import TilePlan
@@ -179,7 +182,7 @@ def generate_base(
         base,
         target,
         indices,
-        get_accuracy(base, target, indices, AXIS),
+        anchor_accuracy(base, target, indices, AXIS),
     )
 
 
@@ -217,7 +220,7 @@ def assess_result(
     )
     scaled_accuracy = None
     if base_result.target is not None:
-        scaled_accuracy = get_accuracy(
+        scaled_accuracy = anchor_accuracy(
             center,
             base_result.target,
             base_result.indices,
@@ -368,39 +371,11 @@ def main() -> None:
         show_slices(vol, generator.num_phases)
 
 
-def positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("value must be positive")
-    return parsed
-
-
-def non_negative_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("value must be non-negative")
-    return parsed
-
-
 def print_plan(plan: TilePlan, device: torch.device) -> None:
     print(
         f"Plan    : {' × '.join(map(str, plan.grid))} tiles "
         f"({plan.tile_count} total), overlap {plan.overlap}, {device}"
     )
-
-
-def get_accuracy(
-    vol: torch.Tensor,
-    target: torch.Tensor,
-    indices: tuple[int, ...],
-    axis: int,
-) -> float | None:
-    if not indices:
-        return None
-    idx = torch.tensor(indices, dtype=torch.long)
-    actual = vol.movedim(axis, 0).index_select(0, idx)
-    expected = target.movedim(axis, 0).index_select(0, idx)
-    return voxel_accuracy(actual, expected)
 
 
 def show_slices(
