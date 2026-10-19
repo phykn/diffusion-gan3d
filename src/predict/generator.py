@@ -257,6 +257,8 @@ class Generator:
         height_extent = self.validate_height(
             (size,) * 3, domain, height_origin, height_extent
         )
+        if vf_profile is None and vf is None and not anchors:
+            vf_profile = self.default_profile(domain)
         vf_profile = self.validate_profile_request(
             vf_profile, size, domain, height_origin, height_extent, vf
         )
@@ -386,6 +388,13 @@ class Generator:
             resolve_extent(data, domain, extent),
             self.device,
         )
+
+    def default_profile(self, domain):
+        """Training-data depth profile; height alone flattens strong gradients."""
+        if getattr(self.model, "profile_input", None) is None:
+            return None
+        profiles = (self.height_data or {}).get("depth_profiles") or {}
+        return profiles.get(0 if domain is None else domain)
 
     def validate_profile_request(self, spec, depth, domain, origin, extent, vf):
         if spec is None:

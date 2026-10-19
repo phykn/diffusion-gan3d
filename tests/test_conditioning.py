@@ -517,6 +517,27 @@ def test_profile_tiles_use_global_coordinates_and_local_means(tmp_path):
         generator.generate(vf_profile=spec, vf=[1, 0], height_extent=32)
 
 
+def test_height_only_generation_defaults_to_training_depth_profile(tmp_path):
+    cfg = configuration(tmp_path, height=True)
+    cfg["conditioning"]["spatial_profile"]["enabled"] = True
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    save_yaml(tmp_path / "train.yaml", trainer.cfg)
+    torch.save(trainer.denoiser.state_dict(), tmp_path / "generator.pt")
+    generator = load_generator(tmp_path / "generator.pt", torch.device("cpu"))
+    default = generator.height_data["depth_profiles"][0]
+    assert default["points"][0][0] == 0 and default["points"][-1][0] == 1
+
+    with patch.object(generator, "predict", wraps=generator.predict) as predict:
+        generator.generate(margin=0)
+    profile = predict.call_args.kwargs["profile"]
+    expected = generator.profile_condition(default, profile.shape[-1], 0, 0.0)
+    torch.testing.assert_close(profile, expected)
+
+    with patch.object(generator, "predict", wraps=generator.predict) as predict:
+        generator.generate(vf=[0.5, 0.5], margin=0)
+    assert predict.call_args.kwargs.get("profile") is None
+
+
 def test_profile_rejects_impossible_anchor_and_preserved_base(tmp_path):
     cfg = configuration(tmp_path, height=True)
     cfg["conditioning"]["spatial_profile"]["enabled"] = True

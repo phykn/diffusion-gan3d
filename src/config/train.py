@@ -14,7 +14,7 @@ from src.config.defaults import INACTIVE_DEFAULTS, STAGE_DEFAULTS, TRAIN_DEFAULT
 from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml
 from src.config.schema import validate_config_keys
 from src.config.values import validate_training_values
-from src.data.source import fill_height_extents
+from src.data.source import fill_depth_profiles, fill_height_extents
 from src.data.split import resolve_split
 from src.plane import PLANE_DIRECTIONS, PLANES
 
@@ -45,7 +45,8 @@ def load_train_config(
         cfg["data"] = str(data)
     if isinstance(cfg.get("data"), str):
         cfg["data"] = load_yaml(resolve_external_data_path(cfg["data"]))
-    return fill_height_extents(normalize_loaded_train_config(cfg, stage))
+    cfg = fill_height_extents(normalize_loaded_train_config(cfg, stage))
+    return fill_depth_profiles(cfg)
 
 
 def resolve_external_data_path(path: str | Path) -> Path:

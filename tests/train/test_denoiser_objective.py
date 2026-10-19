@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from src.model.critic import CriticScores
-from src.train.loss.denoiser import adversarial_loss
+from src.train.loss.denoiser import adversarial_loss, profile_loss
 
 
 class PairCritic(nn.Module):
@@ -62,3 +62,27 @@ def test_empty_adversarial_batch_returns_differentiable_zero():
     loss.backward()
     assert torch.equal(logits.grad, torch.zeros_like(logits))
     assert diagnostics == {}
+
+
+@pytest.mark.parametrize("preserve_height", [False, True])
+def test_profile_loss_supervises_height_only_samples(preserve_height):
+    # Uniform fake against a real profile that rises with depth; CFG dropped vf.
+    probs = torch.full((2, 2, 4, 2, 2), 0.5, requires_grad=True)
+    rising = torch.tensor([0.0, 0.1, 0.2, 0.3])
+    profile = torch.stack((1 - rising, rising)).expand(2, 2, 4)
+    batch = SimpleNamespace(
+        clean_probs=probs, profile=profile, vf_present=torch.tensor([True, False])
+    )
+    settings = SimpleNamespace(
+        profile_bins=4,
+        profile_gradient_weight=0.0,
+        profile_weight=1.0,
+        num_phases=2,
+        preserve_height=preserve_height,
+    )
+    loss, logs = profile_loss(batch, settings)
+    loss.backward()
+    dropped = probs.grad[1].abs().sum()
+    assert (dropped > 0) == preserve_height
+    assert probs.grad[0].abs().sum() > 0
+    assert logs["profile/soft_mae"] > 0

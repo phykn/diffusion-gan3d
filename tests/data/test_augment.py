@@ -203,3 +203,24 @@ def test_plane_policy_does_not_allow_an_implicit_axis_or_global_mode():
         aug.apply_together((torch.zeros(2, 1, 3, 3),))
     with pytest.raises(TypeError, match="mode"):
         CriticAugment(mode="isotropic", planes={"xy": {"flip_axes": []}})
+
+
+def test_half_mirroring_hides_tilt_sign_from_the_critic():
+    # Height-preserving xz policy: mirror x only. At probability 0.5 a slice
+    # and its mirror image give the same augmented distribution, so a
+    # one-way tilt of every fake particle looks like the symmetric real data.
+    augment = CriticAugment(planes={"xz": {"flip_axes": ["x"]}}, prob=0.5)
+    torch.manual_seed(0)
+    transforms = augment.sample_transforms(20000, torch.device("cpu"), "xz")
+    assert set(transforms.tolist()) == {0, 4}
+    assert float((transforms == 4).float().mean()) == pytest.approx(0.5, abs=0.02)
+    tilted = torch.eye(4).reshape(1, 1, 4, 4)
+    mirrored = augment.apply_transforms(tilted, torch.tensor([4]))
+    assert torch.equal(mirrored, tilted.flip(-1))
+
+
+def test_real_only_must_be_boolean():
+    assert not CriticAugment().real_only
+    assert CriticAugment(real_only=True).real_only
+    with pytest.raises(ValueError, match="real_only"):
+        CriticAugment(real_only="yes")

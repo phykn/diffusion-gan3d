@@ -19,3 +19,12 @@ def test_structure_metrics_detect_disconnection_and_match_measured_planes():
         structure_metrics(probs, real, {"xy": (0,)})["structure/phase_1/percolation_xy"]
         == 0
     )
+
+
+def test_structure_metrics_report_particle_tilt_balance():
+    z, y, x = torch.meshgrid(*(torch.arange(16) - 8,) * 3, indexing="ij")
+    labels = ((z - 0.3 * y).abs() <= 1) & (y**2 + x**2 <= 36)
+    probs = torch.nn.functional.one_hot(labels[None].long(), 2).movedim(-1, 1).float()
+    metrics = structure_metrics(probs, {}, {})
+    assert metrics["structure/phase_1/tilt_balance_zy"] == 1
+    assert metrics["structure/phase_1/tilt_balance_zx"] == 0

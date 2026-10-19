@@ -12,6 +12,7 @@ add `--no-view` to skip the viewer.
 | [04_check_scale_up.py](../scripts/04_check_scale_up.py) | Tiled generation and seams | LR |
 | [05_check_continuation.py](../scripts/05_check_continuation.py) | Grow a volume from a boundary section | LR |
 | [06_check_hr.py](../scripts/06_check_hr.py) | Compare LR, upsampling, and SR | SR |
+| [07_check_tilt.py](../scripts/07_check_tilt.py) | Signed particle tilt balance vs real volumes | LR (optional) |
 
 ```bash
 python scripts/04_check_scale_up.py --weight "run/my-lr-run" --blocks 2 2 2 --no-view
@@ -22,7 +23,12 @@ python scripts/05_check_continuation.py --weight "run/my-lr-run" --anchor image.
   the script prints the actual tile grid. `--axis 0/1/2` selects `xy/xz/yz`.
 - `--device`, `--seed`, `--domain`, and `--napari` work in `02–06`; `--help` lists the rest.
 - `--height-origin` and `--height-extent` are in source pixels along the xz/yz row direction.
+- `02 --vf-profile config/data/simul_anode_profile.yaml --guidance 1.5` fixes the depth
+  fractions; height alone flattens a strong gradient.
 - `02–05` save `volume.tiff/png/json`; `06` saves LR/HR volumes, `comparison.png`, and `report.json`.
+- `07` counts particles tilted each way (`dz/dy`, `dz/dx`, `dy/dx`); generated volumes
+  should match `--real` (use `--real-stride 2` for 128-pixel crops at 64 voxels). Training
+  logs the same balance as `structure/phase_N/tilt_balance_*`.
 - Guidance, anchor strength (0–1 logit interpolation), and overlap default to
   [config/gen.yaml](../config/gen.yaml). Anchor demos show controlled generation, not 3D accuracy.
 

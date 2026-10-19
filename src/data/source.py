@@ -1,9 +1,13 @@
 from collections.abc import Sequence
 from pathlib import Path
 
+import numpy as np
+import torch
 from PIL import Image
 
 from src.config.data import get_domains
+from src.data.dataset import read_labels
+from src.prepare.profile import rebin_profile
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
 ImageGroups = dict[int, dict[int, tuple[tuple[Path, ...], ...]]]
@@ -60,6 +64,57 @@ def fill_height_extents(cfg: dict) -> dict:
     if cfg["conditioning"]["height_enabled"] and "height_extents" not in cfg["data"]:
         cfg["data"]["height_extents"] = infer_height_extents(cfg["data"])
     return cfg
+
+
+def fill_depth_profiles(cfg: dict) -> dict:
+    profile = cfg["conditioning"].get("spatial_profile", {})
+    if (
+        cfg.get("stage") == "low_res"
+        and profile.get("enabled", False)
+        and "depth_profiles" not in cfg["data"]
+    ):
+        cfg["data"]["depth_profiles"] = infer_depth_profiles(cfg["data"])
+    return cfg
+
+
+def infer_depth_profiles(data: dict, bins: int = 16) -> dict[int, dict | None]:
+    """Mean phase fractions of full-height side images in `bins` equal z bands.
+
+    Height-only generation flattens strong depth gradients, so inference uses
+    this training-data profile when no vf or vf_profile is requested.
+    """
+    phases = data["num_phases"]
+    profiles = {}
+    for domain, planes in collect_image_groups(data).items():
+        images = [
+            read_labels(path)[0]
+            for axis, groups in planes.items()
+            if axis != 0
+            for paths in groups
+            for path in paths
+        ]
+        if len({len(image) for image in images}) != 1:
+            profiles[domain] = None
+            continue
+        rows = np.mean(
+            [np.stack([(img == p).mean(1) for p in range(phases)]) for img in images],
+            axis=0,
+        )
+        bands = rebin_profile(torch.from_numpy(rows)[None], bins)[0].T.numpy()
+        values = []
+        for band in bands:
+            row = [round(float(v), 4) for v in band]
+            # Keep the rounded fractions on the simplex that vf_profile requires.
+            top = row.index(max(row))
+            row[top] = round(1.0 - sum(row) + row[top], 4)
+            values.append(row)
+        values.append(values[-1])
+        profiles[domain] = {
+            "axis": "z",
+            "interpolation": "constant",
+            "points": [[i / bins, row] for i, row in enumerate(values)],
+        }
+    return profiles
 
 
 def infer_height_extents(data: dict) -> dict[int, int | None]:

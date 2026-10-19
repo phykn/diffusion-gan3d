@@ -386,7 +386,8 @@ class Trainer:
                 measured=excluded,
                 height=height,
             )
-            pairs = self.critic_augment.apply_together(pairs, plane=axis)
+            if not self.critic_augment.real_only:
+                pairs = self.critic_augment.apply_together(pairs, plane=axis)
             result.pairs[axis] = pairs[:2]
             if len(pairs) == 3:
                 result.heights[axis] = pairs[2][:, :1]

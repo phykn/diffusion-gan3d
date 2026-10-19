@@ -1,0 +1,10 @@
+# z phase fractions of simul/config_anode.yaml ([pore, graphite, silicon], top to
+# bottom) for --vf-profile; height-only generation flattens this gradient.
+axis: z
+interpolation: linear
+points:
+  - [0.0, [0.55, 0.45, 0.0]]
+  - [0.25, [0.55, 0.45, 0.0]]
+  - [0.5, [0.55, 0.42, 0.03]]
+  - [0.75, [0.54, 0.34, 0.12]]
+  - [1.0, [0.48, 0.22, 0.30]]

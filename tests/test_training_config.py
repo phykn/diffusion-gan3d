@@ -345,6 +345,17 @@ def test_requested_auto_augmentation_preserves_height_coordinates(stage, height)
     assert normalize_train_config(cfg, stage) == cfg
 
 
+def test_real_only_augmentation_reaches_the_critic_augment():
+    raw = {
+        "data": {"domains": {0: {plane: ["images"] for plane in ("xy", "xz", "yz")}}},
+        "augmentation": {"auto_planes": True, "real_only": True},
+        "conditioning": {"height_enabled": True},
+    }
+    cfg = normalize_train_config(raw, "low_res")
+    assert build_augmentation(cfg).real_only
+    assert normalize_train_config(cfg, "low_res") == cfg
+
+
 def test_auto_augmentation_does_not_override_explicit_policy():
     with pytest.raises(ValueError, match="or explicit planes"):
         normalize_train_config(

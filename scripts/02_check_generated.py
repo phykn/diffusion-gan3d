@@ -17,6 +17,7 @@ from scripts.common.cli import (
 )
 from scripts.common.diagnostic import show_napari
 from src.build.predict import load_generator
+from src.config.files import load_yaml
 from src.config.generation import load_generation_settings
 from src.device import check_device
 from src.plane import PLANES
@@ -55,6 +56,12 @@ def main() -> None:
     )
     parser.add_argument("--guidance", type=float, help="Default: config/gen.yaml.")
     add_height_arguments(parser)
+    parser.add_argument(
+        "--vf-profile",
+        type=Path,
+        help="YAML/JSON file with a z vf_profile (axis, points, interpolation); "
+        "default: height conditioning only.",
+    )
     args = parser.parse_args()
     args = prepare_check(args, __file__)
     if args.guidance is None:
@@ -77,6 +84,11 @@ def main() -> None:
             guidance=args.guidance,
             domain=args.domain,
             **height_options(args),
+            **(
+                {}
+                if args.vf_profile is None
+                else {"vf_profile": load_yaml(args.vf_profile)}
+            ),
             margin=generator.default_margin,
         )
     save_volume(vol, args.out)

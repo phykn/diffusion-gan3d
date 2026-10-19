@@ -2,7 +2,11 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from src.data.source import collect_image_groups, infer_height_extents
+from src.data.source import (
+    collect_image_groups,
+    infer_depth_profiles,
+    infer_height_extents,
+)
 
 
 def test_height_inference_ignores_directories_with_image_extensions(tmp_path):
@@ -72,3 +76,33 @@ def test_height_inference_requires_side_images(tmp_path):
     Image.fromarray(np.zeros((12, 10), dtype=np.uint8)).save(tmp_path / "image.png")
     with pytest.raises(ValueError, match="full-height side images"):
         infer_height_extents({"domains": {0: {"xy": [tmp_path]}}})
+
+
+def test_depth_profiles_average_side_images_in_z_bands(tmp_path):
+    image = np.zeros((16, 6), dtype=np.uint8)
+    image[8:] = 1
+    image[12:, :3] = 0
+    for folder in ("xz", "yz"):
+        (tmp_path / folder).mkdir()
+        Image.fromarray(image).save(tmp_path / folder / "a.png")
+    data = {
+        "num_phases": 2,
+        "domains": {0: {"xz": [str(tmp_path / "xz")], "yz": [str(tmp_path / "yz")]}},
+    }
+
+    profile = infer_depth_profiles(data, bins=2)[0]
+
+    assert profile["axis"] == "z" and profile["interpolation"] == "constant"
+    assert profile["points"] == [
+        [0.0, [1.0, 0.0]],
+        [0.5, [0.25, 0.75]],
+        [1.0, [0.25, 0.75]],
+    ]
+
+
+def test_depth_profiles_skip_domains_with_mixed_heights(tmp_path):
+    Image.fromarray(np.zeros((16, 6), dtype=np.uint8)).save(tmp_path / "a.png")
+    Image.fromarray(np.zeros((12, 6), dtype=np.uint8)).save(tmp_path / "b.png")
+    data = {"num_phases": 2, "domains": {0: {"xz": [str(tmp_path)]}}}
+
+    assert infer_depth_profiles(data, bins=2) == {0: None}

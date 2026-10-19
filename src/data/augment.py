@@ -38,10 +38,17 @@ class CriticAugment:
         planes: Mapping | None = None,
         prob: float = 1.0,
         preserve_height: bool = False,
+        real_only: bool = False,
     ) -> None:
         self.prob = float(prob)
         if not math.isfinite(self.prob) or not 0 <= self.prob <= 1:
             raise ValueError("augmentation probability must be between zero and one.")
+        if type(real_only) is not bool:
+            raise ValueError("augmentation.real_only must be true or false.")
+        # Flipping fakes too makes a mirror-image bias (one-way particle tilt)
+        # invisible to the plane critics; with mirror-symmetric data only reals
+        # need it.
+        self.real_only = real_only
         self.plane_transforms = None
         if planes is not None:
             if not isinstance(planes, Mapping) or not planes:

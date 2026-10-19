@@ -15,7 +15,9 @@ model:
     num_steps: 10
 
 augmentation:
-  probability: 0.5
+  # No flips: mirrored reals make either tilt direction look real, so the
+  # generator tilts every particle one way; unflipped data keeps the real tilts.
+  probability: 0.0
   auto_planes: true
 
 conditioning:
@@ -28,7 +30,7 @@ conditioning:
 
 loss:
   connectivity_local_weight: 0.5
-  r1_weight: 0.5
+  r1_weight: 1.0  # two volumes: critic overfits after ~5k steps at 0.5
   r2_weight: 0.1
   r1_every_steps: 8
 
@@ -37,6 +39,8 @@ loss:
   anchor_neighborhood_weight: 0.1
   anchor_neighborhood_radius: 2
   volume_fraction_weight: 1.0
+  # smooth_l1 (beta=1) is quadratic at these profile errors, so 1.0 barely pulls.
+  spatial_profile_weight: 30.0
 
   group_statistics:
     weight: 0.1

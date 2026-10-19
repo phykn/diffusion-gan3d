@@ -362,7 +362,8 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
     assert all(set(values) == {NULL_DOMAIN} for values in observed_domains[2])
 
 
-def test_training_step_updates_denoiser_and_all_critics() -> None:
+@pytest.mark.parametrize("real_only", [False, True])
+def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
     data = Config(
         domains={0: {0: ".", 1: ".", 2: "."}},
         crop_size=8,
@@ -421,8 +422,10 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
                 for plane in PLANES
             },
             prob=1.0,
+            real_only=real_only,
         )
     )
+    trainer.critic_augment.real_only = real_only  # Mock does not wrap attributes.
     denoiser_before = _parameters(denoiser)
     critic_before = {axis: _parameters(critics[PLANES[axis]]) for axis in (0, 1, 2)}
 
@@ -444,7 +447,8 @@ def test_training_step_updates_denoiser_and_all_critics() -> None:
     assert metrics.generator_connectivity == 0.0
     assert metrics.critic_connectivity == 0.0
     assert len(r1_values) == 3
-    assert trainer.critic_augment.apply_together.call_count == 6
+    # Real slices of three planes, plus fake slices unless reals only.
+    assert trainer.critic_augment.apply_together.call_count == (3 if real_only else 6)
     assert math.isclose(metrics.r1, sum(r1_values) / len(r1_values), rel_tol=1e-6)
     assert math.isclose(
         metrics.generator,

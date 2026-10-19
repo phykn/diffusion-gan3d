@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from src.evaluate.connectivity import spanning_fractions
+from src.evaluate.tilt import tilt_balance
 from src.plane import PLANES
 
 
@@ -67,6 +68,9 @@ def structure_metrics(probs, real, groups):
             metrics[
                 f"structure/phase_{phase}/percolation_lower_bound_{PLANES[axis]}"
             ] = float(np.mean(lower, axis=0)[axis])
+        # Per-particle tilt sign; a mirror-symmetric structure stays near zero.
+        for name, stats in tilt_balance(labels, phase).items():
+            metrics[f"structure/phase_{phase}/tilt_balance_{name}"] = stats["balance"]
     generated_curves = {}
     for axis, images in real.items():
         images = images.detach().float().cpu()

@@ -15,11 +15,13 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                 "lo_res_size",
                 "hi_res_size",
                 "height_extents",
+                "depth_profiles",
             )
         ),
         "augmentation": {
             "probability": None,
             "auto_planes": None,
+            "real_only": None,
             "planes": {
                 plane: dict.fromkeys(("flip_axes", "rotate_90")) for plane in PLANES
             },
