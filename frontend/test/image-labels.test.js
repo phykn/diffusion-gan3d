@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { deflateSync } from 'node:zlib'
 
-import { cropAndResizeLabels, decodePngLabels } from '../src/image-labels.js'
+import { decodePngLabels } from '../src/image-labels.js'
 
 function pngChunk(name, data) {
   const output = new Uint8Array(12 + data.length)
@@ -43,11 +43,6 @@ test('grayscale PNG data is decoded as raw phase values', async () => {
   const truncated = png.slice()
   new DataView(truncated.buffer).setUint32(16, 4)
   await assert.rejects(decodePngLabels(truncated.buffer), /declared dimensions/)
-})
-
-test('indexed labels are resized with nearest-neighbor sampling', () => {
-  const source = { width: 3, height: 1, labels: new Uint8Array([0, 1, 2]) }
-  assert.deepEqual(cropAndResizeLabels(source, { x: 0, y: 0, size: 3 }, 6), Array.from({ length: 6 }, () => [0, 0, 1, 1, 2, 2]))
 })
 
 test('PNG inflation cancels as soon as pixel data exceeds declared dimensions', async t => {

@@ -172,26 +172,16 @@ export async function readPngLabels(file) {
   return labels
 }
 
-export function cropAndResizeLabels(source, crop, inputSize) {
-  const labels = []
-  for (let row = 0; row < inputSize; row += 1) {
-    const sourceY = Math.min(source.height - 1, Math.max(0, Math.floor(crop.y + (row + 0.5) * crop.size / inputSize)))
-    const outputRow = []
-    for (let column = 0; column < inputSize; column += 1) {
-      const sourceX = Math.min(source.width - 1, Math.max(0, Math.floor(crop.x + (column + 0.5) * crop.size / inputSize)))
-      outputRow.push(source.labels[sourceY * source.width + sourceX])
-    }
-    labels.push(outputRow)
-  }
-  return labels
-}
-
 export function cropAnchor(source, crop, cropSize) {
   // Use the same integer cell boundaries for the labels and their height metadata.
   const x = Math.max(0, Math.min(Math.round(crop.x), source.width - cropSize))
   const y = Math.max(0, Math.min(Math.round(crop.y), source.height - cropSize))
   return {
-    image: cropAndResizeLabels(source, { x, y, size: cropSize }, cropSize),
+    // /prepare resizes the crop to the model input on the server.
+    image: Array.from({ length: cropSize }, (_, row) => {
+      const start = (y + row) * source.width + x
+      return Array.from(source.labels.subarray(start, start + cropSize))
+    }),
     cropOrigin: [y, x],
     sourceShape: [source.height, source.width],
   }

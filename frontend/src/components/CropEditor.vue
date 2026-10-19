@@ -4,7 +4,7 @@ import { cropAnchor, readPngLabels } from '../image-labels.js'
 
 const props = defineProps({
   file: File,
-  cropSize: { type: Number, default: 128 },
+  cropSize: Number,
   disabled: Boolean,
 })
 const emit = defineEmits(['change', 'error', 'ready'])
@@ -119,9 +119,8 @@ watch(() => [props.file, props.cropSize], ([file], previous, onCleanup) => {
   state.crop = null
   emit('ready', false)
   draw()
-  if (!file) {
-    return
-  }
+  // Wait for /health: a guessed size could reject an image the model accepts.
+  if (!file || !props.cropSize) return
   const cropSize = props.cropSize
   const url = URL.createObjectURL(file)
   onCleanup(() => URL.revokeObjectURL(url))
@@ -160,8 +159,7 @@ watch(() => [props.file, props.cropSize], ([file], previous, onCleanup) => {
 })
 
 function getAnchorImage() {
-  if (!state.image || !state.crop) return null
-  if (!state.sourceLabels) throw new Error('The image does not contain raw PNG label values.')
+  if (!state.crop) return null
   return cropAnchor(state.sourceLabels, state.crop, props.cropSize)
 }
 onMounted(() => {

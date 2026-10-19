@@ -12,7 +12,7 @@ from backend.src.config import ServerConfig, load_server_config
 from backend.src.middleware import RequestSizeLimit
 from backend.src.response import DownloadResponse, volume_response
 from backend.src.schema import GenerateRequest, PrepareRequest
-from src.predict.inference import LowResolutionAPI
+from src.api import LowResolutionAPI
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
@@ -63,18 +63,18 @@ def create_app(
     @app.post("/prepare")
     def prepare(request: PrepareRequest) -> dict:
         try:
-            request = request.check_limits(config)
+            request.check_limits(config)
             image = app.state.inference.prepare_image(
                 torch.tensor(request.image, dtype=torch.long)
             )
-        except (TypeError, ValueError) as exc:
+        except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"image": image.tolist()}
 
     @app.post("/generate", response_class=StreamingResponse)
     def generate(request: GenerateRequest) -> Response:
         try:
-            request = request.check_limits(config)
+            request.check_limits(config)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if not app.state.download_slots.acquire(blocking=False):
@@ -95,7 +95,7 @@ def create_app(
             inference = app.state.inference
             try:
                 volume = _generate_volume(inference, request, config)
-            except (TypeError, ValueError) as exc:
+            except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
             try:
                 content = volume_response(

@@ -24,6 +24,10 @@ def measure_volume(
             axis=0,
             device=device,
         )
-    except (RuntimeError, ValueError, ZeroDivisionError):
+    except (RuntimeError, ValueError, ZeroDivisionError) as exc:
+        # Memory exhaustion is a request failure, not a missing metric; MPS
+        # reports it as a plain RuntimeError.
+        if isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc):
+            raise
         tau = None
     return VolumeMetrics(porosity=porosity, tortuosity=tau)

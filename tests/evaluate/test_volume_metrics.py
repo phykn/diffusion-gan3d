@@ -64,3 +64,19 @@ def test_unconverged_solver_keeps_porosity_but_marks_tortuosity_unavailable(
     )
     assert result.porosity == 1
     assert result.tortuosity is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        torch.OutOfMemoryError("CUDA out of memory"),
+        RuntimeError("MPS backend out of memory (MPS allocated: 1 GB)"),
+    ],
+)
+def test_measure_volume_propagates_memory_exhaustion(monkeypatch, error):
+    def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(metrics_module, "tortuosity", fail)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        measure_volume(torch.zeros(2, 2, 2, dtype=torch.uint8), torch.device("cpu"))

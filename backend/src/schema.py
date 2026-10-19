@@ -8,6 +8,7 @@ from backend.src.config import ServerConfig
 from src.anchor import PlaneAnchor
 
 Dimension = Annotated[int, Field(ge=1, strict=True)]
+Index = Annotated[int, Field(ge=0, strict=True)]
 PhaseID = Annotated[int, Field(ge=0, le=255, strict=True)]
 Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
 LabelRow = Annotated[list[PhaseID], Field(min_length=1)]
@@ -21,37 +22,21 @@ ProbabilityImage = Annotated[
 
 class AnchorRequest(BaseModel):
     image: LabelImage | ProbabilityImage
-    axis: Annotated[int, Field(ge=0, le=2)]
-    index: Annotated[int, Field(ge=0)]
-    position: (
-        tuple[
-            Annotated[int, Field(ge=0)],
-            Annotated[int, Field(ge=0)],
-        ]
-        | None
-    ) = None
+    axis: Annotated[int, Field(ge=0, le=2, strict=True)]
+    index: Index
+    position: tuple[Index, Index] | None = None
 
     @field_validator("image")
     @classmethod
     def validate_image(cls, image):
-        if not image or not image[0]:
-            raise ValueError("anchor image must not be empty")
-        planes = image if isinstance(image[0][0], list) else [image]
-        height, width = len(planes[0]), len(planes[0][0])
-        if width == 0 or any(
-            len(plane) != height or any(len(row) != width for row in plane)
-            for plane in planes
-        ):
-            raise ValueError("anchor image rows must have equal length")
-        return image
+        return check_rectangular(image)
 
-    def check_limits(self, cfg: ServerConfig):
-        self.image = check_image_size(self.image, cfg.max_size)
+    def check_limits(self, cfg: ServerConfig) -> None:
+        check_image_size(self.image, cfg.max_size)
         if self.index >= cfg.max_size or (
             self.position is not None and max(self.position) >= cfg.max_size
         ):
             raise ValueError("anchor coordinates exceed the server size limit")
-        return self
 
     def to_anchor(self) -> PlaneAnchor:
         return PlaneAnchor(
@@ -68,23 +53,24 @@ class GenerateRequest(BaseModel):
     shape: Dimension | tuple[Dimension, Dimension, Dimension] | None = None
     size: Dimension | None = None
     vf: list[Probability] | None = Field(default=None, max_length=256)
-    domain: int | None = Field(default=None, ge=0)
+    domain: Index | None = None
     seed: int | None = Field(default=None, ge=0, le=2**64 - 1, strict=True)
     guidance: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     anchor_strength: Probability | None = None
     height_origin: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     height_extent: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     vf_profile: dict | None = None
-    overlap: int | None = Field(default=None, ge=0)
+    overlap: Index | None = None
     storage: Literal["auto", "cpu", "cuda"] = "auto"
     progress: bool = False
     format: Literal["tiff", "raw"] = "tiff"
     include_metrics: bool = False
 
-    def check_limits(self, cfg: ServerConfig):
+    def check_limits(self, cfg: ServerConfig) -> None:
         if len(self.anchors) > cfg.max_anchors:
             raise ValueError("anchor count exceeds the server limit")
-        self.anchors = [anchor.check_limits(cfg) for anchor in self.anchors]
+        for anchor in self.anchors:
+            anchor.check_limits(cfg)
         if self.overlap is not None and self.overlap > cfg.max_size // 2:
             raise ValueError("overlap exceeds the server size limit")
         for value, dimension, maximum, label in (
@@ -97,22 +83,38 @@ class GenerateRequest(BaseModel):
             shape = (value,) * 3 if isinstance(value, int) else value
             if max(shape) > dimension or math.prod(shape) > maximum:
                 raise ValueError(f"{label} exceeds the server limit")
-        return self
 
 
 class PrepareRequest(BaseModel):
     image: LabelImage
 
-    def check_limits(self, cfg: ServerConfig):
-        self.image = check_image_size(self.image, cfg.max_size)
-        return self
+    @field_validator("image")
+    @classmethod
+    def validate_image(cls, image):
+        return check_rectangular(image)
+
+    def check_limits(self, cfg: ServerConfig) -> None:
+        check_image_size(self.image, cfg.max_size)
 
 
-def check_image_size(image, maximum):
-    planes = image if isinstance(image[0][0], list) else [image]
+def image_planes(image) -> list:
+    return image if isinstance(image[0][0], list) else [image]
+
+
+def check_rectangular(image):
+    planes = image_planes(image)
+    height, width = len(planes[0]), len(planes[0][0])
     if any(
-        len(plane) > maximum or any(len(row) > maximum for row in plane)
+        len(plane) != height or any(len(row) != width for row in plane)
         for plane in planes
     ):
-        raise ValueError("image dimensions exceed the server size limit")
+        raise ValueError("image rows must have equal length")
     return image
+
+
+def check_image_size(image, maximum: int) -> None:
+    if any(
+        len(plane) > maximum or any(len(row) > maximum for row in plane)
+        for plane in image_planes(image)
+    ):
+        raise ValueError("image dimensions exceed the server size limit")

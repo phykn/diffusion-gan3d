@@ -56,7 +56,7 @@ const {
         <CropEditor
           ref="cropEditor"
           :file
-          :crop-size="health?.crop_size ?? 128"
+          :crop-size="health?.crop_size"
           :disabled="busy"
           @change="invalidateResult"
           @error="status = $event; error = true"
@@ -66,7 +66,7 @@ const {
           :values="result?.values"
           :shape="result?.shape"
           :busy
-          :num-phases="health?.num_phases ?? 2"
+          :num-phases="health?.num_phases"
         />
       </div>
     </section>
