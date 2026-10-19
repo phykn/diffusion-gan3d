@@ -6,9 +6,9 @@ from src.plane import PLANES, get_axis
 
 
 class DataResolution(NamedTuple):
-    crop_pixels: int
-    low_res_voxels: int
-    high_res_voxels: int
+    crop_size: int
+    lo_res_size: int
+    hi_res_size: int
 
 
 def validate_sr_source(data: Mapping, base_data: Mapping) -> Mapping:

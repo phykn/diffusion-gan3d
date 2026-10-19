@@ -765,3 +765,30 @@ def test_lr_sampler_sizes_fail_during_normalization(path):
     cfg = {section: {rest[0]: {rest[1]: 0}}}
     with pytest.raises(ValueError, match=rest[1]):
         normalize_train_config(cfg)
+
+
+@pytest.mark.parametrize(
+    "section, key",
+    [
+        ("train", "mixed_precision"),
+        ("model", "gradient_checkpointing"),
+        ("augmentation", "real_only"),
+    ],
+)
+def test_quoted_booleans_are_rejected(section, key):
+    raw = {
+        "data": {"domains": {0: {"xy": ["images"]}}},
+        section: {key: "false"},
+    }
+    with pytest.raises(ValueError, match=f"{section}.{key} must be a boolean"):
+        normalize_train_config(raw, "low_res")
+
+
+@pytest.mark.parametrize("channels", [[], [8, 0], [8, "16"], 8])
+def test_critic_channels_must_list_positive_integers(channels):
+    raw = {
+        "data": {"domains": {0: {"xy": ["images"]}}},
+        "model": {"critic": {"channels": channels}},
+    }
+    with pytest.raises(ValueError, match="model.critic.channels"):
+        normalize_train_config(raw, "low_res")

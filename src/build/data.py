@@ -10,13 +10,13 @@ from src.plane import PLANES
 
 
 def build_augmentation(cfg: dict) -> CriticAugment:
-    settings = cfg.get("augmentation", {})
+    settings = cfg["augmentation"]
     planes = settings.get("planes")
     augment = CriticAugment(
-        prob=settings.get("probability", 0.5),
+        prob=settings["probability"],
         planes=planes,
         preserve_height=cfg["conditioning"]["height_enabled"],
-        real_only=settings.get("real_only", False),
+        real_only=settings["real_only"],
     )
     active = {axis for axes in get_domains(cfg["data"]).values() for axis in axes}
     if planes is not None and any(PLANES[axis] not in planes for axis in active):
@@ -32,15 +32,13 @@ def build_datasets(
     )
     data = cfg["data"]
     resolution = get_sr_resolution(cfg) if high_resolution else get_resolution(data)
-    output_size = (
-        resolution.high_res_voxels if high_resolution else resolution.low_res_voxels
-    )
+    output_size = resolution.hi_res_size if high_resolution else resolution.lo_res_size
     datasets = {}
     for domain_id, grouped in collect_image_groups(data).items():
         datasets[domain_id] = {
             axis: RealDataset(
                 path_groups,
-                crop_size=resolution.crop_pixels,
+                crop_size=resolution.crop_size,
                 patch_size=output_size,
                 num_phases=data["num_phases"],
                 plane=axis,

@@ -176,9 +176,9 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         ),
         volume_batch_size=train["volume_batch_size"],
         num_phases=data["num_phases"],
-        patch_size=get_sr_resolution(cfg).high_res_voxels
+        patch_size=get_sr_resolution(cfg).hi_res_size
         if sr
-        else get_resolution(data).low_res_voxels,
+        else get_resolution(data).lo_res_size,
         slice_pairs_per_axis=train["slice_pairs_per_plane"],
         ema_decay=optim["ema_decay"],
         r1_gamma=loss["r1_weight"],

@@ -178,6 +178,5 @@ def build_diffusion(cfg: dict) -> Diffusion:
 
 def build_sr_model(cfg: dict) -> Denoiser3D:
     cfg = normalize_train_config(cfg, "sr")
-    data = cfg["data"]
-    data["crop_size"], data["lo_res_size"], data["hi_res_size"] = get_sr_resolution(cfg)
+    get_sr_resolution(cfg)  # SR models require data.hi_res_size.
     return build_denoiser(cfg, checkpointing=False)

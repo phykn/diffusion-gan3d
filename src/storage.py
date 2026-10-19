@@ -11,12 +11,10 @@ import torch
 from torch import nn
 
 
-def atomic_torch_save(payload, path: str | Path, *, overwrite: bool = True) -> Path:
-    """Publish a complete artifact, optionally refusing to replace an existing one."""
+def atomic_torch_save(payload, path: str | Path) -> Path:
+    """Replace path with a complete artifact; readers never see a partial file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not overwrite and path.exists():
-        raise FileExistsError(path)
     temporary = tempfile.NamedTemporaryFile(
         dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
     )
@@ -29,17 +27,12 @@ def atomic_torch_save(payload, path: str | Path, *, overwrite: bool = True) -> P
             temporary.flush()
             os.fsync(temporary.fileno())
         complete = True
-        if overwrite:
-            _retry_file_operation(lambda: temporary_path.replace(path))
-        else:
-            # Link the complete file atomically; unlike replace, this cannot
-            # overwrite a snapshot published concurrently by another writer.
-            _retry_file_operation(lambda: os.link(temporary_path, path))
+        _retry_file_operation(lambda: temporary_path.replace(path))
     except OSError as error:
         if complete and getattr(error, "winerror", None) in (5, 32, 33):
             retain = True
             error.add_note(
-                f"Checkpoint publication failed; complete checkpoint retained at "
+                f"Publication failed; complete file retained at "
                 f"{temporary_path.resolve()}"
             )
         raise
@@ -50,7 +43,7 @@ def atomic_torch_save(payload, path: str | Path, *, overwrite: bool = True) -> P
             except OSError:
                 # Cleanup must not mask a save error or invalidate a published file.
                 logging.getLogger(__name__).warning(
-                    "Could not remove temporary checkpoint %s",
+                    "Could not remove temporary file %s",
                     temporary_path,
                     exc_info=True,
                 )

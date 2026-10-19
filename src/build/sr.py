@@ -15,7 +15,7 @@ def build_sr_trainer(
     data = cfg["data"]
     domains = get_domains(data)
     resolution = get_sr_resolution(cfg)
-    bank = validate_bank(bank, domains, resolution.low_res_voxels, data["num_phases"])
+    bank = validate_bank(bank, domains, resolution.lo_res_size, data["num_phases"])
     if cfg["conditioning"]["height_enabled"]:
         data["height_extents"] = infer_height_extents(data)
         bank_extents = validate_bank_height(

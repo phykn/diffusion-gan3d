@@ -102,8 +102,30 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     ):
         raise ValueError("nickname must be a valid folder-name component.")
     cfg["nickname"] = nickname
-    if type(cfg["conditioning"]["height_enabled"]) is not bool:
-        raise ValueError("conditioning.height_enabled must be a boolean.")
+    flags = [
+        ("conditioning.height_enabled", cfg["conditioning"]["height_enabled"]),
+        ("train.mixed_precision", cfg["train"]["mixed_precision"]),
+        ("model.gradient_checkpointing", cfg["model"]["gradient_checkpointing"]),
+        ("augmentation.real_only", cfg["augmentation"]["real_only"]),
+    ]
+    if stage == "low_res":
+        name = "model.generator.anchor_multiscale_input"
+        flags.append((name, cfg["model"]["generator"]["anchor_multiscale_input"]))
+    for name, value in flags:
+        # YAML reads a quoted "false" as text, which would act as true.
+        if type(value) is not bool:
+            raise ValueError(f"{name} must be a boolean.")
+    for name in ("embedding_channels", "latent_channels"):
+        value = cfg["model"]["generator"][name]
+        if type(value) is not int or value < 1:
+            raise ValueError(f"model.generator.{name} must be a positive integer.")
+    channels = cfg["model"]["critic"].get("channels")
+    if channels is not None and (
+        not isinstance(channels, list)
+        or not channels
+        or any(type(value) is not int or value < 1 for value in channels)
+    ):
+        raise ValueError("model.critic.channels must list positive integers.")
     augmentation = cfg.get("augmentation", {})
     auto_planes = augmentation.get("auto_planes", False)
     if type(auto_planes) is not bool:
@@ -231,8 +253,7 @@ def validate_sr_config(cfg: dict) -> dict:
         or any(char not in "0123456789abcdef" for char in data_sha256)
     ):
         raise ValueError("source.data_sha256 must be a SHA-256 hex digest.")
-    data = cfg["data"]
-    data["crop_size"], data["lo_res_size"], data["hi_res_size"] = get_sr_resolution(cfg)
+    get_sr_resolution(cfg)  # Requires data.hi_res_size.
     groups = get_plane_groups(cfg)
     cfg["model"]["critic"]["plane_groups"] = [
         [PLANES[axis] for axis in axes] for axes in groups.values()

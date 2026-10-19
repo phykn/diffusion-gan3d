@@ -170,39 +170,20 @@ def test_failed_bank_write_can_be_retried_without_publishing_partial_file(
     assert torch.load(saved["bank"], weights_only=True) == {"step": 7}
 
 
-def test_exclusive_save_preserves_concurrently_published_file(tmp_path, monkeypatch):
-    import os
-
-    path = tmp_path / "snapshot.pt"
-    link = os.link
-
-    def competing_link(source, destination):
-        Path(destination).write_bytes(b"another complete snapshot")
-        link(source, destination)
-
-    monkeypatch.setattr(os, "link", competing_link)
-    with pytest.raises(FileExistsError):
-        atomic_torch_save({"step": 7}, path, overwrite=False)
-    assert path.read_bytes() == b"another complete snapshot"
-    assert list(tmp_path.iterdir()) == [path]
-
-
 def locked_file_error(code=32):
     error = PermissionError("file locked")
     error.winerror = code
     return error
 
 
-@pytest.mark.parametrize("overwrite", [True, False])
 @pytest.mark.parametrize("code", [5, 32, 33])
 def test_atomic_save_retries_publication_without_serializing_again(
-    tmp_path, monkeypatch, overwrite, code
+    tmp_path, monkeypatch, code
 ):
     path = tmp_path / "last.pt"
-    if overwrite:
-        atomic_torch_save({"step": 1}, path)
+    atomic_torch_save({"step": 1}, path)
     save = torch.save
-    publish = Path.replace if overwrite else os.link
+    publish = Path.replace
     attempts = []
     writers = []
     delays = []
@@ -216,19 +197,14 @@ def test_atomic_save_retries_publication_without_serializing_again(
         assert torch.load(source, weights_only=True) == {"step": 2}
         attempts.append(source)
         if len(attempts) <= 3:
-            if overwrite:
-                assert torch.load(path, weights_only=True) == {"step": 1}
-            else:
-                assert not path.exists()
+            assert torch.load(path, weights_only=True) == {"step": 1}
             raise locked_file_error(code)
         return publish(source, destination)
 
     monkeypatch.setattr(torch, "save", capture_save)
     monkeypatch.setattr(storage.time, "sleep", delays.append)
-    monkeypatch.setattr(
-        Path if overwrite else os, "replace" if overwrite else "link", busy_publish
-    )
-    assert atomic_torch_save({"step": 2}, path, overwrite=overwrite) == path
+    monkeypatch.setattr(Path, "replace", busy_publish)
+    assert atomic_torch_save({"step": 2}, path) == path
     assert len(writers) == 1
     assert len(set(attempts)) == 1
     assert delays == [0.1, 0.2, 0.4]
@@ -236,13 +212,9 @@ def test_atomic_save_retries_publication_without_serializing_again(
     assert list(tmp_path.iterdir()) == [path]
 
 
-@pytest.mark.parametrize("overwrite", [True, False])
-def test_persistent_lock_preserves_complete_checkpoint(
-    tmp_path, monkeypatch, overwrite
-):
+def test_persistent_lock_preserves_complete_file(tmp_path, monkeypatch):
     path = tmp_path / "last.pt"
-    if overwrite:
-        atomic_torch_save({"step": 1}, path)
+    atomic_torch_save({"step": 1}, path)
     error = locked_file_error()
     delays = []
 
@@ -250,18 +222,13 @@ def test_persistent_lock_preserves_complete_checkpoint(
         raise error
 
     monkeypatch.setattr(storage.time, "sleep", delays.append)
-    monkeypatch.setattr(
-        Path if overwrite else os, "replace" if overwrite else "link", busy_publish
-    )
+    monkeypatch.setattr(Path, "replace", busy_publish)
     with pytest.raises(PermissionError) as caught:
-        atomic_torch_save({"step": 2}, path, overwrite=overwrite)
+        atomic_torch_save({"step": 2}, path)
     assert caught.value is error
     assert len(delays) == 10
     assert sum(delays) == pytest.approx(7.5)
-    if overwrite:
-        assert torch.load(path, weights_only=True) == {"step": 1}
-    else:
-        assert not path.exists()
+    assert torch.load(path, weights_only=True) == {"step": 1}
     (recovery,) = tmp_path.glob(".last.pt.*.tmp")
     assert torch.load(recovery, weights_only=True) == {"step": 2}
     assert str(recovery.resolve()) in error.__notes__[0]
@@ -288,14 +255,14 @@ def test_cleanup_lock_does_not_fail_published_save_or_mask_write_error(
         if save_fails:
             patch.setattr(torch, "save", failed_save)
             with pytest.raises(OSError) as caught:
-                atomic_torch_save({"step": 2}, path, overwrite=False)
+                atomic_torch_save({"step": 2}, path)
             assert caught.value is write_error
             assert not path.exists()
         else:
-            assert atomic_torch_save({"step": 2}, path, overwrite=False) == path
+            assert atomic_torch_save({"step": 2}, path) == path
             assert torch.load(path, weights_only=True) == {"step": 2}
     assert len(delays) == 10
-    assert "Could not remove temporary checkpoint" in caplog.text
+    assert "Could not remove temporary file" in caplog.text
 
 
 def test_non_lock_failure_is_not_retried(tmp_path, monkeypatch):

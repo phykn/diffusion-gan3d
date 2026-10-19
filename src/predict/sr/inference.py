@@ -36,9 +36,9 @@ class SuperResolutionAPI:
         self.model.load_state_dict(payload["model"], strict=True)
         self.model.eval().requires_grad_(False)
         resolution = get_sr_resolution(self.config)
-        self.crop_size = resolution.crop_pixels
-        self.lo_res_size = resolution.low_res_voxels
-        self.hi_res_size = resolution.high_res_voxels
+        self.crop_size = resolution.crop_size
+        self.lo_res_size = resolution.lo_res_size
+        self.hi_res_size = resolution.hi_res_size
         self.scale_factor = self.hi_res_size / self.lo_res_size
         self.num_phases = self.config["data"]["num_phases"]
         self.generator = Generator(

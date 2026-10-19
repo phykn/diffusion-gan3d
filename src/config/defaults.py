@@ -24,6 +24,8 @@ TRAIN_DEFAULTS = {
     "loss.group_statistics.ramp_steps": 5000,
     "optim.adam_betas": [0.5, 0.9],
     "train.num_workers": 0,
+    "augmentation.probability": 0.5,
+    "augmentation.real_only": False,
 }
 
 

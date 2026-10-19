@@ -50,7 +50,7 @@ def build_generator(
         denoiser,
         build_diffusion(cfg).to(device),
         device=device,
-        patch_size=get_resolution(data).low_res_voxels,
+        patch_size=get_resolution(data).lo_res_size,
         num_phases=data["num_phases"],
         latent_channels=model["generator"]["latent_channels"],
         use_amp=use_amp,
