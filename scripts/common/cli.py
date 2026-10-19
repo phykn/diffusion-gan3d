@@ -48,6 +48,40 @@ def add_device_argument(parser):
     )
 
 
+def add_generation_arguments(parser, *, anchors: bool = False, origin_default=0.0):
+    """Options shared by the LR checks 02-05; unset guidance uses config/gen.yaml."""
+    parser.add_argument(
+        "--weight",
+        type=Path,
+        required=True,
+        help="LR generator.pt or its run directory",
+    )
+    parser.add_argument("--domain", type=int, default=0, help="numeric domain ID")
+    parser.add_argument("--seed", type=int, default=0, help="reproducible seed")
+    parser.add_argument(
+        "--guidance",
+        type=float,
+        help="classifier-free guidance scale (default: config/gen.yaml)",
+    )
+    if anchors:
+        parser.add_argument(
+            "--anchor-strength",
+            type=parse_unit_interval,
+            help="normalized anchor prediction strength (default: config/gen.yaml)",
+        )
+    parser.add_argument(
+        "--out", type=Path, help="TIFF path; default: a new directory under checks/"
+    )
+    parser.add_argument(
+        "--napari", action="store_true", help="show the 3D phase volume in Napari"
+    )
+    parser.add_argument(
+        "--no-view", action="store_true", help="save results without a viewer"
+    )
+    add_device_argument(parser)
+    add_height_arguments(parser, origin_default)
+
+
 def add_height_arguments(parser, origin_default=0.0):
     text = "Output Z origin in source pixels."
     if origin_default is None:

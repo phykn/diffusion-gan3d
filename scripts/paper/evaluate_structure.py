@@ -37,6 +37,7 @@ from src.evaluate.fid import compute_fid
 from src.evaluate.kid import compute_kid
 from src.evaluate.label import phase_fraction
 from src.evaluate.tortuosity import tortuosity
+from src.phase import PORE_PHASE
 from src.predict.tiling.generator import TiledGenerator
 from src.storage import save_volume
 
@@ -47,7 +48,6 @@ REAL_CROP_COUNT = 64
 FID_FEATURE_DIMENSIONS = 192
 KID_SUBSET_SIZE = 50
 KID_SUBSETS = 100
-PORE_PHASE = 0
 TAUFACTOR_CONVERGENCE = 1e-3
 SCALE_BLOCKS = (3, 3, 3)
 SCALE_MARGIN = 0

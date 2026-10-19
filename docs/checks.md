@@ -28,7 +28,8 @@ python scripts/05_check_continuation.py --weight "run/my-lr-run" --anchor image.
 - `02–05` save `volume.tiff/png/json`; `06` saves LR/HR volumes, `comparison.png`, and `report.json`.
 - `07` counts particles tilted each way (`dz/dy`, `dz/dx`, `dy/dx`); generated volumes
   should match `--real` (use `--real-stride 2` for 128-pixel crops at 64 voxels). Training
-  logs the same balance as `structure/phase_N/tilt_balance_*`.
+  logs the same balance as `structure/phase_N/tilt_balance_*` (pore phase 0 excluded);
+  percolation is logged per transport axis as `structure/phase_N/percolation_z|y|x`.
 - In `02–05`, guidance, anchor strength (0–1 logit interpolation), and overlap default to
   [config/gen.yaml](../config/gen.yaml). In `06`, `--lr-guidance` uses that default,
   `--guidance` is the SR guidance (default 1.0), and overlap is scale-aligned. Anchor demos

@@ -16,6 +16,7 @@ from scripts.common.cli import (
     result_directory,
 )
 from src.evaluate.tilt import TILT_PAIRS, tilt_balance
+from src.phase import PORE_PHASE
 from src.storage import load_volume
 
 
@@ -42,7 +43,10 @@ def main() -> None:
     parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--guidance", type=float, help="Default: config/gen.yaml.")
     parser.add_argument(
-        "--phases", type=int, nargs="*", help="Default: every phase except 0."
+        "--phases",
+        type=int,
+        nargs="*",
+        help="Default: every phase except the pore phase 0.",
     )
     parser.add_argument("--threshold", type=float, default=0.05)
     parser.add_argument("--min-voxels", type=non_negative_int, default=8)
@@ -61,7 +65,8 @@ def main() -> None:
     ]
 
     phases = args.phases or sorted(
-        {int(p) for volume in generated + real for p in np.unique(volume)} - {0}
+        {int(p) for volume in generated + real for p in np.unique(volume)}
+        - {PORE_PHASE}
     )
     report = {"threshold": args.threshold, "phases": {}}
     for phase in phases:

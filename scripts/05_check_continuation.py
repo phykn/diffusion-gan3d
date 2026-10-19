@@ -11,11 +11,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
-    add_device_argument,
-    add_height_arguments,
+    add_generation_arguments,
     check_parser,
     height_options,
-    parse_unit_interval,
     prepare_check,
     save_preview,
 )
@@ -46,36 +44,17 @@ DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
 
 def main() -> None:
     parser = check_parser(__file__, "Inspect continuation from one boundary plane.")
-    parser.add_argument("--weight", type=Path, required=True)
     parser.add_argument(
         "--anchor",
         type=Path,
         help="optional real 2D image; default uses an unconditioned sample",
     )
-    parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--axis", type=int, choices=(0, 1, 2), default=0)
     parser.add_argument("--side", choices=("start", "end"), default="start")
     parser.add_argument(
-        "--anchor-strength",
-        type=parse_unit_interval,
-        help="normalized anchor prediction strength (default: config/gen.yaml)",
-    )
-    parser.add_argument("--guidance", type=float)
-    parser.add_argument(
-        "--out", type=Path, help="TIFF path; default: a new directory under checks/"
-    )
-    parser.add_argument(
         "--figure", type=Path, help="Slice-strip PNG; default: <out>_continuation.png."
     )
-    parser.add_argument(
-        "--napari",
-        action="store_true",
-        help="inspect the generated volume and condition input in Napari",
-    )
-    parser.add_argument("--no-view", action="store_true")
-    add_device_argument(parser)
-    add_height_arguments(parser, origin_default=None)
+    add_generation_arguments(parser, anchors=True, origin_default=None)
     args = parser.parse_args()
     args = prepare_check(args, __file__)
     if args.figure is None:

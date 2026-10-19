@@ -22,6 +22,16 @@ from src.prepare.resize import resize_phases, scaled_size
 from src.random import seeded_rng
 
 
+def load_sr_export(path: str | Path) -> dict:
+    """Load an exported SR generator.pt and return it with its resolved config."""
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if payload.get("format") != "diffusion-gan3d.sr":
+        raise ValueError(
+            "use exported SR weights (generator.pt), not a training or stage-1 checkpoint."
+        )
+    return {**payload, "config": normalize_train_config(payload["config"], "sr")}
+
+
 class SuperResolutionAPI:
     """Refine an LR label/fraction volume into HR voxels using separate SR weights."""
 
@@ -30,12 +40,8 @@ class SuperResolutionAPI:
     ) -> None:
         self.device = check_device(default_device() if device is None else device)
         self.weights = resolve_weights(weights)
-        payload = torch.load(self.weights, map_location="cpu", weights_only=True)
-        if payload.get("format") != "diffusion-gan3d.sr":
-            raise ValueError(
-                "use exported SR weights (generator.pt), not a training or stage-1 checkpoint."
-            )
-        self.config = normalize_train_config(payload["config"], "sr")
+        payload = load_sr_export(self.weights)
+        self.config = payload["config"]
         self.model = build_sr_model(self.config).to(self.device)
         self.model.load_state_dict(payload["model"], strict=True)
         self.model.eval().requires_grad_(False)

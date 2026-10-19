@@ -1,8 +1,7 @@
 import torch
 
 from src.evaluate.tortuosity import tortuosity
-
-PORE_PHASE = 0
+from src.phase import PORE_PHASE
 
 
 def pore_tortuosity(volume: torch.Tensor, device: torch.device) -> float | None:

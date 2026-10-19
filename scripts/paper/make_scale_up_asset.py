@@ -33,13 +33,14 @@ from src.anchor import PlaneAnchor
 from src.build.predict import load_generator, resolve_weights
 from src.config.generation import load_generation_settings
 from src.predict.tiling.generator import TiledGenerator
+from src.predict.volume_condition import resolve_offset
 
 BLOCKS = (3, 3, 3)
 SCALE_MARGIN = 0
 
 
 @dataclass(frozen=True)
-class ScaleAssessment:
+class AssetAssessment:
     start: tuple[int, int, int]
     shell: int
     center_plane: torch.Tensor
@@ -208,11 +209,11 @@ def assess_scale(
     anchor: torch.Tensor,
     anchor_index: int,
     shell: int,
-) -> ScaleAssessment:
+) -> AssetAssessment:
     patch_size = base.shape[0]
     if base.shape != (patch_size,) * 3 or anchor.shape != (patch_size,) * 2:
         raise ValueError("base and anchor must use the same cubic patch size.")
-    start = tuple((size - patch_size) // 2 for size in volume.shape)
+    start = resolve_offset(None, volume.shape, base.shape)
     global_index = start[AXIS] + anchor_index
     center_plane = volume.select(AXIS, global_index)
     embedded = center_plane[
@@ -225,7 +226,7 @@ def assess_scale(
         start[1] : start[1] + patch_size,
         start[2] : start[2] + patch_size,
     ]
-    return ScaleAssessment(
+    return AssetAssessment(
         start=start,
         shell=shell,
         center_plane=center_plane,
@@ -240,7 +241,7 @@ def assess_scale(
     )
 
 
-def print_assessment(assessment: ScaleAssessment) -> None:
+def print_assessment(assessment: AssetAssessment) -> None:
     print(
         f"Anchor  : {assessment.anchor_matches} / {assessment.anchor_total} "
         f"({assessment.anchor_matches / assessment.anchor_total:.4%})"
@@ -260,7 +261,7 @@ def print_assessment(assessment: ScaleAssessment) -> None:
 def render_result(
     anchor: torch.Tensor,
     volume: torch.Tensor,
-    assessment: ScaleAssessment,
+    assessment: AssetAssessment,
     output: Path,
 ) -> None:
     center_plane = assessment.center_plane

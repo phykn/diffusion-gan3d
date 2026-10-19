@@ -14,12 +14,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
-    add_device_argument,
-    add_height_arguments,
+    add_generation_arguments,
     check_parser,
     height_options,
     non_negative_int,
-    parse_unit_interval,
     positive_int,
     prepare_check,
     save_preview,
@@ -39,6 +37,7 @@ from src.evaluate.label import phase_fractions
 from src.evaluate.seam import SeamQuality, measure_seams
 from src.predict.tiling.generator import TiledGenerator
 from src.predict.tiling.layout import TilePlan
+from src.predict.volume_condition import resolve_offset
 from src.random import seeded_rng
 from src.storage import load_volume, save_volume
 
@@ -68,18 +67,6 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
         __file__, "Inspect LR tiled generation; defaults to 2 x 2 x 2 blocks."
     )
     parser.add_argument(
-        "--weight",
-        type=Path,
-        required=True,
-        help="LR generator.pt or its run directory",
-    )
-    parser.add_argument(
-        "--domain",
-        type=int,
-        default=0,
-        help="numeric domain ID (default: 0)",
-    )
-    parser.add_argument(
         "--gt",
         type=Path,
         help="ground-truth TIFF volume used to build anchors",
@@ -107,34 +94,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
         type=int,
         help="generate a base with this many anchor planes",
     )
-    parser.add_argument(
-        "--anchor-strength",
-        type=parse_unit_interval,
-        help="normalized base anchor strength (default: config/gen.yaml)",
-    )
-    parser.add_argument(
-        "--guidance",
-        type=float,
-        help="classifier-free guidance scale (default: config/gen.yaml)",
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        help="TIFF path; default: a new directory under checks/",
-    )
-    parser.add_argument(
-        "--napari",
-        action="store_true",
-        help="show the complete scaled phase volume in Napari",
-    )
-    parser.add_argument(
-        "--no-view",
-        action="store_true",
-        help="skip interactive visualization",
-    )
-    add_device_argument(parser)
-    parser.add_argument("--seed", type=int, default=0)
-    add_height_arguments(parser)
+    add_generation_arguments(parser, anchors=True)
     args = parser.parse_args()
     args = prepare_check(args, __file__)
     if args.count is not None and args.count < 0:
@@ -204,7 +164,7 @@ def assess_result(
     if base is None:
         return ScaleAssessment(quality, vfs, None, None, None, None)
 
-    start = tuple((size - patch_size) // 2 for size in volume.shape)
+    start = resolve_offset(None, volume.shape, base.shape)
     region = tuple(slice(index, index + patch_size) for index in start)
     center = volume[region]
     base_match = float((center == base).to(torch.float32).mean())
@@ -444,7 +404,7 @@ def show_unanchored_base_result(
     panels[0, 2].set_title("3. Scaled vs base")
     panels[0, 2].axis("off")
 
-    start = tuple((size - base.shape[axis]) // 2 for axis, size in enumerate(vol.shape))
+    start = resolve_offset(None, vol.shape, base.shape)
     mid = tuple(size // 2 for size in vol.shape)
     views = (
         vol[mid[0], :, :],
@@ -496,9 +456,7 @@ def show_base_result(
     target_plane = target.movedim(axis, 0)[idx]
     base_plane = base.movedim(axis, 0)[idx]
     center_plane = center.movedim(axis, 0)[idx]
-    start = tuple(
-        (size - base.shape[value]) // 2 for value, size in enumerate(vol.shape)
-    )
+    start = resolve_offset(None, vol.shape, base.shape)
     full_plane = vol.movedim(axis, 0)[start[axis] + idx]
     diff_cmap = ListedColormap(("#f7f7f7", "#e63946"))
     fig, panels = plt.subplots(3, 3, figsize=(11, 10))

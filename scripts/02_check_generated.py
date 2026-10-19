@@ -8,8 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
-    add_device_argument,
-    add_height_arguments,
+    add_generation_arguments,
     check_parser,
     height_options,
     prepare_check,
@@ -27,35 +26,7 @@ from src.storage import save_volume
 
 def main() -> None:
     parser = check_parser(__file__, "Inspect an LR model with three orthogonal slices.")
-    parser.add_argument(
-        "--weight",
-        type=Path,
-        required=True,
-        help="LR generator.pt or its run directory",
-    )
-    parser.add_argument(
-        "--domain",
-        type=int,
-        default=0,
-        help="numeric domain ID (default: 0)",
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        help="TIFF path; default: a new directory under checks/",
-    )
-    parser.add_argument(
-        "--napari",
-        action="store_true",
-        help="show the complete 3D phase volume in Napari",
-    )
-    add_device_argument(parser)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument(
-        "--no-view", action="store_true", help="Save without opening a viewer."
-    )
-    parser.add_argument("--guidance", type=float, help="Default: config/gen.yaml.")
-    add_height_arguments(parser)
+    add_generation_arguments(parser)
     parser.add_argument(
         "--vf-profile",
         type=Path,

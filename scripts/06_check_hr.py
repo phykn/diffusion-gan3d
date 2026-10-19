@@ -20,10 +20,10 @@ from scripts.common.cli import (
 from src.build.predict import resolve_weights
 from src.config.data import validate_sr_source
 from src.config.files import load_yaml
-from src.config.train import normalize_train_config
+from src.device import check_device
 from src.evaluate.label import phase_fractions
 from src.predict.inference import LowResolutionAPI
-from src.predict.sr.inference import SuperResolutionAPI
+from src.predict.sr.inference import SuperResolutionAPI, load_sr_export
 from src.prepare.resize import downsample, phase_channels
 from src.storage import load_probabilities, load_volume, save_probabilities, save_volume
 from src.train.run.source import load_frozen_source
@@ -136,12 +136,9 @@ def main(argv=None):
         "--no-view", action="store_true", help="Save results without opening a viewer."
     )
     args = parser.parse_args(argv)
+    device = check_device(args.device)
     weight = resolve_weights(args.weight or latest_sr())
-    payload = torch.load(weight, map_location="cpu", weights_only=True)
-    if payload.get("format") != "diffusion-gan3d.sr":
-        raise ValueError("--weight must be an exported SR generator.pt.")
-    cfg = normalize_train_config(payload["config"], "sr")
-    del payload
+    cfg = load_sr_export(weight)["config"]
     lr_weight = None
     common = dict(
         domain=args.domain,
@@ -170,15 +167,15 @@ def main(argv=None):
         if not args.lr_weight:
             load_frozen_source({**cfg["source"], "weights": str(lr_weight)})
         print(f"LR weights: {lr_weight}\nGenerating LR...", flush=True)
-        lr = LowResolutionAPI(lr_weight, args.device)
+        lr = LowResolutionAPI(lr_weight, device)
         validate_sr_source(cfg["data"], lr.data)
         low = lr.generate_probs(guidance=args.lr_guidance, **common)
         del lr
         gc.collect()
-        if args.device == "cuda":
+        if device.type == "cuda":
             torch.cuda.empty_cache()
     print(f"SR weights: {weight}\nRefining LR {tuple(low.shape[-3:])}...", flush=True)
-    sr = SuperResolutionAPI(weight, args.device)
+    sr = SuperResolutionAPI(weight, device)
     tile_size = args.tile_size
     if tile_size is None and sr.scale_factor.is_integer():
         scale = int(sr.scale_factor)

@@ -18,3 +18,24 @@ def prepare_images(images, device: torch.device | str | None = None) -> torch.Te
     if values.shape[1] == 1:
         values = values.repeat(1, 3, 1, 1)
     return values.to(device) if device is not None else values
+
+
+def metric_device(device: torch.device | str) -> torch.device:
+    """Inception metrics accumulate float64 statistics, which MPS cannot hold."""
+    device = torch.device(device)
+    return torch.device("cpu") if device.type == "mps" else device
+
+
+def check_batch_size(batch_size: int) -> None:
+    # Checked before the Inception model is built, which can be slow to load.
+    if type(batch_size) is not int or batch_size < 1:
+        raise ValueError("batch_size must be a positive integer.")
+
+
+def update_image_metric(metric, real, generated, device, batch_size: int) -> None:
+    for images, is_real in ((real, True), (generated, False)):
+        for start in range(0, len(images), batch_size):
+            metric.update(
+                prepare_images(images[start : start + batch_size], device),
+                real=is_real,
+            )

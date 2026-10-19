@@ -5,7 +5,8 @@ import torch
 
 from src.evaluate.connectivity import spanning_fractions
 from src.evaluate.tilt import tilt_balance
-from src.plane import PLANES
+from src.phase import PORE_PHASE
+from src.plane import AXIS_NAMES, PLANES
 
 
 def two_point(probs, max_lag=16):
@@ -61,13 +62,16 @@ def structure_metrics(probs, real, groups):
             span.append(fractions)
             lower.append(bounds)
         percolation[phase] = np.mean(span, axis=0)
-        for axis in range(3):
-            metrics[f"structure/phase_{phase}/percolation_{PLANES[axis]}"] = (
-                percolation[phase, axis]
+        # Percolation is transport along an axis, named z/y/x.
+        for axis, name in enumerate(AXIS_NAMES):
+            metrics[f"structure/phase_{phase}/percolation_{name}"] = percolation[
+                phase, axis
+            ]
+            metrics[f"structure/phase_{phase}/percolation_lower_bound_{name}"] = float(
+                np.mean(lower, axis=0)[axis]
             )
-            metrics[
-                f"structure/phase_{phase}/percolation_lower_bound_{PLANES[axis]}"
-            ] = float(np.mean(lower, axis=0)[axis])
+        if phase == PORE_PHASE:
+            continue
         # Per-particle tilt sign; a mirror-symmetric structure stays near zero.
         for name, stats in tilt_balance(labels, phase).items():
             metrics[f"structure/phase_{phase}/tilt_balance_{name}"] = stats["balance"]

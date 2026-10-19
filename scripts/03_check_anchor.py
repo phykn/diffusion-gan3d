@@ -10,11 +10,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
-    add_device_argument,
-    add_height_arguments,
+    add_generation_arguments,
     check_parser,
     height_options,
-    parse_unit_interval,
     prepare_check,
     save_preview,
 )
@@ -46,24 +44,6 @@ def main() -> None:
         __file__, "Inspect how generated planes constrain a second LR sample."
     )
     parser.add_argument(
-        "--weight",
-        type=Path,
-        required=True,
-        help="LR generator.pt or its run directory",
-    )
-    parser.add_argument(
-        "--domain",
-        type=int,
-        default=0,
-        help="numeric domain ID (default: 0)",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="reproducible diagnostic seed (default: 0)",
-    )
-    parser.add_argument(
         "--axis",
         type=int,
         choices=(0, 1, 2),
@@ -76,33 +56,7 @@ def main() -> None:
         default=3,
         help="number of evenly distributed anchor planes to use (default: 3)",
     )
-    parser.add_argument(
-        "--anchor-strength",
-        type=parse_unit_interval,
-        help="normalized anchor prediction strength (default: config/gen.yaml)",
-    )
-    parser.add_argument(
-        "--guidance",
-        type=float,
-        help="classifier-free guidance scale (default: config/gen.yaml)",
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        help="TIFF path; default: a new directory under checks/",
-    )
-    parser.add_argument(
-        "--napari",
-        action="store_true",
-        help="show the complete generated phase volume in Napari",
-    )
-    parser.add_argument(
-        "--no-view",
-        action="store_true",
-        help="skip interactive visualization",
-    )
-    add_device_argument(parser)
-    add_height_arguments(parser)
+    add_generation_arguments(parser, anchors=True)
     args = parser.parse_args()
     args = prepare_check(args, __file__)
     if args.count < 0:
