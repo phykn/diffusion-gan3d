@@ -23,7 +23,7 @@ python scripts/05_check_continuation.py --weight "run/my-lr-run" --anchor image.
   the script prints the actual tile grid. `--axis 0/1/2` selects `xy/xz/yz`.
 - `--device`, `--seed`, `--domain`, and `--napari` work in `02–06`; `--help` lists the rest.
 - `--height-origin` and `--height-extent` are in source pixels along the xz/yz row direction.
-- `02 --vf-profile config/data/simul_anode_profile.yaml --guidance 1.5` fixes the depth
+- `02 --vf-profile config/profile/simul_anode.yaml --guidance 1.5` fixes the depth
   fractions; height alone flattens a strong gradient.
 - `02–05` save `volume.tiff/png/json`; `06` saves LR/HR volumes, `comparison.png`, and `report.json`.
 - `07` counts particles tilted each way (`dz/dy`, `dz/dx`, `dy/dx`); generated volumes

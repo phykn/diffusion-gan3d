@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 
+from src.config.data import get_domains
 from src.plane import PLANES
 
 
@@ -154,12 +155,6 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                 check(value, allowed[key], name)
 
     check(cfg, schema)
-    domains = cfg.get("data", {}).get("domains", {})
-    if not isinstance(domains, Mapping):
-        raise TypeError("data.domains must be a mapping.")
-    for planes in domains.values():
-        if not isinstance(planes, Mapping):
-            raise TypeError("data.domains must map domains to plane folders.")
-        if any(plane not in PLANES for plane in planes):
-            raise ValueError("data.domains must use plane names xy, xz or yz.")
+    if "domains" in cfg.get("data", {}):
+        get_domains(cfg["data"])
     return cfg

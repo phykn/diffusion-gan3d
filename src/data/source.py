@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -22,12 +21,7 @@ def collect_image_groups(data: dict) -> ImageGroups:
     for domain, folders in get_domains(data).items():
         planes = {}
         for axis in sorted(folders):
-            values = folders[axis]
-            if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-                raise TypeError(f"axis {axis} folders must be a sequence of paths.")
-            if not values:
-                raise ValueError(f"axis {axis} folders must not be empty.")
-            paths = tuple(Path(value) for value in values)
+            paths = tuple(Path(value) for value in folders[axis])
             if len({path.resolve() for path in paths}) != len(paths):
                 raise ValueError(f"axis {axis} folders must not contain duplicates.")
 

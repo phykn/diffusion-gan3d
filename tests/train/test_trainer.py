@@ -1441,7 +1441,10 @@ def _config(
     return Config(
         data=Config(
             domains={
-                domain: {PLANES[axis]: paths for axis, paths in planes.items()}
+                domain: {
+                    PLANES[axis]: [paths] if isinstance(paths, str) else paths
+                    for axis, paths in planes.items()
+                }
                 for domain, planes in data.domains.items()
             },
             num_phases=data.num_phases,

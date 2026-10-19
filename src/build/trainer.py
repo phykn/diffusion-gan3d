@@ -19,7 +19,7 @@ from src.config.train import (
     validate_training_settings,
 )
 from src.data.provenance import fingerprint_data
-from src.data.source import infer_height_extents
+from src.data.source import fill_height_extents
 from src.storage import load_model
 from src.train.ema import build_ema
 from src.train.loss.denoiser import DenoiserLossSettings
@@ -64,9 +64,8 @@ def build_trainer(
     if sr != (bank is not None):
         raise ValueError("only SR training requires a coarse bank.")
     train = cfg["train"]
-    data = cfg["data"]
-    if cfg["conditioning"]["height_enabled"]:
-        data["height_extents"] = infer_height_extents(data)
+    # Loading or resuming already recorded extents; infer only for raw configs.
+    fill_height_extents(cfg)
     settings = _build_settings(cfg, device)
     critic_augment = build_augmentation(cfg)
     denoiser, critics, connectivity_critic = build_models(cfg)

@@ -5,8 +5,9 @@ import pytest
 import torch
 from PIL import Image
 
+from src.config.data import resolve_split
 from src.data.dataset import RealDataset
-from src.data.split import resolve_split, training_origin
+from src.data.split import training_origin
 
 
 def test_every_training_crop_avoids_validation_and_no_valid_origin_is_lost():

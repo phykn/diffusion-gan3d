@@ -1,42 +1,4 @@
-from pathlib import Path
-
 import numpy as np
-
-
-def resolve_split(settings, root):
-    files = settings.get("validation_files", [])
-    regions = settings.get("validation_regions", {})
-    if not isinstance(files, list) or not isinstance(regions, dict):
-        raise ValueError(
-            "split requires validation_files list and validation_regions mapping."
-        )
-
-    def resolve_image_path(value):
-        if not isinstance(value, str) or not value:
-            raise ValueError("split image paths must be non-empty strings.")
-        return str((Path(root) / value).resolve())
-
-    files = [resolve_image_path(value) for value in files]
-    if len(set(files)) != len(files):
-        raise ValueError("validation_files must not contain duplicates.")
-    resolved = {}
-    for source, region in regions.items():
-        source = resolve_image_path(source)
-        if source in resolved:
-            raise ValueError(
-                "validation_regions must not contain duplicate image paths."
-            )
-        if source in files or not isinstance(region, list) or len(region) != 4:
-            raise ValueError(
-                "a holdout must be a file or one [top,left,height,width] region."
-            )
-        if any(
-            type(value) is not int or value < (0 if i < 2 else 1)
-            for i, value in enumerate(region)
-        ):
-            raise ValueError("invalid validation region coordinates.")
-        resolved[source] = region
-    return {"validation_files": files, "validation_regions": resolved}
 
 
 def training_origin(shape, crop, excluded):

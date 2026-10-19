@@ -4,7 +4,7 @@ from src.build.trainer import build_trainer
 from src.config.data import get_domains
 from src.config.train import get_sr_resolution, validate_sr_config
 from src.data.bank import validate_bank, validate_bank_height
-from src.data.source import infer_height_extents
+from src.data.source import fill_height_extents
 from src.train.trainer import Trainer
 
 
@@ -17,7 +17,7 @@ def build_sr_trainer(
     resolution = get_sr_resolution(cfg)
     bank = validate_bank(bank, domains, resolution.lo_res_size, data["num_phases"])
     if cfg["conditioning"]["height_enabled"]:
-        data["height_extents"] = infer_height_extents(data)
+        fill_height_extents(cfg)
         bank_extents = validate_bank_height(
             bank,
             bank_origins,

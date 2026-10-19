@@ -6,16 +6,15 @@ from pathlib import Path
 
 from src.config.data import (
     DataResolution,
-    get_domains,
     get_plane_groups,
     get_resolution,
+    resolve_split,
 )
 from src.config.defaults import INACTIVE_DEFAULTS, STAGE_DEFAULTS, TRAIN_DEFAULTS
 from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml
 from src.config.schema import validate_config_keys
 from src.config.values import validate_training_values
 from src.data.source import fill_depth_profiles, fill_height_extents
-from src.data.split import resolve_split
 from src.plane import PLANE_DIRECTIONS, PLANES
 
 # Settings without defaults; partial configs may omit them until training.
@@ -65,10 +64,6 @@ def normalize_loaded_train_config(cfg: dict, stage: str = "low_res") -> dict:
         raise ValueError("SR config must set lr_bank.guidance explicitly.")
     cfg = normalize_train_config(cfg, stage)
     # Relative folders follow the project root, like every other config path.
-    for folders in get_domains(cfg["data"]).values():
-        for paths in folders.values():
-            if isinstance(paths, (str, bytes)) or not isinstance(paths, Sequence):
-                raise TypeError("plane folders must be a sequence of paths.")
     cfg["data"]["domains"] = {
         domain: {
             plane: [
