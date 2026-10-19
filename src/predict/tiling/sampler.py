@@ -96,11 +96,13 @@ class TileSampler:
         generator = self.generator
         for tile in tiles:
             shape = tuple(region.stop - region.start for region in tile.target)
+            # Draw on the model device so a seed does not depend on where
+            # storage="auto" placed the state.
             noise = torch.randn(
                 1,
                 generator.num_phases,
                 *shape,
-                device=state.values.device,
+                device=generator.device,
                 dtype=torch.float32,
             )
             state.write(tile.target, noise)
@@ -139,13 +141,13 @@ class TileSampler:
                 tile.source,
                 generator.device,
             )
-            conditions = {"vf": vf}
-            if tile_conditions is not None:
-                conditions.update(tile_conditions(tile, index))
             pred = (
                 None if base is None else base.prediction(tile.source, generator.device)
             )
             if pred is None:
+                conditions = {"vf": vf}
+                if tile_conditions is not None:
+                    conditions.update(tile_conditions(tile, index))
                 with torch.autocast(
                     device_type=generator.device.type,
                     dtype=torch.float16,
@@ -207,10 +209,14 @@ class TileSampler:
                     base.constrain(clean, global_region)
                 if output is None:
                     previous = current.read(global_region).float()
+                    noise = torch.randn(
+                        previous.shape, device=generator.device, dtype=torch.float32
+                    )
                     updated = generator.diffusion.sample_posterior(
                         previous,
                         clean,
                         transition,
+                        noise=noise.to(previous.device),
                     )
                     if base is not None:
                         base.constrain(

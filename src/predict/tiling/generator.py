@@ -189,7 +189,8 @@ class TiledGenerator:
             self.generator,
         )
         tiles = make_tiles(plan)
-        tile_anchors = self.prepare_anchors(anchors, tiles, plan, anchor_strength)
+        anchor_strength = self.generator.validate_anchor_strength(anchor_strength)
+        tile_anchors = self.prepare_anchors(anchors, tiles, plan)
         vf = self.generator.prepare_vf(vf)
         height_domain = domain
         domain = self.generator.prepare_domain(domain)
@@ -312,8 +313,7 @@ class TiledGenerator:
             raise ValueError("profile conflicts with fixed anchors or preserved base.")
         return spec
 
-    def prepare_anchors(self, anchors, tiles, plan, strength):
-        strength = self.generator.validate_anchor_strength(strength)
+    def prepare_anchors(self, anchors, tiles, plan):
         shape = tuple(size - 2 * plan.margin for size in plan.shape)
         placed = []
         for anchor in anchors:

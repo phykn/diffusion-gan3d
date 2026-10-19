@@ -43,7 +43,7 @@ def resolve_offset(offset, shape, base_shape):
     return tuple(result)
 
 
-def phase_fractions(volume, num_phases):
+def fraction_channels(volume, num_phases):
     volume_shape(volume)
     if volume.ndim == 3:
         return phase_channels(volume.cpu().unsqueeze(0), num_phases)
@@ -134,7 +134,7 @@ def prepare_base(volume, num_phases, shape, margin, offset, shell, preserve):
         return None
     base_shape = volume_shape(volume)
     position = resolve_offset(offset, shape, base_shape)
-    clean = phase_fractions(volume, num_phases).mul_(2).sub_(1)
+    clean = fraction_channels(volume, num_phases).mul_(2).sub_(1)
     region = tuple(
         slice(margin + p, margin + p + n) for p, n in zip(position, base_shape)
     )

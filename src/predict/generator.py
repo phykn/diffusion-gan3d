@@ -9,7 +9,7 @@ from src.device import wide_dtype
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.phase import validate_num_phases
-from src.predict.convert import owned_clean_to_probs_
+from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 from src.predict.memory import estimate_memory, select_storage
 from src.prepare.height import height_field, resolve_extent
 from src.prepare.profile import sample_profile
@@ -114,52 +114,15 @@ class Generator:
         partial_anchor = anchor_mask is not None and 0.0 < anchor_strength < 1.0
         if guidance == 1.0 and not partial_anchor:
             return self.model(current, time, latent, **conditions)
-        logits = self.compute_logits(
-            current,
-            time,
-            latent,
-            guidance=guidance,
-            **({"anchor_strength": anchor_strength} if partial_anchor else {}),
-            **conditions,
-        )
-        return Denoiser3D.decode(logits).to(current.dtype)
-
-    def compute_logits(
-        self,
-        current: torch.Tensor,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        domain: torch.Tensor,
-        guidance: float = 1.0,
-        vf: torch.Tensor | None = None,
-        anchor_image: torch.Tensor | None = None,
-        anchor_mask: torch.Tensor | None = None,
-        height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
-        coarse: torch.Tensor | None = None,
-        corruption_level: torch.Tensor | None = None,
-        anchor_strength: float = 1.0,
-    ) -> torch.Tensor:
-        conditions = self.prepare_conditions(
-            domain,
-            vf,
-            anchor_image,
-            anchor_mask,
-            height,
-            profile,
-            coarse,
-            corruption_level,
-        )
-        if guidance == 1.0 and anchor_strength == 1.0:
-            return self.model.compute_logits(current, time, latent, **conditions)
-        return self.model.apply_guidance_logits(
+        logits = self.model.apply_guidance_logits(
             current,
             time,
             latent,
             guidance,
-            **({"anchor_strength": anchor_strength} if anchor_strength != 1.0 else {}),
+            **({"anchor_strength": anchor_strength} if partial_anchor else {}),
             **conditions,
         )
+        return Denoiser3D.decode(logits).to(current.dtype)
 
     @staticmethod
     def prepare_conditions(
@@ -547,4 +510,5 @@ class Generator:
             vf_profile=vf_profile,
             probabilities=False,
         )
-        return clean.argmax(dim=1).squeeze(0).to(device="cpu", dtype=torch.uint8)
+        # Chunked argmax avoids a full int64 label volume on the model device.
+        return labels_from_channels(clean.squeeze(0))

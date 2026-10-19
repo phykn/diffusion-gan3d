@@ -7,7 +7,7 @@ import torch
 from src.config.data import validate_sr_source
 from src.predict.memory import require_memory
 from src.predict.tiling.layout import parse_shape
-from src.predict.volume_condition import phase_fractions, resolve_offset, volume_shape
+from src.predict.volume_condition import fraction_channels, resolve_offset, volume_shape
 from src.prepare.resize import downsample
 
 
@@ -29,7 +29,7 @@ def coarsen_volume(high, scale, num_phases):
         target = tuple(slice(s, min(s + edge, n)) for s, n in zip(start, low_shape))
         source = tuple(slice(p.start * scale, p.stop * scale) for p in target)
         block = high[(..., *source)]
-        fractions = phase_fractions(block, num_phases)
+        fractions = fraction_channels(block, num_phases)
         low[(slice(None), *target)] = downsample(
             fractions, tuple(p.stop - p.start for p in target)
         )[0]

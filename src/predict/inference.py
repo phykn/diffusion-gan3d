@@ -5,7 +5,6 @@ import torch
 
 from src.anchor import PlaneAnchor
 from src.build.predict import build_generator, resolve_weights
-from src.config.data import get_resolution
 from src.config.files import find_saved_config
 from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
@@ -61,9 +60,7 @@ class LowResolutionAPI:
                 f"image must be a {self.crop_size} x {self.crop_size} original crop."
             )
         # Area resizing can round a full cell to 1 + eps; anchors require [0, 1].
-        return resize_crop(
-            image, get_resolution(self.data).low_res_voxels, self.num_phases
-        ).clamp_(0.0, 1.0)
+        return resize_crop(image, self.input_size, self.num_phases).clamp_(0.0, 1.0)
 
     def estimate_memory(
         self,

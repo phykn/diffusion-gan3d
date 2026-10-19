@@ -6,6 +6,7 @@ import tifffile
 import torch
 
 from src.config.generation import GenerationSettings
+from src.predict.tiling import layout
 from src.predict.tiling.layout import TilePlan
 
 
@@ -17,15 +18,7 @@ def weight_file(directory: Path) -> Path:
 
 
 def make_plan() -> TilePlan:
-    return TilePlan(
-        shape=(8, 8, 8),
-        tile_size=6,
-        overlap=1,
-        stride=4,
-        grid=(2, 2, 2),
-        tile_count=8,
-        seams=((4,), (4,), (4,)),
-    )
+    return layout.make_plan((8, 8, 8), tile_size=6, overlap=1)
 
 
 @pytest.mark.parametrize("count", (None, "0"))

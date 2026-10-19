@@ -15,23 +15,11 @@ class TilePlan:
     grid: tuple[int, int, int]
     tile_count: int
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
+    # Tile starts stay in generation space, also after output_plan reports
+    # the output shape and seams.
+    starts: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
     generation_shape: tuple[int, int, int] | None = None
     margin: int = 0
-    starts: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None
-
-    def __post_init__(self) -> None:
-        # Preserve direct construction while keeping starts in generation space,
-        # including when output_plan replaces shape/seams for reporting.
-        if self.starts is None:
-            shape = self.generation_shape or self.shape
-            object.__setattr__(
-                self,
-                "starts",
-                tuple(
-                    axis_starts(size, min(size, self.tile_size), self.stride)
-                    for size in shape
-                ),
-            )
 
     @property
     def base_shell(self) -> int:

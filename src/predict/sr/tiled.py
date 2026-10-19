@@ -36,21 +36,28 @@ def refine_tiled(
         base, api.num_phases, shape, margin, base_offset, 0, base is not None
     )
 
+    # A single block also supports fractional scale and arbitrary margin; its
+    # condition is the same at every step, so resize it once.
+    whole = (
+        None
+        if len(tiles) > 1
+        else F.pad(resize_phases(coarse, shape), (margin,) * 6, mode="replicate").to(
+            api.device
+        )
+    )
+    domain_id = int(domain.item())
+
     def conditions(tile, index):
         origin = tuple(part.start - margin for part in tile.source)
         expanded = tuple(part.stop - part.start for part in tile.source)
-        if len(tiles) > 1:
-            values = coarse_region(coarse, origin, expanded, int(api.scale_factor))
-        else:
-            # A single block also supports fractional scale and arbitrary margin.
-            values = F.pad(
-                resize_phases(coarse, shape), (margin,) * 6, mode="replicate"
+        if whole is None:
+            values = coarse_region(coarse, origin, expanded, int(api.scale_factor)).to(
+                api.device
             )
-        values = values.to(api.device)
+        else:
+            values = whole
         result = {"coarse": values, "corruption_level": values.new_zeros(1)}
-        height = api._height(
-            expanded, origin, int(domain.item()), height_origin, height_extent
-        )
+        height = api._height(expanded, origin, domain_id, height_origin, height_extent)
         if height is not None:
             result["height"] = height
         return result
