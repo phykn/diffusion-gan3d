@@ -51,53 +51,86 @@ class SuperResolutionAPI:
             self.config["train"]["mixed_precision"] and self.device.type == "cuda",
         )
 
-    def predict_probs(
+    def refine(
         self,
         low: torch.Tensor,
+        *,
         domain: int | None = None,
-        seed: int = 0,
+        seed: int | None = None,
+        guidance: float = 1.0,
         tile_size: int | None = None,
         overlap: int = 8,
-        height_origin: float = 0.0,
         margin: int | None = None,
-        guidance: float = 1.0,
-        *,
+        height_origin: float = 0.0,
+        height_extent: float | None = None,
         base: torch.Tensor | None = None,
         base_offset=None,
-        height_extent=None,
     ) -> torch.Tensor:
+        """Refine LR labels or phase fractions into HR uint8 labels."""
         return self._resolve(
             low,
-            domain,
-            seed,
-            tile_size,
-            overlap,
-            height_origin,
-            margin,
-            guidance,
-            output_kind="probabilities",
+            output_kind="labels",
+            domain=domain,
+            seed=seed,
+            guidance=guidance,
+            tile_size=tile_size,
+            overlap=overlap,
+            margin=margin,
+            height_origin=height_origin,
+            height_extent=height_extent,
             base=base,
             base_offset=base_offset,
+        )
+
+    def refine_probs(
+        self,
+        low: torch.Tensor,
+        *,
+        domain: int | None = None,
+        seed: int | None = None,
+        guidance: float = 1.0,
+        tile_size: int | None = None,
+        overlap: int = 8,
+        margin: int | None = None,
+        height_origin: float = 0.0,
+        height_extent: float | None = None,
+        base: torch.Tensor | None = None,
+        base_offset=None,
+    ) -> torch.Tensor:
+        """Refine LR labels or phase fractions into HR phase fractions."""
+        return self._resolve(
+            low,
+            output_kind="probabilities",
+            domain=domain,
+            seed=seed,
+            guidance=guidance,
+            tile_size=tile_size,
+            overlap=overlap,
+            margin=margin,
+            height_origin=height_origin,
             height_extent=height_extent,
+            base=base,
+            base_offset=base_offset,
         )
 
     @torch.inference_mode()
     def _resolve(
         self,
-        low,
-        domain,
-        seed,
-        tile_size,
-        overlap,
-        height_origin,
-        margin,
-        guidance,
+        low: torch.Tensor,
         *,
-        output_kind,
-        base=None,
+        output_kind: str,
+        domain: int | None = None,
+        seed: int | None = None,
+        guidance: float = 1.0,
+        tile_size: int | None = None,
+        overlap: int = 8,
+        margin: int | None = None,
+        height_origin: float = 0.0,
+        height_extent: float | None = None,
+        base: torch.Tensor | None = None,
         base_offset=None,
-        height_extent=None,
     ):
+        """Shared refine path; tile_size, overlap and margin are HR voxels."""
         if low.ndim not in (3, 4):
             raise ValueError(
                 "LR input must be D,H,W labels or K,D,H,W phase fractions."
@@ -289,33 +322,3 @@ class SuperResolutionAPI:
         clean = self._sample_clean(coarse, domain, height, guidance)
         probs = owned_clean_to_probs_(clean)
         return probs.squeeze(0).cpu()
-
-    def super_resolve(
-        self,
-        low: torch.Tensor,
-        domain: int | None = None,
-        seed: int = 0,
-        tile_size: int | None = None,
-        overlap: int = 8,
-        height_origin: float = 0.0,
-        margin: int | None = None,
-        guidance: float = 1.0,
-        *,
-        base: torch.Tensor | None = None,
-        base_offset=None,
-        height_extent=None,
-    ) -> torch.Tensor:
-        return self._resolve(
-            low,
-            domain,
-            seed,
-            tile_size,
-            overlap,
-            height_origin,
-            margin,
-            guidance,
-            output_kind="labels",
-            base=base,
-            base_offset=base_offset,
-            height_extent=height_extent,
-        )

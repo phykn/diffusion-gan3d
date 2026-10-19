@@ -18,6 +18,7 @@ class MemoryEstimate:
     buffer_bytes: int
     output_bytes: int
     base_bytes: int = 0
+    tiled: bool = True
 
     @property
     def tile_shape(self) -> tuple[int, int, int]:
@@ -48,6 +49,7 @@ def estimate_memory(
     if isinstance(margin, bool) or not isinstance(margin, int) or margin < 0:
         raise ValueError("margin must be a non-negative integer.")
     generation_shape = tuple(size + 2 * margin for size in shape)
+    tiled = tile_size is not None
     tile_size = max(generation_shape) if tile_size is None else tile_size
     if isinstance(tile_size, bool) or not isinstance(tile_size, int) or tile_size < 1:
         raise ValueError("tile_size must be a positive integer.")
@@ -83,6 +85,7 @@ def estimate_memory(
         base_bytes=(12 * num_phases + 24) * math.prod(parse_shape(base_shape))
         if base_shape is not None
         else 0,
+        tiled=tiled,
     )
 
 

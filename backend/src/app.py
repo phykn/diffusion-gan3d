@@ -160,11 +160,7 @@ def _generate_volume(
         raise ValueError("resolved output shape exceeds the server size limit")
     if estimate.tile_count > config.max_tiles:
         raise ValueError("resolved tile count exceeds the server tile limit")
-    inference.check_memory(
-        estimate,
-        storage=request.storage,
-        tiled=request.blocks is not None or request.shape is not None,
-    )
+    inference.check_memory(estimate, storage=request.storage)
     return inference.generate(
         anchors=tuple(anchor.to_anchor() for anchor in request.anchors),
         blocks=request.blocks,

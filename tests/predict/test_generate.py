@@ -1210,7 +1210,9 @@ def test_circular_slab_matches_full_weighted_fusion(shape, overlap):
 
 def test_tiled_probabilities_allow_explicit_cpu_storage():
     scaled = TiledGenerator(_generator(_ControlledModel(), Diffusion(1)))
-    probs = scaled.generate_probs((6, 5, 7), overlap=1, storage="cpu", progress=False)
+    probs = scaled.generate_probs(
+        shape=(6, 5, 7), overlap=1, storage="cpu", progress=False
+    )
     assert probs.device.type == "cpu"
     torch.testing.assert_close(probs.sum(dim=0), torch.ones(6, 5, 7))
 

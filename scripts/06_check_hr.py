@@ -191,7 +191,7 @@ def main(argv=None):
             if tile_size is None
             else min(8 // scale, (tile_size - 1) // (2 * scale)) * scale
         )
-    high = sr.super_resolve(
+    high = sr.refine(
         low,
         tile_size=tile_size,
         overlap=overlap,

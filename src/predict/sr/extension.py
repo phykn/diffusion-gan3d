@@ -48,7 +48,7 @@ def extend_hr(
     anchors=(),
     vf=None,
     domain=None,
-    seed=0,
+    seed=None,
     lr_overlap=None,
     tile_size=None,
     overlap=8,
@@ -107,7 +107,7 @@ def extend_hr(
         height_extent=height_extent,
         progress=progress,
     )
-    refine = sr.predict_probs if probabilities else sr.super_resolve
+    refine = sr.refine_probs if probabilities else sr.refine
     high = refine(
         expanded,
         domain=domain,

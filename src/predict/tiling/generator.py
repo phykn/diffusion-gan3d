@@ -50,92 +50,24 @@ class TiledGenerator:
             raise ValueError("shape must not be smaller than patch_size.")
         return make_plan(shape, tile_size, overlap)
 
-    @torch.no_grad()
-    def generate_probs(
-        self,
-        shape: int | Sequence[int],
-        overlap: int = 8,
-        base: torch.Tensor | None = None,
-        vf: Sequence[float] | None = None,
-        progress: bool = True,
-        guidance: float = 1.0,
-        domain: int | None = None,
-        margin: int | None = None,
-        base_offset: Sequence[int | None] | None = None,
-        anchors: Sequence[PlaneAnchor] = (),
-        anchor_strength: float = 1.0,
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
-        vf_profile: dict | None = None,
-        storage: str = "auto",
-        preserve_base: bool = False,
-    ) -> torch.Tensor:
+    def generate(self, *, blocks=None, shape=None, **options) -> torch.Tensor:
+        """Tiled uint8 labels for blocks or an LR shape (see _generate)."""
         return self._generate(
-            shape=shape,
-            overlap=overlap,
-            base=base,
-            vf=vf,
-            progress=progress,
-            guidance=guidance,
-            domain=domain,
-            margin=margin,
-            base_offset=base_offset,
-            anchors=anchors,
-            anchor_strength=anchor_strength,
-            height_origin=height_origin,
-            height_extent=height_extent,
-            vf_profile=vf_profile,
-            storage=storage,
-            preserve_base=preserve_base,
-            probabilities=True,
+            self._resolve_shape(blocks, shape, options), probabilities=False, **options
         )
 
-    @torch.no_grad()
-    def generate(
-        self,
-        blocks: int | Sequence[int] | None = None,
-        overlap: int = 8,
-        base: torch.Tensor | None = None,
-        vf: Sequence[float] | None = None,
-        storage: str = "auto",
-        progress: bool = True,
-        shape: int | Sequence[int] | None = None,
-        guidance: float = 1.0,
-        domain: int | None = None,
-        margin: int | None = None,
-        base_offset: Sequence[int | None] | None = None,
-        anchors: Sequence[PlaneAnchor] = (),
-        anchor_strength: float = 1.0,
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
-        vf_profile: dict | None = None,
-        preserve_base: bool = False,
-    ) -> torch.Tensor:
-        if blocks is not None:
-            if shape is not None:
-                raise ValueError("blocks and shape cannot be provided together.")
-            shape = self.shape_from_blocks(blocks, overlap)
-        elif shape is None:
-            raise TypeError("blocks or shape must be provided.")
+    def generate_probs(self, *, blocks=None, shape=None, **options) -> torch.Tensor:
+        """Tiled phase fractions for blocks or an LR shape (see _generate)."""
         return self._generate(
-            overlap=overlap,
-            base=base,
-            vf=vf,
-            storage=storage,
-            progress=progress,
-            shape=shape,
-            guidance=guidance,
-            domain=domain,
-            margin=margin,
-            base_offset=base_offset,
-            anchors=anchors,
-            anchor_strength=anchor_strength,
-            height_origin=height_origin,
-            height_extent=height_extent,
-            vf_profile=vf_profile,
-            preserve_base=preserve_base,
-            probabilities=False,
+            self._resolve_shape(blocks, shape, options), probabilities=True, **options
         )
+
+    def _resolve_shape(self, blocks, shape, options):
+        if (blocks is None) == (shape is None):
+            raise ValueError("provide exactly one of blocks or shape.")
+        if blocks is None:
+            return shape
+        return self.shape_from_blocks(blocks, options.get("overlap", 8))
 
     @torch.no_grad()
     def _generate(

@@ -236,7 +236,7 @@ def main():
     sr = SuperResolutionAPI(sr_run / "generator.pt", device=args.device)
     sr_checks = []
     for index, low in enumerate(low_volumes):
-        high = sr.super_resolve(low, seed=300 + index)
+        high = sr.refine(low, seed=300 + index)
         save_volume(high, root / f"sr_{index}.tiff")
         reconstructed = resize_labels(high, low.shape[0], phases)
         sr_checks.append(

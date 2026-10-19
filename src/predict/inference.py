@@ -93,9 +93,9 @@ class LowResolutionAPI:
             base_shape=base_shape,
         )
 
-    def check_memory(self, estimate, *, storage="auto", tiled=True):
+    def check_memory(self, estimate, *, storage="auto"):
         # A direct reverse chain holds its entire state on the model device.
-        if not tiled:
+        if not estimate.tiled:
             storage = "cuda" if self.device.type == "cuda" else "cpu"
         return select_storage(storage, estimate, self.generator)
 
@@ -121,51 +121,28 @@ class LowResolutionAPI:
         height_extent: float | None = None,
         vf_profile: dict | None = None,
     ) -> torch.Tensor:
-        anchors = _validate_anchors(anchors)
-        tiled = _validate_generation_options(
-            blocks, shape, size, base, base_offset, preserve_base, storage, overlap
+        """Generate uint8 labels; see _run for the options."""
+        return self._run(
+            anchors,
+            probabilities=False,
+            blocks=blocks,
+            shape=shape,
+            size=size,
+            base=base,
+            vf=vf,
+            domain=domain,
+            seed=seed,
+            guidance=guidance,
+            anchor_strength=anchor_strength,
+            overlap=overlap,
+            storage=storage,
+            progress=progress,
+            height_origin=height_origin,
+            base_offset=base_offset,
+            preserve_base=preserve_base,
+            height_extent=height_extent,
+            vf_profile=vf_profile,
         )
-
-        guidance = self.settings.guidance if guidance is None else guidance
-        anchor_strength = (
-            self.settings.anchor_strength
-            if anchor_strength is None
-            else anchor_strength
-        )
-        overlap = self.settings.overlap if overlap is None else overlap
-
-        with seeded_rng(seed, self.device):
-            if not tiled:
-                return self.generator.generate(
-                    anchors=anchors,
-                    vf=vf,
-                    size=size,
-                    anchor_strength=anchor_strength,
-                    guidance=guidance,
-                    domain=domain,
-                    height_origin=height_origin,
-                    height_extent=height_extent,
-                    vf_profile=vf_profile,
-                )
-
-            return self.scaled.generate(
-                blocks=blocks,
-                shape=shape,
-                overlap=overlap,
-                base=base,
-                base_offset=base_offset,
-                preserve_base=preserve_base,
-                anchors=anchors,
-                anchor_strength=anchor_strength,
-                vf=vf,
-                storage=storage,
-                progress=progress,
-                guidance=guidance,
-                domain=domain,
-                height_origin=height_origin,
-                height_extent=height_extent,
-                vf_profile=vf_profile,
-            )
 
     def generate_probs(
         self,
@@ -189,40 +166,91 @@ class LowResolutionAPI:
         height_extent: float | None = None,
         vf_profile: dict | None = None,
     ) -> torch.Tensor:
+        """Generate phase fractions (C,D,H,W); see _run for the options."""
+        return self._run(
+            anchors,
+            probabilities=True,
+            blocks=blocks,
+            shape=shape,
+            size=size,
+            base=base,
+            vf=vf,
+            domain=domain,
+            seed=seed,
+            guidance=guidance,
+            anchor_strength=anchor_strength,
+            overlap=overlap,
+            storage=storage,
+            progress=progress,
+            height_origin=height_origin,
+            base_offset=base_offset,
+            preserve_base=preserve_base,
+            height_extent=height_extent,
+            vf_profile=vf_profile,
+        )
+
+    def _run(
+        self,
+        anchors: Sequence[PlaneAnchor],
+        *,
+        probabilities: bool,
+        blocks: int | Sequence[int] | None = None,
+        shape: int | Sequence[int] | None = None,
+        size: int | None = None,
+        base: torch.Tensor | None = None,
+        vf: Sequence[float] | None = None,
+        domain: int | None = None,
+        seed: int | None = None,
+        guidance: float | None = None,
+        anchor_strength: float | None = None,
+        overlap: int | None = None,
+        storage: str = "auto",
+        progress: bool = False,
+        height_origin: float = 0.0,
+        base_offset=None,
+        preserve_base: bool = False,
+        height_extent: float | None = None,
+        vf_profile: dict | None = None,
+    ) -> torch.Tensor:
+        """blocks or shape tile the output; size, or neither, samples one block.
+
+        shape, size and overlap are LR voxels; height values are source pixels.
+        Unset guidance, anchor_strength and overlap come from config/gen.yaml.
+        """
+        anchors = _validate_anchors(anchors)
         tiled = _validate_generation_options(
             blocks, shape, size, base, base_offset, preserve_base, storage, overlap
         )
-
-        options = {} if size is None else {"size": size}
-        sampler = self.generator
+        common = dict(
+            anchors=anchors,
+            vf=vf,
+            domain=domain,
+            guidance=self.settings.guidance if guidance is None else guidance,
+            anchor_strength=self.settings.anchor_strength
+            if anchor_strength is None
+            else anchor_strength,
+            height_origin=height_origin,
+            height_extent=height_extent,
+            vf_profile=vf_profile,
+        )
+        sampler = self.scaled if tiled else self.generator
         if tiled:
-            overlap = self.settings.overlap if overlap is None else overlap
-            if blocks is not None:
-                shape = self.scaled.shape_from_blocks(blocks, overlap)
-            sampler = self.scaled
-            options = dict(
+            common.update(
+                blocks=blocks,
                 shape=shape,
-                overlap=overlap,
-                storage=storage,
-                progress=progress,
+                overlap=self.settings.overlap if overlap is None else overlap,
                 base=base,
                 base_offset=base_offset,
                 preserve_base=preserve_base,
+                storage=storage,
+                progress=progress,
             )
+        else:
+            common["size"] = size
         with seeded_rng(seed, self.device):
-            return sampler.generate_probs(
-                anchors=_validate_anchors(anchors),
-                vf=vf,
-                domain=domain,
-                guidance=self.settings.guidance if guidance is None else guidance,
-                anchor_strength=self.settings.anchor_strength
-                if anchor_strength is None
-                else anchor_strength,
-                height_origin=height_origin,
-                height_extent=height_extent,
-                vf_profile=vf_profile,
-                **options,
-            )
+            if probabilities:
+                return sampler.generate_probs(**common)
+            return sampler.generate(**common)
 
 
 def _validate_generation_options(

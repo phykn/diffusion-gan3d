@@ -180,7 +180,7 @@ def test_sr_preserves_offset_base_during_shared_sampling(tmp_path, scale, tiled)
     base = torch.arange(6**3).reshape(6, 6, 6).remainder(api.num_phases)
     before = base.clone()
     rng = torch.get_rng_state().clone()
-    actual = api.super_resolve(
+    actual = api.refine(
         low,
         seed=3,
         tile_size=16 if tiled else None,
@@ -429,7 +429,7 @@ def test_sr_training_restores_state_without_rng(tmp_path):
     path = tmp_path / "model.pt"
     export_sr(restored, path)
     api = SuperResolutionAPI(path, "cpu")
-    assert api.super_resolve(bank[0][0]).shape == (12, 12, 12)
+    assert api.refine(bank[0][0]).shape == (12, 12, 12)
 
 
 @pytest.mark.parametrize("scale", [1.5, 2, 4])
@@ -442,19 +442,19 @@ def test_predict_fractional_shape_seed_and_tiled_coverage(tmp_path, scale):
     low = torch.randint(3, (12, 14, 16))
     rng = torch.get_rng_state().clone()
     expected = tuple(int(n * scale) for n in low.shape)
-    full = api.predict_probs(low, seed=11)
+    full = api.refine_probs(low, seed=11)
     if scale == 1.5:
         with pytest.raises(ValueError, match="integer HR/LR scale"):
-            api.predict_probs(low, seed=11, tile_size=8, overlap=2)
-        tiled = api.predict_probs(low, seed=11, tile_size=24, overlap=2)
+            api.refine_probs(low, seed=11, tile_size=8, overlap=2)
+        tiled = api.refine_probs(low, seed=11, tile_size=24, overlap=2)
     else:
-        tiled = api.predict_probs(low, seed=11, tile_size=16, overlap=4)
+        tiled = api.refine_probs(low, seed=11, tile_size=16, overlap=4)
     assert full.shape == (3, *expected) and tiled.shape == full.shape
     assert torch.isfinite(tiled).all()
     torch.testing.assert_close(tiled.sum(0), torch.ones(expected))
     torch.testing.assert_close(
         tiled,
-        api.predict_probs(
+        api.refine_probs(
             low,
             seed=11,
             tile_size=24 if scale == 1.5 else 16,
@@ -464,7 +464,7 @@ def test_predict_fractional_shape_seed_and_tiled_coverage(tmp_path, scale):
         atol=0,
     )
     assert torch.equal(rng, torch.get_rng_state())
-    assert not torch.equal(full, api.predict_probs(low, seed=12))
+    assert not torch.equal(full, api.refine_probs(low, seed=12))
 
 
 def test_multidomain_and_invalid_inference_contract(tmp_path):
@@ -475,12 +475,12 @@ def test_multidomain_and_invalid_inference_contract(tmp_path):
     api = SuperResolutionAPI(path, "cpu")
     low = torch.zeros(8, 8, 8, dtype=torch.uint8)
     with pytest.raises(ValueError, match="domain is required"):
-        api.super_resolve(low)
-    assert api.super_resolve(low, domain=1).shape == (12, 12, 12)
+        api.refine(low)
+    assert api.refine(low, domain=1).shape == (12, 12, 12)
     with pytest.raises(ValueError, match="integer dtype"):
-        api.super_resolve(low.float(), domain=0)
+        api.refine(low.float(), domain=0)
     with pytest.raises(ValueError, match="integer HR/LR scale"):
-        api.super_resolve(low, domain=0, tile_size=5, overlap=1)
+        api.refine(low, domain=0, tile_size=5, overlap=1)
 
 
 @pytest.mark.parametrize("fractions", [False, True])
@@ -510,7 +510,7 @@ def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
     monkeypatch.setattr(sr_module, "resize_phases", fail)
     monkeypatch.setattr(api, "_predict", fail)
     with pytest.raises(MemoryError, match="SR RAM"):
-        api.predict_probs(low)
+        api.refine_probs(low)
 
 
 def test_sr_tiled_refinement_uses_bounded_shared_fusion(tmp_path, monkeypatch):
@@ -535,7 +535,7 @@ def test_sr_tiled_refinement_uses_bounded_shared_fusion(tmp_path, monkeypatch):
         "predict",
         lambda values, *args, **kwargs: torch.full_like(values, -1 / 3),
     )
-    result = api.predict_probs(low, tile_size=8, overlap=2, margin=2)
+    result = api.refine_probs(low, tile_size=8, overlap=2, margin=2)
     assert len(buffers) == 1 and buffers[0].pred_sum.shape == (1, 3, 12, 20, 20)
     torch.testing.assert_close(result, torch.full_like(result, 1 / 3))
 
@@ -552,7 +552,7 @@ def test_sr_labels_match_probabilities_and_use_correct_budget(
     api = SuperResolutionAPI(path, "cpu")
     low = torch.randint(3, (6, 6, 6))
     options = dict(seed=13, margin=2, tile_size=8 if tiled else None, overlap=2)
-    expected = api.predict_probs(low, **options).argmax(0).to(torch.uint8)
+    expected = api.refine_probs(low, **options).argmax(0).to(torch.uint8)
     original = sr_module.estimate_sr_memory
     modes = []
 
@@ -567,8 +567,8 @@ def test_sr_labels_match_probabilities_and_use_correct_budget(
             pytest.fail("single-block labels materialized CPU probabilities")
 
         monkeypatch.setattr(api, "_predict", fail)
-        monkeypatch.setattr(api, "predict_probs", fail)
-    actual = api.super_resolve(low, **options)
+        monkeypatch.setattr(api, "refine_probs", fail)
+    actual = api.refine(low, **options)
     assert modes == ["labels"]
     torch.testing.assert_close(actual, expected)
 
@@ -608,8 +608,8 @@ def test_sr_shared_sampling_keeps_final_precision_and_fractional_base(
         base=base,
         base_offset=(2, 4, 6),
     )
-    probs = api.predict_probs(low, **options)
-    labels = api.super_resolve(low, **options)
+    probs = api.refine_probs(low, **options)
+    labels = api.refine(low, **options)
     torch.testing.assert_close(
         probs, expected[:, None, None, None].expand_as(probs), rtol=0, atol=1e-7
     )
@@ -764,7 +764,7 @@ def test_tiled_coarse_and_height_share_global_coordinates_with_margin(tmp_path):
         return 2 * conditions["coarse"] - 1
 
     with patch.object(api.generator, "predict", side_effect=identity):
-        actual = api.predict_probs(
+        actual = api.refine_probs(
             low, tile_size=16, overlap=4, margin=2, height_origin=3
         )
     expected = torch.nn.functional.interpolate(
@@ -838,7 +838,7 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
     monkeypatch.setattr(api.generator, "predict", predict)
     monkeypatch.setattr(api.generator.diffusion, "sample", forbidden)
     low = torch.rand(3, 6, 4, 4).softmax(0)
-    output = api.predict_probs(low, tile_size=8, overlap=2, margin=2, guidance=guidance)
+    output = api.refine_probs(low, tile_size=8, overlap=2, margin=2, guidance=guidance)
     assert [call[0] for call in calls] == [2, 2, 1, 1, 0, 0]
     for first, second in zip(calls[::2], calls[1::2]):
         torch.testing.assert_close(
@@ -859,7 +859,7 @@ def test_tiled_sr_rejects_misaligned_hr_lattice(tmp_path, tile, overlap, margin)
     export_model(path, sr_config(tmp_path, scale=4))
     api = SuperResolutionAPI(path, "cpu")
     with pytest.raises(ValueError, match="multiples of the LR/HR scale"):
-        api.predict_probs(
+        api.refine_probs(
             torch.zeros(8, 8, 8, dtype=torch.uint8),
             tile_size=tile,
             overlap=overlap,
@@ -895,7 +895,7 @@ def test_sr_runs_full_reverse_chain_and_training_uses_matching_hr_slices(tmp_pat
     export_sr(trainer, path)
     api = SuperResolutionAPI(path, "cpu")
     with patch.object(api.model, "forward", wraps=api.model.forward) as forward:
-        api.predict_probs(bank[0][0], margin=0)
+        api.refine_probs(bank[0][0], margin=0)
     assert [int(call.args[1][0]) for call in forward.call_args_list] == [2, 1, 0]
     assert all(
         call.kwargs["corruption_level"].eq(0).all() for call in forward.call_args_list
@@ -949,14 +949,14 @@ def test_sr_cuda_amp_checkpointing_and_cfg_inference(tmp_path):
     export_sr(trainer, path)
     api = SuperResolutionAPI(path, "cuda")
     for guidance in (1.0, 1.7):
-        probs = api.predict_probs(
+        probs = api.refine_probs(
             trainer.conditions.bank[0][0], guidance=guidance, margin=0
         )
         assert torch.isfinite(probs).all()
         torch.testing.assert_close(
             probs.sum(0), torch.ones(16, 16, 16), atol=2e-6, rtol=0
         )
-    tiled = api.predict_probs(
+    tiled = api.refine_probs(
         trainer.conditions.bank[0][0], guidance=1.7, tile_size=12, overlap=2, margin=2
     )
     assert torch.isfinite(tiled).all()

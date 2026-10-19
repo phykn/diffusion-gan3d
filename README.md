@@ -76,7 +76,8 @@ and `POST /api/generate`; HTTP limits are in [backend/config.yaml](backend/confi
 
 [src/api.py](src/api.py) provides `LowResolutionAPI`, `PlaneAnchor`, and `SuperResolutionAPI`.
 `generate` returns labels and `generate_probs` phase fractions, for example
-`api.generate_probs(shape=(96, 64, 64), seed=1)`.
+`api.generate_probs(shape=(96, 64, 64), seed=1)`. SR's `refine` and `refine_probs` take an
+LR volume and the same keyword options; `seed=None` leaves the RNG unseeded.
 
 Generated volumes are plausible samples, not measurements of an unknown 3D specimen.
 

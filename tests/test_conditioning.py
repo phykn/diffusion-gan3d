@@ -518,7 +518,7 @@ def test_profile_tiles_use_global_coordinates_and_local_means(tmp_path):
     }
     with patch.object(generator, "predict", wraps=generator.predict) as predict:
         result = TiledGenerator(generator).generate_probs(
-            (12, 8, 8),
+            shape=(12, 8, 8),
             overlap=1,
             margin=0,
             height_origin=3,
@@ -612,9 +612,9 @@ def test_sr_bank_records_2d_profile_and_per_image_extent(tmp_path):
     export_sr(trainer, tmp_path / "sr.pt")
     api = SuperResolutionAPI(tmp_path / "sr.pt", "cpu")
     with pytest.raises(ValueError, match="height_extent is required"):
-        api.predict_probs(bank[0][0])
+        api.refine_probs(bank[0][0])
     with patch.object(api, "_height", wraps=api._height) as height:
-        output = api.predict_probs(
+        output = api.refine_probs(
             bank[0][0], height_origin=8, height_extent=32, tile_size=16, overlap=2
         )
     assert output.shape == (2, 16, 16, 16)
@@ -869,7 +869,7 @@ def test_height_origin_survives_loader_training_export_and_tiles(tmp_path):
     scaled = TiledGenerator(generator)
     with patch.object(generator, "predict", side_effect=record):
         result = scaled.generate_probs(
-            (12, 8, 8), overlap=1, margin=0, height_origin=3, progress=False
+            shape=(12, 8, 8), overlap=1, margin=0, height_origin=3, progress=False
         )
     assert result.shape == (2, 12, 8, 8)
     torch.testing.assert_close(heights[0][:, :, 4:], heights[1][:, :, :4])
@@ -950,7 +950,7 @@ def test_height_conditioned_sr_uses_fractional_bank_and_zero_level_at_inference(
     export_sr(trainer, tmp_path / "model.pt")
     api = SuperResolutionAPI(tmp_path / "model.pt", "cpu")
     with patch.object(api.model, "forward", wraps=api.model.forward) as forward:
-        result = api.predict_probs(bank[0][0], height_origin=2, margin=0)
+        result = api.refine_probs(bank[0][0], height_origin=2, margin=0)
     assert result.shape == (2, 16, 16, 16)
     assert forward.call_args.kwargs["corruption_level"].eq(0).all()
     assert forward.call_count == 2
