@@ -87,8 +87,7 @@ def build_trainer(
             path = root / f"critic_{plane}.pt"
             load_model(path, critic_model)
         load_model(root / "critic_c.pt", connectivity_critic)
-        if (root / "critic_s.pt").is_file():
-            load_model(root / "critic_s.pt", seam_critic)
+        load_model(root / "critic_s.pt", seam_critic)
     denoiser_optim, critic_optims, connectivity_optim, seam_optim = build_optimizers(
         denoiser, critics, connectivity_critic, seam_critic, cfg
     )

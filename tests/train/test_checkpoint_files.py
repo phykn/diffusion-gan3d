@@ -154,14 +154,6 @@ def test_latest_checkpoint_orders_steps_numerically(tmp_path):
     assert resolve_checkpoint(tmp_path).name == "step_100.pt"
 
 
-def test_legacy_suffix_checkpoints_remain_resumable(tmp_path):
-    for name in ("step_9_900.pt", "step_10_100.pt", "step_10_200.pt"):
-        complete_checkpoint(torch_save({}, tmp_path / name))
-    assert resolve_checkpoint(tmp_path).name == "step_10_200.pt"
-    complete_checkpoint(torch_save({}, tmp_path / "step_00000011.pt"))
-    assert resolve_checkpoint(tmp_path).name == "step_00000011.pt"
-
-
 def test_unmarked_checkpoint_is_rejected_as_a_file_and_directory_fallback(tmp_path):
     path = torch_save({"step": 1}, tmp_path / "checkpoints" / "last.pt")
     with pytest.raises(FileNotFoundError, match="No completed"):

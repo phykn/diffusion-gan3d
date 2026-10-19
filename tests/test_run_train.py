@@ -416,11 +416,11 @@ def test_lr_run_saves_the_supplied_yaml_and_cli_overrides_only(
     resumed = run_low_res_train(
         "cpu", resume=first / "checkpoints", run_dir=tmp_path / "resumed", steps=2
     )
-    expected["train"]["total_steps"] = 2
-    assert load_yaml(resumed / "train.yaml") == expected
     payload = torch.load(
         resumed / "checkpoints" / "step_00000002.pt", weights_only=True
     )
+    # A resume saves the resolved checkpoint settings.
+    assert load_yaml(resumed / "train.yaml") == payload["config"]
     assert payload["config"]["data"]["domains"] == {
         0: {plane: [str(folder.resolve())] for plane in PLANES}
     }

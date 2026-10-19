@@ -405,7 +405,7 @@ def test_tensorboard_records_seam_terms(tmp_path):
     assert (run_dir / "critic_s.pt").is_file()
 
 
-def test_weights_export_and_initial_weights_include_an_optional_seam_critic(tmp_path):
+def test_weights_export_and_initial_weights_include_the_seam_critic(tmp_path):
     cfg = small_config(tmp_path)
     trainer = build_trainer(cfg, torch.device("cpu"))
     with torch.no_grad():
@@ -418,9 +418,6 @@ def test_weights_export_and_initial_weights_include_an_optional_seam_critic(tmp_
     loaded = build_trainer(copy.deepcopy(cfg), torch.device("cpu"))
     for parameter in loaded.seam_critic.parameters():
         assert (parameter == 0.5).all()
-    (weights / "critic_s.pt").unlink()
-    fresh = build_trainer(copy.deepcopy(cfg), torch.device("cpu"))
-    assert not all((p == 0.5).all() for p in fresh.seam_critic.parameters())
 
 
 def test_checkpoint_restores_the_seam_critic(tmp_path):
@@ -444,28 +441,6 @@ def test_checkpoint_restores_the_seam_critic(tmp_path):
     )
 
 
-def test_checkpoint_from_before_the_seam_critic_starts_a_new_one(tmp_path):
-    cfg = small_config(tmp_path)
-    for key in ("anchor_seam_weight", "anchor_seam_rows"):
-        cfg["loss"].pop(key)
-    trainer = build_trainer(cfg, torch.device("cpu"))
-    path = tmp_path / "training.pt"
-    save_training(trainer, path)
-    payload = torch.load(path, weights_only=True)
-    payload.pop("seam")
-    payload.pop("seam_optim")
-    payload["updates"].pop("seam")
-    for key in ("anchor_seam_weight", "anchor_seam_rows"):
-        payload["config"]["loss"].pop(key)
-    torch.manual_seed(1)
-    restored = build_trainer(cfg, torch.device("cpu"))
-    initial = copy.deepcopy(restored.seam_critic.state_dict())
-    resume_training(restored, payload)
-    assert restored.updates["seam"] == 0
-    for name, value in restored.seam_critic.state_dict().items():
-        torch.testing.assert_close(value, initial[name], rtol=0, atol=0)
-
-
 @pytest.mark.parametrize("missing", ["seam", "seam_optim", "counter"])
 def test_resume_rejects_incomplete_seam_state(tmp_path, missing):
     cfg = small_config(tmp_path)
@@ -477,18 +452,6 @@ def test_resume_rejects_incomplete_seam_state(tmp_path, missing):
         payload["updates"].pop("seam")
     else:
         payload.pop(missing)
-    with pytest.raises(ValueError, match="Seam training state is incomplete"):
-        resume_training(build_trainer(cfg, torch.device("cpu")), payload)
-
-
-def test_active_seam_requires_saved_seam_state(tmp_path):
-    cfg = small_config(tmp_path)
-    trainer = build_trainer(cfg, torch.device("cpu"))
-    path = tmp_path / "training.pt"
-    save_training(trainer, path)
-    payload = torch.load(path, weights_only=True)
-    payload.pop("seam")
-    payload.pop("seam_optim")
-    payload["updates"].pop("seam")
-    with pytest.raises(ValueError, match="Seam training state is missing"):
+    message = "update counters" if missing == "counter" else "is missing"
+    with pytest.raises(ValueError, match=message):
         resume_training(build_trainer(cfg, torch.device("cpu")), payload)

@@ -35,32 +35,22 @@ def save_training(trainer, path: str | Path) -> None:
 
 
 def resume_training(trainer, payload: dict) -> None:
-    actual = normalize_train_config(trainer.cfg)
     _require_saved_config(
         normalize_train_config(payload["config"]),
-        actual,
+        normalize_train_config(trainer.cfg),
         "LR resume must use saved settings; only total_steps may change.",
     )
     if payload["data_fingerprint"] != trainer.data_fingerprint:
         raise ValueError("LR source images changed since the checkpoint.")
-    if (
-        not {"connectivity", "connectivity_optim"} <= payload.keys()
-        or "connectivity" not in payload["updates"]
-    ):
-        raise ValueError("Connectivity training state is incomplete.")
-    seam = {"seam", "seam_optim"} & payload.keys()
-    if not seam and "seam" not in payload["updates"]:
-        if actual["loss"]["anchor_seam_weight"] > 0.0:
-            raise ValueError("Seam training state is missing.")
-        payload = {**payload, "updates": {**payload["updates"], "seam": 0}}
-    elif len(seam) < 2 or "seam" not in payload["updates"]:
-        raise ValueError("Seam training state is incomplete.")
+    missing = {"connectivity", "connectivity_optim", "seam", "seam_optim"}
+    missing -= payload.keys()
+    if missing:
+        raise ValueError(f"LR training checkpoint is missing {sorted(missing)}.")
     _restore_state(trainer, payload)
     trainer.connectivity_critic.load_state_dict(payload["connectivity"])
     trainer.connectivity_optim.load_state_dict(payload["connectivity_optim"])
-    if seam:
-        trainer.seam_critic.load_state_dict(payload["seam"])
-        trainer.seam_optim.load_state_dict(payload["seam_optim"])
+    trainer.seam_critic.load_state_dict(payload["seam"])
+    trainer.seam_optim.load_state_dict(payload["seam_optim"])
     trainer.conditions.use_multi_anchor_next = payload["use_multi_anchor_next"]
     trainer.conditions.anchor_bank.entries = payload["anchor_bank"]
 

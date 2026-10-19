@@ -173,9 +173,10 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     assert Path(second["config"]["source"]["bank"]).parent == resumed / "lr_bank"
     assert Path(first["config"]["source"]["bank"]).is_file()
     assert Path(archived["config"]["source"]["bank"]).is_file()
+    # A resume saves the resolved checkpoint settings.
     assert load_yaml(resumed / "train.yaml") == {
-        **stored,
-        "train": {**stored["train"], "total_steps": 2},
+        **first["config"],
+        "train": {**first["config"]["train"], "total_steps": 2},
     }
     check_hr = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts/06_check_hr.py")

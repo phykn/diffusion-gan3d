@@ -186,7 +186,7 @@ def test_lr_resume_rejects_incomplete_connectivity_state(tmp_path, active, missi
         payload["updates"].pop("connectivity")
     restored = build_trainer(cfg, torch.device("cpu"))
     before = copy.deepcopy(restored.denoiser.state_dict())
-    with pytest.raises(ValueError, match="Connectivity training state is incomplete"):
+    with pytest.raises(ValueError, match="is missing|update counters"):
         resume_training(restored, payload)
     torch.testing.assert_close(restored.denoiser.state_dict(), before, rtol=0, atol=0)
 

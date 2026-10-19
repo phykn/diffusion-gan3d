@@ -1,7 +1,6 @@
 import copy
 from pathlib import Path
 
-from src.config.files import find_saved_config, load_yaml
 from src.config.train import normalize_train_config
 from src.train.checkpoint import resolve_checkpoint
 from src.train.relocate import relocate_checkpoint
@@ -26,16 +25,8 @@ def load_resume(
     checkpoint = resolve_checkpoint(resume)
     payload = relocate_checkpoint(load_training(checkpoint, stage), path_map)
     cfg = normalize_train_config(payload["config"], stage)
-    if path_map:
-        # Moved paths exist only in the relocated config; the old train.yaml
-        # would point inference and later SR runs at the previous location.
-        source = copy.deepcopy(payload["config"])
-    else:
-        try:
-            source = load_yaml(find_saved_config(checkpoint))
-        except FileNotFoundError:
-            source = copy.deepcopy(payload["config"])
-    return payload, cfg, source
+    # Save the resolved checkpoint config: it carries any relocated paths.
+    return payload, cfg, copy.deepcopy(payload["config"])
 
 
 def set_total_steps(cfg: dict, source: dict, steps: int | None) -> None:

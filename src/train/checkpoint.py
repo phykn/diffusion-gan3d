@@ -2,8 +2,7 @@ import os
 import re
 from pathlib import Path
 
-# Older runs used a numeric suffix; they remain available for resume.
-_NAME = re.compile(r"step_(\d+)(?:_(\d+))?\.pt")
+_NAME = re.compile(r"step_(\d+)\.pt")
 
 
 def complete_checkpoint(path: Path) -> None:
@@ -32,8 +31,7 @@ def resolve_checkpoint(value: str | Path) -> Path:
         for candidate in root.glob("step_*.pt"):
             match = _NAME.fullmatch(candidate.name)
             if match:
-                order = (int(match[1]), int(match[2] or 0))
-                candidates.append((order, candidate))
+                candidates.append((int(match[1]), candidate))
         for _, candidate in sorted(candidates, reverse=True):
             if _is_complete(candidate):
                 return candidate
