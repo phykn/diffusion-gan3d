@@ -16,7 +16,7 @@ class ServerConfig(BaseModel):
     max_size: PositiveInt
     max_voxels: PositiveInt
     max_blocks: PositiveInt
-    max_total_blocks: PositiveInt
+    max_tiles: PositiveInt
     max_anchors: PositiveInt
     max_request_bytes: PositiveInt
     max_inflight_downloads: PositiveInt

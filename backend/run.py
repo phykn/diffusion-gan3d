@@ -8,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.src.app import create_app
-from backend.src.config import DEFAULT_CONFIG, load_server_config
+from backend.src.config import DEFAULT_CONFIG, ServerConfig, load_server_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,12 +34,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    app = create_app(
-        args.weight,
-        device=args.device,
-        config=load_server_config(args.config),
-        max_inflight_downloads=args.max_inflight_downloads,
-    )
+    config = load_server_config(args.config)
+    if args.max_inflight_downloads is not None:
+        config = ServerConfig.model_validate(
+            {
+                **config.model_dump(),
+                "max_inflight_downloads": args.max_inflight_downloads,
+            }
+        )
+    app = create_app(args.weight, device=args.device, config=config)
     uvicorn.run(app, host=args.host, port=args.port)
 
 

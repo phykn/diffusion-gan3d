@@ -6,7 +6,7 @@ import tifffile
 import torch
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
-from src.evaluate.volume import measure_volume
+from src.evaluate.volume import pore_tortuosity
 
 CHUNK_BYTES = 64 * 1024
 
@@ -144,24 +144,12 @@ def volume_response(
     volume: torch.Tensor,
     format: str,
     device: torch.device,
-    include_metrics: bool = False,
+    tortuosity: bool = False,
 ) -> Response:
-    headers = {
-        "X-Volume-Shape": ",".join(str(value) for value in volume.shape),
-        "X-Volume-Dtype": "uint8",
-    }
-    if include_metrics:
-        metrics = measure_volume(volume, device=device)
-        headers.update(
-            {
-                "X-Porosity": f"{metrics.porosity:.8g}",
-                "X-Tortuosity": "unavailable"
-                if metrics.tortuosity is None
-                else f"{metrics.tortuosity:.8g}",
-                "X-Pore-Phase": "0",
-                "X-Tortuosity-Axis": "0",
-            }
-        )
+    headers = {"X-Volume-Shape": ",".join(str(value) for value in volume.shape)}
+    if tortuosity:
+        tau = pore_tortuosity(volume, device=device)
+        headers["X-Tortuosity"] = "unavailable" if tau is None else f"{tau:.8g}"
     if format == "raw":
         return RawVolumeResponse(volume, headers)
     path = None

@@ -69,8 +69,8 @@ npm run dev
 
 Open the URL Vite prints. For a non-default backend address, use
 `API_URL=http://HOST:PORT npm run dev`; after `npm run build`, the backend serves the page
-itself (default http://127.0.0.1:8000). HTTP limits are in
-[backend/config.yaml](backend/config.yaml).
+itself (default http://127.0.0.1:8000). The API is `GET /api/health`, `POST /api/prepare`,
+and `POST /api/generate`; HTTP limits are in [backend/config.yaml](backend/config.yaml).
 
 ## Python API
 

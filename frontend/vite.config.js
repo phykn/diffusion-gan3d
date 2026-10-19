@@ -7,5 +7,5 @@ const api = process.env.API_URL ?? 'http://127.0.0.1:8000'
 export default defineConfig({
   plugins: [vue()],
   build: { outDir: 'dist', emptyOutDir: true, chunkSizeWarningLimit: 950 },
-  server: { proxy: { '/prepare': api, '/generate': api, '/health': api } },
+  server: { proxy: { '/api': api } },
 })

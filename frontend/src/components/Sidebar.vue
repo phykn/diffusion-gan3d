@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import { MAX_BLOCKS, MIN_BLOCKS, normalizeBlock, normalizeSeed } from '../input-state.js'
+import { MIN_BLOCKS, normalizeBlock, normalizeSeed } from '../input-state.js'
 
 const props = defineProps({
   file: File,
@@ -43,7 +43,7 @@ function setSeed(event) {
 }
 
 function setBlock(index, event) {
-  const value = normalizeBlock(event.target.value)
+  const value = normalizeBlock(event.target.value, props.health?.max_blocks ?? MIN_BLOCKS)
   const next = [...blocks.value]
   next[index] = value
   blocks.value = next
@@ -105,7 +105,7 @@ function setBlock(index, event) {
           :value="blocks[index]"
           type="number"
           :min="MIN_BLOCKS"
-          :max="MAX_BLOCKS"
+          :max="health?.max_blocks ?? MIN_BLOCKS"
           step="1"
           :disabled="busy"
           @change="setBlock(index, $event)"

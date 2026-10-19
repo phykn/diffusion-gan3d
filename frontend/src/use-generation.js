@@ -90,7 +90,7 @@ export function useGeneration(cropEditor) {
         throw new Error(`Choose a valid ${health.value.crop_size} × ${health.value.crop_size} crop first.`)
       }
       const requestSeed = normalizeSeed(seed.value)
-      const requestBlocks = normalizeBlocks(blocks.value)
+      const requestBlocks = normalizeBlocks(blocks.value, health.value.max_blocks)
       const conditions = { axis: plane.value, domain: domain.value }
       if (health.value.height_enabled) {
         conditions.height_origin = plane.value === 0 ? heightOrigin.value : crop.cropOrigin[0]

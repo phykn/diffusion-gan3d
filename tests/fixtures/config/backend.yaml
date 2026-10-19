@@ -4,7 +4,7 @@ max_voxels: 134217728
 
 max_blocks: 64
 
-max_total_blocks: 4096
+max_tiles: 4096
 
 max_anchors: 32
 

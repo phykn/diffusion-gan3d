@@ -2,7 +2,7 @@ import math
 from typing import Annotated, Literal
 
 import torch
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.src.config import ServerConfig
 from src.anchor import PlaneAnchor
@@ -20,7 +20,12 @@ ProbabilityImage = Annotated[
 ]
 
 
-class AnchorRequest(BaseModel):
+class Request(BaseModel):
+    # Unknown fields are client errors, not silently ignored options.
+    model_config = ConfigDict(extra="forbid")
+
+
+class AnchorRequest(Request):
     image: LabelImage | ProbabilityImage
     axis: Annotated[int, Field(ge=0, le=2, strict=True)]
     index: Index
@@ -47,7 +52,7 @@ class AnchorRequest(BaseModel):
         )
 
 
-class GenerateRequest(BaseModel):
+class GenerateRequest(Request):
     anchors: list[AnchorRequest] = Field(default_factory=list)
     blocks: Dimension | tuple[Dimension, Dimension, Dimension] | None = None
     shape: Dimension | tuple[Dimension, Dimension, Dimension] | None = None
@@ -62,9 +67,8 @@ class GenerateRequest(BaseModel):
     vf_profile: dict | None = None
     overlap: Index | None = None
     storage: Literal["auto", "cpu", "cuda"] = "auto"
-    progress: bool = False
     format: Literal["tiff", "raw"] = "tiff"
-    include_metrics: bool = False
+    tortuosity: bool = False
 
     def check_limits(self, cfg: ServerConfig) -> None:
         if len(self.anchors) > cfg.max_anchors:
@@ -73,19 +77,20 @@ class GenerateRequest(BaseModel):
             anchor.check_limits(cfg)
         if self.overlap is not None and self.overlap > cfg.max_size // 2:
             raise ValueError("overlap exceeds the server size limit")
-        for value, dimension, maximum, label in (
-            (self.shape, cfg.max_size, cfg.max_voxels, "shape voxels"),
-            (self.size, cfg.max_size, cfg.max_voxels, "size voxels"),
-            (self.blocks, cfg.max_blocks, cfg.max_total_blocks, "block count"),
-        ):
+        # Reject huge requests before planning; app.py checks the resolved shape.
+        for value, label in ((self.shape, "shape"), (self.size, "size")):
             if value is None:
                 continue
             shape = (value,) * 3 if isinstance(value, int) else value
-            if max(shape) > dimension or math.prod(shape) > maximum:
+            if max(shape) > cfg.max_size or math.prod(shape) > cfg.max_voxels:
                 raise ValueError(f"{label} exceeds the server limit")
+        if self.blocks is not None:
+            blocks = (self.blocks,) * 3 if isinstance(self.blocks, int) else self.blocks
+            if max(blocks) > cfg.max_blocks:
+                raise ValueError("block count exceeds the server limit")
 
 
-class PrepareRequest(BaseModel):
+class PrepareRequest(Request):
     image: LabelImage
 
     @field_validator("image")

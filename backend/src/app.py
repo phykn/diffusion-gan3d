@@ -23,13 +23,8 @@ def create_app(
     inference: LowResolutionAPI | None = None,
     *,
     config: ServerConfig | None = None,
-    max_inflight_downloads: int | None = None,
 ) -> FastAPI:
     config = load_server_config() if config is None else config
-    if max_inflight_downloads is not None:
-        config = ServerConfig.model_validate(
-            {**config.model_dump(), "max_inflight_downloads": max_inflight_downloads}
-        )
     if inference is None:
         if weights is None:
             raise ValueError("weights are required when inference is not provided.")
@@ -45,22 +40,22 @@ def create_app(
     app.state.inference = inference
     app.state.generate_lock = Lock()
     app.state.download_slots = BoundedSemaphore(config.max_inflight_downloads)
+    max_blocks = _axis_block_limit(inference, config)
 
-    @app.get("/health")
+    @app.get("/api/health")
     def health() -> dict:
         generator = app.state.inference.generator
         return {
-            "status": "ready",
             "device": str(app.state.inference.device),
             "crop_size": app.state.inference.crop_size,
-            "input_size": app.state.inference.input_size,
             "num_phases": app.state.inference.num_phases,
             "num_domains": generator.num_domains,
             "height_enabled": generator.height_data is not None,
             "height_extents": (generator.height_data or {}).get("height_extents", {}),
+            "max_blocks": max_blocks,
         }
 
-    @app.post("/prepare")
+    @app.post("/api/prepare")
     def prepare(request: PrepareRequest) -> dict:
         try:
             request.check_limits(config)
@@ -71,7 +66,7 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"image": image.tolist()}
 
-    @app.post("/generate", response_class=StreamingResponse)
+    @app.post("/api/generate", response_class=StreamingResponse)
     def generate(request: GenerateRequest) -> Response:
         try:
             request.check_limits(config)
@@ -102,7 +97,7 @@ def create_app(
                     volume,
                     request.format,
                     device=inference.device,
-                    include_metrics=request.include_metrics,
+                    tortuosity=request.tortuosity,
                 )
             except (TypeError, ValueError) as exc:
                 raise HTTPException(
@@ -140,6 +135,16 @@ def create_app(
     return app
 
 
+def _axis_block_limit(inference: LowResolutionAPI, config: ServerConfig) -> int:
+    """Largest block count on one axis whose default tiling fits max_size."""
+    limit = 1
+    for count in range(2, config.max_blocks + 1):
+        if max(inference.estimate_memory(blocks=(count, 1, 1)).shape) > config.max_size:
+            break
+        limit = count
+    return limit
+
+
 def _generate_volume(
     inference: LowResolutionAPI, request: GenerateRequest, config: ServerConfig
 ) -> torch.Tensor:
@@ -154,8 +159,8 @@ def _generate_volume(
         or math.prod(estimate.shape) > config.max_voxels
     ):
         raise ValueError("resolved output shape exceeds the server size limit")
-    if estimate.tile_count > config.max_total_blocks:
-        raise ValueError("resolved tile count exceeds the server block limit")
+    if estimate.tile_count > config.max_tiles:
+        raise ValueError("resolved tile count exceeds the server tile limit")
     inference.check_memory(
         estimate,
         storage=request.storage,
@@ -176,5 +181,4 @@ def _generate_volume(
         vf_profile=request.vf_profile,
         overlap=request.overlap,
         storage=request.storage,
-        progress=request.progress,
     )

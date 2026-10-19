@@ -14,9 +14,10 @@ test('seed is always a nonnegative integer', () => {
   assert.equal(normalizeSeed('invalid'), 0)
 })
 
-test('three block counts are clamped to the supported range', () => {
-  assert.deepEqual(normalizeBlocks([0, 3.8, 99]), [1, 3, 4])
-  assert.deepEqual(normalizeBlocks(), [1, 1, 1])
+test('three block counts are clamped to the server limit', () => {
+  assert.deepEqual(normalizeBlocks([0, 3.8, 99], 4), [1, 3, 4])
+  assert.deepEqual(normalizeBlocks([0, 3.8, 99], 9), [1, 3, 9])
+  assert.deepEqual(normalizeBlocks(undefined, 4), [1, 1, 1])
 })
 
 test('an input change rejects an in-flight response', () => {

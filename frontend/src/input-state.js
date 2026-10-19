@@ -1,5 +1,4 @@
 export const MIN_BLOCKS = 1
-export const MAX_BLOCKS = 4
 
 function integerInRange(value, minimum, maximum, fallback) {
   const number = Number(value)
@@ -11,12 +10,13 @@ export function normalizeSeed(value) {
   return integerInRange(value, 0, Number.MAX_SAFE_INTEGER, 0)
 }
 
-export function normalizeBlock(value) {
-  return integerInRange(value, MIN_BLOCKS, MAX_BLOCKS, MIN_BLOCKS)
+// maximum is the server's per-axis limit from /api/health.
+export function normalizeBlock(value, maximum) {
+  return integerInRange(value, MIN_BLOCKS, maximum, MIN_BLOCKS)
 }
 
-export function normalizeBlocks(values) {
-  return Array.from({ length: 3 }, (_, index) => normalizeBlock(values?.[index]))
+export function normalizeBlocks(values, maximum) {
+  return Array.from({ length: 3 }, (_, index) => normalizeBlock(values?.[index], maximum))
 }
 
 export function createRequestGate() {

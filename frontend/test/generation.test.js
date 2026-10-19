@@ -11,8 +11,8 @@ const settle = () => new Promise(resolve => setImmediate(resolve))
 
 async function mount(t, respond, health = {}) {
   t.mock.method(globalThis, 'fetch', async (path, options) => {
-    if (path === '/health') return Response.json({ crop_size: 1, num_phases: 2, ...health })
-    if (path === '/prepare') {
+    if (path === '/api/health') return Response.json({ crop_size: 1, num_phases: 2, max_blocks: 4, ...health })
+    if (path === '/api/prepare') {
       assert.deepEqual(JSON.parse(options.body).image, [[1]])
       return Response.json({ image: [[[0]], [[1]]] })
     }
@@ -111,10 +111,10 @@ test('health checks retry until the server answers and report the outage', async
   t.mock.timers.enable({ apis: ['setTimeout'] })
   let attempts = 0
   t.mock.method(globalThis, 'fetch', async path => {
-    assert.equal(path, '/health')
+    assert.equal(path, '/api/health')
     attempts += 1
     if (attempts < 3) throw new TypeError('connection refused')
-    return Response.json({ crop_size: 1, num_phases: 2 })
+    return Response.json({ crop_size: 1, num_phases: 2, max_blocks: 4 })
   })
   let state
   const app = renderer.createApp({
@@ -147,5 +147,5 @@ test('unchecking tortuosity skips the server metric', async t => {
   })
   state.measureTortuosity.value = false
   await state.generate()
-  assert.equal(body.include_metrics, false)
+  assert.equal(body.tortuosity, false)
 })

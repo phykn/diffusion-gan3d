@@ -51,11 +51,13 @@ def test_phase_ids_keep_the_uint8_contract():
         {"domain": True},
         {"domain": "1"},
         {"overlap": 2.0},
+        {"progress": True},
+        {"include_metrics": True},
         {"anchors": [{"image": [[0]], "axis": True, "index": 0}]},
         {"anchors": [{"image": [[0]], "axis": 0, "index": "0"}]},
     ],
 )
-def test_generate_request_rejects_coerced_integers(values):
+def test_generate_request_rejects_coerced_or_unknown_fields(values):
     with pytest.raises(ValidationError):
         GenerateRequest(**values)
 

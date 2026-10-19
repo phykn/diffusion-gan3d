@@ -5,14 +5,14 @@ import { generateVolume, prepareImage } from '../src/api.js'
 test('generation sends a prepared boundary anchor and decodes volume metadata', async t => {
   const image = [[[0.25]], [[0.75]]]
   t.mock.method(globalThis, 'fetch', async (path, options) => {
-    assert.equal(path, '/generate')
+    assert.equal(path, '/api/generate')
     assert.deepEqual(JSON.parse(options.body), {
       anchors: [{ image, axis: 0, index: 0, position: [0, 0] }],
       domain: 0,
       seed: 7,
       blocks: [2, 1, 1],
       format: 'raw',
-      include_metrics: true,
+      tortuosity: true,
     })
     return new Response(new Uint8Array([0, 1]), { headers: {
       'X-Volume-Shape': '2,1,1', 'X-Tortuosity': 'unavailable',
@@ -24,7 +24,7 @@ test('generation sends a prepared boundary anchor and decodes volume metadata', 
 
 test('porosity is counted locally when the server skips tortuosity', async t => {
   t.mock.method(globalThis, 'fetch', async (path, options) => {
-    assert.equal(JSON.parse(options.body).include_metrics, false)
+    assert.equal(JSON.parse(options.body).tortuosity, false)
     return new Response(new Uint8Array([0, 0, 0, 1]), { headers: { 'X-Volume-Shape': '4,1,1' } })
   })
   const result = await generateVolume([[0]], 0, [1, 1, 1], undefined, {}, { tortuosity: false })
@@ -80,7 +80,7 @@ test('preparation preserves fractional channels and forwards cancellation', asyn
   const image = [[[0.25]], [[0.75]]]
   const controller = new AbortController()
   t.mock.method(globalThis, 'fetch', async (path, options) => {
-    assert.equal(path, '/prepare')
+    assert.equal(path, '/api/prepare')
     assert.equal(options.signal, controller.signal)
     assert.deepEqual(JSON.parse(options.body), { image: [[0]] })
     return Response.json({ image })

@@ -4,16 +4,11 @@ import torch
 
 import src.evaluate.volume as metrics_module
 from src.evaluate.tortuosity import tau
-from src.evaluate.volume import measure_volume
+from src.evaluate.volume import pore_tortuosity
 
 
-def test_measure_volume_uses_phase_zero_and_thickness_axis(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    volume = torch.tensor(
-        [[[0, 1], [0, 1]], [[1, 1], [0, 0]]],
-        dtype=torch.uint8,
-    )
+def test_pore_tortuosity_uses_phase_zero_and_thickness_axis(monkeypatch):
+    volume = torch.zeros(2, 2, 2, dtype=torch.uint8)
     calls = []
 
     def fake_tortuosity(values, *, phase, axis, device):
@@ -21,34 +16,11 @@ def test_measure_volume_uses_phase_zero_and_thickness_axis(
         return 1.75
 
     monkeypatch.setattr(metrics_module, "tortuosity", fake_tortuosity)
-
-    result = measure_volume(volume, device=torch.device("cpu"))
-
-    assert result.porosity == pytest.approx(0.5)
-    assert result.tortuosity == pytest.approx(1.75)
+    assert pore_tortuosity(volume, torch.device("cpu")) == pytest.approx(1.75)
     assert calls == [(volume, 0, 0, torch.device("cpu"))]
 
 
-def test_measure_volume_marks_failed_tortuosity_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        metrics_module,
-        "tortuosity",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("no path")),
-    )
-
-    result = measure_volume(
-        np.zeros((2, 2, 2), dtype=np.uint8), device=torch.device("cpu")
-    )
-
-    assert result.porosity == pytest.approx(1.0)
-    assert result.tortuosity is None
-
-
-def test_unconverged_solver_keeps_porosity_but_marks_tortuosity_unavailable(
-    monkeypatch,
-):
+def test_unconverged_solver_reports_unavailable(monkeypatch):
     class Solver:
         converged = False
 
@@ -59,11 +31,8 @@ def test_unconverged_solver_keeps_porosity_but_marks_tortuosity_unavailable(
             self.tau = np.array([2.75])
 
     monkeypatch.setattr(tau, "Solver", Solver)
-    result = measure_volume(
-        torch.zeros(2, 2, 2, dtype=torch.uint8), torch.device("cpu")
-    )
-    assert result.porosity == 1
-    assert result.tortuosity is None
+    volume = torch.zeros(2, 2, 2, dtype=torch.uint8)
+    assert pore_tortuosity(volume, torch.device("cpu")) is None
 
 
 @pytest.mark.parametrize(
@@ -73,10 +42,10 @@ def test_unconverged_solver_keeps_porosity_but_marks_tortuosity_unavailable(
         RuntimeError("MPS backend out of memory (MPS allocated: 1 GB)"),
     ],
 )
-def test_measure_volume_propagates_memory_exhaustion(monkeypatch, error):
+def test_pore_tortuosity_propagates_memory_exhaustion(monkeypatch, error):
     def fail(*_args, **_kwargs):
         raise error
 
     monkeypatch.setattr(metrics_module, "tortuosity", fail)
     with pytest.raises(RuntimeError, match="out of memory"):
-        measure_volume(torch.zeros(2, 2, 2, dtype=torch.uint8), torch.device("cpu"))
+        pore_tortuosity(torch.zeros(2, 2, 2, dtype=torch.uint8), torch.device("cpu"))

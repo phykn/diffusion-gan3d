@@ -23,7 +23,7 @@ test('development server forwards preparation, health and generation', async t =
   t.after(() => server.close())
   await server.listen()
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`
-  for (const [path, method] of [['/health', 'GET'], ['/prepare', 'POST'], ['/generate', 'POST']]) {
+  for (const [path, method] of [['/api/health', 'GET'], ['/api/prepare', 'POST'], ['/api/generate', 'POST']]) {
     const response = await fetch(`${origin}${path}`, { method })
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), { path, method })

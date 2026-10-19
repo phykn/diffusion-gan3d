@@ -24,11 +24,11 @@ function errorDetail(response, detail) {
 }
 
 export async function getHealth(signal) {
-  return (await request('/health', undefined, signal)).json()
+  return (await request('/api/health', undefined, signal)).json()
 }
 
 export async function prepareImage(image, signal) {
-  const response = await request('/prepare', { image }, signal)
+  const response = await request('/api/prepare', { image }, signal)
   return (await response.json()).image
 }
 
@@ -53,7 +53,7 @@ export async function generateVolume(
   image, seed, blocks, signal, conditions = {}, { tortuosity = true } = {},
 ) {
   const { axis = 0, domain = 0, height_origin, height_extent } = conditions
-  const response = await request('/generate', {
+  const response = await request('/api/generate', {
     anchors: [{ image, axis, index: 0, position: [0, 0] }],
     domain,
     ...(height_origin === undefined ? {} : { height_origin, height_extent }),
@@ -61,7 +61,7 @@ export async function generateVolume(
     ...(blocks.some(value => value > 1) ? { blocks } : {}),
     format: 'raw',
     // The server solves tortuosity before streaming; porosity is counted here.
-    include_metrics: tortuosity,
+    tortuosity,
   }, signal)
   const shape = response.headers.get('X-Volume-Shape')?.split(',').map(Number)
   const size = shape?.reduce((total, value) => total * value, 1)
