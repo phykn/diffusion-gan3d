@@ -436,18 +436,12 @@ def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
     assert math.isfinite(metrics.generator)
     assert math.isfinite(metrics.critic)
     assert math.isfinite(metrics.r1)
-    assert math.isfinite(metrics.critic_global)
     assert metrics.generator_connectivity == 0.0
     assert metrics.critic_connectivity == 0.0
     assert len(r1_values) == 3
     # Real slices of three planes, plus fake slices unless reals only.
     assert trainer.critic_augment.apply_together.call_count == (3 if real_only else 6)
     assert math.isclose(metrics.r1, sum(r1_values) / len(r1_values), rel_tol=1e-6)
-    assert math.isclose(
-        metrics.critic,
-        metrics.critic_global + 0.5 * optim.r1_gamma * optim.r1_interval * metrics.r1,
-        rel_tol=1e-5,
-    )
     assert 0 <= metrics.transition < 2
     assert metrics.volume_size == 8
     assert _changed(denoiser_before, denoiser)
@@ -1401,7 +1395,7 @@ def _make_trainer(
             r1_gamma=cfg.loss.r1_weight,
             r1_interval=cfg.loss.r1_every_steps,
             loss=DenoiserLossSettings(
-                connectivity_local_weight=cfg.loss.connectivity_local_weight,
+                connectivity_local_weight=cfg.loss.connectivity.local_weight,
                 connectivity_weight=cfg.loss.connectivity.adversarial_weight,
                 vf_weight=cfg.loss.volume_fraction_weight,
                 real_transition_weight=0.0,
@@ -1486,13 +1480,13 @@ def _config(
             dropout_probability_per_case=conditioning.joint_each_prob,
         ),
         loss=Config(
-            connectivity_local_weight=optim.connectivity_local_weight,
             r1_weight=optim.r1_gamma,
             r1_every_steps=optim.r1_interval,
             anchor_pixel_weight=anchor.pixel_weight,
             volume_fraction_weight=vf.weight,
             connectivity=Config(
                 adversarial_weight=connectivity.weight,
+                local_weight=optim.connectivity_local_weight,
             ),
         ),
         optim=Config(

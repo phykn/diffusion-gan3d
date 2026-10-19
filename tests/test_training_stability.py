@@ -2,6 +2,7 @@ import copy
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -163,7 +164,7 @@ def test_lr_checkpoint_restores_training_state_without_rng(
             else:
                 assert global_loss == local_loss == 0
             assert total == pytest.approx(
-                global_loss + cfg["loss"]["connectivity_local_weight"] * local_loss
+                global_loss + cfg["loss"]["connectivity"]["local_weight"] * local_loss
             )
 
 
@@ -376,9 +377,10 @@ def test_connectivity_regularization_counts_its_own_updates(tmp_path):
         torch.ones(2, dtype=torch.long),
     )
     domains = torch.zeros(2, dtype=torch.long)
-    trainer.update_connectivity_critic(values + 0.1, fake, domains)
+    real = replace(fake, values=values + 0.1)
+    trainer.update_connectivity_critic(real, fake, domains)
     assert trainer.diagnostics["regularization/connectivity"] == 0
-    trainer.update_connectivity_critic(values + 0.1, fake, domains)
+    trainer.update_connectivity_critic(real, fake, domains)
     assert trainer.diagnostics["regularization/connectivity"] == 1
     assert trainer.updates["connectivity"] == 2
 

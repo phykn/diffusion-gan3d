@@ -26,7 +26,6 @@ class Metrics:
     critic_connectivity: float
     connectivity_r1: float
     anchor_ramp: float
-    critic_global: float = 0.0
     generator_connectivity_global: float = 0.0
     generator_connectivity_local: float = 0.0
     critic_connectivity_global: float = 0.0
@@ -49,7 +48,6 @@ def collect_metrics(
     denoiser_update: DenoiserUpdate,
     critic_vals: list[float],
     r1: float,
-    critic_global: float,
     critic_connectivity: float,
     critic_connectivity_global: float,
     critic_connectivity_local: float,
@@ -81,7 +79,6 @@ def collect_metrics(
             connectivity_r1=connectivity_r1,
             anchor_ramp=prepared.anchor_ramp,
             connectivity_ramp=prepared.connectivity_ramp,
-            critic_global=critic_global,
             vf_loss=denoiser_update.vf,
             vf_active=presence.vf.any(),
             anchor_input_active_fraction=presence.anchor.to(torch.float32).mean(),
@@ -155,7 +152,6 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "loss/generator": metrics.generator,
         "loss/generator_total": metrics.generator_total,
         "loss/critic": metrics.critic,
-        "loss/critic_global": metrics.critic_global,
         "loss/r1": metrics.r1,
         "loss/generator_connectivity": metrics.generator_connectivity,
         "loss/generator_connectivity_global": metrics.generator_connectivity_global,

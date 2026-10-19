@@ -50,7 +50,6 @@ def test_tensorboard_preserves_unavailable_boundaries_without_changing_diagnosti
         denoiser_update=update,
         critic_vals=[torch.tensor(0.5), 0.0, torch.tensor(0.25)],
         r1=torch.tensor(0.0),
-        critic_global=torch.tensor(0.75),
         critic_connectivity=0.625,
         critic_connectivity_global=0.25,
         critic_connectivity_local=0.75,

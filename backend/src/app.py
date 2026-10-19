@@ -40,7 +40,6 @@ def create_app(
     app.state.inference = inference
     app.state.generate_lock = Lock()
     app.state.download_slots = BoundedSemaphore(config.max_inflight_downloads)
-    max_blocks = _axis_block_limit(inference, config)
 
     @app.get("/api/health")
     def health() -> dict:
@@ -52,7 +51,7 @@ def create_app(
             "num_domains": generator.num_domains,
             "height_enabled": generator.height_data is not None,
             "height_extents": (generator.height_data or {}).get("height_extents", {}),
-            "max_blocks": max_blocks,
+            "max_blocks": _axis_block_limit(app.state.inference, config),
         }
 
     @app.post("/api/prepare")

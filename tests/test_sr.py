@@ -333,10 +333,10 @@ def test_web_anchor_preparation_matches_new_dataset(tmp_path):
             config=load_server_config("tests/fixtures/config/backend.yaml"),
         )
     ) as client:
-        response = client.post("/prepare", json={"image": crop.tolist()})
+        response = client.post("/api/prepare", json={"image": crop.tolist()})
         assert response.status_code == 200
         assert response.json()["image"] == expected.tolist()
-        assert client.post("/prepare", json={"image": [[0]]}).status_code == 422
+        assert client.post("/api/prepare", json={"image": [[0]]}).status_code == 422
 
 
 def test_consistency_has_gradient_and_a_dead_zone():

@@ -29,7 +29,6 @@ conditioning:
     ramp_steps: 500
 
 loss:
-  connectivity_local_weight: 0.5
   r1_weight: 1.0  # two volumes: critic overfits after ~5k steps at 0.5
   r2_weight: 0.1
   r1_every_steps: 8
@@ -51,6 +50,7 @@ loss:
   connectivity:
     max_slice_gap: 8
     adversarial_weight: 0.0
+    local_weight: 0.5
     real_transition_weight: 0.1
     ramp_steps: 5000
 

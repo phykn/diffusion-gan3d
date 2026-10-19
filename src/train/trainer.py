@@ -258,11 +258,7 @@ class Trainer:
         seam_real, seam_fake = self.make_seam_bands(prediction, anchor, presence.anchor)
         seam_domains = self.get_axis_domains(prepared.critic_domains, seam_fake.axes)
 
-        (
-            critic_vals,
-            r1,
-            critic_global,
-        ) = self.update_critics(
+        critic_vals, r1 = self.update_critics(
             transition,
             fake,
             real,
@@ -276,7 +272,7 @@ class Trainer:
                 critic_connectivity_global,
                 critic_connectivity_local,
             ) = self.update_connectivity_critic(
-                connectivity_real.values,
+                connectivity_real,
                 connectivity_fake,
                 connectivity_domains,
             )
@@ -334,7 +330,6 @@ class Trainer:
             denoiser_update=denoiser_update,
             critic_vals=critic_vals,
             r1=r1,
-            critic_global=critic_global,
             critic_connectivity=critic_connectivity,
             critic_connectivity_global=critic_connectivity_global,
             critic_connectivity_local=critic_connectivity_local,
@@ -775,10 +770,10 @@ class Trainer:
         batches: RealBatch,
         domains: dict[int, int],
         profile_present: torch.Tensor | None = None,
-    ) -> tuple[list[float], float, float]:
+    ) -> tuple[list[float], float]:
+        """Return per-axis adversarial critic losses (R1/R2 excluded) and mean R1."""
         critic_losses = [0.0] * len(AXES)
         r1_sum = 0.0
-        global_sum = 0.0
         groups = active_groups(fake.pairs, self.critic_groups)
         for group, axes in groups.items():
             regularize, apply_r1, apply_r2 = self.regularization(group)
@@ -875,7 +870,6 @@ class Trainer:
                         r2_weight=self.settings.r2_gamma if apply_r2 else 0.0,
                         interval=self.settings.r1_interval,
                     )
-                global_sum += losses.adversarial.global_loss.detach() * weight
                 self.diagnostics[f"score/{group}/{axis}/real"] = (
                     real_score.logits_global.detach().mean()
                 )
@@ -894,46 +888,34 @@ class Trainer:
                     self.diagnostics[f"r2/{group}/{axis}"] = losses.r2.detach()
                 loss = validate_loss(losses.total, f"critic {group}/{axis}")
                 self.scaler.scale(loss * weight).backward()
-                critic_losses[axis] = loss.detach() * weight
+                critic_losses[axis] = losses.adversarial.global_loss.detach() * weight
             if step_optimizer(optimizer, self.scaler, self.diagnostics, group):
                 self.updates[group] += 1
-        return critic_losses, r1_sum, global_sum
+        return critic_losses, r1_sum
 
     def update_connectivity_critic(
         self,
-        real: torch.Tensor,
+        real: TripletBatch,
         fake: TripletBatch,
         domains: torch.Tensor,
     ) -> tuple[float, float, float, float]:
         if not len(fake):
             return 0.0, 0.0, 0.0, 0.0
+        if len(real) != len(fake):
+            raise ValueError("connectivity real and fake triplets must pair up.")
 
         regularize, apply_r1, apply_r2 = self.regularization("connectivity")
         self.connectivity_optim.zero_grad(set_to_none=True)
-        real = real.detach().float().requires_grad_(apply_r1)
+        real_values = real.values.detach().float().requires_grad_(apply_r1)
         fake_values = fake.values.detach().float().requires_grad_(apply_r2)
         autocast = self.autocast(self.settings.amp_enabled and not regularize)
         with autocast:
-            real_score = self.connectivity_critic(
-                real,
-                fake.axes,
-                fake.gaps,
-                domains,
-                **({"height": fake.height} if fake.height is not None else {}),
-                **({"profile": fake.profile} if fake.profile is not None else {}),
-            )
-            fake_score = self.connectivity_critic(
-                fake_values,
-                fake.axes,
-                fake.gaps,
-                domains,
-                **({"height": fake.height} if fake.height is not None else {}),
-                **({"profile": fake.profile} if fake.profile is not None else {}),
-            )
+            real_score = self._score_triplets(real, real_values, domains)
+            fake_score = self._score_triplets(fake, fake_values, domains)
             losses = critic_objective(
                 real_score,
                 fake_score,
-                (real,),
+                (real_values,),
                 (fake_values,),
                 local_weight=self.settings.loss.connectivity_local_weight,
                 r1_weight=self.settings.r1_gamma if apply_r1 else 0.0,
@@ -957,6 +939,16 @@ class Trainer:
             losses.r1.detach(),
             losses.adversarial.global_loss.detach(),
             losses.adversarial.local_loss.detach(),
+        )
+
+    def _score_triplets(self, batch: TripletBatch, values, domains):
+        return self.connectivity_critic(
+            values,
+            batch.axes,
+            batch.gaps,
+            domains,
+            **({"height": batch.height} if batch.height is not None else {}),
+            **({"profile": batch.profile} if batch.profile is not None else {}),
         )
 
     def update_seam_critic(

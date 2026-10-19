@@ -170,7 +170,6 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         critic_connectivity=0.4,
         connectivity_r1=0.05,
         anchor_ramp=0.5,
-        critic_global=1.2,
         vf_loss=0.15,
         vf_active=True,
     )
@@ -297,9 +296,9 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
                 "anchor_pixel_weight": 0.05,
                 "connectivity": {
                     "adversarial_weight": 0.25,
+                    "local_weight": 0.5,
                 },
                 "volume_fraction_weight": 1.0,
-                "connectivity_local_weight": 0.5,
                 "r1_weight": 0.0,
                 "r1_every_steps": 2,
             },

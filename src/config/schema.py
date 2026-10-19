@@ -54,9 +54,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                 "structure_every_steps",
             )
         ),
-        "loss": dict.fromkeys(
-            ("connectivity_local_weight", "r1_weight", "r1_every_steps", "r2_weight")
-        )
+        "loss": dict.fromkeys(("r1_weight", "r1_every_steps", "r2_weight"))
         | {
             "group_statistics": dict.fromkeys(
                 ("weight", "max_gap", "tolerance", "start_step", "ramp_steps")
@@ -105,6 +103,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                         (
                             "max_slice_gap",
                             "adversarial_weight",
+                            "local_weight",
                             "real_transition_weight",
                             "start_step",
                             "ramp_steps",

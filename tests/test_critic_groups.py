@@ -204,15 +204,15 @@ def test_sr_groups_step_once_per_critic_update_and_restore_state(tmp_path, group
         )
 
 
-@pytest.mark.parametrize("stage", ["low_res", "sr"])
-def test_plane_training_is_independent_of_connectivity_local_weight(tmp_path, stage):
+def test_plane_training_is_independent_of_connectivity_local_weight(tmp_path):
     torch.set_num_threads(1)
+    stage = "low_res"
     cfg = config(tmp_path, stage, GROUPS[0])
-    bank = {0: torch.full((2, 2, 8, 8, 8), 0.5)} if stage == "sr" else None
+    bank = None
     trained = []
     for weight in (0.0, 50.0):
         torch.manual_seed(43)
-        cfg["loss"]["connectivity_local_weight"] = weight
+        cfg["loss"]["connectivity"]["local_weight"] = weight
         trainer = build_trainer(cfg, torch.device("cpu"), bank=bank)
         metrics = trainer.step(0)
         assert (

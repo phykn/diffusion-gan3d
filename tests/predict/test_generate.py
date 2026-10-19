@@ -2248,9 +2248,9 @@ def _config(root: Path) -> dict:
             "anchor_pixel_weight": 0.05,
             "connectivity": {
                 "adversarial_weight": 0.0,
+                "local_weight": 0.5,
             },
             "volume_fraction_weight": 1.0,
-            "connectivity_local_weight": 0.5,
             "r1_weight": 0.0,
             "r1_every_steps": 2,
         },

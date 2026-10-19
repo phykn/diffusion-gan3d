@@ -650,7 +650,6 @@ def test_obsolete_and_unknown_config_keys_fail_with_full_path(section, key):
         ("optim.adam_betas", [True, 0.9]),
         ("conditioning.domain_keep_probability", 1.1),
         ("conditioning.domain_keep_probability", float("nan")),
-        ("loss.connectivity_local_weight", -1),
         ("loss.r1_weight", float("inf")),
         ("loss.r2_weight", True),
         ("augmentation.probability", -0.1),
@@ -792,3 +791,11 @@ def test_critic_channels_must_list_positive_integers(channels):
     }
     with pytest.raises(ValueError, match="model.critic.channels"):
         normalize_train_config(raw, "low_res")
+
+
+def test_connectivity_local_weight_is_an_lr_setting():
+    raw = {"loss": {"connectivity": {"local_weight": -1}}}
+    with pytest.raises(ValueError, match="local_weight"):
+        normalize_train_config(raw, "low_res")
+    with pytest.raises(ValueError, match="loss.connectivity"):
+        normalize_train_config({"loss": {"connectivity": {"local_weight": 0.5}}}, "sr")
