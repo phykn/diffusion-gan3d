@@ -346,12 +346,12 @@ def test_resume_passes_cumulative_path_maps_to_source_validation(tmp_path, monke
     new_map = [("/middle", str(tmp_path / "current"))]
     seen = {}
 
-    def validate(weights, source, path_maps):
-        seen["weights"] = weights
+    def validate(source, path_maps):
+        seen["weights"] = Path(source["weights"])
         seen["path_maps"] = path_maps
         raise RuntimeError("source validation reached")
 
-    monkeypatch.setattr("src.train.run.sr.validate_frozen_source", validate)
+    monkeypatch.setattr("src.train.run.sr.load_frozen_source", validate)
     with pytest.raises(RuntimeError, match="source validation reached"):
         run_sr_train(resume=checkpoint, path_map=new_map, device="cpu")
 

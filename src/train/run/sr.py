@@ -6,28 +6,18 @@ from src.build.data import build_augmentation
 from src.build.sr import build_sr_trainer
 from src.config.data import validate_sr_source
 from src.config.files import PROJECT_ROOT, find_saved_config, load_yaml
-from src.config.train import (
-    get_sr_resolution,
-    load_train_config,
-    normalize_train_config,
-    validate_sr_config,
-)
+from src.config.train import get_sr_resolution, load_train_config, validate_sr_config
 from src.data.bank import load_bank
 from src.data.source import fill_height_extents, infer_height_extents
 from src.device import check_device
-from src.train.checkpoint import resolve_checkpoint
-from src.train.relocate import relocate_checkpoint
 from src.train.run.bank import (
     create_bank,
     publish_bank,
     refresh_bank,
 )
-from src.train.run.loop import check_run_dir, make_run_dir, run_train, saved_config
-from src.train.run.source import (
-    file_hash,
-    read_source_config,
-    validate_frozen_source,
-)
+from src.train.run.loop import check_run_dir, make_run_dir, run_train
+from src.train.run.resume import check_resume_args, load_resume, set_total_steps
+from src.train.run.source import file_hash, load_frozen_source, read_source_config
 from src.train.state import resume_sr_training
 
 
@@ -42,35 +32,20 @@ def run_sr_train(
     data: Path | None = None,
     path_map: list[tuple[str, str]] | None = None,
 ) -> Path:
-    if path_map and resume is None:
-        raise ValueError("path_map requires --resume.")
+    check_resume_args(resume, path_map, config, data)
     if base_weights is not None and resume is not None:
         raise ValueError("base_weights cannot change on resume.")
     device = check_device(device)
     check_run_dir(run_dir)
     payload = None
     if resume:
-        if config is not None or data is not None:
-            raise ValueError(
-                "--resume uses its saved config; only --steps may override training settings."
-            )
         if bank_size is not None:
             raise ValueError("--bank-size cannot change on resume.")
-        checkpoint = resolve_checkpoint(resume)
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        if payload.get("format") != "diffusion-gan3d.sr.train":
-            raise ValueError("resume requires an SR training checkpoint.")
-        payload = relocate_checkpoint(payload, path_map)
-        cfg = normalize_train_config(payload["config"], "sr")
-        source = saved_config(checkpoint, payload)
+        payload, cfg, source = load_resume(resume, "sr", path_map)
         bank_path = Path(cfg["source"]["bank"])
         if file_hash(bank_path) != cfg["source"]["bank_sha256"]:
             raise ValueError("LR bank changed since the checkpoint was saved.")
-        validate_frozen_source(
-            Path(cfg["source"]["weights"]),
-            cfg["source"],
-            payload["path_maps"],
-        )
+        load_frozen_source(cfg["source"], payload["path_maps"])
         bank_payload = load_bank(bank_path)
     else:
         path = config or PROJECT_ROOT / "config/train/sr.yaml"
@@ -84,13 +59,11 @@ def run_sr_train(
         if bank_size is not None:
             cfg["lr_bank"]["samples_per_domain"] = bank_size
             source.setdefault("lr_bank", {})["samples_per_domain"] = bank_size
-    if steps is not None:
-        cfg["train"]["total_steps"] = steps
-        source.setdefault("train", {})["total_steps"] = steps
+    set_total_steps(cfg, source, steps)
     cfg = validate_sr_config(cfg)
     build_augmentation(cfg)
     if payload and cfg["train"]["total_steps"] <= payload["step"]:
-        raise ValueError("--steps must exceed the completed checkpoint step.")
+        raise ValueError("total steps must exceed completed steps.")
     run_dir = make_run_dir(PROJECT_ROOT / "run", "sr", run_dir, cfg["nickname"])
     if payload is None:
         bank_payload = create_bank(cfg, device)

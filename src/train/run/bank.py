@@ -6,6 +6,7 @@ from tqdm import trange
 from src.build.data import build_datasets
 from src.build.predict import build_generator
 from src.config.data import get_domains
+from src.data.bank import LR_BANK_FORMAT
 from src.device import empty_cache
 from src.prepare.profile import image_profile
 from src.storage import torch_save
@@ -63,7 +64,7 @@ def create_bank(cfg: dict, device: torch.device) -> dict:
     del generator
     empty_cache(device)
     return {
-        "format": "diffusion-gan3d.lr-bank",
+        "format": LR_BANK_FORMAT,
         "volumes": bank,
         "height_origins": origins if height_enabled else None,
         "height_extents": extents,

@@ -215,7 +215,6 @@ def test_plane_training_is_independent_of_connectivity_local_weight(tmp_path, st
         cfg["loss"]["connectivity_local_weight"] = weight
         trainer = build_trainer(cfg, torch.device("cpu"), bank=bank)
         metrics = trainer.step(0)
-        assert metrics.generator == metrics.generator_global
         assert (
             metrics.generator_connectivity_global
             == metrics.generator_connectivity_local

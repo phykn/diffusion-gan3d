@@ -137,7 +137,7 @@ class Trainer:
         self.data_fingerprint = components.data_fingerprint
         self.cfg = components.cfg
         self.critic_groups_by_domain = components.critic_groups_by_domain
-        self.critic_groups = (
+        self._use_critic_groups(
             {
                 group: tuple(PLANE_AXES[plane] for plane in group.split("_"))
                 for group in self.critics
@@ -145,10 +145,6 @@ class Trainer:
             if self.critic_groups_by_domain is None
             else self.critic_groups_by_domain[0]
         )
-        self.axis_critics = {
-            axis: group for group, axes in self.critic_groups.items() for axis in axes
-        }
-        self.active_axes = tuple(sorted(self.axis_critics))
         self.conditions = ConditionSampler(
             self.settings,
             self.streams,
@@ -184,7 +180,8 @@ class Trainer:
             or settings.r2_gamma < 0
         ):
             raise ValueError(
-                "regularization interval must be positive and R2 weight finite/non-negative."
+                "R1 interval must be a positive integer and R1/R2 weights "
+                "finite and non-negative."
             )
         self.updates = {
             name: 0 for name in (*self.critics, "connectivity", "generator")
@@ -200,6 +197,13 @@ class Trainer:
             if components.critic_augment is None
             else components.critic_augment
         )
+
+    def _use_critic_groups(self, groups: dict[str, tuple[int, ...]]) -> None:
+        self.critic_groups = groups
+        self.axis_critics = {
+            axis: group for group, axes in groups.items() for axis in axes
+        }
+        self.active_axes = tuple(sorted(self.axis_critics))
 
     def step(
         self,
@@ -227,11 +231,7 @@ class Trainer:
         anchor = None if selection is None else selection.condition
         clean_probs = (prediction + 1.0) * 0.5
         measured = None if selection is None else selection.measured
-        profile = (
-            prepared.model_conditions.get("profile")
-            if self.settings.profile_settings.get("critic_enabled", False)
-            else None
-        )
+        profile = self._critic_profile(prepared)
         profile_present = presence.vf.to(self.device)
         fake = self._sample_fake_pairs(previous, current, prepared)
         connectivity_real, connectivity_fake = self.make_connectivity_triplets(
@@ -239,9 +239,7 @@ class Trainer:
             None if selection is None else selection.reference,
             anchor,
             transition,
-            presence.anchor & presence.vf
-            if self.settings.profile_settings["enabled"]
-            else presence.anchor,
+            self._anchor_visibility(presence),
             None if selection is None else selection.source,
             height=prepared.model_conditions.get("height"),
             profile=profile,
@@ -312,9 +310,7 @@ class Trainer:
                 prepared.domain,
                 prediction,
                 measured,
-                presence.anchor & presence.vf
-                if self.settings.profile_settings["enabled"]
-                else presence.anchor,
+                self._anchor_visibility(presence),
                 prepared.model_conditions.get("height"),
                 prepared.model_conditions.get("profile"),
                 selection.geometry,
@@ -363,17 +359,13 @@ class Trainer:
             None if measured is None else self.visible_anchor(measured, anchor_present)
         )
         result = SampledPairs(pairs={})
-        volume_height = prepared.model_conditions.get("height")
-        profile = (
-            prepared.model_conditions.get("profile")
-            if self.settings.profile_settings.get("critic_enabled", False)
-            else None
+        profile = self._critic_profile(prepared)
+        volume_height = self._with_profile(
+            prepared.model_conditions.get("height"),
+            profile,
+            prepared.presence.vf.to(self.device),
+            previous.shape[-3:],
         )
-        if volume_height is not None and profile is not None:
-            field = profile_field(
-                profile * 2 - 1, previous.shape[-3:]
-            ) * prepared.presence.vf.to(self.device).reshape(-1, 1, 1, 1, 1)
-            volume_height = torch.cat((volume_height, field), 1)
         for axis in self.active_axes:
             height = volume_height if axis in real.heights else None
             pairs = sample_pairs(
@@ -394,6 +386,25 @@ class Trainer:
                 if profile is not None:
                     result.profiles[axis] = pairs[2][:, 1:]
         return result
+
+    def _critic_profile(self, prepared: StepPreparation) -> torch.Tensor | None:
+        if not self.settings.profile_settings.get("critic_enabled", False):
+            return None
+        return prepared.model_conditions.get("profile")
+
+    def _anchor_visibility(self, presence) -> torch.Tensor:
+        # With profiles on, an anchor counts only where its profile is visible too.
+        if self.settings.profile_settings["enabled"]:
+            return presence.anchor & presence.vf
+        return presence.anchor
+
+    @staticmethod
+    def _with_profile(height, profile, present, shape) -> torch.Tensor | None:
+        """Append the masked profile field to the height channel for critics."""
+        if height is None or profile is None:
+            return height
+        field = profile_field(profile * 2 - 1, shape) * present.reshape(-1, 1, 1, 1, 1)
+        return torch.cat((height, field), 1)
 
     def _make_denoiser_batch(
         self,
@@ -552,13 +563,7 @@ class Trainer:
 
         domain = self.conditions.sample_target_domain()
         if self.critic_groups_by_domain is not None:
-            self.critic_groups = self.critic_groups_by_domain[domain]
-            self.axis_critics = {
-                axis: group
-                for group, axes in self.critic_groups.items()
-                for axis in axes
-            }
-            self.active_axes = tuple(sorted(self.axis_critics))
+            self._use_critic_groups(self.critic_groups_by_domain[domain])
         self.conditions.active_axes = self.active_axes
         model_domain = self.conditions.sample_domain_condition(domain)
         batch_domains = self.conditions.select_batch_domains(domain)
@@ -620,11 +625,9 @@ class Trainer:
             return empty, empty
         anchor = self.visible_anchor(anchor, visible)
 
-        if profile is not None:
-            field = profile_field(
-                profile * 2 - 1, prediction.shape[-3:]
-            ) * profile_present.reshape(-1, 1, 1, 1, 1)
-            height = torch.cat((height, field), 1)
+        height = self._with_profile(
+            height, profile, profile_present, prediction.shape[-3:]
+        )
         real, fake = self.anchor_triplets.sample(
             prediction,
             reference_prediction,

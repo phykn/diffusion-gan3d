@@ -29,7 +29,6 @@ class SampledPairs:
 class DenoiserUpdate:
     adversarial: torch.Tensor
     total: torch.Tensor
-    global_loss: torch.Tensor
     connectivity: torch.Tensor
     connectivity_global: torch.Tensor
     connectivity_local: torch.Tensor

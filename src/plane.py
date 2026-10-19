@@ -1,4 +1,5 @@
 AXES = (0, 1, 2)
+AXIS_NAMES = ("z", "y", "x")
 
 PLANES = ("xy", "xz", "yz")
 PLANE_AXES = {plane: axis for axis, plane in enumerate(PLANES)}

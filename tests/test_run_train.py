@@ -170,7 +170,6 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         critic_connectivity=0.4,
         connectivity_r1=0.05,
         anchor_ramp=0.5,
-        generator_global=0.6,
         critic_global=1.2,
         vf_loss=0.15,
         vf_active=True,

@@ -5,7 +5,7 @@ import torch
 from src.prepare.resize import resize_phases
 
 
-def phase_pairs(probs: torch.Tensor, axis: int, gap: int, preserve_height: bool):
+def volume_phase_pairs(probs: torch.Tensor, axis: int, gap: int, preserve_height: bool):
     dim = axis + 2
     length = probs.shape[dim] - gap
     left = probs.narrow(dim, 0, length)
@@ -59,10 +59,12 @@ def compute_group_statistics_loss(
                         key = (axis, gap)
                         if key not in cache:
                             cache[key] = (
-                                phase_pairs(probs, axis, gap, preserve_height),
+                                volume_phase_pairs(probs, axis, gap, preserve_height),
                                 None
                                 if reference is None
-                                else phase_pairs(reference, axis, gap, preserve_height),
+                                else volume_phase_pairs(
+                                    reference, axis, gap, preserve_height
+                                ),
                             )
                     a, ref_a = cache[first, gap]
                     b, ref_b = cache[second, gap]

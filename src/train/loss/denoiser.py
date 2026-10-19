@@ -183,7 +183,6 @@ def denoiser_objective(
     return DenoiserUpdate(
         adversarial=adversarial,
         total=total,
-        global_loss=adversarial,
         connectivity=connectivity,
         connectivity_global=connectivity_global,
         connectivity_local=connectivity_local,

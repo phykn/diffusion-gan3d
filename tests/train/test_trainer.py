@@ -301,11 +301,8 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
     )
     denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
-        denoiser,
-        critics,
-        connectivity_critic,
-        cfg,
+    denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
+        denoiser, critics, connectivity_critic, None, cfg
     )
     images = (
         torch.arange(64, dtype=torch.long)
@@ -391,11 +388,8 @@ def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
     cfg = _config(data, model, optim)
     denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
-        denoiser,
-        critics,
-        connectivity_critic,
-        cfg,
+    denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
+        denoiser, critics, connectivity_critic, None, cfg
     )
     images = torch.randint(0, data.num_phases, (data.batch_size, 8, 8))
     streams = {
@@ -442,7 +436,6 @@ def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
     assert math.isfinite(metrics.generator)
     assert math.isfinite(metrics.critic)
     assert math.isfinite(metrics.r1)
-    assert math.isfinite(metrics.generator_global)
     assert math.isfinite(metrics.critic_global)
     assert metrics.generator_connectivity == 0.0
     assert metrics.critic_connectivity == 0.0
@@ -450,11 +443,6 @@ def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
     # Real slices of three planes, plus fake slices unless reals only.
     assert trainer.critic_augment.apply_together.call_count == (3 if real_only else 6)
     assert math.isclose(metrics.r1, sum(r1_values) / len(r1_values), rel_tol=1e-6)
-    assert math.isclose(
-        metrics.generator,
-        metrics.generator_global,
-        rel_tol=1e-5,
-    )
     assert math.isclose(
         metrics.critic,
         metrics.critic_global + 0.5 * optim.r1_gamma * optim.r1_interval * metrics.r1,
@@ -527,11 +515,8 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
     )
     denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
-        denoiser,
-        critics,
-        connectivity_critic,
-        cfg,
+    denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
+        denoiser, critics, connectivity_critic, None, cfg
     )
     images = torch.randint(0, data.num_phases, (data.batch_size, 8, 8))
     trainer = _make_trainer(
@@ -578,11 +563,6 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
     assert metrics.generator_connectivity == 0.0
     assert metrics.critic_connectivity == 0.0
     assert 0.0 <= metrics.anchor_accuracy <= 1.0
-    assert math.isclose(
-        metrics.generator,
-        metrics.generator_global,
-        rel_tol=1e-5,
-    )
     assert math.isclose(
         metrics.generator_total,
         metrics.generator + metrics.anchor_loss + metrics.vf_loss,
@@ -1354,11 +1334,8 @@ def _conditioning_trainer(
     cfg["model"]["critic"]["input_mode"] = critic_mode
     denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
-        denoiser,
-        critics,
-        connectivity_critic,
-        cfg,
+    denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
+        denoiser, critics, connectivity_critic, None, cfg
     )
     base = torch.arange(2 * crop_size * crop_size).reshape(
         2,

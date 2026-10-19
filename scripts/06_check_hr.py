@@ -24,7 +24,7 @@ from src.predict.inference import LowResolutionAPI
 from src.predict.sr.inference import SuperResolutionAPI
 from src.prepare.resize import downsample, phase_channels
 from src.storage import load_probabilities, load_volume, save_probabilities, save_volume
-from src.train.run.source import validate_frozen_source
+from src.train.run.source import load_frozen_source
 
 
 def latest_sr():
@@ -162,7 +162,7 @@ def main(argv=None):
                 "SR export has no LR source. Supply --lr-weight or --input."
             )
         if not args.lr_weight:
-            validate_frozen_source(lr_weight, cfg["source"])
+            load_frozen_source({**cfg["source"], "weights": str(lr_weight)})
         print(f"LR weights: {lr_weight}\nGenerating LR...", flush=True)
         lr = LowResolutionAPI(lr_weight, args.device)
         validate_sr_source(cfg["data"], lr.data)

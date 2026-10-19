@@ -8,7 +8,7 @@ from threading import Event, current_thread, main_thread
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.config.files import find_saved_config, load_yaml, save_yaml
+from src.config.files import save_yaml
 from src.storage import save_model, torch_save
 from src.train.checkpoint import complete_checkpoint
 from src.train.metrics import write_metrics
@@ -43,13 +43,6 @@ def make_run_dir(
             sequence += 1
             continue
         return path
-
-
-def saved_config(checkpoint: Path, payload: dict) -> dict:
-    try:
-        return load_yaml(find_saved_config(checkpoint))
-    except FileNotFoundError:
-        return payload["config"]
 
 
 def save_weights(trainer: Trainer, root: Path, stage: str = "low_res") -> None:

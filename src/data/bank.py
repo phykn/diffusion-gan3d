@@ -2,6 +2,8 @@ from pathlib import Path
 
 import torch
 
+LR_BANK_FORMAT = "diffusion-gan3d.lr-bank"
+
 
 def validate_bank(
     bank: dict[int, torch.Tensor], domains: dict, size: int, phases: int
@@ -64,6 +66,6 @@ def validate_bank_height(
 
 def load_bank(path: str | Path) -> dict:
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if payload.get("format") != "diffusion-gan3d.lr-bank":
+    if payload.get("format") != LR_BANK_FORMAT:
         raise ValueError("unsupported LR bank format.")
     return payload

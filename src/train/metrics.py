@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -26,7 +26,6 @@ class Metrics:
     critic_connectivity: float
     connectivity_r1: float
     anchor_ramp: float
-    generator_global: float = 0.0
     critic_global: float = 0.0
     generator_connectivity_global: float = 0.0
     generator_connectivity_local: float = 0.0
@@ -40,8 +39,6 @@ class Metrics:
     anchor_pixel_loss: float = 0.0
     anchor_shared: bool = False
     connectivity_ramp: float = 0.0
-    anchor_neighbor_agreement: float | None = None
-    anchor_neighbor_excess_jump: float | None = None
     diagnostics: dict = field(default_factory=dict)
 
 
@@ -84,9 +81,6 @@ def collect_metrics(
             connectivity_r1=connectivity_r1,
             anchor_ramp=prepared.anchor_ramp,
             connectivity_ramp=prepared.connectivity_ramp,
-            anchor_neighbor_agreement=diagnostics.get("anchor/neighbor_agreement"),
-            anchor_neighbor_excess_jump=diagnostics.get("anchor/neighbor_excess_jump"),
-            generator_global=denoiser_update.global_loss,
             critic_global=critic_global,
             vf_loss=denoiser_update.vf,
             vf_active=presence.vf.any(),
@@ -106,11 +100,6 @@ def collect_metrics(
         for key in ("anchor/neighbor_agreement", "anchor/neighbor_excess_jump"):
             if key in metrics.diagnostics:
                 metrics.diagnostics[key] = None
-        metrics = replace(
-            metrics,
-            anchor_neighbor_agreement=None,
-            anchor_neighbor_excess_jump=None,
-        )
     return metrics
 
 
@@ -165,7 +154,6 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
     scalars = {
         "loss/generator": metrics.generator,
         "loss/generator_total": metrics.generator_total,
-        "loss/generator_global": metrics.generator_global,
         "loss/critic": metrics.critic,
         "loss/critic_global": metrics.critic_global,
         "loss/r1": metrics.r1,
@@ -192,8 +180,6 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "sampling/transition": metrics.transition,
         "sampling/volume_size": metrics.volume_size,
         "sampling/domain": metrics.domain,
-        "anchor/neighbor_agreement": metrics.anchor_neighbor_agreement,
-        "anchor/neighbor_excess_jump": metrics.anchor_neighbor_excess_jump,
         f"timestep/{metrics.transition}/generator": metrics.generator,
         f"timestep/{metrics.transition}/critic": metrics.critic,
         **{

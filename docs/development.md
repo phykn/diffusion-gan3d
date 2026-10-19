@@ -54,7 +54,9 @@ ramp, and are LR-only.
   Relative YAML paths resolve from the project root.
 - LR inference reads the run's `train.yaml` and `config/gen.yaml`; SR reads settings
   inside its export; resume reads checkpoint settings.
-- `src/train/state.py` owns checkpoint formats and the frozen-LR and saved-bank checks.
+- `src/train/state.py` owns training checkpoint formats and the resume config check;
+  `src/train/run/resume.py` loads and relocates checkpoints, and `src/train/run/source.py`
+  checks the frozen LR source. A relocated resume saves the moved paths in `train.yaml`.
 - Keep measured 2D observations and generated replay references apart in losses,
   metadata, and claims.
 - Folders: simulated data in `data/generated/<name>/`, inspection results in `checks/`,

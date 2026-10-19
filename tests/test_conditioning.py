@@ -253,6 +253,27 @@ def configuration(tmp_path, stage="low_res", height=False):
     return cfg
 
 
+def test_relocated_lr_resume_saves_moved_paths_for_inference(tmp_path):
+    torch.set_num_threads(1)
+    original = tmp_path / "original"
+    original.mkdir()
+    save_yaml(original / "lr.yaml", configuration(original, height=True))
+    run_low_res_train(config=original / "lr.yaml", steps=1, run_dir=original / "lr")
+    moved = tmp_path / "moved"
+    original.rename(moved)
+    output = moved / "resumed"
+    run_low_res_train(
+        resume=moved / "lr",
+        steps=2,
+        run_dir=output,
+        path_map=[(str(original), str(moved))],
+    )
+    # Inference and SR read train.yaml; it must name the moved images.
+    cfg = load_train_config(output / "train.yaml")
+    assert cfg["data"]["domains"][0]["xy"] == [str(moved / "images")]
+    assert cfg["train"]["total_steps"] == 2
+
+
 def test_height_conditioned_sr_refresh_survives_repeated_directory_moves(tmp_path):
     torch.set_num_threads(1)
     original = tmp_path / "original"
@@ -701,7 +722,7 @@ def test_replay_training_never_generates_reference_and_survives_resume(tmp_path)
     assert generate.call_count == 2
     assert first.anchor_planes == 1 and second.anchor_planes == 4
     assert second.anchor_loss > 0 and second.generator_connectivity > 0
-    assert first.anchor_neighbor_agreement is not None
+    assert first.diagnostics["anchor/neighbor_agreement"] is not None
     assert any("two_point_mae" in key for key in second.diagnostics)
     save_training(trainer, tmp_path / "training.pt")
     restored = build_trainer(cfg, torch.device("cpu"))

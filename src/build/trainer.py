@@ -30,38 +30,29 @@ def build_optimizers(
     denoiser: nn.Module,
     critics: nn.ModuleDict,
     connectivity_critic: nn.Module | None,
+    seam_critic: nn.Module | None,
     cfg: dict,
 ) -> tuple[
     torch.optim.Optimizer,
     dict[str, torch.optim.Optimizer],
     torch.optim.Optimizer | None,
+    torch.optim.Optimizer | None,
 ]:
     cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
     optim = cfg["optim"]
     betas = tuple(optim["adam_betas"])
-    denoiser_optim = torch.optim.Adam(
-        denoiser.parameters(),
-        lr=optim["generator_lr"],
-        betas=betas,
+
+    def critic_adam(module):
+        if module is None:
+            return None
+        return torch.optim.Adam(module.parameters(), lr=optim["critic_lr"], betas=betas)
+
+    return (
+        torch.optim.Adam(denoiser.parameters(), lr=optim["generator_lr"], betas=betas),
+        {plane: critic_adam(critics[plane]) for plane in critics},
+        critic_adam(connectivity_critic),
+        critic_adam(seam_critic),
     )
-    critic_optims = {
-        plane: torch.optim.Adam(
-            critics[plane].parameters(),
-            lr=optim["critic_lr"],
-            betas=betas,
-        )
-        for plane in critics
-    }
-    connectivity_optim = (
-        None
-        if connectivity_critic is None
-        else torch.optim.Adam(
-            connectivity_critic.parameters(),
-            lr=optim["critic_lr"],
-            betas=betas,
-        )
-    )
-    return denoiser_optim, critic_optims, connectivity_optim
 
 
 def build_trainer(
@@ -98,20 +89,8 @@ def build_trainer(
         load_model(root / "critic_c.pt", connectivity_critic)
         if (root / "critic_s.pt").is_file():
             load_model(root / "critic_s.pt", seam_critic)
-    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
-        denoiser,
-        critics,
-        connectivity_critic,
-        cfg,
-    )
-    seam_optim = (
-        None
-        if seam_critic is None
-        else torch.optim.Adam(
-            seam_critic.parameters(),
-            lr=cfg["optim"]["critic_lr"],
-            betas=tuple(cfg["optim"]["adam_betas"]),
-        )
+    denoiser_optim, critic_optims, connectivity_optim, seam_optim = build_optimizers(
+        denoiser, critics, connectivity_critic, seam_critic, cfg
     )
     datasets = build_datasets(cfg, high_resolution=sr)
     streams = {

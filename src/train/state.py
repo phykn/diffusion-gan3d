@@ -1,14 +1,29 @@
 from pathlib import Path
 
+import torch
+
 from src.config.data import get_plane_groups
 from src.config.train import normalize_train_config
 from src.storage import torch_save
+
+TRAIN_FORMATS = {
+    "low_res": "diffusion-gan3d.lr.train",
+    "sr": "diffusion-gan3d.sr.train",
+}
+
+
+def load_training(path: str | Path, stage: str) -> dict:
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if payload.get("format") != TRAIN_FORMATS[stage]:
+        label = "an SR" if stage == "sr" else "an LR"
+        raise ValueError(f"--resume requires {label} training checkpoint.")
+    return payload
 
 
 def save_training(trainer, path: str | Path) -> None:
     payload = _capture_state(trainer)
     payload.update(
-        format="diffusion-gan3d.lr.train",
+        format=TRAIN_FORMATS["low_res"],
         connectivity=trainer.connectivity_critic.state_dict(),
         connectivity_optim=trainer.connectivity_optim.state_dict(),
         seam=trainer.seam_critic.state_dict(),
@@ -20,17 +35,12 @@ def save_training(trainer, path: str | Path) -> None:
 
 
 def resume_training(trainer, payload: dict) -> None:
-    if payload.get("format") != "diffusion-gan3d.lr.train":
-        raise ValueError(
-            "resume requires an LR training checkpoint, not inference weights."
-        )
-    expected = normalize_train_config(payload["config"])
     actual = normalize_train_config(trainer.cfg)
-    expected["train"]["total_steps"] = actual["train"]["total_steps"]
-    if expected != actual:
-        raise ValueError(
-            "LR resume must use saved settings; only total_steps may change."
-        )
+    _require_saved_config(
+        normalize_train_config(payload["config"]),
+        actual,
+        "LR resume must use saved settings; only total_steps may change.",
+    )
     if payload["data_fingerprint"] != trainer.data_fingerprint:
         raise ValueError("LR source images changed since the checkpoint.")
     if (
@@ -57,25 +67,31 @@ def resume_training(trainer, payload: dict) -> None:
 
 def save_sr_training(trainer, path: str | Path) -> None:
     payload = _capture_state(trainer)
-    payload["format"] = "diffusion-gan3d.sr.train"
+    payload["format"] = TRAIN_FORMATS["sr"]
     torch_save(payload, path, overwrite=False)
 
 
 def resume_sr_training(trainer, payload: dict) -> None:
-    if payload.get("format") != "diffusion-gan3d.sr.train":
-        raise ValueError("unsupported SR training checkpoint format.")
     if payload["data_fingerprint"] != trainer.data_fingerprint:
         raise ValueError("SR source images changed since the checkpoint.")
     saved = normalize_train_config(payload["config"], "sr")
     if get_plane_groups(saved) != get_plane_groups(trainer.cfg):
         raise ValueError("critic plane_groups cannot change on resume.")
-    expected, actual = dict(saved), dict(trainer.cfg)
-    expected["train"], actual["train"] = dict(expected["train"]), dict(actual["train"])
-    expected["train"].pop("total_steps")
-    actual["train"].pop("total_steps")
-    if expected != actual:
-        raise ValueError("SR resume must use its saved resolved configuration.")
+    _require_saved_config(
+        saved, trainer.cfg, "SR resume must use its saved resolved configuration."
+    )
     _restore_state(trainer, payload)
+
+
+def _require_saved_config(saved: dict, actual: dict, message: str) -> None:
+    """Compare resolved settings, ignoring the total_steps a resume may extend."""
+
+    def without_steps(cfg):
+        train = {k: v for k, v in cfg["train"].items() if k != "total_steps"}
+        return {**cfg, "train": train}
+
+    if without_steps(saved) != without_steps(actual):
+        raise ValueError(message)
 
 
 def _capture_state(trainer) -> dict:

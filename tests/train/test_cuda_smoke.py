@@ -98,11 +98,8 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
     critics = critics.to(device)
     connectivity_critic = connectivity_critic.to(device)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim = build_optimizers(
-        denoiser,
-        critics,
-        connectivity_critic,
-        cfg,
+    denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
+        denoiser, critics, connectivity_critic, None, cfg
     )
     images = torch.randint(
         0,

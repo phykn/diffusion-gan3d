@@ -1,14 +1,14 @@
 import torch
 
 from src.anchor import AnchorCondition
-from src.plane import PLANE_DIRECTIONS, PLANES
+from src.plane import AXIS_NAMES, PLANE_DIRECTIONS, PLANES
 from src.train.loss.transition import TransitionStatistics
 
 
 @torch.no_grad()
 def reference_transition(statistics, axis, gap, sign, intervals=None):
     """Conditional transitions and mean crop-to-mean TV, at matching heights."""
-    direction = ("z", "y", "x")[axis]
+    direction = AXIS_NAMES[axis]
     joints, weights = [], []
     for (plane, dim, distance), stats in statistics.items():
         if distance != gap or PLANE_DIRECTIONS[PLANES[plane]][dim - 2] != direction:

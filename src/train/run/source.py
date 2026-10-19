@@ -25,12 +25,6 @@ def _validate_source_files(weights: Path, recorded: dict) -> None:
             raise ValueError(f"frozen LR source {label} changed since SR training.")
 
 
-def validate_frozen_source(
-    weights: Path, recorded: dict, path_maps: list | None = None
-) -> None:
-    load_frozen_source({**recorded, "weights": str(weights)}, path_maps)
-
-
 def read_source_config(
     path: Path, path_maps: list | None = None
 ) -> tuple[dict, str | None]:
