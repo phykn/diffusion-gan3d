@@ -30,7 +30,7 @@ lr_bank:
   refresh_every_steps: 500
 
 train:
-  total_steps: 10000
+  total_steps: 5000
 
   volume_batch_size: 1
   real_batch_size: 8

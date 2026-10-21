@@ -12,6 +12,4 @@ tune:
   lr:
     loss:
       r1_weight: 1.0
-    train:
-      total_steps: 20000
   sr: {}

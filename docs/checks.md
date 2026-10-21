@@ -48,7 +48,7 @@ python scripts/05_check_continuation.py --weight "run/my-run-lr" --anchor data/s
 - Metrics and diagnostics go only to `tensorboard/`.
 
 ```bash
-python run_train.py --resume "run/my-run-lr" --steps 20000 --run-dir "run/my-run-2"
+python run_train.py --resume "run/my-run-lr" --steps 30000 --run-dir "run/my-run-2"
 ```
 
 Resume continues the stage the checkpoint belongs to with its saved settings, so it takes
