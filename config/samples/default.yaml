@@ -3,6 +3,11 @@ images:
   xz: data
   yz: data
 
+resolution:
+  crop_size: 128
+  lo_res_size: 64
+  hi_res_size: 128
+
 structure:
   isotropic: true
   depth_gradient: false

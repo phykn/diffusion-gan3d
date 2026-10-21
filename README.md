@@ -32,8 +32,8 @@ python -m pip install -r requirements.txt
 ## Train
 
 Training has two stages. The **LR** (low-resolution) model generates volumes from noise
-at `lo_res_size` voxels per `crop_size` source pixels (default 64 per 128). The **SR**
-(super-resolution) model then refines LR volumes to `hi_res_size` voxels (default 128).
+at `lo_res_size` voxels per `crop_size` source pixels (64 per 128 in the default sample).
+The **SR** (super-resolution) model then refines LR volumes to `hi_res_size` voxels (128).
 
 ```bash
 python scripts/01_check_dataset.py --sample default --no-view
@@ -56,8 +56,9 @@ A sample is one file in [config/samples/](config/samples/); copy
 
 - `images` maps `xy`, `xz`, and `yz` to folders of 2D uint8 label images with one shared
   pixel size; in `xz` and `yz` images, z runs down the rows. Labels are phases `0..K-1`,
-  and phase 0 is pore. `K` is the largest label plus one unless `num_phases` is set;
-  `resolution` can override `crop_size`, `lo_res_size`, and `hi_res_size`.
+  and phase 0 is pore. `K` is the largest label plus one unless `num_phases` is set.
+- `resolution` sets the data size: each training crop is `crop_size` source pixels on
+  an edge, sampled to `lo_res_size` voxels for LR and `hi_res_size` voxels for SR.
 - `structure` says what the material looks like:
   - `isotropic: false` judges `xy` sections apart from `xz`/`yz` sections.
   - `depth_gradient: true` conditions both stages on height and, in LR, on the phase

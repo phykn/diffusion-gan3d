@@ -11,7 +11,7 @@ BASE_DIR = PROJECT_ROOT / "config" / "base"
 # Short stage names for config/base/<name>.yaml, tune keys, and run folders.
 STAGE_NAMES = {"low_res": "lr", "sr": "sr"}
 SAMPLE_KEYS = ("images", "structure", "tune", "num_phases", "resolution")
-RESOLUTION = {"crop_size": 128, "lo_res_size": 64, "hi_res_size": 128}
+RESOLUTION = ("crop_size", "lo_res_size", "hi_res_size")
 STRUCTURE = ("isotropic", "depth_gradient", "mirror_symmetric")
 TEMPLATE = "config/samples/default.yaml"
 
@@ -33,7 +33,9 @@ def load_sample(sample: str | Path) -> dict:
     unknown = set(cfg) - set(SAMPLE_KEYS)
     if unknown:
         raise ValueError(f"unknown sample setting: {', '.join(sorted(unknown))}")
-    missing = [name for name in ("images", "structure") if name not in cfg]
+    missing = [
+        name for name in ("images", "resolution", "structure") if name not in cfg
+    ]
     if missing:
         raise ValueError(f"{path.name} needs {' and '.join(missing)}; see {TEMPLATE}.")
     for name, allowed in (
@@ -47,6 +49,9 @@ def load_sample(sample: str | Path) -> dict:
         unknown = set(section) - set(allowed)
         if unknown:
             raise ValueError(f"unknown {name} setting: {', '.join(sorted(unknown))}")
+    for name in RESOLUTION:
+        if name not in cfg["resolution"]:
+            raise ValueError(f"resolution.{name} is required; see {TEMPLATE}.")
     for name in STRUCTURE:
         if type(cfg["structure"].get(name)) is not bool:
             raise ValueError(f"structure.{name} must be true or false; see {TEMPLATE}.")
@@ -70,7 +75,6 @@ def build_train_config(sample: Mapping, stage: str) -> dict:
     data = {
         "domains": {0: images},
         "num_phases": num_phases,
-        **RESOLUTION,
         **sample["resolution"],
     }
     cfg = {"stage": stage, "nickname": sample["name"], "data": data} | base

@@ -3,6 +3,11 @@ images:
   xz: data/generated/simul_anode/slices/1
   yz: data/generated/simul_anode/slices/2
 
+resolution:
+  crop_size: 128
+  lo_res_size: 64
+  hi_res_size: 128
+
 structure:
   isotropic: false
   depth_gradient: true

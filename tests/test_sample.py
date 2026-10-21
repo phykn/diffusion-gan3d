@@ -28,12 +28,19 @@ def test_default_sample_counts_phases_from_its_images():
     assert cfg["data"]["num_phases"] == 2
 
 
-def test_sample_needs_images_and_every_structure_value(tmp_path):
+def test_sample_needs_images_resolution_and_every_structure_value(tmp_path):
     path = tmp_path / "bare.yaml"
     save_yaml(path, {"images": {"xy": "a"}})
-    with pytest.raises(ValueError, match="needs structure; see .*default.yaml"):
+    with pytest.raises(
+        ValueError, match="needs resolution and structure; see .*default.yaml"
+    ):
         load_sample(path)
-    save_yaml(path, {"images": {"xy": "a"}, "structure": {"isotropic": True}})
+    sample = {"images": {"xy": "a"}, "resolution": {"crop_size": 128}}
+    save_yaml(path, sample | {"structure": {"isotropic": True}})
+    with pytest.raises(ValueError, match="resolution.lo_res_size is required"):
+        load_sample(path)
+    sample["resolution"] |= {"lo_res_size": 64, "hi_res_size": 128}
+    save_yaml(path, sample | {"structure": {"isotropic": True}})
     with pytest.raises(ValueError, match="structure.depth_gradient must be true"):
         load_sample(path)
 
@@ -56,7 +63,13 @@ def test_structure_decides_stage_settings():
 def write_sample(tmp_path, **sample):
     path = tmp_path / "trial.yaml"
     structure = {"isotropic": True, "depth_gradient": False, "mirror_symmetric": True}
-    base = {"images": {"xy": "a", "xz": "b"}, "structure": structure, "num_phases": 2}
+    resolution = {"crop_size": 128, "lo_res_size": 64, "hi_res_size": 128}
+    base = {
+        "images": {"xy": "a", "xz": "b"},
+        "resolution": resolution,
+        "structure": structure,
+        "num_phases": 2,
+    }
     save_yaml(path, base | sample)
     return path
 
