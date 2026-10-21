@@ -9,7 +9,9 @@ import matplotlib.pyplot as plt
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(SCRIPT_DIR))
 
 from evaluation_io import set_seed
 from make_assets import OUTPUT_DIR
