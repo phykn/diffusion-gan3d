@@ -1,5 +1,6 @@
 """Resolve presets or saved run settings."""
 
+import copy
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -36,12 +37,12 @@ TRAINING_SETTINGS = (
 )
 
 
-def load_train_config(
-    path: str | Path, stage: str = "low_res", data: str | Path | None = None
-) -> dict:
-    cfg = load_yaml(path)
-    if data is not None:
-        cfg["data"] = str(data)
+def load_train_config(config: str | Path | Mapping, stage: str = "low_res") -> dict:
+    """Resolve a training YAML path, or a config built by src.config.sample."""
+    if isinstance(config, Mapping):
+        cfg = copy.deepcopy(dict(config))
+    else:
+        cfg = load_yaml(config)
     if isinstance(cfg.get("data"), str):
         cfg["data"] = load_yaml(resolve_external_data_path(cfg["data"]))
     cfg = fill_height_extents(normalize_loaded_train_config(cfg, stage))

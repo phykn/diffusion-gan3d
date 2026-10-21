@@ -374,17 +374,16 @@ def test_data_selection_and_snapshot_are_independent_of_cwd(tmp_path, monkeypatc
     }
     save_yaml(root / "config/data/selected.yaml", data)
     preset = tmp_path / "experiment.yaml"
-    save_yaml(preset, {"stage": "low_res", "data": "missing.yaml"})
+    save_yaml(preset, {"stage": "low_res", "data": "config/data/selected.yaml"})
     monkeypatch.setattr(config_module, "PROJECT_ROOT", root)
     monkeypatch.chdir(tmp_path)
-    cfg = load_train_config(preset, data="config/data/selected.yaml")
+    cfg = load_train_config(preset)
     assert cfg["data"]["domains"][0]["xy"] == [str((root / "images").resolve())]
     assert "scale_factor" not in cfg["data"]
     snapshot = tmp_path / "train.yaml"
     save_yaml(snapshot, cfg)
     (root / "config/data/selected.yaml").unlink()
     assert load_train_config(snapshot) == cfg
-    assert load_yaml(preset)["data"] == "missing.yaml"
 
 
 def test_embedded_data_folders_resolve_against_the_project_root(tmp_path, monkeypatch):
@@ -748,7 +747,7 @@ def test_existing_run_directory_is_rejected_before_setup(tmp_path, monkeypatch, 
     run.mkdir()
     runner = run_sr_train if stage == "sr" else low_res_module.run_low_res_train
     with pytest.raises(FileExistsError, match="already exists"):
-        runner(run_dir=run)
+        runner(config=tmp_path / "unused.yaml", run_dir=run)
 
 
 def test_numbers_read_as_text_explain_the_yaml_spelling():

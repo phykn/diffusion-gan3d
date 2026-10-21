@@ -3,7 +3,7 @@
 </div>
 
 Recorded experiments below use their stated settings; current training presets
-and behavior are defined by `config/train/` and the source code.
+and behavior are defined by `config/base/`, `config/samples/`, and the source code.
 
 ## Abstract
 

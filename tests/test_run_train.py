@@ -309,22 +309,12 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     runner = (
         "import sys; "
         "from pathlib import Path; "
-        "import run_train_1st; "
-        "import src.train.run.low_res; "
-        "src.train.run.low_res.PROJECT_ROOT = Path(sys.argv.pop(1)); "
-        "run_train_1st.main()"
+        "import src.train.run.low_res as low_res; "
+        "low_res.PROJECT_ROOT = Path(sys.argv[1]); "
+        "low_res.run_low_res_train('cpu', config=Path(sys.argv[2]))"
     )
     result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            runner,
-            str(tmp_path),
-            "--config",
-            str(config),
-            "--device",
-            "cpu",
-        ],
+        [sys.executable, "-c", runner, str(tmp_path), str(config)],
         cwd=PROJECT_ROOT,
         env=environment,
         capture_output=True,
@@ -370,7 +360,7 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     )
 
 
-def test_lr_run_saves_the_supplied_yaml_and_cli_overrides_only(
+def test_lr_run_saves_the_supplied_yaml_and_step_override_only(
     tmp_path: Path, monkeypatch
 ) -> None:
     folder = tmp_path / "slices"
@@ -390,6 +380,7 @@ def test_lr_run_saves_the_supplied_yaml_and_cli_overrides_only(
         },
     )
     source = load_yaml(PROJECT_ROOT / "tests/fixtures/config/train/low_res.yaml")
+    source["data"] = str(data)
     source["model"]["generator"].update(
         channels=[4, 8], embedding_channels=8, latent_channels=4
     )
@@ -406,10 +397,8 @@ def test_lr_run_saves_the_supplied_yaml_and_cli_overrides_only(
     config = tmp_path / "low_res.yaml"
     save_yaml(config, source)
     monkeypatch.setattr("src.train.run.low_res.PROJECT_ROOT", tmp_path)
-    first = run_low_res_train(
-        "cpu", config=config, run_dir=tmp_path / "first", steps=1, data=data
-    )
-    expected = {**source, "data": str(data)}
+    first = run_low_res_train("cpu", config=config, run_dir=tmp_path / "first", steps=1)
+    expected = dict(source)
     expected["train"] = {**source["train"], "total_steps": 1}
     assert load_yaml(first / "train.yaml") == expected
     resumed = run_low_res_train(
@@ -429,16 +418,18 @@ def test_dataset_check_script_accepts_one_axis(tmp_path: Path) -> None:
     folder = tmp_path / "axis_0"
     folder.mkdir()
     Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(folder / "sample.png")
-    config = tmp_path / "train.yaml"
+    sample = tmp_path / "one_axis.yaml"
     save_yaml(
-        config,
+        sample,
         {
-            "data": {
-                "domains": {0: {"xy": [str(folder)]}},
-                "crop_size": 8,
-                "num_phases": 2,
-                "lo_res_size": 8,
-            }
+            "images": {"xy": str(folder)},
+            "structure": {
+                "isotropic": True,
+                "depth_gradient": False,
+                "mirror_symmetric": True,
+            },
+            "num_phases": 2,
+            "resolution": {"crop_size": 8, "lo_res_size": 8, "hi_res_size": 8},
         },
     )
     environment = dict(os.environ)
@@ -447,8 +438,8 @@ def test_dataset_check_script_accepts_one_axis(tmp_path: Path) -> None:
         [
             sys.executable,
             str(PROJECT_ROOT / "scripts" / "01_check_dataset.py"),
-            "--config",
-            str(config),
+            "--sample",
+            str(sample),
             "--domain",
             "0",
             "--out",

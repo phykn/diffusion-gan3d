@@ -1,0 +1,41 @@
+stage: sr
+
+model:
+  generator:
+    channels: [16, 32, 64, 64]
+
+  critic:
+    channels: [32, 64, 128]
+
+  diffusion:
+    num_steps: 10
+
+augmentation:
+  auto_planes: true
+
+loss:
+  r1_weight: 0.5
+  r2_weight: 0.1
+  r1_every_steps: 8
+
+  downsample_consistency_weight: 10.0
+
+optim:
+  generator_lr: 0.00016
+  critic_lr: 0.0001
+
+lr_bank:
+  samples_per_domain: 8
+  guidance: 0.9
+  refresh_every_steps: 500
+
+train:
+  total_steps: 10000
+
+  volume_batch_size: 1
+  real_batch_size: 8
+  slice_pairs_per_plane: 8
+
+  weights_every_steps: 500
+  archive_every_steps: 2500
+  structure_every_steps: 250

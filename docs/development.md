@@ -4,7 +4,7 @@
 
 | Change | Start here |
 | --- | --- |
-| Input images or resolutions | [config/data/](../config/data/), [RealDataset](../src/data/dataset.py) |
+| Samples, input images, or resolutions | [config/samples/](../config/samples/), [sample settings](../src/config/sample.py), [RealDataset](../src/data/dataset.py) |
 | Network architecture | [src/model/](../src/model/), [model assembly](../src/build/model.py) |
 | Training step or objective | [Trainer](../src/train/trainer.py), [losses](../src/train/loss/) |
 | Anchors, replay, or condition sampling | [ConditionSampler](../src/train/conditioning.py), [step inputs](../src/train/batch.py) |
@@ -18,8 +18,9 @@
 
 ## How the pieces fit
 
-- Training: `run_train_1st.py` / `run_train_2nd.py` → `src/train/run/` → `src/build/`
-  assembles data, models, and the trainer.
+- Training: `run_train.py` → `src/config/sample.py` builds each stage's settings from
+  `config/base/` and the sample → `src/train/run/` → `src/build/` assembles data,
+  models, and the trainer.
 - `Trainer.step` owns optimizer and EMA updates. `Trainer.settings` holds runtime and
   loss settings built once in `src/build/trainer.py`; read them there instead of copying.
 - `Trainer.conditions` (`ConditionSampler`) samples real batches, anchors, replay,
@@ -65,8 +66,9 @@ ramp, and are LR-only.
 
 ## Synthetic data
 
-`python simul/run.py --config <file>` writes 3D TIFFs, per-axis slice PNGs, and
-`simulation.yaml` (targets and measured fractions). The output folder must be empty.
+`python simul/run.py --config <file>` writes 3D TIFFs, per-axis slice PNGs
+(`slices/0..2` for `xy`, `xz`, `yz`), and `simulation.yaml` (targets and measured
+fractions). The output folder must be empty.
 
 - Default `kind: particles` ([geometry.py](../simul/src/geometry.py)): elongated phase 2
   and spherical phase 1 particles with periodic y/x.
@@ -75,16 +77,15 @@ ramp, and are LR-only.
   fractions at evenly spaced heights, enforced per slice. Order bias alone cannot
   concentrate silicon once graphite fills the pores.
 
-Train on the anode set with [config/train/anode.yaml](../config/train/anode.yaml) (LR) and
-[config/train/anode_sr.yaml](../config/train/anode_sr.yaml) (SR): the stock presets with this
-data and height conditioning, which SR must share with its LR source.
+The anode sample is not isotropic, has a depth gradient, and is not mirror symmetric, so
+both stages share height conditioning and split the `xy` critic from `xz`/`yz`; LR adds
+the per-height profile loss and turns off flips.
 
 ```bash
 python simul/run.py --config simul/config_anode.yaml
-python scripts/01_check_dataset.py --config config/train/anode.yaml --no-view
-python run_train_1st.py --config config/train/anode.yaml --run-dir "run/anode-lr"
+python scripts/01_check_dataset.py --sample simul_anode --no-view
+python run_train.py simul_anode --run-dir "run/anode"
 python scripts/02_check_generated.py --weight "run/anode-lr" --no-view
-python run_train_2nd.py --config config/train/anode_sr.yaml --base-weights "run/anode-lr" --run-dir "run/anode-sr"
 python scripts/06_check_hr.py --weight "run/anode-sr" --no-view
 ```
 

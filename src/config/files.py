@@ -32,11 +32,15 @@ def load_yaml(path: str | Path) -> dict:
 
 def save_yaml(path: str | Path, data: dict) -> None:
     with Path(path).open("w", encoding="utf-8") as file:
-        blocks = [
-            yaml.dump({key: value}, Dumper=ConfigDumper, sort_keys=False)
-            for key, value in prepare_yaml(data).items()
-        ]
-        file.write("\n".join(blocks) if blocks else "{}\n")
+        file.write(dump_yaml(data))
+
+
+def dump_yaml(data: dict) -> str:
+    blocks = [
+        yaml.dump({key: value}, Dumper=ConfigDumper, sort_keys=False)
+        for key, value in prepare_yaml(data).items()
+    ]
+    return "\n".join(blocks) if blocks else "{}\n"
 
 
 class ConfigDumper(yaml.SafeDumper):

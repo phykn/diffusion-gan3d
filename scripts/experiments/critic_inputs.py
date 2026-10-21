@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.common.metrics import read_metrics
 from src.build.trainer import build_trainer
+from src.config.sample import build_train_config, load_sample
 from src.config.train import load_train_config
 from src.train.run.loop import run_train
 
@@ -112,7 +113,7 @@ def compare(cfg, root, seeds, steps, device):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--config", type=Path, default=Path("config/train/low_res.yaml")
+        "--sample", default="default", help="Name in config/samples/ or a YAML path."
     )
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--seeds", type=int, nargs="+", default=[11, 22, 33])
@@ -121,7 +122,7 @@ def main():
     args = parser.parse_args()
     torch.set_num_threads(1)
     compare(
-        load_train_config(args.config),
+        load_train_config(build_train_config(load_sample(args.sample), "low_res")),
         args.run_dir,
         args.seeds,
         args.steps,

@@ -15,16 +15,17 @@ add `--no-view` to skip the viewer in `01–06`.
 | [07_check_tilt.py](../scripts/07_check_tilt.py) | Signed particle tilt balance vs real volumes | LR (optional) |
 
 ```bash
-python scripts/04_check_scale_up.py --weight "run/my-lr-run" --blocks 2 2 2 --no-view
-python scripts/05_check_continuation.py --weight "run/my-lr-run" --anchor image.png --axis 0
+python scripts/04_check_scale_up.py --weight "run/my-run-lr" --blocks 2 2 2 --no-view
+python scripts/05_check_continuation.py --weight "run/my-run-lr" --anchor image.png --axis 0
 ```
 
 - `--blocks D H W` sets the `(z, y, x)` size to `patch + (n - 1) * (patch - 2 * overlap)`;
   the script prints the actual tile grid. `--axis 0/1/2` selects `xy/xz/yz`.
 - `--device`, `--seed`, `--domain`, and `--napari` work in `02–06`; `--help` lists the rest.
 - `--height-origin` and `--height-extent` (`02–07`) are in source pixels along the xz/yz row direction.
-- `02 --vf-profile config/profile/simul_anode.yaml --guidance 1.5` fixes the depth
-  fractions; height alone flattens a strong gradient.
+- `02 --vf-profile simul/config_anode.yaml --guidance 1.5` fixes the depth fractions to
+  that simulation's targets (a profile YAML/JSON also works); height alone flattens a
+  strong gradient.
 - `02–05` save `volume.tiff/png/json`; `06` saves LR/HR volumes, `comparison.png`, and `report.json`.
 - `07` counts particles tilted each way (`dz/dy`, `dz/dx`, `dy/dx`); generated volumes
   should match `--real` (use `--real-stride 2` for 128-pixel crops at 64 voxels). Training
@@ -45,11 +46,13 @@ python scripts/05_check_continuation.py --weight "run/my-lr-run" --anchor image.
 - The first Ctrl+C stops after the current step; a second stops at once without saving.
 
 ```bash
-python run_train_1st.py --resume "run/my-lr-run" --steps 20000
+python run_train.py --resume "run/my-run-lr" --steps 20000 --run-dir "run/my-run-2"
 ```
 
-`--steps` is the total, including completed steps. Resume uses saved settings, writes a
-new run directory, and rejects checkpoints from older schemas. Pass `--path-map OLD NEW`
+`--steps` is the total, including completed steps. Resume continues the stage the
+checkpoint belongs to, uses its saved settings, writes a new run directory (here
+`run/my-run-2-lr`), and rejects checkpoints from older schemas. After an LR resume,
+`python run_train.py <sample> --run-dir "run/my-run-2"` reuses it and trains SR. Pass `--path-map OLD NEW`
 (repeatable) when data or runs have moved.
 
 [Back to README](../README.md)

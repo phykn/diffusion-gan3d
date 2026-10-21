@@ -102,6 +102,24 @@ def vf_profile(size: int, padding: int, vf) -> np.ndarray:
     return np.interp(height, np.linspace(0.0, 1.0, len(points)), points)
 
 
+def depth_profile(geometry: dict) -> dict:
+    """Target [pore, graphite, silicon] fractions over z, as a generation vf_profile."""
+    vfs = [
+        np.atleast_1d(np.asarray(geometry[name], dtype=float))
+        for name in ("graphite_vf", "silicon_vf")
+    ]
+    knots = [np.linspace(0.0, 1.0, len(vf)) for vf in vfs]
+    heights = np.union1d(np.union1d(*knots), (0.0, 1.0))
+    points = []
+    for height in heights:
+        graphite, silicon = (
+            round(float(np.interp(height, knot, vf)), 6) for knot, vf in zip(knots, vfs)
+        )
+        pore = round(1.0 - graphite - silicon, 6)
+        points.append([round(float(height), 6), [pore, graphite, silicon]])
+    return {"axis": "z", "interpolation": "linear", "points": points}
+
+
 def check_anode(
     size,
     graphite_radius,

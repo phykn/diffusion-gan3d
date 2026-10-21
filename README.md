@@ -28,37 +28,38 @@ source .venv/bin/activate   # PowerShell: .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
-Input images are set in [config/data/default.yaml](config/data/default.yaml) (default:
-`data/sample.png`). Each must be a 2D uint8 image of phase IDs `0` to `num_phases - 1`.
-`crop_size` is in source pixels; `lo_res_size` and `hi_res_size` are voxel grid sizes.
+## Samples
+
+Each sample is one file in [config/samples/](config/samples/), all with the shape of
+[default.yaml](config/samples/default.yaml): `images` (a folder of 2D uint8 label images
+per plane; the phase count comes from the images), `structure` (what the material looks
+like), and `tune` (`lr`, `sr`: single values to change). Settings apply in order, later
+winning: [config/base/](config/base/)`<stage>.yaml`, then `structure`, then `tune`;
+`--show` prints the result.
 
 ```bash
-python scripts/01_check_dataset.py --no-view
-python run_train_1st.py --run-dir "run/my-lr-run"
-python scripts/02_check_generated.py --weight "run/my-lr-run" --no-view
+python scripts/01_check_dataset.py --sample default --no-view
+python run_train.py default --run-dir "run/my-run"
+python scripts/02_check_generated.py --weight "run/my-run-lr" --no-view
+python scripts/06_check_hr.py --weight "run/my-run-sr" --no-view
 ```
 
-[config/train/low_res.yaml](config/train/low_res.yaml) controls training. Use a new
-`--run-dir` per run; it stores weights and resolved settings, while inspection results
-go to `checks/`. The device is CUDA, then MPS, then CPU unless `--device` is given;
-mixed precision runs only on CUDA.
+`run_train.py` trains the LR model, then the super-resolution (SR) model from its frozen
+volumes and the real high-resolution sections. `--run-dir NAME` writes `NAME-lr` and
+`NAME-sr`, and rerunning the command skips a finished stage; without it, each stage gets a
+new timestamped folder in `run/`. `--show` prints the settings built for both stages, and
+`--resume` continues an interrupted stage from its checkpoints. Inspection results go to
+`checks/`. The device is CUDA, then MPS, then CPU unless `--device` is given; mixed
+precision runs only on CUDA.
 
-## Super-resolution (optional)
-
-Stage 2 trains a separate model from frozen stage-1 volumes and real high-resolution
-sections ([config/train/sr.yaml](config/train/sr.yaml)):
-
-```bash
-python run_train_2nd.py --base-weights "run/my-lr-run" --run-dir "run/my-sr-run"
-python scripts/06_check_hr.py --weight "run/my-sr-run" --no-view
-```
+To add a sample, copy `default.yaml` and change its folders and `structure`.
 
 ## Web interface
 
 Start the backend with an LR run, then the frontend in another terminal (Node.js required):
 
 ```bash
-python backend/run.py --weight "run/my-lr-run"
+python backend/run.py --weight "run/my-run-lr"
 ```
 
 ```bash

@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
@@ -5,7 +6,7 @@ import torch
 from src.build.data import build_augmentation
 from src.build.sr import build_sr_trainer
 from src.config.data import validate_sr_source
-from src.config.files import PROJECT_ROOT, find_saved_config, load_yaml
+from src.config.files import PROJECT_ROOT, find_saved_config
 from src.config.train import get_sr_resolution, load_train_config, validate_sr_config
 from src.data.bank import load_bank
 from src.data.source import fill_height_extents, infer_height_extents
@@ -16,7 +17,12 @@ from src.train.run.bank import (
     refresh_bank,
 )
 from src.train.run.loop import check_run_dir, make_run_dir, run_train
-from src.train.run.resume import check_resume_args, load_resume, set_total_steps
+from src.train.run.resume import (
+    check_resume_args,
+    load_resume,
+    load_source,
+    set_total_steps,
+)
 from src.train.run.source import file_hash, load_frozen_source, read_source_config
 from src.train.state import resume_sr_training
 
@@ -25,14 +31,13 @@ def run_sr_train(
     device: str | torch.device = "cpu",
     base_weights: Path | None = None,
     resume: Path | None = None,
-    config: Path | None = None,
+    config: Path | Mapping | None = None,
     run_dir: Path | None = None,
     steps: int | None = None,
     bank_size: int | None = None,
-    data: Path | None = None,
     path_map: list[tuple[str, str]] | None = None,
 ) -> Path:
-    check_resume_args(resume, path_map, config, data)
+    check_resume_args(resume, path_map, config)
     if base_weights is not None and resume is not None:
         raise ValueError("base_weights cannot change on resume.")
     device = check_device(device)
@@ -48,11 +53,8 @@ def run_sr_train(
         load_frozen_source(cfg["source"], payload["path_maps"])
         bank_payload = load_bank(bank_path)
     else:
-        path = config or PROJECT_ROOT / "config/train/sr.yaml"
-        source = load_yaml(path)
-        if data is not None:
-            source["data"] = str(data)
-        cfg = load_train_config(path, "sr", data=data)
+        source = load_source(config)
+        cfg = load_train_config(source, "sr")
         prepare_source(cfg, base_weights)
         if base_weights is not None:
             source.setdefault("source", {})["weights"] = str(base_weights)

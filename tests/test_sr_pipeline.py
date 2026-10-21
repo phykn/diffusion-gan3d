@@ -10,7 +10,6 @@ import torch
 from PIL import Image
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-import run_train_2nd
 from src.build.trainer import build_trainer
 from src.config.files import load_yaml, save_yaml
 from src.config.generation import load_generation_settings
@@ -19,7 +18,9 @@ from src.storage import load_volume
 from src.train.checkpoint import resolve_checkpoint
 from src.train.run.bank import publish_bank, refresh_bank, save_bank
 from src.train.run.loop import run_train
+from src.train.run.low_res import run_low_res_train
 from src.train.run.source import file_hash
+from src.train.run.sr import run_sr_train
 
 
 @pytest.mark.parametrize(
@@ -100,15 +101,10 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
-    source_args = ["--base-weights", str(base_dir)] if source_mode == "cli" else []
-    run_train_2nd.main(
-        [
-            "--config",
-            str(sr_config),
-            *source_args,
-            "--device",
-            "cpu",
-        ]
+    run_sr_train(
+        "cpu",
+        config=sr_config,
+        base_weights=base_dir if source_mode == "cli" else None,
     )
     (sr_dir,) = (tmp_path / "run").iterdir()
     assert sr_dir.name.endswith("_sr_refine")
@@ -151,18 +147,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     first = torch.load(resolve_checkpoint(sr_dir), weights_only=True)
     assert first["step"] == 1
     resumed = tmp_path / "resumed"
-    run_train_2nd.main(
-        [
-            "--resume",
-            str(sr_dir),
-            "--steps",
-            "2",
-            "--run-dir",
-            str(resumed),
-            "--device",
-            "cpu",
-        ]
-    )
+    run_sr_train("cpu", resume=sr_dir, steps=2, run_dir=resumed)
     second = torch.load(resolve_checkpoint(resumed), weights_only=True)
     assert second["step"] == 2
     assert (
@@ -297,16 +282,7 @@ def test_bank_snapshot_cannot_overwrite_a_published_step(tmp_path):
     assert torch.load(path, weights_only=True)["volumes"].eq(1).all()
 
 
-def test_sr_default_config_comes_from_project_root(monkeypatch):
-    from src.config.files import PROJECT_ROOT
-    from src.train.run.sr import run_sr_train
-
-    def read_config(path, stage, **kwargs):
-        assert path == PROJECT_ROOT / "config/train/sr.yaml"
-        assert path.is_file()
-        assert stage == "sr"
-        raise RuntimeError("default config reached")
-
-    monkeypatch.setattr("src.train.run.sr.load_train_config", read_config)
-    with pytest.raises(RuntimeError, match="default config reached"):
-        run_sr_train()
+def test_new_runs_need_a_training_config():
+    for runner in (run_low_res_train, run_sr_train):
+        with pytest.raises(ValueError, match="needs a training config"):
+            runner()

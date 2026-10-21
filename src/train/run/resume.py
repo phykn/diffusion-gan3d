@@ -1,6 +1,8 @@
 import copy
+from collections.abc import Mapping
 from pathlib import Path
 
+from src.config.files import load_yaml
 from src.config.train import normalize_train_config
 from src.train.checkpoint import resolve_checkpoint
 from src.train.relocate import relocate_checkpoint
@@ -8,14 +10,23 @@ from src.train.state import load_training
 
 
 def check_resume_args(
-    resume: Path | None, path_map: list | None, config: Path | None, data: Path | None
+    resume: Path | None, path_map: list | None, config: Path | Mapping | None
 ) -> None:
     if path_map and resume is None:
         raise ValueError("path_map requires --resume.")
-    if resume is not None and (config is not None or data is not None):
+    if resume is not None and config is not None:
         raise ValueError(
             "--resume uses saved settings; only --steps may override them."
         )
+    if resume is None and config is None:
+        raise ValueError("a new run needs a training config.")
+
+
+def load_source(config: Path | Mapping) -> dict:
+    """Return the training YAML that a new run saves as its train.yaml."""
+    if isinstance(config, Mapping):
+        return copy.deepcopy(dict(config))
+    return load_yaml(config)
 
 
 def load_resume(

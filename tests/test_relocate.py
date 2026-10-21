@@ -3,8 +3,7 @@ from pathlib import Path
 import pytest
 import torch
 
-import run_train_1st
-import run_train_2nd
+import run_train
 from src.train.relocate import PathRemapper, relocate_checkpoint
 from src.train.run.low_res import run_low_res_train
 from src.train.run.sr import run_sr_train
@@ -118,9 +117,8 @@ def test_path_maps_require_resume(runner, tmp_path):
         runner(path_map=[("/old", str(tmp_path))])
 
 
-@pytest.mark.parametrize("cli", [run_train_1st, run_train_2nd])
-def test_cli_accepts_multiple_path_maps(cli):
-    args = cli.parse_args(
+def test_cli_accepts_multiple_path_maps():
+    args = run_train.parse_args(
         [
             "--resume",
             "training.pt",

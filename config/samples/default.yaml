@@ -1,0 +1,13 @@
+images:
+  xy: data
+  xz: data
+  yz: data
+
+structure:
+  isotropic: true
+  depth_gradient: false
+  mirror_symmetric: true
+
+tune:
+  lr: {}
+  sr: {}

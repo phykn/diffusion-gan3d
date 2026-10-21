@@ -1,0 +1,17 @@
+images:
+  xy: data/generated/simul_anode/slices/0
+  xz: data/generated/simul_anode/slices/1
+  yz: data/generated/simul_anode/slices/2
+
+structure:
+  isotropic: false
+  depth_gradient: true
+  mirror_symmetric: false
+
+tune:
+  lr:
+    loss:
+      r1_weight: 1.0
+    train:
+      total_steps: 20000
+  sr: {}

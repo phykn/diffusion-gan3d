@@ -256,7 +256,7 @@ def test_lr_cli_resumes_progress_without_training_seed(tmp_path):
             [
                 sys.executable,
                 "-B",
-                "run_train_1st.py",
+                "run_train.py",
                 "--device",
                 "cpu",
                 *map(str, args),
@@ -266,7 +266,7 @@ def test_lr_cli_resumes_progress_without_training_seed(tmp_path):
             text=True,
         )
 
-    run("--config", preset, "--steps", 2, "--run-dir", tmp_path / "first")
+    run_low_res_train(config=preset, steps=2, run_dir=tmp_path / "first")
     run(
         "--resume",
         tmp_path / "first",
@@ -275,7 +275,9 @@ def test_lr_cli_resumes_progress_without_training_seed(tmp_path):
         "--run-dir",
         tmp_path / "resumed",
     )
-    resumed = torch.load(resolve_checkpoint(tmp_path / "resumed"), weights_only=True)
+    resumed_dir = tmp_path / "resumed-lr"
+    assert (resumed_dir / ".done").is_file()
+    resumed = torch.load(resolve_checkpoint(resumed_dir), weights_only=True)
     assert resumed["step"] == 4
     assert "seed" not in resumed["config"]["train"]
     assert "torch_rng" not in resumed

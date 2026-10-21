@@ -22,6 +22,7 @@ from scripts.common.metrics import read_metrics
 from src.api import LowResolutionAPI, PlaneAnchor, SuperResolutionAPI
 from src.build.trainer import build_trainer
 from src.config.files import save_yaml
+from src.config.sample import build_train_config, load_sample
 from src.config.train import load_train_config
 from src.prepare.resize import resize_labels
 from src.storage import save_volume
@@ -123,7 +124,7 @@ def main():
         "grid": {"crop": 128, "low": 64, "high": 128},
         "variants": {},
     }
-    reference = load_train_config("config/train/low_res.yaml")
+    reference = load_train_config(build_train_config(load_sample("default"), "low_res"))
     reference["data"].update(
         domains={0: {p: [str(train_images.resolve())] for p in ("xy", "xz", "yz")}},
         num_phases=phases,
@@ -209,7 +210,7 @@ def main():
             raise RuntimeError("LR checkpoint did not resume the next update.")
     # Keep the baseline for the pipeline; a short ablation does not select a winner.
     base = root / "index_r1"
-    sr_cfg = load_train_config("config/train/sr.yaml", "sr")
+    sr_cfg = load_train_config(build_train_config(load_sample("default"), "sr"), "sr")
     sr_cfg["data"] = copy.deepcopy(reference["data"])
     sr_cfg["model"]["generator"].update(
         channels=[8, 16, 32], embedding_channels=32, latent_channels=16

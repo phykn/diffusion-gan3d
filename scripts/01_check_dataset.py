@@ -12,10 +12,10 @@ from scripts.common.cli import check_parser, result_directory
 from src.build.data import build_datasets
 from src.build.predict import resolve_weights
 from src.config.files import find_saved_config, load_yaml
+from src.config.sample import build_train_config, find_sample, load_sample
 from src.config.train import load_train_config
 from src.plane import PLANES
 
-DEFAULT_CONFIG = PROJECT_ROOT / "config" / "train" / "low_res.yaml"
 SAMPLES = 4
 
 
@@ -31,9 +31,15 @@ def main() -> None:
         help="Use the data configuration saved with these weights.",
     )
     source.add_argument(
-        "--config",
-        type=Path,
-        help="Training config; default: config/train/low_res.yaml.",
+        "--sample",
+        default="default",
+        help="Name in config/samples/ or a sample YAML path.",
+    )
+    parser.add_argument(
+        "--stage",
+        choices=("low_res", "sr"),
+        default="low_res",
+        help="With --sample: sr shows the HR crops.",
     )
     parser.add_argument(
         "--out",
@@ -51,13 +57,13 @@ def main() -> None:
     args = parser.parse_args()
     if args.no_view:
         plt.switch_backend("Agg")
-    config = (
-        find_saved_config(resolve_weights(args.weight))
-        if args.weight
-        else args.config or DEFAULT_CONFIG
-    )
-    stage = load_yaml(config).get("stage", "low_res")
-    cfg = load_train_config(config, stage)
+    if args.weight:
+        config = find_saved_config(resolve_weights(args.weight))
+        stage = load_yaml(config).get("stage", "low_res")
+        cfg = load_train_config(config, stage)
+    else:
+        config, stage = find_sample(args.sample), args.stage
+        cfg = load_train_config(build_train_config(load_sample(config), stage), stage)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     datasets = build_datasets(cfg, high_resolution=stage == "sr")

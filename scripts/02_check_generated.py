@@ -12,6 +12,7 @@ from scripts.common.cli import (
     save_preview,
 )
 from scripts.common.diagnostic import show_napari, show_slices
+from simul.src.anode import depth_profile
 from src.build.predict import load_generator
 from src.config.files import load_yaml
 from src.device import check_device
@@ -25,7 +26,8 @@ def main() -> None:
     parser.add_argument(
         "--vf-profile",
         type=Path,
-        help="YAML/JSON file with a z vf_profile (axis, points, interpolation); "
+        help="YAML/JSON file with a z vf_profile (axis, points, interpolation), or "
+        "an anode simulation config for its target depth fractions; "
         "default: height conditioning only.",
     )
     args = parser.parse_args()
@@ -50,7 +52,7 @@ def main() -> None:
             **(
                 {}
                 if args.vf_profile is None
-                else {"vf_profile": load_yaml(args.vf_profile)}
+                else {"vf_profile": load_vf_profile(args.vf_profile)}
             ),
             margin=generator.default_margin,
         )
@@ -63,6 +65,13 @@ def main() -> None:
         show_napari(vol)
     else:
         show_slices(vol, generator.num_phases, "EMA model")
+
+
+def load_vf_profile(path: Path) -> dict:
+    spec = load_yaml(path)
+    if spec.get("geometry", {}).get("kind") == "anode":
+        return depth_profile(spec["geometry"])
+    return spec
 
 
 if __name__ == "__main__":
