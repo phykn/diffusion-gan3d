@@ -18,6 +18,7 @@ from scripts.common.metrics import read_metrics
 from src.build.trainer import build_trainer
 from src.config.sample import build_train_config, load_sample
 from src.config.train import load_train_config
+from src.device import check_device, default_device
 from src.train.run.loop import run_train
 
 
@@ -42,8 +43,6 @@ def compare(cfg, root, seeds, steps, device):
         raise ValueError("use positive steps and distinct seeds.")
     if cfg["train"]["num_workers"] != 0:
         raise ValueError("paired sampling requires train.num_workers=0.")
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise ValueError("CUDA is unavailable; choose --device cpu explicitly.")
     root.mkdir(parents=True, exist_ok=False)
     report = {
         "purpose": "training diagnostics, not held-out quality evaluation",
@@ -118,7 +117,9 @@ def main():
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--seeds", type=int, nargs="+", default=[11, 22, 33])
     parser.add_argument("--steps", type=int, required=True)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--device", choices=("cpu", "cuda", "mps"), default=default_device()
+    )
     args = parser.parse_args()
     torch.set_num_threads(1)
     compare(
@@ -126,7 +127,7 @@ def main():
         args.run_dir,
         args.seeds,
         args.steps,
-        torch.device(args.device),
+        check_device(args.device),
     )
 
 

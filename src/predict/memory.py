@@ -17,8 +17,8 @@ class MemoryEstimate:
     fusion_bytes: int
     buffer_bytes: int
     output_bytes: int
-    base_bytes: int = 0
-    tiled: bool = True
+    base_bytes: int
+    tiled: bool
 
     @property
     def tile_shape(self) -> tuple[int, int, int]:
@@ -40,19 +40,9 @@ def estimate_memory(
     base_shape=None,
 ) -> MemoryEstimate:
     shape = parse_shape(shape)
-    if (
-        isinstance(num_phases, bool)
-        or not isinstance(num_phases, int)
-        or num_phases < 1
-    ):
-        raise ValueError("num_phases must be a positive integer.")
-    if isinstance(margin, bool) or not isinstance(margin, int) or margin < 0:
-        raise ValueError("margin must be a non-negative integer.")
     generation_shape = tuple(size + 2 * margin for size in shape)
     tiled = tile_size is not None
     tile_size = max(generation_shape) if tile_size is None else tile_size
-    if isinstance(tile_size, bool) or not isinstance(tile_size, int) or tile_size < 1:
-        raise ValueError("tile_size must be a positive integer.")
     check_overlap(tile_size, overlap)
     stride = tile_size - 2 * overlap
     tile_shape = tuple(min(size, tile_size) for size in generation_shape)
@@ -94,13 +84,13 @@ def tile_buffer_bytes(num_phases: int, shape: tuple[int, int, int]) -> int:
     return 4 * (12 * num_phases + 4) * math.prod(shape)
 
 
-def workspace_bytes(generator, tile_size: int | tuple[int, int, int]) -> int:
+def workspace_bytes(generator, shape: tuple[int, int, int]) -> int:
     channels = getattr(
         getattr(generator.model, "input", None), "out_channels", generator.num_phases
     )
     # FP32 normalization, skip activations and convolution scratch coexist,
     # including when convolutions themselves run under autocast.
-    voxels = tile_size**3 if isinstance(tile_size, int) else math.prod(tile_size)
+    voxels = math.prod(shape)
     profile_bytes = 0
     if getattr(generator.model, "profile_input", None) is not None:
         profile_bytes = 4 * (generator.num_phases + channels) * voxels

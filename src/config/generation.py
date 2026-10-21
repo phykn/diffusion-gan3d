@@ -2,7 +2,7 @@ import math
 from dataclasses import dataclass, fields
 
 from src.config.files import PROJECT_ROOT, load_yaml
-from src.config.values import _integer
+from src.config.values import check_integer, check_number
 
 
 @dataclass(frozen=True)
@@ -24,15 +24,9 @@ def load_generation_settings() -> GenerationSettings:
     if type(guidance) not in (int, float) or not math.isfinite(guidance):
         raise ValueError("guidance must be a finite number.")
     anchor_strength = section.get("anchor_strength", defaults.anchor_strength)
-    if (
-        not isinstance(anchor_strength, (int, float))
-        or isinstance(anchor_strength, bool)
-        or not math.isfinite(anchor_strength)
-        or not 0.0 <= anchor_strength <= 1.0
-    ):
-        raise ValueError("anchor_strength must be between zero and one.")
+    check_number(anchor_strength, "anchor_strength", 1)
     overlap = section.get("overlap", defaults.overlap)
-    _integer(overlap, "overlap", 0)
+    check_integer(overlap, "overlap", 0)
     return GenerationSettings(
         guidance=float(guidance),
         anchor_strength=float(anchor_strength),

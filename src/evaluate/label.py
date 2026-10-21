@@ -1,7 +1,6 @@
 import torch
 
 from src.device import assert_all, wide_dtype
-from src.plane import AXES
 
 LABEL_CHUNK_ELEMENTS = 1024**2
 
@@ -35,34 +34,6 @@ def phase_labels(values, num_phases: int | None = None) -> torch.Tensor:
         message = f"labels must contain integer phases from 0 to {num_phases - 1}."
     assert_all(valid, message)
     return labels
-
-
-def compute_vf(
-    batches: dict[int, torch.Tensor],
-    num_phases: int,
-) -> torch.Tensor:
-    if not batches or not set(batches).issubset(AXES):
-        raise ValueError("batches must contain at least one valid axis.")
-    if any(
-        not isinstance(images, torch.Tensor) or images.ndim not in (3, 4)
-        for images in batches.values()
-    ):
-        raise ValueError("training crops must have shape [B,H,W] or [B,C,H,W].")
-    counts = []
-    total = 0
-    for images in batches.values():
-        if images.numel() == 0:
-            raise ValueError("training crops must not be empty.")
-        if images.ndim == 4:
-            if images.shape[1] != num_phases:
-                raise ValueError("phase channels must match num_phases.")
-            counts.append(images.float().sum(dim=(0, 2, 3)))
-            total += images.numel() // num_phases
-            continue
-        values = phase_labels(images, num_phases)
-        counts.append(torch.bincount(values.flatten(), minlength=num_phases).float())
-        total += values.numel()
-    return torch.stack(counts).sum(0).div(total)
 
 
 def check_labels(values, num_phases: int | None = None) -> torch.Tensor:

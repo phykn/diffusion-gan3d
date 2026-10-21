@@ -30,8 +30,7 @@ def validate_loss(loss: torch.Tensor, name: str) -> torch.Tensor:
 
 
 def step_optimizer(optimizer, scaler, diagnostics: dict, name: str) -> bool:
-    if scaler is not None:
-        scaler.unscale_(optimizer)
+    scaler.unscale_(optimizer)
     grads = [
         p.grad.detach().float()
         for group in optimizer.param_groups
@@ -47,12 +46,9 @@ def step_optimizer(optimizer, scaler, diagnostics: dict, name: str) -> bool:
     finite = math.isfinite(norm)
     diagnostics[f"gradient/{name}"] = norm if finite else None
     diagnostics[f"skipped/{name}"] = int(not finite)
-    if not finite and (scaler is None or not scaler.is_enabled()):
+    if not finite and not scaler.is_enabled():
         raise FloatingPointError(
             f"non-finite {name} gradient; optimizer was not stepped."
         )
-    if scaler is None:
-        optimizer.step()
-    else:
-        scaler.step(optimizer)
+    scaler.step(optimizer)
     return finite

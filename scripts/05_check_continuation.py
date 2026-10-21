@@ -1,3 +1,4 @@
+import argparse
 import sys
 from pathlib import Path
 
@@ -12,16 +13,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
     add_generation_arguments,
-    check_parser,
     height_options,
     prepare_check,
-    save_preview,
+    save_results,
 )
 from scripts.common.diagnostic import (
     format_percent,
-    format_profile,
     format_ratio,
     generate_with_baseline,
+    print_anchor_effect,
     show_napari,
 )
 from src.anchor import PlaneAnchor
@@ -37,22 +37,36 @@ from src.evaluate.anchor import (
 from src.evaluate.label import voxel_accuracy
 from src.prepare.resize import resize_crop
 from src.random import seeded_rng
-from src.storage import save_volume
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
 
 
 def main() -> None:
-    parser = check_parser(__file__, "Inspect continuation from one boundary plane.")
+    parser = argparse.ArgumentParser(
+        description="Inspect continuation from one boundary plane."
+    )
     parser.add_argument(
         "--anchor",
         type=Path,
-        help="optional real 2D image; default uses an unconditioned sample",
+        help="Real 2D label image (default: a plane of an unconditioned sample).",
     )
-    parser.add_argument("--axis", type=int, choices=(0, 1, 2), default=0)
-    parser.add_argument("--side", choices=("start", "end"), default="start")
     parser.add_argument(
-        "--figure", type=Path, help="Slice-strip PNG; default: <out>_continuation.png."
+        "--axis",
+        type=int,
+        choices=(0, 1, 2),
+        default=0,
+        help="Boundary plane: 0=xy, 1=xz, 2=yz (default: 0).",
+    )
+    parser.add_argument(
+        "--side",
+        choices=("start", "end"),
+        default="start",
+        help="Boundary side (default: start).",
+    )
+    parser.add_argument(
+        "--figure",
+        type=Path,
+        help="Slice-strip PNG (default: <out>_continuation.png).",
     )
     add_generation_arguments(parser, anchors=True, origin_default=None)
     args = parser.parse_args()
@@ -63,7 +77,7 @@ def main() -> None:
     device = check_device(args.device)
     generator = load_generator(args.weight, device=device)
     index = 0 if args.side == "start" else generator.patch_size - 1
-    print(f"\nWeights : {args.weight.resolve()}")
+    print(f"\nWeights : {args.weight}")
     print(f"Boundary: axis {args.axis}, {args.side} plane {index}")
     print(f"Strength: {args.anchor_strength:.2f}")
     with seeded_rng(args.seed, device):
@@ -83,7 +97,7 @@ def main() -> None:
             train_config = load_train_config(find_saved_config(args.weight))
             data_config = train_config["data"]
             crop_size = int(data_config["crop_size"])
-            anchor_image, crop = load_anchor_image(
+            anchor_image, crop, source_height = load_anchor_image(
                 args.anchor,
                 crop_size,
                 generator.patch_size,
@@ -93,8 +107,7 @@ def main() -> None:
                 if args.height_origin is None:
                     args.height_origin = float(crop[0])
                 if args.height_extent is None:
-                    with Image.open(args.anchor) as source:
-                        args.height_extent = float(source.height)
+                    args.height_extent = float(source_height)
             print(
                 f"Anchor  : {args.anchor.resolve()}, crop {crop} -> "
                 f"input {generator.patch_size} x {generator.patch_size}"
@@ -113,9 +126,7 @@ def main() -> None:
             **height_options(args),
         )
 
-    save_volume(generated, args.out)
-    print(f"Saved   : {args.out.resolve()}")
-    save_preview(generated, args, generator.num_phases)
+    save_results(generated, args, generator.num_phases)
     anchor_labels = anchor_image.argmax(0) if anchor_image.ndim == 3 else anchor_image
     print_quality(
         generated,
@@ -142,9 +153,8 @@ def load_anchor_image(
     crop_size: int,
     input_size: int,
     num_phases: int,
-) -> tuple[torch.Tensor, tuple[int, int, int, int]]:
-    if not path.is_file():
-        raise FileNotFoundError(f"anchor image was not found: {path}")
+) -> tuple[torch.Tensor, tuple[int, int, int, int], int]:
+    """Center crop and resize; also return the image height for --height-extent."""
     with Image.open(path) as image:
         values = np.asarray(image)
     if values.ndim != 2 or values.dtype != np.uint8:
@@ -158,12 +168,8 @@ def load_anchor_image(
         values[top : top + crop_size, left : left + crop_size],
         copy=True,
     )
-    return resize_crop(torch.from_numpy(crop), input_size, num_phases), (
-        top,
-        left,
-        crop_size,
-        crop_size,
-    )
+    labels = resize_crop(torch.from_numpy(crop), input_size, num_phases)
+    return labels, (top, left, crop_size, crop_size), height
 
 
 def print_quality(
@@ -177,13 +183,7 @@ def print_quality(
     accuracy = voxel_accuracy(slices[index], anchor)
     boundary = measure_boundaries(generated, (index,), axis)
     smoothness = measure_slice_smoothness(generated, (index,), axis, baseline)
-    profile = measure_distance_divergence(
-        generated,
-        baseline,
-        (index,),
-        axis,
-        generated.shape[axis] - 1,
-    )
+    profile = measure_distance_divergence(generated, baseline, (index,), axis)
     print("\nQuality")
     print(f"Anchor match  : {accuracy:7.2%}")
     print(
@@ -192,18 +192,7 @@ def print_quality(
         f"{format_percent(boundary.ordinary_change)} "
         f"({format_ratio(boundary.change_ratio)})"
     )
-    print(
-        "Smoothness    : "
-        f"p95 {format_ratio(smoothness.p95_ratio)}, "
-        f"peak {format_ratio(smoothness.max_ratio)}"
-    )
-    print(
-        "Surface bumps : "
-        f"{format_percent(smoothness.reversal_rate)} vs baseline "
-        f"{format_percent(smoothness.baseline_reversal_rate)} "
-        f"({format_ratio(smoothness.reversal_ratio)})"
-    )
-    print(f"Anchor effect : {format_profile(profile, 'boundary')}")
+    print_anchor_effect(smoothness, profile, "boundary")
 
 
 def render_strip(
@@ -242,7 +231,7 @@ def render_strip(
     cmap = plt.get_cmap("gray", num_phases)
     for panel, image, title in zip(panels.flat, images, titles, strict=False):
         panel.imshow(
-            image.cpu().numpy(),
+            image.numpy(),
             cmap=cmap,
             vmin=-0.5,
             vmax=num_phases - 0.5,

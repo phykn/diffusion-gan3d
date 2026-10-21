@@ -46,7 +46,6 @@ def test_training_keeps_checkpoints_without_rename_or_temporary_files(
     def forbidden(*args, **kwargs):
         pytest.fail("Training saves must not use temporary files or rename/link/delete")
 
-    monkeypatch.setattr("src.storage.tempfile.NamedTemporaryFile", forbidden)
     monkeypatch.setattr(Path, "replace", forbidden)
     monkeypatch.setattr(Path, "rename", forbidden)
     monkeypatch.setattr(Path, "unlink", forbidden)

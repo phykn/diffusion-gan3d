@@ -1,9 +1,11 @@
-from collections.abc import Mapping, Sequence
-
 from torch import nn
 
 from src.config.data import get_domains, get_plane_groups, get_sr_plane_groups
-from src.config.train import get_sr_resolution, normalize_train_config
+from src.config.train import (
+    get_sr_resolution,
+    get_trainer_sections,
+    normalize_train_config,
+)
 from src.model.critic import (
     ConnectivityCritic2D,
     PairCritic2D,
@@ -16,68 +18,34 @@ from src.model.diffusion import Diffusion
 
 def get_time_scale(cfg: dict) -> float:
     diffusion = cfg["model"]["diffusion"]
-    steps = diffusion["num_steps"]
-    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
-        raise ValueError("model.diffusion.num_steps must be a positive integer.")
-    mode = diffusion["time_embedding"]
-    if mode == "index":
+    if diffusion["time_embedding"] == "index":
         return 1.0
-    if mode == "scaled":
-        return 1000.0 / steps
-    raise ValueError("model.diffusion.time_embedding must be index or scaled.")
+    return 1000.0 / diffusion["num_steps"]
 
 
-def get_generator_channels(model: Mapping[str, object]) -> tuple[int, tuple[int, ...]]:
-    generator = model["generator"]
-    if not isinstance(generator, Mapping):
-        raise TypeError("model.generator must be a mapping.")
-    channels = generator["channels"]
-    if isinstance(channels, (str, bytes)) or not isinstance(channels, Sequence):
-        raise TypeError("model.generator.channels must be a sequence.")
-    values = tuple(channels)
-    if not values or any(
-        not isinstance(value, int) or isinstance(value, bool) or value < 2
-        for value in values
-    ):
-        raise ValueError(
-            "model.generator.channels must contain integers of at least two."
-        )
-    base = values[0]
-    if any(value % base for value in values):
-        raise ValueError(
-            "model.generator.channels must be integer multiples of its first value."
-        )
-    return base, tuple(value // base for value in values)
-
-
-def build_denoiser(
-    cfg: dict,
-    checkpointing: bool | None = None,
-) -> Denoiser3D:
+def build_denoiser(cfg: dict) -> Denoiser3D:
     cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
+    sr = cfg["stage"] == "sr"
+    if sr:
+        get_sr_resolution(cfg)  # SR models require data.hi_res_size.
     data = cfg["data"]
     model = cfg["model"]
     generator = model["generator"]
-    num_domains = len(get_domains(data))
-    checkpointing = (
-        model["gradient_checkpointing"] if checkpointing is None else checkpointing
-    )
-    base_channels, multipliers = get_generator_channels(model)
+    channels = generator["channels"]
+    conditioning, _ = get_trainer_sections(cfg)
     return Denoiser3D(
         num_phases=data["num_phases"],
-        base_channels=base_channels,
-        channel_multipliers=multipliers,
+        base_channels=channels[0],
+        channel_multipliers=tuple(value // channels[0] for value in channels),
         embedding_channels=generator["embedding_channels"],
         latent_channels=generator["latent_channels"],
-        num_domains=num_domains,
-        gradient_checkpointing=checkpointing,
+        num_domains=len(get_domains(data)),
+        gradient_checkpointing=model["gradient_checkpointing"],
         anchor_multiscale=generator.get("anchor_multiscale_input", False),
         time_scale=get_time_scale(cfg),
-        height_enabled=cfg["conditioning"]["height_enabled"],
-        coarse_enabled=cfg["stage"] == "sr",
-        profile_enabled=cfg["conditioning"]
-        .get("spatial_profile", {})
-        .get("enabled", False),
+        height_enabled=conditioning["height_enabled"],
+        coarse_enabled=sr,
+        profile_enabled=conditioning["spatial_profile"]["enabled"],
     )
 
 
@@ -100,10 +68,9 @@ def build_models(
         }
     else:
         groups = get_plane_groups(cfg)
-    height = cfg["conditioning"]["height_enabled"]
-    profile = (
-        cfg["conditioning"].get("spatial_profile", {}).get("critic_enabled", False)
-    )
+    conditioning, _ = get_trainer_sections(cfg)
+    height = conditioning["height_enabled"]
+    profile = conditioning["spatial_profile"]["critic_enabled"]
     phases = data["num_phases"]
     shared = dict(
         num_phases=phases,
@@ -163,9 +130,3 @@ def build_diffusion(cfg: dict) -> Diffusion:
         diffusion["beta_min"],
         diffusion["beta_max"],
     )
-
-
-def build_sr_model(cfg: dict) -> Denoiser3D:
-    cfg = normalize_train_config(cfg, "sr")
-    get_sr_resolution(cfg)  # SR models require data.hi_res_size.
-    return build_denoiser(cfg, checkpointing=False)

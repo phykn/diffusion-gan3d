@@ -1,4 +1,5 @@
-import importlib.util
+import importlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import torch
 from PIL import Image
 
 import scripts.common.cli as cli
+from scripts.common import diagnostic
 from src.build.model import build_models
 from src.config.files import save_yaml
 from src.config.generation import GenerationSettings, load_generation_settings
@@ -22,8 +24,6 @@ from src.evaluate.anchor import (
     measure_slice_smoothness,
 )
 from src.storage import save_model
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def weight_file(directory: Path) -> Path:
@@ -47,13 +47,13 @@ def test_boundary_continuation_defaults_to_an_unconditioned_reference(
     output_path = tmp_path / "continuation.tiff"
 
     module = _load_script("05_check_continuation.py")
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "05_check_continuation.py",
+            "--device",
+            "cpu",
             "--weight",
             str(weights),
             "--out",
@@ -93,13 +93,13 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     figure_path = tmp_path / "continuation.png"
 
     module = _load_script("05_check_continuation.py")
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "05_check_continuation.py",
+            "--device",
+            "cpu",
             "--weight",
             str(weights),
             "--anchor",
@@ -148,14 +148,15 @@ def test_continuation_anchor_keeps_indexed_phases_and_fractional_resize(
     image.save(path)
 
     module = _load_script("05_check_continuation.py")
-    labels, crop = module.load_anchor_image(path, 4, 2, 3)
+    labels, crop, height = module.load_anchor_image(path, 4, 2, 3)
 
     assert crop == (1, 1, 4, 4)
+    assert height == 6
     assert labels.argmax(0).tolist() == [[1, 2], [2, 0]]
     assert labels.shape == (3, 2, 2)
     source[1, 1] = 0
     Image.fromarray(source).save(path)
-    fractions, _ = module.load_anchor_image(path, 4, 2, 3)
+    fractions, _, _ = module.load_anchor_image(path, 4, 2, 3)
     torch.testing.assert_close(fractions[:, 0, 0], torch.tensor([0.25, 0.75, 0.0]))
 
 
@@ -225,13 +226,13 @@ def test_anchor_check_script_runs_with_generated_reference(
 
     filename = "03_check_anchor.py"
     module = _load_script(filename)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         sys,
         "argv",
         [
             filename,
+            "--device",
+            "cpu",
             "--weight",
             str(weights),
             "--count",
@@ -261,39 +262,33 @@ def test_anchor_check_script_runs_with_generated_reference(
     assert "Phase recall" not in output
     if count == 0:
         assert "Anchor effect" not in output
-        assert "strength 1.00" not in output
+        assert "Strength" not in output
     else:
         assert "Anchor effect" in output
-        assert f"strength {load_generation_settings().anchor_strength:.2f}" in output
+        assert f"Strength: {load_generation_settings().anchor_strength:.2f}" in output
     assert "Indices" not in output
     assert "Center slice" not in output
 
 
 def test_anchor_selection_is_center_first_and_evenly_distributed() -> None:
-    module = _load_script("03_check_anchor.py")
-
-    assert module.select_indices(64, 0) == ()
-    assert module.select_indices(64, 2) == (16, 48)
-    assert module.select_indices(64, 3) == (10, 32, 53)
-    assert module.select_indices(64, 4) == (8, 24, 40, 56)
-    assert module.select_indices(8, 8) == tuple(range(8))
+    assert diagnostic.select_indices(64, 0) == ()
+    assert diagnostic.select_indices(64, 2) == (16, 48)
+    assert diagnostic.select_indices(64, 3) == (10, 32, 53)
+    assert diagnostic.select_indices(64, 4) == (8, 24, 40, 56)
+    assert diagnostic.select_indices(8, 8) == tuple(range(8))
 
 
 def test_anchor_graph_uses_nearest_selected_plane() -> None:
-    module = _load_script("03_check_anchor.py")
-
-    assert module.select_display_index(64, ()) == 32
-    assert module.select_display_index(64, (16, 48)) == 16
-    assert module.select_display_index(64, (10, 32, 53)) == 32
+    assert diagnostic.select_display_index(64, ()) == 32
+    assert diagnostic.select_display_index(64, (16, 48)) == 16
+    assert diagnostic.select_display_index(64, (10, 32, 53)) == 32
 
 
 def test_anchor_effect_profile_reports_parameter_free_distances() -> None:
-    module = _load_script("03_check_anchor.py")
-
-    assert module.format_profile((0.2, 0.4, 0.8), "anchor") == (
+    assert diagnostic.format_profile((0.2, 0.4, 0.8), "anchor") == (
         "anchor 20.00%, mean 46.67%, farthest 80.00% at distance 2"
     )
-    assert module.format_profile((0.2, 0.4, None), "anchor") == (
+    assert diagnostic.format_profile((0.2, 0.4, None), "anchor") == (
         "anchor 20.00%, mean 30.00%, farthest 40.00% at distance 1"
     )
 
@@ -342,13 +337,13 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
         lambda: GenerationSettings(),
     )
     monkeypatch.setattr(module, "show_result", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         module.sys,
         "argv",
         [
             "03_check_anchor.py",
+            "--device",
+            "cpu",
             "--weight",
             str(weight_file(tmp_path)),
             "--domain",
@@ -398,13 +393,13 @@ def test_anchor_check_uses_generated_reference_and_same_rng_baseline(
         "load_generation_settings",
         lambda: GenerationSettings(),
     )
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         module.sys,
         "argv",
         [
             "03_check_anchor.py",
+            "--device",
+            "cpu",
             "--weight",
             str(weight_file(tmp_path)),
             "--seed",
@@ -457,13 +452,13 @@ def test_unconditioned_check_routes_only_domain_condition(
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
     monkeypatch.setattr(module, "show_slices", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         module.sys,
         "argv",
         [
             "02_check_generated.py",
+            "--device",
+            "cpu",
             "--weight",
             str(weight_file(tmp_path)),
             "--out",
@@ -559,28 +554,16 @@ def test_anchor_divergence_profile_compares_same_distance_slices() -> None:
     anchored[2] = 1
     anchored[1, 0] = 1
 
-    profile = measure_distance_divergence(
-        anchored,
-        baseline,
-        (2,),
-        axis=0,
-        max_distance=3,
-    )
+    profile = measure_distance_divergence(anchored, baseline, (2,), axis=0)
 
     assert profile[0] == pytest.approx(1.0)
     assert profile[1] == pytest.approx(0.25)
     assert profile[2] == pytest.approx(0.0)
-    assert profile[3] is None
+    assert profile[3:] == (None, None)
 
 
 def _load_script(filename: str):
-    path = ROOT / "scripts" / filename
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load test script: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module(f"scripts.{Path(filename).stem}")
 
 
 def _config(root: Path) -> dict:
@@ -681,10 +664,6 @@ def _config(root: Path) -> dict:
 def test_weight_directory_alone_saves_manual_check_results(
     tmp_path, monkeypatch, filename
 ):
-    import json
-
-    import scripts.common.cli as cli
-
     torch.set_num_threads(1)
     cfg = _config(tmp_path)
     run_dir = tmp_path / "trained"
@@ -693,10 +672,11 @@ def test_weight_directory_alone_saves_manual_check_results(
     model, _, _ = build_models(cfg)
     save_model(run_dir / "generator.pt", model)
     module = _load_script(filename)
-    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
-    monkeypatch.setattr(sys, "argv", [filename, "--weight", str(run_dir), "--no-view"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [filename, "--device", "cpu", "--weight", str(run_dir), "--no-view"],
+    )
     module.main()
     results = list((tmp_path / "checks").glob("*/volume.tiff"))
     assert len(results) == 1
@@ -733,8 +713,6 @@ def test_weight_directory_alone_saves_manual_check_results(
 def test_inspection_scripts_support_mixed_source_heights(
     tmp_path, monkeypatch, filename, extra
 ):
-    import json
-
     cfg = _config(tmp_path)
     cfg.setdefault("conditioning", {})["height_enabled"] = True
     cfg["data"]["height_extents"] = {0: None}

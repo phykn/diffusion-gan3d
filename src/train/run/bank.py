@@ -9,33 +9,36 @@ from src.config.data import get_domains
 from src.data.bank import LR_BANK_FORMAT
 from src.device import empty_cache
 from src.prepare.profile import image_profile
-from src.storage import torch_save
-from src.train.run import source as _source
-
-
-def save_bank(run_dir: Path, step: int, payload: dict) -> dict:
-    path = run_dir / "lr_bank" / f"step_{step:08d}.pt"
-    # Published banks may be referenced by older runs; never overwrite them.
-    torch_save(payload, path, overwrite=False)
-    return {"bank": str(path), "bank_sha256": _source.file_hash(path)}
+from src.storage import file_hash, torch_save
+from src.train.run.source import load_frozen_source
 
 
 def publish_bank(payload: dict, cfg: dict, run_dir: Path, step: int) -> None:
+    """Save a bank snapshot and point cfg["source"] at it."""
     payload["data"] = cfg["data"]
     payload["source"] = {
         key: value
         for key, value in cfg["source"].items()
         if key not in {"bank", "bank_sha256"}
     }
-    cfg["source"].update(save_bank(run_dir, step, payload))
+    path = run_dir / "lr_bank" / f"step_{step:08d}.pt"
+    # Published banks may be referenced by older runs; never overwrite them.
+    torch_save(payload, path, overwrite=False)
+    cfg["source"].update(bank=str(path), bank_sha256=file_hash(path))
+
+
+def open_source(cfg: dict, device: torch.device, path_maps: list | None = None):
+    """Verify the frozen LR source and load its generator and height datasets."""
+    base_cfg = load_frozen_source(cfg["source"], path_maps)
+    generator = build_generator(Path(cfg["source"]["weights"]), base_cfg, device)
+    height_enabled = cfg["conditioning"]["height_enabled"]
+    datasets = build_datasets(base_cfg) if height_enabled else None
+    return base_cfg, generator, datasets
 
 
 def create_bank(cfg: dict, device: torch.device) -> dict:
-    source = Path(cfg["source"]["weights"])
-    base_cfg = _source.load_frozen_source(cfg["source"])
-    generator = build_generator(source, base_cfg, device)
-    height_enabled = cfg["conditioning"]["height_enabled"]
-    datasets = build_datasets(base_cfg) if height_enabled else None
+    base_cfg, generator, datasets = open_source(cfg, device)
+    height_enabled = datasets is not None
     bank, origins, extents, conditions = {}, {}, {}, {}
     for domain in get_domains(cfg["data"]):
         conditions[domain] = [
@@ -81,11 +84,7 @@ def refresh_bank(
     device: torch.device,
     path_maps: list | None = None,
 ) -> None:
-    source = Path(cfg["source"]["weights"])
-    base_cfg = _source.load_frozen_source(cfg["source"], path_maps)
-    height_enabled = cfg["conditioning"]["height_enabled"]
-    generator = build_generator(source, base_cfg, device)
-    datasets = build_datasets(base_cfg) if height_enabled else None
+    base_cfg, generator, datasets = open_source(cfg, device, path_maps)
     interval = cfg["lr_bank"]["refresh_every_steps"]
     for domain, volumes in payload["volumes"].items():
         index = (step // interval - 1) % len(volumes)
@@ -95,7 +94,7 @@ def refresh_bank(
             domain=domain, guidance=cfg["lr_bank"]["guidance"], **conditions
         )
         volumes[index] = volume
-        if height_enabled:
+        if datasets is not None:
             payload["height_origins"][domain][index] = recorded["height_origin"]
             payload["height_extents"][domain][index] = recorded["height_extent"]
         if payload.get("conditions") is not None:
@@ -124,11 +123,11 @@ def sample_bank_condition(cfg, domain, datasets):
     paths = [p for group in dataset.path_groups for p in group]
     item = dataset[paths[int(torch.randint(len(paths), ()))]]
     record = {key: item[key] for key in ("image_id", "height_origin", "height_extent")}
-    record["image_sha256"] = _source.file_hash(Path(item["image_id"]))
+    record["image_sha256"] = file_hash(Path(item["image_id"]))
     record["crop_origin"] = item["crop_origin"].tolist()
     record["source_shape"] = item["source_shape"].tolist()
-    settings = cfg["conditioning"].get("spatial_profile", {})
-    if settings.get("enabled", False):
+    settings = cfg["conditioning"]["spatial_profile"]
+    if settings["enabled"]:
         profile = image_profile(
             item["image"].unsqueeze(0), dataset.height_direction, settings["num_bins"]
         )[0].T.tolist()

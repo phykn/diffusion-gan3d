@@ -1,63 +1,27 @@
-import hashlib
 from pathlib import Path
 
 from src.config.files import find_saved_config, load_yaml
-from src.config.train import (
-    normalize_loaded_train_config,
-    resolve_external_data_path,
-)
+from src.config.train import normalize_loaded_train_config
+from src.storage import file_hash
 from src.train.relocate import PathRemapper
 
 
-def file_hash(path: Path) -> str:
-    with path.open("rb") as file:
-        return hashlib.file_digest(file, "sha256").hexdigest()
-
-
-def _validate_source_files(weights: Path, recorded: dict) -> None:
-    for key, path, label in (
-        ("weights_sha256", weights, "weights"),
-        ("config_sha256", find_saved_config(weights), "configuration"),
-    ):
-        if not recorded.get(key):
-            raise ValueError(f"frozen LR source has no saved {label} hash.")
-        if file_hash(path) != recorded[key]:
-            raise ValueError(f"frozen LR source {label} changed since SR training.")
-
-
-def read_source_config(
-    path: Path, path_maps: list | None = None
-) -> tuple[dict, str | None]:
+def read_source_config(path: Path, path_maps: list | None = None) -> dict:
     cfg = load_yaml(path)
-    external_data = isinstance(cfg.get("data"), str)
-    remapper = PathRemapper(path_maps) if path_maps else None
-    data_sha256 = None
-    if external_data:
-        data_path = cfg["data"]
-        if remapper:
-            mapped_path = remapper(data_path)
-            if mapped_path == data_path:
-                mapped_path = remapper(str(resolve_external_data_path(data_path)))
-            data_path = mapped_path
-        data_path = resolve_external_data_path(data_path)
-        data_sha256 = file_hash(data_path)
-        cfg["data"] = load_yaml(data_path)
-    if remapper:
-        cfg = remapper.config(cfg)
-    return (
-        normalize_loaded_train_config(cfg, "low_res"),
-        data_sha256,
-    )
+    if path_maps:
+        cfg = PathRemapper(path_maps).config(cfg)
+    return normalize_loaded_train_config(cfg, "low_res")
 
 
 def load_frozen_source(source: dict, path_maps: list | None = None) -> dict:
     weights = Path(source["weights"])
-    _validate_source_files(weights, source)
-    cfg, data_sha256 = read_source_config(find_saved_config(weights), path_maps)
-    if data_sha256 is not None and not source.get("data_sha256"):
-        raise ValueError("frozen LR source has no saved data configuration hash.")
-    if data_sha256 != source.get("data_sha256"):
-        raise ValueError(
-            "frozen LR source data configuration changed since SR training."
-        )
-    return cfg
+    config = find_saved_config(weights)
+    for key, path, label in (
+        ("weights_sha256", weights, "weights"),
+        ("config_sha256", config, "configuration"),
+    ):
+        if not source.get(key):
+            raise ValueError(f"frozen LR source has no saved {label} hash.")
+        if file_hash(path) != source[key]:
+            raise ValueError(f"frozen LR source {label} changed since SR training.")
+    return read_source_config(config, path_maps)

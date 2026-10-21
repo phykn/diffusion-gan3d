@@ -25,13 +25,13 @@ def measure_seams(
 ) -> SeamQuality:
     tvs = []
     deltas = []
+    width = max(1, min(band_size, 4))
     for axis, positions in enumerate(seams):
         if not positions:
             tvs.append(None)
             deltas.append(None)
             continue
         pair_count = vol.shape[axis] - 1
-        width = max(1, min(band_size, 4))
         band_idx = sorted(
             {
                 idx
@@ -44,6 +44,10 @@ def measure_seams(
         )
         band_set = set(band_idx)
         inner_idx = [idx for idx in range(pair_count) if idx not in band_set]
+        if not inner_idx or not band_idx:
+            tvs.append(None)
+            deltas.append(None)
+            continue
         if len(inner_idx) > 64:
             selected = np.linspace(0, len(inner_idx) - 1, num=64, dtype=int)
             inner_idx = [inner_idx[idx] for idx in selected]
@@ -67,11 +71,6 @@ def measure_seams(
                 band_counts[idx] = counts
             elif idx in inner_set:
                 inner_counts.add_(counts)
-
-        if not inner_idx or not band_idx:
-            tvs.append(None)
-            deltas.append(None)
-            continue
 
         axis_tv = []
         axis_delta = []

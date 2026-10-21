@@ -2,7 +2,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
-from src.config.values import _integer
+from src.config.values import check_integer
 from src.plane import PLANES, get_axis
 
 
@@ -14,25 +14,27 @@ class DataResolution(NamedTuple):
 
 def validate_sr_source(data: Mapping, base_data: Mapping) -> Mapping:
     if "lo_res_size" not in base_data:
-        raise ValueError("SR requires stage-1 weights trained with lo_res_size.")
+        raise ValueError("SR requires LR weights trained with lo_res_size.")
     if (data["crop_size"], data["lo_res_size"]) != (
         base_data["crop_size"],
         base_data["lo_res_size"],
     ):
-        raise ValueError("SR data resolution must match the stage-1 crop/LR sizes.")
+        raise ValueError(
+            "SR data resolution (crop_size, lo_res_size) must match the LR model."
+        )
     if data["num_phases"] != base_data["num_phases"]:
-        raise ValueError("SR data.num_phases must match the stage-1 model.")
+        raise ValueError("SR data.num_phases must match the LR model.")
     if set(get_domains(data)) != set(get_domains(base_data)):
-        raise ValueError("SR data domain IDs must match the stage-1 model.")
+        raise ValueError("SR data domain IDs must match the LR model.")
     if data.get("height_extents") != base_data.get("height_extents"):
-        raise ValueError("SR height coordinates must match the stage-1 model.")
+        raise ValueError("SR height coordinates must match the LR model.")
     return data
 
 
 def get_resolution(data: Mapping[str, object]) -> DataResolution:
     crop, low = data["crop_size"], data["lo_res_size"]
     for name, size in (("crop_size", crop), ("lo_res_size", low)):
-        _integer(size, name)
+        check_integer(size, name)
     high = data.get("hi_res_size", low)
     if type(high) is not int or high < low:
         raise ValueError("hi_res_size must be an integer at least lo_res_size.")

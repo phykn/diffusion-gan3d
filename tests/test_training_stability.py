@@ -364,7 +364,9 @@ def test_nonfinite_gradient_does_not_update_fp32_parameters():
     parameter.grad = torch.tensor(float("inf"))
     diagnostics = {}
     with pytest.raises(FloatingPointError, match="gradient"):
-        step_optimizer(optimizer, None, diagnostics, "generator")
+        step_optimizer(
+            optimizer, torch.amp.GradScaler(enabled=False), diagnostics, "generator"
+        )
     assert parameter.item() == 1
     assert diagnostics["skipped/generator"] == 1
 
@@ -451,6 +453,7 @@ def test_stability_report_reads_lr_and_sr_tensorboard_metrics(tmp_path, monkeypa
     training_stability.main()
     report = json.loads((root / "report.json").read_text(encoding="utf-8"))
     assert report["complete"] is True
+    assert report["grid"] == {"crop": 128, "low": 8, "high": 16}
     assert len(report["variants"]) == 3
     assert not list(root.rglob("metrics.jsonl"))
     for name, variant in report["variants"].items():

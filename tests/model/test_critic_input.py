@@ -1,5 +1,3 @@
-import inspect
-
 import pytest
 import torch
 
@@ -18,7 +16,6 @@ def test_critic_input_mode_controls_current_dependency(mode, channels):
     current = torch.randn_like(previous, requires_grad=True)
     time, domain = torch.tensor([0, 1]), torch.zeros(2, dtype=torch.long)
     if mode == "single":
-        assert "x_current" not in inspect.signature(model.forward).parameters
         score = model(previous, time, domain)
         changed = model(previous, time, domain)
     else:

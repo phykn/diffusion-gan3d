@@ -35,7 +35,7 @@ STRUCTURES = {
 class Export:
     volumes: tuple[Path, ...]
     slices: dict[int, tuple[Path, ...]]
-    measured: tuple[dict[str, float], ...] = ()
+    measured: tuple[dict[str, float], ...]
 
 
 def generate(cfg: dict) -> Export:

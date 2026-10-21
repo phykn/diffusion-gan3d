@@ -25,8 +25,6 @@ def check_run_dir(run_dir: Path | None) -> None:
 def make_run_dir(
     root: Path, stage: str, run_dir: Path | None = None, nickname: str = ""
 ) -> Path:
-    if stage not in ("low_res", "sr"):
-        raise ValueError("stage must be low_res or sr.")
     if run_dir is not None:
         path = run_dir.expanduser().resolve()
         path.mkdir(parents=True, exist_ok=False)
@@ -152,6 +150,9 @@ def run_train(
                 done = step + 1
                 write_metrics(writer, done, metrics)
                 writer.flush()
+                # An interrupt while saving leaves that save incomplete; saving
+                # again would collide with its files, so stop without it.
+                at_boundary = False
                 if done == steps or (
                     checkpoint_every is not None and done % checkpoint_every == 0
                 ):
@@ -159,6 +160,7 @@ def run_train(
                     checkpoint_step = trainer.completed_steps
                 if done % save_every == 0 or done == steps:
                     save_weights(trainer, root, stage)
+                at_boundary = True
                 if stop.is_set():
                     raise KeyboardInterrupt
         except KeyboardInterrupt:

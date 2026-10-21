@@ -73,10 +73,10 @@ def test_cuda_fraction_validation_is_budgeted_even_for_cpu_sr(monkeypatch):
 @pytest.mark.parametrize("tile_size", [None, 64])
 def test_sr_labels_budget_final_bytes_and_bounded_conversion(tile_size):
     labels = sr_memory.estimate_sr_memory(
-        (256,) * 3, (512,) * 3, 3, tile_size=tile_size, output_kind="labels"
+        (256,) * 3, (512,) * 3, 3, tile_size=tile_size, probabilities=False
     )
     probabilities = sr_memory.estimate_sr_memory(
-        (256,) * 3, (512,) * 3, 3, tile_size=tile_size, output_kind="probabilities"
+        (256,) * 3, (512,) * 3, 3, tile_size=tile_size, probabilities=True
     )
     assert labels.output_bytes == 512**3
     assert labels.cpu_label_bytes + labels.model_label_bytes == 9 * 1024**2

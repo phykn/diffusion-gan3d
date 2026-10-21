@@ -12,7 +12,7 @@ def test_volume_symmetries_preserve_fractions_and_height(height, count):
     source = torch.cat((values, 1 - values), dim=1).expand(count, -1, -1, -1, -1)
     before = source.clone()
     with patch("src.data.augment.torch.randint", return_value=torch.arange(count)):
-        actual = augment_volumes(source, preserve_height=height)
+        actual = augment_volumes(source, permute_z=not height, flip_z=not height)
     assert torch.unique(actual.flatten(1), dim=0).shape[0] == count
     assert torch.equal(source, before)
     assert actual.dtype == source.dtype and actual.device == source.device
@@ -39,3 +39,17 @@ def test_volume_augmentation_is_seeded_and_preserves_rectangular_shape():
     second = augment_volumes(source)
     assert torch.equal(first, second)
     assert first.shape == source.shape
+
+
+def test_fixed_z_volume_augmentation_keeps_z_but_may_flip_it():
+    values = torch.arange(27, dtype=torch.float32).reshape(1, 1, 3, 3, 3) / 27
+    source = torch.cat((values, 1 - values), dim=1).expand(16, -1, -1, -1, -1)
+    with patch("src.data.augment.torch.randint", return_value=torch.arange(16)):
+        actual = augment_volumes(source, permute_z=False)
+    assert torch.unique(actual.flatten(1), dim=0).shape[0] == 16
+    layers = source[0].sum((-1, -2))
+    for row in actual:
+        z_layers = row.sum((-1, -2))
+        assert torch.allclose(z_layers, layers) or torch.allclose(
+            z_layers, layers.flip(-1)
+        )

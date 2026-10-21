@@ -83,10 +83,6 @@ class LabelTransformTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "crop size must fit"):
             dataset.crop_with_origin(np.zeros((3, 8), dtype=np.uint8))
 
-    def test_partial_crop_option_is_not_supported(self):
-        with self.assertRaises(TypeError):
-            RealDataset([["unused"]], 8, 4, 2, allow_part=True)
-
     def test_one_image_can_fill_a_replacement_batch(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "image.png"

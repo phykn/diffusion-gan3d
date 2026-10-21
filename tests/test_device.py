@@ -197,7 +197,9 @@ def test_optimizer_step_reports_gradient_norm_on_apple_gpu():
         torch.cat([p.grad.flatten().cpu() for p in model.parameters()]).norm()
     )
     diagnostics = {}
-    assert step_optimizer(optimizer, None, diagnostics, "model")
+    assert step_optimizer(
+        optimizer, torch.amp.GradScaler(enabled=False), diagnostics, "model"
+    )
     assert diagnostics["gradient/model"] == pytest.approx(expected)
 
 

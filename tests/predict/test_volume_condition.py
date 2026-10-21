@@ -25,7 +25,7 @@ def test_preserved_base_accepts_matching_anchor_formats(axis, kind, full_plane):
     )
     anchor = PlaneAnchor(image, axis, index, position)
 
-    assert validate_base_anchors(base, (anchor,), (6, 7, 8), 1) is base
+    validate_base_anchors(base, (anchor,), (6, 7, 8), 1)
 
     conflicting = torch.zeros_like(image)
     if "fractions" in kind:

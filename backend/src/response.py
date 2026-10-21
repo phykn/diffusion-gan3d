@@ -6,7 +6,7 @@ import tifffile
 import torch
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
-from src.evaluate.volume import pore_tortuosity
+from src.evaluate.tortuosity import pore_tortuosity
 
 CHUNK_BYTES = 64 * 1024
 

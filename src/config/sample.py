@@ -1,5 +1,3 @@
-"""Build each stage's training settings from one sample file in config/samples/."""
-
 import copy
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,7 +8,6 @@ from src.plane import PLANES
 
 SAMPLES_DIR = PROJECT_ROOT / "config" / "samples"
 BASE_DIR = PROJECT_ROOT / "config" / "base"
-STAGES = ("low_res", "sr")
 # Short stage names for config/base/<name>.yaml, tune keys, and run folders.
 STAGE_NAMES = {"low_res": "lr", "sr": "sr"}
 SAMPLE_KEYS = ("images", "structure", "tune", "num_phases", "resolution")
@@ -59,8 +56,8 @@ def load_sample(sample: str | Path) -> dict:
 
 def build_train_config(sample: Mapping, stage: str) -> dict:
     """Return the stage YAML: base, then structure settings, then tune; later wins."""
-    if stage not in STAGES:
-        raise ValueError(f"stage must be one of {', '.join(STAGES)}.")
+    if stage not in STAGE_NAMES:
+        raise ValueError(f"stage must be one of {', '.join(STAGE_NAMES)}.")
     base = load_yaml(BASE_DIR / f"{STAGE_NAMES[stage]}.yaml")
     images = get_images(sample)
     num_phases = sample.get("num_phases")

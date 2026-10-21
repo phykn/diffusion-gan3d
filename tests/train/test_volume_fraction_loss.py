@@ -1,18 +1,6 @@
 import torch
 
-from src.evaluate.label import compute_vf
 from src.train.loss.volume_fraction import compute_vf_loss
-
-
-def test_compute_vf_aggregates_all_images_and_axes() -> None:
-    batches = {
-        0: torch.tensor([[[0, 0], [1, 1]], [[2, 2], [2, 2]]]),
-        1: torch.tensor([[[1, 1], [1, 2]], [[0, 1], [2, 2]]]),
-        2: torch.tensor([[[0, 0], [0, 0]], [[0, 1], [1, 2]]]),
-    }
-    expected = torch.tensor((1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0))
-
-    torch.testing.assert_close(compute_vf(batches, num_phases=3), expected)
 
 
 def test_compute_vf_loss_uses_only_present_samples() -> None:

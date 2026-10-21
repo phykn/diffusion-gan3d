@@ -34,7 +34,7 @@ def build_generator(
     device: torch.device,
 ) -> Generator:
     path = Path(weights).resolve()
-    denoiser = build_denoiser(cfg, checkpointing=False).to(device)
+    denoiser = build_denoiser(cfg).to(device)
     try:
         load_model(path, denoiser)
     except (TypeError, RuntimeError, ValueError) as exc:

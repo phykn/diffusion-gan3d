@@ -1,6 +1,7 @@
 import math
 from collections.abc import Sequence
 from dataclasses import replace
+from functools import partial
 
 import torch
 
@@ -13,25 +14,6 @@ from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 from src.predict.memory import estimate_memory, select_storage
 from src.prepare.height import height_field, resolve_extent
 from src.prepare.profile import sample_profile
-
-
-class GuidedDenoiser:
-    def __init__(
-        self, generator: "Generator", guidance: float, anchor_strength: float = 1.0
-    ) -> None:
-        self.generator = generator
-        self.guidance = guidance
-        self.anchor_strength = anchor_strength
-
-    def __call__(self, current, time, latent, **conditions) -> torch.Tensor:
-        return self.generator.predict(
-            current,
-            time,
-            latent,
-            guidance=self.guidance,
-            anchor_strength=self.anchor_strength,
-            **conditions,
-        )
 
 
 def profile_feasible(target, known, free, tolerance: float = 1e-4) -> bool:
@@ -62,10 +44,7 @@ class Generator:
         self.num_phases = validate_num_phases(num_phases)
         self.latent_channels = latent_channels
         self.use_amp = use_amp
-        factor = model.downsample_factor
-        if not isinstance(factor, int) or isinstance(factor, bool) or factor < 1:
-            raise ValueError("model.downsample_factor must be a positive integer.")
-        self.default_margin = factor
+        self.default_margin = model.downsample_factor
 
     def predict(
         self,
@@ -170,7 +149,7 @@ class Generator:
         )
         if vf_profile is None and vf is None and not anchors:
             vf_profile = self.default_profile(domain)
-        vf_profile = self.validate_profile_request(
+        self.validate_profile_request(
             vf_profile, size, domain, height_origin, height_extent, vf
         )
         select_storage(
@@ -230,27 +209,30 @@ class Generator:
                     )
         if anchor is not None:
             conditions.update(anchor_image=anchor.image, anchor_mask=anchor.mask)
-        with torch.autocast(
-            device_type=self.device.type,
-            dtype=torch.float16,
-            enabled=self.use_amp,
-        ):
-            clean = self.diffusion.sample(
-                GuidedDenoiser(self, guidance, anchor_strength),
-                initial_noise,
-                self.latent_channels,
-                conditions=conditions,
-            )
+        clean = self.sample(initial_noise, conditions, guidance, anchor_strength)
         if margin:
             region = slice(margin, margin + size)
             clean = clean[:, :, region, region, region].clone()
         return clean
 
+    def sample(self, noise, conditions, guidance, anchor_strength=1.0):
+        """Run the full reverse diffusion from noise to clean phase values."""
+        model = partial(
+            self.predict, guidance=guidance, anchor_strength=anchor_strength
+        )
+        with torch.autocast(
+            device_type=self.device.type, dtype=torch.float16, enabled=self.use_amp
+        ):
+            return self.diffusion.sample(
+                model, noise, self.latent_channels, conditions=conditions
+            )
+
     def height_condition(self, shape, domain, origin, offset=0, extent=None):
+        """Height field over this model's output voxels, offset in those voxels."""
         if self.height_data is None:
             return None
         data = self.height_data
-        spacing = data["crop_size"] / data["lo_res_size"]
+        spacing = data["crop_size"] / self.patch_size
         return height_field(
             shape,
             0,
@@ -261,6 +243,7 @@ class Generator:
         )
 
     def validate_height(self, shape, domain, origin, extent=None):
+        """Check that an LR-voxel shape at origin fits the source image height."""
         if self.height_data is None:
             if extent is not None:
                 raise ValueError("height_extent requires a height-conditioned model.")
@@ -277,7 +260,7 @@ class Generator:
 
     def profile_condition(self, spec, depth, domain, origin, offset=0, extent=None):
         data = self.height_data
-        spacing = data["crop_size"] / data["lo_res_size"]
+        spacing = data["crop_size"] / self.patch_size
         return sample_profile(
             spec,
             self.num_phases,
@@ -309,8 +292,6 @@ class Generator:
                 "vf must equal the profile mean over the final output interval."
             )
 
-        return spec
-
     @staticmethod
     def validate_anchor_strength(strength: float) -> float:
         if (
@@ -336,7 +317,8 @@ class Generator:
     ) -> tuple[PlaneAnchor, ...]:
         anchors = tuple(anchors)
         for anchor in anchors:
-            if not 0 <= anchor.index < size:
+            # A bool would pass the range check and shift into a valid index.
+            if type(anchor.index) is not int or not 0 <= anchor.index < size:
                 raise ValueError("anchor.index is outside the generated volume.")
             if not isinstance(anchor.image, torch.Tensor) or anchor.image.ndim not in {
                 2,

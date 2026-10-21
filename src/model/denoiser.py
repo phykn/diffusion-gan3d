@@ -85,8 +85,6 @@ class Denoiser3D(nn.Module):
         coarse_enabled: bool = False,
     ) -> None:
         super().__init__()
-        if not isinstance(anchor_multiscale, bool):
-            raise TypeError("anchor_multiscale must be a boolean.")
         multipliers = tuple(channel_multipliers)
 
         channels = tuple(base_channels * scale for scale in multipliers)
@@ -196,32 +194,12 @@ class Denoiser3D(nn.Module):
         time: torch.Tensor,
         latent: torch.Tensor,
         domain: torch.Tensor,
-        vf: torch.Tensor | None = None,
-        vf_present: torch.Tensor | None = None,
-        anchor_image: torch.Tensor | None = None,
-        anchor_mask: torch.Tensor | None = None,
-        height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
-        profile_present: torch.Tensor | None = None,
-        coarse: torch.Tensor | None = None,
-        corruption_level: torch.Tensor | None = None,
+        **conditions: torch.Tensor | None,
     ) -> torch.Tensor:
-        logits = self.compute_logits(
-            x_current,
-            time,
-            latent,
-            domain,
-            vf=vf,
-            vf_present=vf_present,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
-            height=height,
-            profile=profile,
-            profile_present=profile_present,
-            coarse=coarse,
-            corruption_level=corruption_level,
+        """Predict clean phase values in [-1, 1]; see compute_logits for conditions."""
+        return self.decode(
+            self.compute_logits(x_current, time, latent, domain, **conditions)
         )
-        return self.decode(logits)
 
     def compute_logits(
         self,
@@ -317,8 +295,7 @@ class Denoiser3D(nn.Module):
             )
             x = run_block(block, x, emb, checkpointing)
 
-        logits = self.output(F.silu(self.output_norm(x)))
-        return logits
+        return self.output(F.silu(self.output_norm(x)))
 
     def apply_guidance_logits(
         self,

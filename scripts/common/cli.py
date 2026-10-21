@@ -5,20 +5,12 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from scripts.common.diagnostic import middle_slices
+from scripts.common.diagnostic import slice_figure
 from src.build.predict import resolve_weights
 from src.config.files import PROJECT_ROOT
 from src.config.generation import load_generation_settings
 from src.device import default_device
-from src.plane import PLANES
-
-
-def check_parser(script, description):
-    return argparse.ArgumentParser(
-        description=description,
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        epilog=f'Example: python scripts/{Path(script).name} --weight "run/my-run"',
-    )
+from src.storage import save_volume
 
 
 def parse_unit_interval(value: str) -> float:
@@ -51,44 +43,54 @@ def add_device_argument(parser):
     )
 
 
+def add_sample_arguments(parser):
+    parser.add_argument(
+        "--domain", type=int, default=0, help="Numeric domain ID (default: 0)."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0, help="Reproducible seed (default: 0)."
+    )
+
+
 def add_generation_arguments(parser, *, anchors: bool = False, origin_default=0.0):
     """Options shared by the LR checks 02-05; unset guidance uses config/gen.yaml."""
     parser.add_argument(
         "--weight",
         type=Path,
         required=True,
-        help="LR generator.pt or its run directory",
+        help="LR generator.pt or its run directory.",
     )
-    parser.add_argument("--domain", type=int, default=0, help="numeric domain ID")
-    parser.add_argument("--seed", type=int, default=0, help="reproducible seed")
+    add_sample_arguments(parser)
     parser.add_argument(
         "--guidance",
         type=float,
-        help="classifier-free guidance scale (default: config/gen.yaml)",
+        help="Classifier-free guidance scale (default: config/gen.yaml).",
     )
     if anchors:
         parser.add_argument(
             "--anchor-strength",
             type=parse_unit_interval,
-            help="normalized anchor prediction strength (default: config/gen.yaml)",
+            help="Normalized anchor prediction strength (default: config/gen.yaml).",
         )
     parser.add_argument(
-        "--out", type=Path, help="TIFF path; default: a new directory under checks/"
+        "--out", type=Path, help="TIFF path (default: a new directory under checks/)."
     )
     parser.add_argument(
-        "--napari", action="store_true", help="show the 3D phase volume in Napari"
+        "--napari", action="store_true", help="Show the 3D phase volume in Napari."
     )
     parser.add_argument(
-        "--no-view", action="store_true", help="save results without a viewer"
+        "--no-view", action="store_true", help="Save results without a viewer."
     )
     add_device_argument(parser)
     add_height_arguments(parser, origin_default)
 
 
 def add_height_arguments(parser, origin_default=0.0):
-    text = "Output Z origin in source pixels."
+    text = "Output Z origin in source pixels"
     if origin_default is None:
-        text += " Real xz/yz crops infer it when omitted."
+        text += "; real xz/yz crops infer it when omitted."
+    else:
+        text += f" (default: {origin_default:g})."
     parser.add_argument(
         "--height-origin", type=float, default=origin_default, help=text
     )
@@ -104,12 +106,9 @@ def height_options(args):
     return {"height_origin": 0.0 if origin is None else origin, "height_extent": extent}
 
 
-def result_directory(name):
-    return (
-        PROJECT_ROOT
-        / "checks"
-        / (datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_" + name)
-    )
+def result_directory(script):
+    name = datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_" + Path(script).stem
+    return PROJECT_ROOT / "checks" / name
 
 
 def prepare_check(args, script):
@@ -118,7 +117,7 @@ def prepare_check(args, script):
         plt.switch_backend("Agg")
     args.weight = resolve_weights(args.weight)
     if args.out is None:
-        args.out = result_directory(Path(script).stem) / "volume.tiff"
+        args.out = result_directory(script) / "volume.tiff"
     args.out = args.out.expanduser().resolve()
     print(f"Results : {args.out.parent}", flush=True)
     settings = load_generation_settings()
@@ -129,22 +128,12 @@ def prepare_check(args, script):
     return settings
 
 
-def save_preview(volume, args, num_phases):
-    volume = volume.detach().cpu()
-    fig, panels = plt.subplots(1, 3, figsize=(10, 4))
-    for panel, plane, image in zip(panels, PLANES, middle_slices(volume)):
-        panel.imshow(
-            image.numpy(),
-            cmap="gray",
-            vmin=0,
-            vmax=num_phases - 1,
-            interpolation="nearest",
-        )
-        panel.set_title(plane)
-        panel.axis("off")
-    fig.tight_layout()
+def save_results(volume, args, num_phases):
+    """Save the TIFF, a middle-slice PNG and the options as JSON next to it."""
+    save_volume(volume, args.out)
+    print(f"Saved   : {args.out}", flush=True)
+    fig = slice_figure(volume, num_phases)
     path = args.out.with_suffix(".png")
-    path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
     metadata = {

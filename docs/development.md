@@ -9,7 +9,8 @@
 | Training step or objective | [Trainer](../src/train/trainer.py), [losses](../src/train/loss/) |
 | Anchors, replay, or condition sampling | [ConditionSampler](../src/train/conditioning.py), [step inputs](../src/train/batch.py) |
 | Plane pairs, triplets, or seam bands | [section sampling](../src/data/slice.py) |
-| Metrics and TensorBoard tags | [metrics](../src/train/metrics.py) |
+| Metrics and TensorBoard tags | [metrics](../src/train/metrics.py), [structure metrics](../src/evaluate/structure.py) |
+| Section augmentation | [auto plane policies](../src/config/train.py), [CriticAugment](../src/data/augment.py) |
 | SR bank or height coordinates | [bank validation](../src/data/bank.py), [SR assembly](../src/build/sr.py) |
 | Checkpoints or resume | [run lifecycle](../src/train/run/), [training state](../src/train/state.py) |
 | Generation, tiling, or SR | [public API](../src/api.py), [src/predict/](../src/predict/) |
@@ -23,10 +24,17 @@
   models, and the trainer.
 - `Trainer.step` owns optimizer and EMA updates. `Trainer.settings` holds runtime and
   loss settings built once in `src/build/trainer.py`; read them there instead of copying.
-- `Trainer.conditions` (`ConditionSampler`) samples real batches, anchors, replay,
-  dropout, and SR coarse inputs. Its replay state is saved through `train/state.py`.
-- `train/loss/denoiser.py` owns the generator objective; `train/loss/gan.py` owns the
-  plane, connectivity, and seam critics and their R1/R2 penalties.
+- `Trainer.conditions` (`ConditionSampler`) samples real batches, anchors, dropout, and
+  SR coarse inputs. Replay is part of it: every other anchored step reuses an earlier
+  generated volume from the `AnchorBank`, when one is stored, as a multi-plane anchor. Its state is saved
+  through `src/train/state.py`.
+- `src/train/loss/denoiser.py` owns the generator objective; `src/train/loss/gan.py`
+  holds the adversarial losses and R1/R2 penalties shared by every critic.
+- With `augmentation.auto_planes`, `auto_plane_policies` in `src/config/train.py` picks
+  each plane's flips and rotations. z stays fixed (no `xz`/`yz` rotation) when height is
+  enabled or no critic group judges `xy` with a side plane; z flips are off with height.
+  SR bank volumes swap or flip z only where those policies do. Set `auto_planes: false`
+  to list `augmentation.planes` yourself.
 - Generation: [TileSampler](../src/predict/tiling/sampler.py) owns state, noise, diffusion,
   fusion, and output. LR and SR tiling only provide their own conditions. Memory
   estimates in `src/predict/memory.py` and `src/predict/sr/memory.py` run before sampling.
@@ -34,18 +42,17 @@
 ## LR anchor losses
 
 All three use the selected transition's x0 prediction at every t, follow the anchor
-ramp, and are LR-only.
+ramp, and are LR-only. Their defaults are in [src/config/defaults.py](../src/config/defaults.py).
 
-- **Continuity** (`loss.anchor_continuity_weight`, default `0.1`): next to each measured
-  anchor, the phase-pair statistics up to `loss.connectivity.max_slice_gap` must match
-  the measured 2D transition statistics. Only TV excess above real crop-to-crop
-  variation is penalized.
-- **Neighborhood** (`loss.anchor_neighborhood_weight`, default `0.1`,
-  `loss.anchor_neighborhood_radius` = `2`): adjacent-plane statistics near an anchor
-  must match those far from it in the same volume.
-- **Seam critic** (`loss.anchor_seam_weight`, default `0`, off; `loss.anchor_seam_rows`
-  = `4`): a 2D critic treats generated bands far from anchors as real and bands next to
-  anchors as fake. Its "real" data is generated, not measured.
+- **Continuity** (`loss.anchor_continuity_weight`): next to each measured anchor, the
+  phase-pair statistics up to `loss.connectivity.max_slice_gap` must match the measured
+  2D transition statistics. Only the total variation (TV, half the L1 distance between
+  the two distributions) above real crop-to-crop variation is penalized.
+- **Neighborhood** (`loss.anchor_neighborhood_weight`, `loss.anchor_neighborhood_radius`):
+  adjacent-plane statistics near an anchor must match those far from it in the same volume.
+- **Seam critic** (`loss.anchor_seam_weight`, off by default; `loss.anchor_seam_rows`):
+  a 2D critic treats generated bands far from anchors as real and bands next to anchors
+  as fake. Its "real" data is generated, not measured.
 
 ## Contracts to preserve
 
@@ -71,15 +78,16 @@ ramp, and are LR-only.
 fractions). The output folder must be empty.
 
 - Default `kind: particles` ([geometry.py](../simul/src/geometry.py)): elongated phase 2
-  and spherical phase 1 particles with periodic y/x.
+  and spherical phase 1 particles. y and x wrap periodically, and z does too unless
+  `radius_gradient` varies with height.
 - `kind: anode` ([anode.py](../simul/src/anode.py), [config_anode.yaml](../simul/config_anode.yaml)):
   tilted graphite flakes (1) and silicon spheres (2) in pores (0). A `*_vf` list sets
   fractions at evenly spaced heights, enforced per slice. Order bias alone cannot
   concentrate silicon once graphite fills the pores.
 
 The anode sample is not isotropic, has a depth gradient, and is not mirror symmetric, so
-both stages share height conditioning and split the `xy` critic from `xz`/`yz`; LR adds
-the per-height profile loss and turns off flips.
+both stages use height conditioning and judge `xy` apart from `xz`/`yz`; LR adds the
+per-height profile, sections flip at probability 0.2, and z is never flipped or rotated.
 
 ```bash
 python simul/run.py --config simul/config_anode.yaml
@@ -89,12 +97,13 @@ python scripts/02_check_generated.py --weight "run/anode-lr" --no-view
 python scripts/06_check_hr.py --weight "run/anode-sr" --no-view
 ```
 
-## Checks
+## Tests and lint
 
 ```bash
 python -m pip install pytest ruff httpx
 python -m pytest -q
 python -m ruff check .
+python -m ruff format --check .
 ```
 
 Frontend, from `frontend/`: `npm ci`, `npm test`, `npm run build`. CUDA and MPS tests

@@ -9,20 +9,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from matplotlib.colors import ListedColormap, to_rgb
+from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(SCRIPT_DIR))
-
-from evaluation_io import set_seed, summarize
-from make_anchor_asset import load_center_roi
-from make_assets import OUTPUT_DIR, PHASE_COLORS, ROI_COLOR, SAMPLE_PATH
-from provenance import build_provenance, file_record, validate_output_paths
 
 from scripts.common.diagnostic import generate_with_baseline
+from scripts.paper.make_anchor_asset import load_center_roi
+from scripts.paper.make_assets import OUTPUT_DIR, PHASE_RGB, ROI_COLOR, SAMPLE_PATH
+from scripts.paper.provenance import (
+    build_provenance,
+    file_record,
+    validate_output_paths,
+)
+from scripts.paper.summary import summarize
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator, resolve_weights
 from src.config.generation import load_generation_settings
@@ -79,7 +80,7 @@ def main() -> None:
     external_anchor = load_center_roi(generator.patch_size)
 
     def run_case(condition, seed, anchor, axis, index, case_seed):
-        set_seed(case_seed, device)
+        torch.manual_seed(case_seed)
         generated, baseline = generate_with_baseline(
             generator,
             (PlaneAnchor(anchor, axis, index),),
@@ -104,7 +105,7 @@ def main() -> None:
             examples[condition] = (anchor.cpu(), generated.cpu())
 
     for seed in SEEDS:
-        set_seed(40_000 + seed, device)
+        torch.manual_seed(40_000 + seed)
         reference = generator.generate(
             anchors=(),
             anchor_strength=0.0,
@@ -205,13 +206,7 @@ def measure_case(
     baseline_plane = baseline.movedim(axis, 0)[index]
     boundary = measure_boundaries(generated, (index,), axis)
     smoothness = measure_slice_smoothness(generated, (index,), axis, baseline)
-    profile = measure_distance_divergence(
-        generated,
-        baseline,
-        (index,),
-        axis,
-        generated.shape[axis] - 1,
-    )
+    profile = measure_distance_divergence(generated, baseline, (index,), axis)
     valid = [value for value in profile if value is not None]
     pool4 = pooled_similarity(generated_plane, anchor, num_phases, pool_size=4)
     baseline_pool4 = pooled_similarity(baseline_plane, anchor, num_phases, pool_size=4)
@@ -256,7 +251,7 @@ def render(
     num_phases: int,
     output: Path,
 ) -> None:
-    colors = [to_rgb(color) for color in PHASE_COLORS[:num_phases]]
+    colors = PHASE_RGB[:num_phases]
     cmap = ListedColormap(colors)
     depth = len(examples[BOUNDARY][1])
     # Smaller models have fewer slices; skip distances beyond the volume.

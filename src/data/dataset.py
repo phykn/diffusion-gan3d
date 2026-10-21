@@ -28,10 +28,10 @@ def read_labels(path: Path) -> tuple[np.ndarray, int]:
         if getattr(img, "n_frames", 1) != 1:
             raise ValueError(f"training images must contain one 2D frame: {path}")
         data = np.asarray(img)
-    try:
-        RealDataset.check_image(data)
-    except ValueError as exc:
-        raise ValueError(f"{str(exc).rstrip('.')}: {path}") from None
+    if data.ndim != 2:
+        raise ValueError(f"image must be two-dimensional: {path}")
+    if data.dtype != np.uint8:
+        raise ValueError(f"image must use uint8: {path}")
     data.flags.writeable = False
     entry = (data, int(data.max()))
     if data.nbytes <= DECODE_CACHE_BYTES:
@@ -61,11 +61,6 @@ class RealDataset(Dataset[dict]):
         )
         if not self.path_groups or any(not group for group in self.path_groups):
             raise ValueError("path groups must be non-empty.")
-        if any(
-            not isinstance(size, int) or isinstance(size, bool) or size < 1
-            for size in (crop_size, patch_size)
-        ):
-            raise ValueError("crop and patch sizes must be positive integers.")
         self.crop_size = crop_size
         self.patch_size = patch_size
         self.num_phases = num_phases
@@ -108,7 +103,6 @@ class RealDataset(Dataset[dict]):
     def crop_with_origin(
         self, img: np.ndarray, excluded: Sequence[int] | None = None
     ) -> tuple[np.ndarray, tuple[int, int]]:
-        img = self.check_image(img)
         height, width = img.shape
         size = self.crop_size
         if size > min(height, width):
@@ -119,11 +113,3 @@ class RealDataset(Dataset[dict]):
         else:
             top, left = training_origin(img.shape, size, excluded)
         return img[top : top + size, left : left + size], (top, left)
-
-    @staticmethod
-    def check_image(img: np.ndarray) -> np.ndarray:
-        if img.ndim != 2:
-            raise ValueError("image must be two-dimensional.")
-        if img.dtype != np.uint8:
-            raise ValueError("image must use uint8.")
-        return img

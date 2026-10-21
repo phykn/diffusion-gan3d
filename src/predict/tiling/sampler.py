@@ -126,8 +126,6 @@ class TileSampler:
         base: VolumeCondition | None = None,
     ) -> None:
         generator = self.generator
-        fusion.pred_sum.zero_()
-        fusion.weight_sum.zero_()
         layer_start = 0
         for index, tile in enumerate(tiles):
             values = tile_buffer.read(

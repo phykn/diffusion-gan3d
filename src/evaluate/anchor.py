@@ -53,7 +53,6 @@ def measure_distance_divergence(
     baseline: torch.Tensor,
     indices: tuple[int, ...],
     axis: int,
-    max_distance: int,
 ) -> tuple[float | None, ...]:
     if not indices:
         return ()
@@ -67,7 +66,7 @@ def measure_distance_divergence(
         None
         if not bool((distances == distance).any())
         else float(changes[distances == distance].mean())
-        for distance in range(max_distance + 1)
+        for distance in range(anchored_slices.shape[0])
     )
 
 
@@ -141,11 +140,7 @@ def anchor_boundary_metrics(prediction, condition) -> dict[str, torch.Tensor]:
     total = prediction.new_zeros(())
     excess = prediction.new_zeros(())
     count = prediction.new_zeros(())
-    active = (
-        range(prediction.shape[0])
-        if condition.active_batches is None
-        else condition.active_batches
-    )
+    active = condition.active_batches
     for region in condition.regions:
         axis, index = region.axis, region.index
         patch = (

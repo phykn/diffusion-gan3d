@@ -137,7 +137,6 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                     "weights",
                     "weights_sha256",
                     "config_sha256",
-                    "data_sha256",
                     "bank",
                     "bank_sha256",
                 )

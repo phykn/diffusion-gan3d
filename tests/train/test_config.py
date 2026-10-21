@@ -33,7 +33,7 @@ def test_find_saved_config_walks_from_numbered_checkpoint(tmp_path: Path) -> Non
     config = tmp_path / "run" / "train.yaml"
     config.parent.mkdir()
     config.write_text("train: {}\n", encoding="utf-8")
-    weight = config.parent / "checkpoints" / "step_00000100" / "generator.pt"
+    weight = config.parent / "checkpoints" / "generator_00000100.pt"
     weight.parent.mkdir(parents=True)
     weight.write_bytes(b"weights")
 
@@ -87,30 +87,31 @@ def test_partial_generation_settings_preserve_supplied_options(monkeypatch, key,
 
 
 @pytest.mark.parametrize(
-    "settings",
+    "settings,match",
     (
-        {"overlap": -1},
-        {"margin": True},
-        {"anchor_strength": -0.1},
-        {"anchor_strength": 1.1},
-        {"anchor_spread": 0.0},
-        {"anchor_spread": float("nan")},
-        {"blocks": [2, 2, 2]},
+        ({"overlap": -1}, "overlap"),
+        ({"overlap": True}, "overlap"),
+        ({"guidance": float("nan")}, "guidance"),
+        ({"guidance": True}, "guidance"),
+        ({"anchor_strength": -0.1}, "anchor_strength"),
+        ({"anchor_strength": 1.1}, "anchor_strength"),
+        ({"margin": 0}, "unknown generation setting: margin"),
     ),
 )
 def test_generation_settings_reject_invalid_values(
     monkeypatch: pytest.MonkeyPatch,
     settings: dict,
+    match: str,
 ) -> None:
     monkeypatch.setattr(config_module, "load_yaml", lambda path: settings)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=match):
         load_generation_settings()
 
 
 def test_yaml_config_remains_a_plain_mapping(tmp_path: Path) -> None:
     cfg = {
-        "data": {"domains": {0: {0: ["data/0"]}}, "input_size": 64},
+        "data": {"domains": {0: {"xy": ["data/0"]}}, "crop_size": 64},
         "train": {"volume_batch_size": 1},
     }
     path = tmp_path / "train.yaml"
@@ -118,14 +119,6 @@ def test_yaml_config_remains_a_plain_mapping(tmp_path: Path) -> None:
     save_yaml(path, cfg)
 
     assert load_yaml(path) == cfg
-
-
-def test_yaml_root_must_be_a_mapping(tmp_path: Path) -> None:
-    path = tmp_path / "train.yaml"
-    path.write_text("- 64\n- 96\n", encoding="utf-8")
-
-    with pytest.raises(TypeError, match="mapping"):
-        load_yaml(path)
 
 
 def test_invalid_yaml_reports_the_source(tmp_path: Path) -> None:
@@ -159,8 +152,8 @@ def test_stage1_training_has_no_measured_3d_target() -> None:
             assert token not in text, f"{token!r} found in {path.relative_to(ROOT)}"
 
 
-@pytest.mark.parametrize("text", ["[]", "false", "0", "''"])
-def test_yaml_rejects_falsey_non_mapping_roots(tmp_path, text):
+@pytest.mark.parametrize("text", ["- 64\n- 96\n", "[]", "false", "0", "''"])
+def test_yaml_root_must_be_a_mapping(tmp_path, text):
     path = tmp_path / "config.yaml"
     path.write_text(text, encoding="utf-8")
     with pytest.raises(TypeError, match="mapping"):

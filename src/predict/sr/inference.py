@@ -1,34 +1,41 @@
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 
-from src.build.model import build_diffusion, build_sr_model
+from src.build.model import build_denoiser, build_diffusion
 from src.build.predict import resolve_weights
 from src.config.train import get_sr_resolution, normalize_train_config
 from src.device import check_device, default_device
 from src.predict.convert import labels_from_channels, owned_clean_to_probs_
-from src.predict.generator import Generator, GuidedDenoiser
+from src.predict.generator import Generator
 from src.predict.sr.memory import check_sr_memory, estimate_sr_memory
-from src.predict.sr.tiled import refine_tiled
-from src.predict.tiling.layout import DEFAULT_OVERLAP, check_overlap
+from src.predict.tiling.layout import (
+    DEFAULT_OVERLAP,
+    check_overlap,
+    make_plan,
+    make_tiles,
+)
+from src.predict.tiling.sampler import TileSampler
 from src.predict.volume_condition import (
     fraction_channels,
+    prepare_base,
     resolve_offset,
     volume_shape,
 )
-from src.prepare.height import height_field, resolve_extent
-from src.prepare.resize import resize_phases, scaled_size
+from src.prepare.resize import coarse_region, resize_phases, scaled_size
 from src.random import seeded_rng
+from src.storage import SR_FORMAT
 
 
 def load_sr_export(path: str | Path) -> dict:
     """Load an exported SR generator.pt and return it with its resolved config."""
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if payload.get("format") != "diffusion-gan3d.sr":
+    if payload.get("format") != SR_FORMAT:
         raise ValueError(
-            "use exported SR weights (generator.pt), not a training or stage-1 checkpoint."
+            "use exported SR weights (generator.pt), not a training or LR checkpoint."
         )
     return {**payload, "config": normalize_train_config(payload["config"], "sr")}
 
@@ -43,7 +50,7 @@ class SuperResolutionAPI:
         self.weights = resolve_weights(weights)
         payload = load_sr_export(self.weights)
         self.config = payload["config"]
-        self.model = build_sr_model(self.config).to(self.device)
+        self.model = build_denoiser(self.config).to(self.device)
         self.model.load_state_dict(payload["model"], strict=True)
         self.model.eval().requires_grad_(False)
         resolution = get_sr_resolution(self.config)
@@ -60,6 +67,9 @@ class SuperResolutionAPI:
             self.num_phases,
             self.config["model"]["generator"]["latent_channels"],
             self.config["train"]["mixed_precision"] and self.device.type == "cuda",
+            height_data=self.config["data"]
+            if self.config["conditioning"]["height_enabled"]
+            else None,
         )
 
     def refine(
@@ -78,9 +88,9 @@ class SuperResolutionAPI:
         base_offset=None,
     ) -> torch.Tensor:
         """Refine LR labels or phase fractions into HR uint8 labels."""
-        return self._resolve(
+        return self._run(
             low,
-            output_kind="labels",
+            probabilities=False,
             domain=domain,
             seed=seed,
             guidance=guidance,
@@ -109,9 +119,9 @@ class SuperResolutionAPI:
         base_offset=None,
     ) -> torch.Tensor:
         """Refine LR labels or phase fractions into HR phase fractions."""
-        return self._resolve(
+        return self._run(
             low,
-            output_kind="probabilities",
+            probabilities=True,
             domain=domain,
             seed=seed,
             guidance=guidance,
@@ -125,11 +135,11 @@ class SuperResolutionAPI:
         )
 
     @torch.inference_mode()
-    def _resolve(
+    def _run(
         self,
         low: torch.Tensor,
         *,
-        output_kind,
+        probabilities,
         domain,
         seed,
         guidance,
@@ -147,7 +157,6 @@ class SuperResolutionAPI:
                 "LR input must be D,H,W labels or K,D,H,W phase fractions."
             )
         domain = self.generator.resolve_domain(domain)
-        domain_ids = self.generator.prepare_domain(domain)
         low_shape = low.shape[-3:]
         shape = tuple(scaled_size(int(n), self.scale_factor) for n in low_shape)
         if base is None and base_offset is not None:
@@ -179,7 +188,8 @@ class SuperResolutionAPI:
                 raise ValueError(
                     "HR shape, tile_size, stride and margin must be multiples of the LR/HR scale."
                 )
-        height_extent = self._validate_height(
+        # Height is validated on the LR grid the input volume was generated on.
+        height_extent = self.generator.validate_height(
             low_shape, domain, height_origin, height_extent
         )
         check_sr_memory(
@@ -192,113 +202,112 @@ class SuperResolutionAPI:
                 label_input=low.ndim == 3,
                 input_element_size=low.element_size(),
                 input_on_cuda=low.device.type == "cuda",
-                output_kind=output_kind,
+                probabilities=probabilities,
                 base_shape=volume_shape(base),
             ),
             self.generator,
             input_device=low.device,
         )
         probs = fraction_channels(low, self.num_phases)
+        height = (domain, height_origin, height_extent)
         with seeded_rng(seed, self.device):
             if not tiled and base is None:
                 return self._refine_block(
-                    probs,
-                    shape,
-                    margin,
-                    domain_ids,
-                    height_origin,
-                    height_extent,
-                    guidance,
-                    output_kind,
+                    probs, shape, margin, height, guidance, probabilities
                 )
-            return refine_tiled(
-                self,
+            return self._refine_tiled(
                 probs,
                 shape,
                 tile_size if tiled else max(shape),
                 overlap if tiled else 0,
                 margin,
-                domain_ids,
-                height_origin,
+                height,
                 guidance,
-                output_kind,
+                probabilities,
                 base,
                 base_offset,
-                height_extent,
             )
 
-    def _validate_height(self, shape, domain, origin, extent=None):
-        if not self.config["conditioning"]["height_enabled"]:
-            if extent is not None:
-                raise ValueError(
-                    "height_extent requires a height-conditioned SR model."
-                )
-            return
-        data = self.config["data"]
-        extent = resolve_extent(data, domain, extent)
-        maximum = extent - shape[0] * self.crop_size / self.lo_res_size
-        if not math.isfinite(origin) or not 0 <= origin <= maximum:
-            raise ValueError(
-                "height_origin places the LR volume outside the source image height."
-            )
-
-        return extent
-
-    def _refine_block(
-        self,
-        probs,
-        shape,
-        margin,
-        domain,
-        height_origin,
-        height_extent,
-        guidance,
-        output_kind,
-    ):
+    def _refine_block(self, probs, shape, margin, height, guidance, probabilities):
+        domain, height_origin, height_extent = height
         coarse = resize_phases(probs, shape)
-        coarse = F.pad(coarse, (margin,) * 6, mode="replicate")
-        height = self._height(
-            coarse.shape[-3:],
-            (-margin,) * 3,
-            int(domain.item()),
-            height_origin,
-            height_extent,
-        )
+        coarse = F.pad(coarse, (margin,) * 6, mode="replicate").to(self.device)
+        conditions = {
+            "domain": self.generator.prepare_domain(domain),
+            "coarse": coarse,
+            "corruption_level": coarse.new_zeros(len(coarse)),
+            "height": self.generator.height_condition(
+                coarse.shape[-3:], domain, height_origin, -margin, height_extent
+            ),
+        }
+        clean = self.generator.sample(torch.randn_like(coarse), conditions, guidance)
         region = (slice(None), *(slice(margin, margin + n) for n in shape))
-        clean = self._sample_clean(coarse, domain, height, guidance)
-        if output_kind == "labels":
+        if not probabilities:
             return labels_from_channels(clean.squeeze(0)[region])
         probs = owned_clean_to_probs_(clean).squeeze(0).cpu()
         return probs[region].contiguous()
 
-    def _height(self, shape, start, domain, origin, extent=None):
-        if not self.config["conditioning"]["height_enabled"]:
-            return None
-        data = self.config["data"]
-        spacing = self.crop_size / self.hi_res_size
-        return height_field(
-            shape,
-            0,
-            origin + start[0] * spacing,
-            spacing,
-            resolve_extent(data, domain, extent),
-            self.device,
+    def _refine_tiled(
+        self,
+        coarse,
+        shape,
+        tile_size,
+        overlap,
+        margin,
+        height,
+        guidance,
+        probabilities,
+        base,
+        base_offset,
+    ):
+        domain, height_origin, height_extent = height
+        # Include global context in the shared state. Each tile keeps its HR margin;
+        # overlapping clean predictions are tapered before one posterior update.
+        generation_shape = tuple(n + 2 * margin for n in shape)
+        plan = replace(
+            make_plan(generation_shape, tile_size + 2 * margin, overlap + margin),
+            generation_shape=generation_shape,
+            margin=margin,
+        )
+        tiles = make_tiles(plan)
+        known = prepare_base(
+            base, self.num_phases, shape, margin, base_offset, 0, base is not None
         )
 
-    def _sample_clean(self, coarse, domain, height, guidance):
-        coarse = coarse.to(self.device)
-        conditions = {
-            "domain": domain,
-            "coarse": coarse,
-            "corruption_level": coarse.new_zeros(len(coarse)),
-            "height": height,
-        }
-        with torch.autocast(
-            self.device.type, dtype=torch.float16, enabled=self.generator.use_amp
-        ):
-            return self.generator.diffusion.sample(
-                GuidedDenoiser(self.generator, guidance),
-                torch.randn_like(coarse),
-                self.generator.latent_channels,
-                conditions,
-            )
+        # A single block also supports fractional scale and arbitrary margin; its
+        # condition is the same at every step, so resize it once.
+        whole = (
+            None
+            if len(tiles) > 1
+            else F.pad(
+                resize_phases(coarse, shape), (margin,) * 6, mode="replicate"
+            ).to(self.device)
+        )
+
+        def conditions(tile, index):
+            origin = tuple(part.start - margin for part in tile.source)
+            expanded = tuple(part.stop - part.start for part in tile.source)
+            if whole is None:
+                values = coarse_region(
+                    coarse, origin, expanded, int(self.scale_factor)
+                ).to(self.device)
+            else:
+                values = whole
+            return {
+                "coarse": values,
+                "corruption_level": values.new_zeros(1),
+                "height": self.generator.height_condition(
+                    expanded, domain, height_origin, origin[0], height_extent
+                ),
+            }
+
+        return TileSampler(self.generator).sample(
+            tiles,
+            plan,
+            base=known,
+            vf=None,
+            domain=self.generator.prepare_domain(domain),
+            probabilities=probabilities,
+            guidance=guidance,
+            tile_conditions=conditions,
+        )

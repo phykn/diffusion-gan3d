@@ -7,7 +7,6 @@ from time import perf_counter
 
 import matplotlib.pyplot as plt
 import torch
-from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,12 +14,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
     add_generation_arguments,
-    check_parser,
     height_options,
     non_negative_int,
     positive_int,
     prepare_check,
-    save_preview,
+    save_results,
 )
 from scripts.common.diagnostic import (
     anchor_accuracy,
@@ -28,19 +26,21 @@ from scripts.common.diagnostic import (
     middle_slices,
     select_display_index,
     select_indices,
+    show_difference,
+    show_labels,
     show_napari,
     show_slices,
 )
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.device import check_device
-from src.evaluate.label import phase_fractions
+from src.evaluate.label import phase_fractions, voxel_accuracy
 from src.evaluate.seam import SeamQuality, measure_seams
 from src.predict.tiling.generator import TiledGenerator
 from src.predict.tiling.layout import TilePlan
 from src.predict.volume_condition import resolve_offset
 from src.random import seeded_rng
-from src.storage import load_volume, save_volume
+from src.storage import load_volume
 
 AXIS = 0
 
@@ -57,6 +57,7 @@ class BaseResult:
 class ScaleAssessment:
     quality: SeamQuality
     phase_fractions: torch.Tensor
+    start: tuple[int, int, int] | None
     center: torch.Tensor | None
     base_match: float | None
     base_interior_match: float | None
@@ -64,13 +65,11 @@ class ScaleAssessment:
 
 
 def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
-    parser = check_parser(
-        __file__, "Inspect LR tiled generation; defaults to 2 x 2 x 2 blocks."
-    )
+    parser = argparse.ArgumentParser(description="Inspect LR tiled generation.")
     parser.add_argument(
         "--gt",
         type=Path,
-        help="ground-truth TIFF volume used to build anchors",
+        help="Ground-truth TIFF volume used to build anchors.",
     )
     parser.add_argument(
         "--blocks",
@@ -78,22 +77,22 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
         type=positive_int,
         default=(2, 2, 2),
         metavar=("D", "H", "W"),
-        help="number of output blocks along each axis (default: 2 2 2)",
+        help="Number of output blocks along each axis (default: 2 2 2).",
     )
     parser.add_argument(
         "--overlap",
         type=non_negative_int,
-        help="context added to each side of a block (default: config/gen.yaml)",
+        help="Context added to each side of a block (default: config/gen.yaml).",
     )
     parser.add_argument(
         "--margin",
         type=non_negative_int,
-        help="voxels discarded from every outer face (default: model-derived)",
+        help="Voxels discarded from every outer face (default: model-derived).",
     )
     parser.add_argument(
         "--count",
         type=non_negative_int,
-        help="generate a base with this many anchor planes",
+        help="Generate a base with this many anchor planes.",
     )
     add_generation_arguments(parser, anchors=True)
     args = parser.parse_args()
@@ -101,13 +100,8 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
 
 
 def generate_base(
-    parser: argparse.ArgumentParser,
-    args: argparse.Namespace,
-    generator,
-    anchor_count: int | None,
+    args: argparse.Namespace, generator, anchor_count: int | None
 ) -> BaseResult:
-    if anchor_count is not None and anchor_count > generator.patch_size:
-        parser.error(f"--count must be at most {generator.patch_size}.")
     if anchor_count is None:
         print("Base    : none")
         return BaseResult(None, None, (), None)
@@ -160,21 +154,17 @@ def assess_result(
     vfs = phase_fractions(volume, num_phases)
     base = base_result.volume
     if base is None:
-        return ScaleAssessment(quality, vfs, None, None, None, None)
+        return ScaleAssessment(quality, vfs, None, None, None, None, None)
 
     start = resolve_offset(None, volume.shape, base.shape)
     region = tuple(slice(index, index + patch_size) for index in start)
     center = volume[region]
-    base_match = float((center == base).to(torch.float32).mean())
     shell = stats.base_shell
     interior = tuple(
         slice(shell, -shell)
         if volume.shape[axis] > patch_size and shell
         else slice(None)
         for axis in range(3)
-    )
-    base_interior_match = float(
-        (center[interior] == base[interior]).to(torch.float32).mean()
     )
     scaled_accuracy = None
     if base_result.target is not None:
@@ -187,9 +177,10 @@ def assess_result(
     return ScaleAssessment(
         quality,
         vfs,
+        start,
         center,
-        base_match,
-        base_interior_match,
+        voxel_accuracy(center, base),
+        voxel_accuracy(center[interior], base[interior]),
         scaled_accuracy,
     )
 
@@ -206,9 +197,11 @@ def main() -> None:
         )
 
     device = check_device(args.device)
-    print(f"\nWeights : {args.weight.resolve()}", flush=True)
+    print(f"\nWeights : {args.weight}", flush=True)
 
     generator = load_generator(args.weight, device=device)
+    if anchor_count is not None and anchor_count > generator.patch_size:
+        parser.error(f"--count must be at most {generator.patch_size}.")
     overlap = (
         min(settings.overlap, (generator.patch_size - 1) // 2)
         if args.overlap is None
@@ -220,7 +213,10 @@ def main() -> None:
     shape = scaled.shape_from_blocks(tuple(args.blocks), overlap)
     generation_shape = tuple(size + 2 * args.margin for size in shape)
     plan = scaled.plan(generation_shape, overlap)
-    print_plan(plan, device)
+    print(
+        f"Plan    : {' × '.join(map(str, plan.grid))} tiles "
+        f"({plan.tile_count} total), overlap {plan.overlap}, {device}"
+    )
     print(f"Output  : {' × '.join(map(str, shape))}, margin {args.margin}")
     with seeded_rng(args.seed, device):
         base_args = copy.copy(args)
@@ -234,7 +230,7 @@ def main() -> None:
                 * generator.height_data["crop_size"]
                 / generator.height_data["lo_res_size"]
             )
-        base_result = generate_base(parser, base_args, generator, anchor_count)
+        base_result = generate_base(base_args, generator, anchor_count)
 
         print("Scaling...", flush=True)
 
@@ -255,9 +251,7 @@ def main() -> None:
         )
     stats = scaled.stats
     elapsed = perf_counter() - start
-    save_volume(vol, args.out)
-    print(f"Saved   : {args.out.resolve()}", flush=True)
-    save_preview(vol, args, generator.num_phases)
+    save_results(vol, args, generator.num_phases)
     assessment = assess_result(
         vol,
         base_result,
@@ -294,18 +288,13 @@ def main() -> None:
         show_napari(vol, name="scaled phases")
     elif base is not None:
         if target is None:
-            show_unanchored_base_result(
-                vol,
-                base,
-                assessment.center,
-                generator.num_phases,
-            )
+            show_unanchored_base_result(vol, base, assessment, generator.num_phases)
         else:
             show_base_result(
                 vol,
                 base,
                 target,
-                assessment.center,
+                assessment,
                 base_result.indices,
                 AXIS,
                 generator.num_phases,
@@ -314,78 +303,27 @@ def main() -> None:
         show_slices(vol, generator.num_phases, "Joint tiled diffusion scale-up")
 
 
-def print_plan(plan: TilePlan, device: torch.device) -> None:
-    print(
-        f"Plan    : {' × '.join(map(str, plan.grid))} tiles "
-        f"({plan.tile_count} total), overlap {plan.overlap}, {device}"
-    )
-
-
 def show_unanchored_base_result(
     vol: torch.Tensor,
     base: torch.Tensor,
-    center: torch.Tensor,
+    assessment: ScaleAssessment,
     num_phases: int,
 ) -> None:
     idx = base.shape[0] // 2
     base_plane = base[idx]
-    center_plane = center[idx]
-    diff_cmap = ListedColormap(("#f7f7f7", "#e63946"))
+    center_plane = assessment.center[idx]
     fig, panels = plt.subplots(2, 3, figsize=(11, 7))
+    show_labels(panels[0, 0], base_plane, num_phases, "1. Base slice")
+    show_labels(panels[0, 1], center_plane, num_phases, "2. Base area after scale")
+    show_difference(panels[0, 2], center_plane != base_plane, "3. Scaled vs base")
 
-    for panel, (img, title) in zip(
-        panels[0, :2],
-        (
-            (base_plane, "1. Base slice"),
-            (center_plane, "2. Base area after scale"),
-        ),
-        strict=True,
-    ):
-        panel.imshow(
-            img.numpy(),
-            cmap="gray",
-            vmin=-0.5,
-            vmax=num_phases - 0.5,
-            interpolation="nearest",
-        )
-        panel.set_title(title)
-        panel.axis("off")
-
-    panels[0, 2].imshow(
-        (center_plane != base_plane).numpy(),
-        cmap=diff_cmap,
-        vmin=0,
-        vmax=1,
-        interpolation="nearest",
-    )
-    panels[0, 2].set_title("3. Scaled vs base")
-    panels[0, 2].axis("off")
-
-    start = resolve_offset(None, vol.shape, base.shape)
     views = middle_slices(vol)
     for axis, (panel, img) in enumerate(zip(panels[1], views, strict=True)):
         plane_axes = tuple(value for value in range(3) if value != axis)
-        top, left = (start[value] for value in plane_axes)
+        top, left = (assessment.start[value] for value in plane_axes)
         height, width = (base.shape[value] for value in plane_axes)
-        panel.imshow(
-            img.numpy(),
-            cmap="gray",
-            vmin=-0.5,
-            vmax=num_phases - 0.5,
-            interpolation="nearest",
-        )
-        panel.add_patch(
-            Rectangle(
-                (left - 0.5, top - 0.5),
-                width,
-                height,
-                fill=False,
-                edgecolor="#00a6d6",
-                linewidth=1.5,
-            )
-        )
-        panel.set_title(f"{axis + 4}. Full volume axis {axis}")
-        panel.axis("off")
+        show_labels(panel, img, num_phases, f"{axis + 4}. Full volume axis {axis}")
+        panel.add_patch(base_box(left - 0.5, top - 0.5, width, height))
 
     fig.suptitle(
         "Scale-up from unanchored base\n"
@@ -395,11 +333,17 @@ def show_unanchored_base_result(
     plt.show()
 
 
+def base_box(left: float, top: float, width: int, height: int) -> Rectangle:
+    return Rectangle(
+        (left, top), width, height, fill=False, edgecolor="#00a6d6", linewidth=1.5
+    )
+
+
 def show_base_result(
     vol: torch.Tensor,
     base: torch.Tensor,
     target: torch.Tensor,
-    center: torch.Tensor,
+    assessment: ScaleAssessment,
     indices: tuple[int, ...],
     axis: int,
     num_phases: int,
@@ -407,103 +351,45 @@ def show_base_result(
     idx = select_display_index(base.shape[axis], indices)
     target_plane = target.movedim(axis, 0)[idx]
     base_plane = base.movedim(axis, 0)[idx]
-    center_plane = center.movedim(axis, 0)[idx]
-    start = resolve_offset(None, vol.shape, base.shape)
+    center_plane = assessment.center.movedim(axis, 0)[idx]
+    start = assessment.start
     full_plane = vol.movedim(axis, 0)[start[axis] + idx]
-    diff_cmap = ListedColormap(("#f7f7f7", "#e63946"))
     fig, panels = plt.subplots(3, 3, figsize=(11, 10))
     plane_axes = tuple(value for value in range(3) if value != axis)
     full_height, full_width = (vol.shape[value] for value in plane_axes)
     top, left = (start[value] for value in plane_axes)
+    height, width = base_plane.shape
 
-    planes = (
-        (target_plane, "1. Reference anchor"),
-        (center_plane, "2. Base area zoom"),
-        (full_plane, "3. Full scaled slice"),
-    )
-    for number, (panel, (img, title)) in enumerate(zip(panels[0], planes, strict=True)):
-        panel.imshow(
-            img.numpy(),
-            cmap="gray",
-            vmin=-0.5,
-            vmax=num_phases - 0.5,
-            interpolation="nearest",
-        )
-        if number == 2:
-            panel.add_patch(
-                Rectangle(
-                    (left - 0.5, top - 0.5),
-                    base_plane.shape[1],
-                    base_plane.shape[0],
-                    fill=False,
-                    edgecolor="#00a6d6",
-                    linewidth=1.5,
-                )
-            )
-        panel.set_title(title)
-        panel.axis("off")
+    show_labels(panels[0, 0], target_plane, num_phases, "1. Reference anchor")
+    show_labels(panels[0, 1], center_plane, num_phases, "2. Base area zoom")
+    show_labels(panels[0, 2], full_plane, num_phases, "3. Full scaled slice")
+    panels[0, 2].add_patch(base_box(left - 0.5, top - 0.5, width, height))
 
-    differences = (
-        (base_plane != target_plane, "4. Base vs reference"),
-        (center_plane != base_plane, "5. Scaled vs base"),
-        (center_plane != target_plane, "6. Scaled vs reference"),
+    show_difference(panels[1, 0], base_plane != target_plane, "4. Base vs reference")
+    show_difference(panels[1, 1], center_plane != base_plane, "5. Scaled vs base")
+    show_difference(
+        panels[1, 2],
+        center_plane != target_plane,
+        "6. Scaled vs reference",
+        extent=(left, left + width, top + height, top),
     )
-    for number, (panel, (img, title)) in enumerate(
-        zip(panels[1], differences, strict=True)
-    ):
-        extent = None
-        if number == 2:
-            extent = (
-                left,
-                left + img.shape[1],
-                top + img.shape[0],
-                top,
-            )
-        panel.imshow(
-            img.numpy(),
-            cmap=diff_cmap,
-            vmin=0,
-            vmax=1,
-            interpolation="nearest",
-            extent=extent,
-        )
-        if number == 2:
-            panel.add_patch(
-                Rectangle(
-                    (left, top),
-                    img.shape[1],
-                    img.shape[0],
-                    fill=False,
-                    edgecolor="#00a6d6",
-                    linewidth=1.5,
-                )
-            )
-            panel.set_xlim(0, full_width)
-            panel.set_ylim(full_height, 0)
-            panel.set_facecolor("#e5e5e5")
-            panel.set_xticks(())
-            panel.set_yticks(())
-            panel.set_title(title)
-            continue
-        panel.set_title(title)
-        panel.axis("off")
+    panels[1, 2].add_patch(base_box(left, top, width, height))
+    panels[1, 2].axis("on")
+    panels[1, 2].set_xlim(0, full_width)
+    panels[1, 2].set_ylim(full_height, 0)
+    panels[1, 2].set_facecolor("#e5e5e5")
+    panels[1, 2].set_xticks(())
+    panels[1, 2].set_yticks(())
 
     views = middle_slices(vol)
     for view_axis, (panel, img) in enumerate(zip(panels[2], views, strict=True)):
-        panel.imshow(
-            img.numpy(),
-            cmap="gray",
-            vmin=-0.5,
-            vmax=num_phases - 0.5,
-            interpolation="nearest",
+        show_labels(
+            panel, img, num_phases, f"{view_axis + 7}. Full volume axis {view_axis}"
         )
-        panel.set_title(f"{view_axis + 7}. Full volume axis {view_axis}")
-        panel.axis("off")
 
-    mode = f"{len(indices)} anchor planes" if indices else "unanchored base"
     fig.suptitle(
-        f"Scale-up from {mode} · displayed slice {idx}\n"
-        f"cyan box: base {target_plane.shape[0]}×{target_plane.shape[1]} area · "
+        f"Scale-up from {len(indices)} anchor planes · displayed slice {idx}\n"
+        f"cyan box: base {height}×{width} area · "
         f"full slice: {full_height}×{full_width}"
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))

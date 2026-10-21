@@ -14,8 +14,7 @@ DONE = ".done"
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train a sample's LR model, then its SR model from it.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Train a sample's LR model, then its SR model from it."
     )
     parser.add_argument(
         "sample",
@@ -44,8 +43,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--resume",
         type=Path,
         help=(
-            "Continue one interrupted stage from its checkpoint file or "
-            "run/checkpoints directory; --steps sets its total steps."
+            "Continue one interrupted stage from a checkpoint file, a run "
+            "directory, or its checkpoints/; --steps sets its total steps."
         ),
     )
     parser.add_argument(
@@ -62,10 +61,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Compute device; CUDA, then Apple MPS, then CPU when available.",
     )
     args = parser.parse_args(argv)
-    if args.resume is not None and (args.sample or args.show):
-        parser.error("--resume uses the saved settings; omit the sample.")
-    if args.path_map and args.resume is None:
+    if args.resume is not None:
+        if args.sample or args.show:
+            parser.error("--resume uses the saved settings; omit the sample.")
+        if args.sr_steps is not None or args.bank_size is not None:
+            parser.error("--resume continues one stage; set its total with --steps.")
+        args.resume = args.resume.expanduser()
+    elif args.path_map:
         parser.error("--path-map requires --resume.")
+    if args.run_dir is not None:
+        args.run_dir = args.run_dir.expanduser()
     return args
 
 
@@ -75,7 +80,7 @@ def main(argv: list[str] | None = None) -> None:
         resume(args)
         return
     sample = load_sample(args.sample or "default")
-    configs = {stage: build_train_config(sample, stage) for stage in ("low_res", "sr")}
+    configs = {stage: build_train_config(sample, stage) for stage in STAGE_NAMES}
     if args.show:
         for stage, cfg in configs.items():
             print(f"# {stage}\n{dump_yaml(cfg)}")

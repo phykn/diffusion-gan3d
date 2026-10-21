@@ -23,13 +23,6 @@ class BatchStream:
 
 class FolderBatchSampler(Sampler[list[Path]]):
     def __init__(self, dataset: RealDataset, batch_size: int) -> None:
-        if (
-            not isinstance(batch_size, int)
-            or isinstance(batch_size, bool)
-            or batch_size < 1
-        ):
-            raise ValueError("batch size must be a positive integer.")
-
         self.batch_size = batch_size
         self.num_batches = max(len(dataset), batch_size) // batch_size
         self._path_groups = dataset.path_groups

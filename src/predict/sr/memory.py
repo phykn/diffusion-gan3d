@@ -27,7 +27,7 @@ class SRMemoryEstimate:
     cuda_input_bytes: int
     cpu_label_bytes: int
     model_label_bytes: int
-    base_bytes: int = 0
+    base_bytes: int
 
     @property
     def cpu_bytes(self) -> int:
@@ -52,21 +52,11 @@ def estimate_sr_memory(
     label_input=True,
     input_element_size=8,
     input_on_cuda=False,
-    output_kind="probabilities",
+    probabilities=True,
     base_shape=None,
 ) -> SRMemoryEstimate:
+    """Bytes a refine call needs; shapes and sizes are already validated."""
     low_shape, shape = parse_shape(low_shape), parse_shape(shape)
-    if output_kind not in {"labels", "probabilities"}:
-        raise ValueError("output_kind must be labels or probabilities.")
-    if (
-        type(num_phases) is not int
-        or num_phases < 1
-        or type(margin) is not int
-        or margin < 0
-    ):
-        raise ValueError("num_phases must be positive and margin non-negative.")
-    if tile_size is not None and (type(tile_size) is not int or tile_size < 1):
-        raise ValueError("tile_size must be positive.")
     tiled = tile_size is not None and any(n > tile_size for n in shape)
     shared = tiled or base_shape is not None
     lengths = tuple(min(n, tile_size) for n in shape) if tiled else shape
@@ -74,7 +64,7 @@ def estimate_sr_memory(
     tile_voxels = math.prod(expanded)
     low_voxels, high_voxels = math.prod(low_shape), math.prod(shape)
     generation_shape = tuple(n + 2 * margin for n in shape)
-    labels = output_kind == "labels"
+    labels = not probabilities
     label_workspace = (
         9 * label_chunk_depth(shape) * math.prod(shape[1:]) if labels else 0
     )
@@ -87,12 +77,8 @@ def estimate_sr_memory(
         else 4 * num_phases * low_voxels + (0 if input_on_cuda else validation)
     )
     if tiled:
-        scale = shape[0] / low_shape[0]
-        if not scale.is_integer() or any(
-            high != low * scale for high, low in zip(shape, low_shape)
-        ):
-            raise ValueError("SR tiles require a uniform integer scale.")
-        scale = int(scale)
+        # Tiled refinement only runs at an integer scale.
+        scale = shape[0] // low_shape[0]
         halo_low = tuple(math.ceil(n / scale) + 2 for n in expanded)
         halo_high = tuple(n * scale for n in halo_low)
         interpolation = math.prod(halo_low) + math.prod(halo_high)

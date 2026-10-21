@@ -11,48 +11,73 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.common.cli import (
     add_device_argument,
     add_height_arguments,
-    check_parser,
+    add_sample_arguments,
     height_options,
     non_negative_int,
     positive_int,
     result_directory,
 )
+from src.build.predict import load_generator
+from src.config.generation import load_generation_settings
+from src.device import check_device
 from src.evaluate.tilt import TILT_PAIRS, tilt_balance
 from src.phase import PORE_PHASE
+from src.random import seeded_rng
 from src.storage import load_volume
 
 
 def main() -> None:
-    parser = check_parser(
-        __file__,
-        "Compare the signed particle tilt balance of generated and real volumes.",
-    )
-    parser.add_argument("--weight", type=Path, help="LR generator.pt or run directory")
-    parser.add_argument(
-        "--volumes", type=Path, nargs="*", default=[], help="Generated TIFF volumes"
+    parser = argparse.ArgumentParser(
+        description="Compare the signed particle tilt balance of generated and real "
+        "volumes."
     )
     parser.add_argument(
-        "--real", type=Path, nargs="*", default=[], help="Real TIFF volumes"
+        "--weight", type=Path, help="LR generator.pt or run directory to sample."
+    )
+    parser.add_argument(
+        "--volumes", type=Path, nargs="*", default=[], help="Generated TIFF volumes."
+    )
+    parser.add_argument(
+        "--real", type=Path, nargs="*", default=[], help="Real TIFF volumes."
     )
     parser.add_argument(
         "--real-stride",
         type=positive_int,
         default=1,
-        help="Subsample real volumes to the generated voxel scale (2 for 128 -> 64).",
+        help="Subsample real volumes to the generated voxel scale, e.g. 2 for "
+        "128 -> 64 (default: 1).",
     )
-    parser.add_argument("--samples", type=positive_int, default=6)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--guidance", type=float, help="Default: config/gen.yaml.")
+    parser.add_argument(
+        "--samples",
+        type=positive_int,
+        default=6,
+        help="Volumes to generate with --weight (default: 6).",
+    )
+    add_sample_arguments(parser)
+    parser.add_argument(
+        "--guidance", type=float, help="Guidance scale (default: config/gen.yaml)."
+    )
     parser.add_argument(
         "--phases",
         type=int,
         nargs="*",
-        help="Default: every phase except the pore phase 0.",
+        help="Phases to measure (default: every phase except the pore phase 0).",
     )
-    parser.add_argument("--threshold", type=float, default=0.05)
-    parser.add_argument("--min-voxels", type=non_negative_int, default=8)
-    parser.add_argument("--out", type=Path, help="report.json path")
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.05,
+        help="Smallest |slope| counted as tilted (default: 0.05).",
+    )
+    parser.add_argument(
+        "--min-voxels",
+        type=non_negative_int,
+        default=8,
+        help="Smallest particle measured (default: 8).",
+    )
+    parser.add_argument(
+        "--out", type=Path, help="report.json path (default: under checks/)."
+    )
     add_device_argument(parser)
     add_height_arguments(parser)
     args = parser.parse_args()
@@ -81,7 +106,7 @@ def main() -> None:
         report["phases"][phase] = entry
         print_phase(phase, entry)
 
-    out = args.out or result_directory(Path(__file__).stem) / "report.json"
+    out = args.out or result_directory(__file__) / "report.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"\nReport  : {out.resolve()}")
@@ -92,16 +117,11 @@ def load_labels(path: Path) -> np.ndarray:
 
 
 def generate(args: argparse.Namespace) -> list[np.ndarray]:
-    from src.build.predict import load_generator, resolve_weights
-    from src.config.generation import load_generation_settings
-    from src.device import check_device
-    from src.random import seeded_rng
-
     device = check_device(args.device)
     guidance = (
         load_generation_settings().guidance if args.guidance is None else args.guidance
     )
-    generator = load_generator(resolve_weights(args.weight), device=device)
+    generator = load_generator(args.weight, device=device)
     volumes = []
     for index in range(args.samples):
         with seeded_rng(args.seed + index, device):
@@ -112,7 +132,7 @@ def generate(args: argparse.Namespace) -> list[np.ndarray]:
                 **height_options(args),
                 margin=generator.default_margin,
             )
-        volumes.append(vol.detach().cpu().numpy())
+        volumes.append(vol.numpy())
         print(f"Generated sample {index + 1}/{args.samples}", flush=True)
     return volumes
 

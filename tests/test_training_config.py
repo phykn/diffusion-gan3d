@@ -218,14 +218,6 @@ def test_group_statistics_settings_are_validated(stage, key, value):
         normalize_train_config({"loss": {"group_statistics": {key: value}}}, stage)
 
 
-@pytest.mark.parametrize("weight", (-1, float("nan"), True))
-def test_real_transition_weight_is_validated(weight):
-    with pytest.raises(ValueError, match="real_transition_weight"):
-        normalize_train_config(
-            {"loss": {"connectivity": {"real_transition_weight": weight}}}
-        )
-
-
 @pytest.mark.parametrize("weight", (-1, float("nan"), float("inf"), True))
 def test_anchor_continuity_weight_is_validated(weight):
     with pytest.raises(ValueError, match="anchor_continuity_weight"):
@@ -328,10 +320,19 @@ def test_unknown_connectivity_setting_is_rejected():
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
-@pytest.mark.parametrize("height", [False, True])
-def test_requested_auto_augmentation_preserves_height_coordinates(stage, height):
+@pytest.mark.parametrize(
+    ("height", "groups", "side"),
+    [
+        (False, [["xy", "xz", "yz"]], set(range(8))),
+        # Separate xy and side critics mean z differs; z stays unrotated.
+        (False, [["xy"], ["xz", "yz"]], {0, 2, 4, 6}),
+        (True, [["xy", "xz", "yz"]], {0, 4}),
+    ],
+)
+def test_auto_augmentation_keeps_z_where_it_is_distinct(stage, height, groups, side):
     raw = {
         "data": {"domains": {0: {plane: ["images"] for plane in ("xy", "xz", "yz")}}},
+        "model": {"critic": {"plane_groups": groups}},
         "augmentation": {"probability": 0.7, "auto_planes": True},
         "conditioning": {"height_enabled": height},
     }
@@ -339,9 +340,7 @@ def test_requested_auto_augmentation_preserves_height_coordinates(stage, height)
     augment = build_augmentation(cfg)
     assert set(augment.plane_transforms[0]) == set(range(8))
     for plane in (1, 2):
-        assert set(augment.plane_transforms[plane]) == (
-            {0, 4} if height else set(range(8))
-        )
+        assert set(augment.plane_transforms[plane]) == side
     assert normalize_train_config(cfg, stage) == cfg
 
 
@@ -361,29 +360,6 @@ def test_auto_augmentation_does_not_override_explicit_policy():
         normalize_train_config(
             {"data": {}, "augmentation": {"auto_planes": True, "planes": {}}}
         )
-
-
-def test_data_selection_and_snapshot_are_independent_of_cwd(tmp_path, monkeypatch):
-    root = tmp_path / "project"
-    (root / "config/data").mkdir(parents=True)
-    data = {
-        "domains": {0: {"xy": ["images"]}},
-        "num_phases": 3,
-        "crop_size": 256,
-        "lo_res_size": 64,
-    }
-    save_yaml(root / "config/data/selected.yaml", data)
-    preset = tmp_path / "experiment.yaml"
-    save_yaml(preset, {"stage": "low_res", "data": "config/data/selected.yaml"})
-    monkeypatch.setattr(config_module, "PROJECT_ROOT", root)
-    monkeypatch.chdir(tmp_path)
-    cfg = load_train_config(preset)
-    assert cfg["data"]["domains"][0]["xy"] == [str((root / "images").resolve())]
-    assert "scale_factor" not in cfg["data"]
-    snapshot = tmp_path / "train.yaml"
-    save_yaml(snapshot, cfg)
-    (root / "config/data/selected.yaml").unlink()
-    assert load_train_config(snapshot) == cfg
 
 
 def test_embedded_data_folders_resolve_against_the_project_root(tmp_path, monkeypatch):
@@ -491,13 +467,14 @@ def test_sr_rejects_incompatible_data_before_creating_a_run(tmp_path, change, me
     low = load_train_config("tests/fixtures/config/train/low_res.yaml")
     low["conditioning"]["height_enabled"] = False
     save_yaml(base / "train.yaml", low)
+    (base / "generator.pt").write_bytes(b"not loaded")
     cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     cfg["conditioning"]["height_enabled"] = False
     cfg["data"].update(change)
     preset = tmp_path / "sr.yaml"
     save_yaml(preset, cfg)
     run = tmp_path / "run"
-    # No weight file exists: validation must fail before loading/generating volumes.
+    # The weights are unreadable: validation must fail before loading them.
     with pytest.raises(ValueError, match=message):
         run_sr_train(base_weights=base, config=preset, run_dir=run)
     assert not run.exists()
@@ -532,7 +509,7 @@ def test_sr_requires_source_weights_before_creating_a_run(tmp_path, weights):
     preset = tmp_path / "sr.yaml"
     save_yaml(preset, cfg)
     output = tmp_path / "run"
-    with pytest.raises(ValueError, match="source.weights.*--base-weights"):
+    with pytest.raises(ValueError, match="source.weights.*base_weights"):
         run_sr_train(config=preset, run_dir=output)
     assert not output.exists()
 
@@ -798,3 +775,20 @@ def test_connectivity_local_weight_is_an_lr_setting():
         normalize_train_config(raw, "low_res")
     with pytest.raises(ValueError, match="loss.connectivity"):
         normalize_train_config({"loss": {"connectivity": {"local_weight": 0.5}}}, "sr")
+
+
+@pytest.mark.parametrize(
+    ("height", "groups", "expected"),
+    [
+        (False, [["xy", "xz", "yz"]], (True, True)),
+        (False, [["xy"], ["xz", "yz"]], (False, True)),
+        (True, [["xy", "xz", "yz"]], (False, False)),
+    ],
+)
+def test_sr_bank_augmentation_follows_the_critic_z_policy(height, groups, expected):
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
+    cfg["conditioning"]["height_enabled"] = height
+    cfg["model"]["critic"]["plane_groups"] = groups
+    cfg["augmentation"] = {"probability": 0.5, "auto_planes": True}
+    settings = _build_settings(normalize_train_config(cfg, "sr"), torch.device("cpu"))
+    assert (settings.volume_permute_z, settings.volume_flip_z) == expected

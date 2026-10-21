@@ -104,7 +104,7 @@ class TiledGenerator:
         )
         if vf_profile is None and vf is None and not anchors and base is None:
             vf_profile = self.generator.default_profile(domain)
-        vf_profile = self.generator.validate_profile_request(
+        self.generator.validate_profile_request(
             vf_profile, output_shape[0], domain, height_origin, height_extent, vf
         )
         storage = select_storage(
@@ -122,12 +122,16 @@ class TiledGenerator:
         )
         tiles = make_tiles(plan)
         anchor_strength = self.generator.validate_anchor_strength(anchor_strength)
-        tile_anchors = self.prepare_anchors(anchors, tiles, plan)
+        tile_anchors = (
+            self.prepare_anchors(anchors, tiles, plan)
+            if anchor_strength > 0
+            else ((),) * len(tiles)
+        )
         vf = self.generator.prepare_vf(vf)
         base = self.prepare_base(base, plan, offset=base_offset, preserve=preserve_base)
         if anchor_strength > 0:
-            base = validate_base_anchors(base, anchors, output_shape, plan.margin)
-        vf_profile = self.validate_profile_constraints(
+            validate_base_anchors(base, anchors, output_shape, plan.margin)
+        self.validate_profile_constraints(
             vf_profile,
             output_shape,
             plan,
@@ -143,7 +147,7 @@ class TiledGenerator:
             generator = self.generator
             shape = tuple(part.stop - part.start for part in tile.source)
             result = {}
-            if tile_anchors[index] and anchor_strength > 0:
+            if tile_anchors[index]:
                 anchor = encode_anchors(
                     tile_anchors[index],
                     1,
@@ -193,7 +197,7 @@ class TiledGenerator:
         self, spec, shape, plan, tiles, anchors, base, domain, origin, extent
     ):
         if spec is None or (not any(anchors) and (base is None or not base.preserve)):
-            return spec
+            return
         generator = self.generator
         target = generator.profile_condition(
             spec, shape[0], domain, origin, extent=extent
@@ -240,14 +244,16 @@ class TiledGenerator:
         free = shape[1] * shape[2] - count
         if not profile_feasible(target, known, free):
             raise ValueError("profile conflicts with fixed anchors or preserved base.")
-        return spec
 
     def prepare_anchors(self, anchors, tiles, plan):
         shape = tuple(size - 2 * plan.margin for size in plan.shape)
         placed = []
         for anchor in anchors:
+            # A bool would pass the range checks and shift into a valid index.
+            if type(anchor.axis) is not int or anchor.axis not in (0, 1, 2):
+                raise ValueError("anchor.axis must be one of 0, 1, or 2.")
             if (
-                anchor.axis not in (0, 1, 2)
+                type(anchor.index) is not int
                 or not 0 <= anchor.index < shape[anchor.axis]
             ):
                 raise ValueError("anchor.index is outside the generated volume.")

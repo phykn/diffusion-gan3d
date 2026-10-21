@@ -1,19 +1,9 @@
 import math
-from dataclasses import dataclass
 
 import torch
 
-from src.anchor import AnchorCondition, PlaneAnchor, encode_anchors
-
-
-@dataclass(frozen=True)
-class AnchorReplay:
-    condition: AnchorCondition
-    measured: AnchorCondition
-    reference: torch.Tensor
-    height: torch.Tensor | None
-    profile: torch.Tensor | None
-    geometry: list[dict] | None
+from src.anchor import PlaneAnchor, encode_anchors
+from src.train.batch import AnchorSelection
 
 
 class AnchorBank:
@@ -71,7 +61,7 @@ class AnchorBank:
             )
         del entries[: -self.capacity]
 
-    def sample(self, domain, batch_size, device) -> AnchorReplay | None:
+    def sample(self, domain, batch_size, device) -> AnchorSelection | None:
         entries = self.entries.get(domain, [])
         if not entries:
             return None
@@ -128,13 +118,14 @@ class AnchorBank:
         height = entry["height"]
         if height is not None:
             height = height.to(device).expand(batch_size, -1, -1, -1, -1)
-        # Continuity targets describe the replay's changes, never artificial
-        # jumps introduced by pasting a measured plane. Anchor loss owns the
-        # measured values themselves; reconciliation is for conditions only.
         profile = entry["profile"]
-        return AnchorReplay(
+        return AnchorSelection(
             condition=condition,
+            source="multi",
             measured=measured,
+            # Continuity targets describe the replay's changes, never artificial
+            # jumps introduced by pasting a measured plane. Anchor loss owns the
+            # measured values themselves; reconciliation is for conditions only.
             reference=volume,
             height=height,
             profile=None

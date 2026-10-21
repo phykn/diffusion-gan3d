@@ -5,17 +5,7 @@ from itertools import combinations
 from pathlib import Path
 
 from src.config.files import find_saved_config
-
-
-def sha256_file(path: str | Path) -> str:
-    source = Path(path).resolve()
-    if not source.is_file():
-        raise FileNotFoundError(f"provenance input was not found: {source}")
-    digest = hashlib.sha256()
-    with source.open("rb") as file:
-        for block in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+from src.storage import file_hash
 
 
 def build_provenance(
@@ -42,13 +32,13 @@ def build_provenance(
     )
     values: dict[str, object] = {
         "weights": str(weight_path),
-        "weight_sha256": sha256_file(weight_path),
+        "weight_sha256": file_hash(weight_path),
         "train_config": str(config_path),
-        "train_config_sha256": sha256_file(config_path),
+        "train_config_sha256": file_hash(config_path),
         "guidance": guidance,
         "reference": None if reference_path is None else str(reference_path),
         "reference_sha256": (
-            None if reference_path is None else sha256_file(reference_path)
+            None if reference_path is None else file_hash(reference_path)
         ),
         "additional_inputs": inputs,
         "generation": generation_values,
@@ -75,11 +65,9 @@ def validate_output_paths(
     reference = provenance.get("reference")
     if reference is not None:
         input_paths.add(Path(str(reference)).resolve())
-    records = provenance.get("additional_inputs")
-    if not isinstance(records, dict):
-        raise TypeError("provenance additional_inputs must be an object.")
     input_paths.update(
-        Path(str(record["path"])).resolve() for record in records.values()
+        Path(str(record["path"])).resolve()
+        for record in provenance["additional_inputs"].values()
     )
 
     resolved_outputs = tuple(Path(path).resolve() for path in outputs)
@@ -96,7 +84,7 @@ def file_record(path: str | Path) -> dict[str, str]:
     resolved = Path(path).resolve()
     return {
         "path": str(resolved),
-        "sha256": sha256_file(resolved),
+        "sha256": file_hash(resolved),
     }
 
 

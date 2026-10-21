@@ -36,29 +36,27 @@ def create_app(
         title="Diffusion-GAN 3D inference",
     )
     app.add_middleware(RequestSizeLimit, limit=config.max_request_bytes)
-    app.state.config = config
-    app.state.inference = inference
     app.state.generate_lock = Lock()
     app.state.download_slots = BoundedSemaphore(config.max_inflight_downloads)
 
     @app.get("/api/health")
     def health() -> dict:
-        generator = app.state.inference.generator
+        generator = inference.generator
         return {
-            "device": str(app.state.inference.device),
-            "crop_size": app.state.inference.crop_size,
-            "num_phases": app.state.inference.num_phases,
+            "device": str(inference.device),
+            "crop_size": inference.crop_size,
+            "num_phases": inference.num_phases,
             "num_domains": generator.num_domains,
             "height_enabled": generator.height_data is not None,
             "height_extents": (generator.height_data or {}).get("height_extents", {}),
-            "max_blocks": _axis_block_limit(app.state.inference, config),
+            "max_blocks": _axis_block_limit(inference, config),
         }
 
     @app.post("/api/prepare")
     def prepare(request: PrepareRequest) -> dict:
         try:
             request.check_limits(config)
-            image = app.state.inference.prepare_image(
+            image = inference.prepare_image(
                 torch.tensor(request.image, dtype=torch.long)
             )
         except ValueError as exc:
@@ -86,7 +84,6 @@ def create_app(
             )
         response_owns_slot = False
         try:
-            inference = app.state.inference
             try:
                 volume = _generate_volume(inference, request, config)
             except ValueError as exc:

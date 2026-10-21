@@ -20,6 +20,7 @@ from src.config.train import (
 )
 from src.data.provenance import fingerprint_data
 from src.data.source import fill_height_extents
+from src.plane import PLANE_DIRECTIONS
 from src.storage import load_model
 from src.train.ema import build_ema
 from src.train.loss.denoiser import DenoiserLossSettings
@@ -69,23 +70,20 @@ def build_trainer(
     critic_augment = build_augmentation(cfg)
     denoiser, critics, connectivity_critic = build_models(cfg)
     seam_critic = build_seam_critic(cfg)
-    denoiser = denoiser.to(device)
-    critics = critics.to(device)
+    initial_weights = None if sr else train["initial_weights"]
+    if initial_weights is not None:
+        root = PROJECT_ROOT / Path(initial_weights).expanduser()
+        load_model(root / "generator.pt", denoiser)
+        for plane, critic_model in critics.items():
+            load_model(root / f"critic_{plane}.pt", critic_model)
+        load_model(root / "critic_c.pt", connectivity_critic)
+        load_model(root / "critic_s.pt", seam_critic)
+    denoiser, critics = denoiser.to(device), critics.to(device)
     if connectivity_critic is not None:
         connectivity_critic = connectivity_critic.to(device)
     if seam_critic is not None:
         seam_critic = seam_critic.to(device)
     ema = build_ema(denoiser)
-    initial_weights = None if sr else train["initial_weights"]
-    if initial_weights is not None:
-        root = PROJECT_ROOT / Path(initial_weights).expanduser()
-        load_model(root / "generator.pt", denoiser)
-        load_model(root / "generator.pt", ema)
-        for plane, critic_model in critics.items():
-            path = root / f"critic_{plane}.pt"
-            load_model(path, critic_model)
-        load_model(root / "critic_c.pt", connectivity_critic)
-        load_model(root / "critic_s.pt", seam_critic)
     denoiser_optim, critic_optims, connectivity_optim, seam_optim = build_optimizers(
         denoiser, critics, connectivity_critic, seam_critic, cfg
     )
@@ -147,8 +145,24 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
     connectivity_start, connectivity_ramp = get_schedule_steps(
         connectivity, "loss.connectivity"
     )
+    z_policies = [
+        policy
+        for plane, policy in (cfg["augmentation"].get("planes") or {}).items()
+        if "z" in PLANE_DIRECTIONS[plane]
+    ]
+    # SR bank volumes swap or flip z only where the critic policies do; with no
+    # z plane policy, nothing in training fixes the z orientation.
+    free_z = not conditioning["height_enabled"]
+    permute_z = free_z and (
+        not z_policies or any(p.get("rotate_90", False) for p in z_policies)
+    )
+    flip_z = free_z and (
+        not z_policies or any("z" in p.get("flip_axes", ()) for p in z_policies)
+    )
     return TrainerSettings(
         height_data=data if conditioning["height_enabled"] else None,
+        volume_permute_z=permute_z,
+        volume_flip_z=flip_z,
         profile_settings=profile,
         loss=DenoiserLossSettings(
             connectivity_local_weight=connectivity["local_weight"],

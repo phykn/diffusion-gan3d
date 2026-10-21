@@ -1,9 +1,8 @@
 import ast
 import hashlib
-import importlib.util
+import importlib
 import json
 import re
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,17 +27,7 @@ def _tree(filename: str) -> ast.Module:
 
 
 def _load_script(filename: str):
-    path = PAPER_DIR / filename
-    spec = importlib.util.spec_from_file_location(f"_test_{path.stem}", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load paper script: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.path.insert(0, str(PAPER_DIR))
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.path.remove(str(PAPER_DIR))
-    return module
+    return importlib.import_module(f"scripts.paper.{Path(filename).stem}")
 
 
 def _arguments(tree: ast.Module) -> dict[str, ast.Call]:

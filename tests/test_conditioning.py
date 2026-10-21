@@ -21,11 +21,11 @@ from src.predict.generator import Generator
 from src.predict.sr.inference import SuperResolutionAPI
 from src.predict.tiling.generator import TiledGenerator
 from src.prepare.resize import resize_crop
+from src.storage import file_hash
 from src.train.checkpoint import resolve_checkpoint
 from src.train.loss.anchor import SoftAnchorLoss
 from src.train.run.bank import refresh_bank
 from src.train.run.low_res import run_low_res_train
-from src.train.run.source import file_hash
 from src.train.run.sr import run_sr_train
 from src.train.state import (
     export_sr,
@@ -613,7 +613,9 @@ def test_sr_bank_records_2d_profile_and_per_image_extent(tmp_path):
     api = SuperResolutionAPI(tmp_path / "sr.pt", "cpu")
     with pytest.raises(ValueError, match="height_extent is required"):
         api.refine_probs(bank[0][0])
-    with patch.object(api, "_height", wraps=api._height) as height:
+    with patch.object(
+        api.generator, "height_condition", wraps=api.generator.height_condition
+    ) as height:
         output = api.refine_probs(
             bank[0][0], height_origin=8, height_extent=32, tile_size=16, overlap=2
         )

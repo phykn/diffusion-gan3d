@@ -1,5 +1,3 @@
-"""HTTP resource limits, independent of the model's saved train.yaml."""
-
 from pathlib import Path
 from typing import Annotated
 

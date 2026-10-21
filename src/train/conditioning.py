@@ -1,5 +1,3 @@
-"""Sample real data, replay anchors, and LR/SR model conditions."""
-
 import torch
 
 from src.anchor import AnchorCondition, PlaneAnchor, encode_anchors
@@ -66,7 +64,9 @@ class ConditionSampler:
         )
         low = self.bank[domain][indices].to(self.device)
         low = augment_volumes(
-            low, preserve_height=self.settings.height_data is not None
+            low,
+            permute_z=self.settings.volume_permute_z,
+            flip_z=self.settings.volume_flip_z,
         )
         coarse, level = corrupt_coarse(
             low,
@@ -374,15 +374,7 @@ class ConditionSampler:
             )
             self.use_multi_anchor_next = False
             if replay is not None:
-                return AnchorSelection(
-                    condition=replay.condition,
-                    source="multi",
-                    measured=replay.measured,
-                    reference=replay.reference,
-                    height=replay.height,
-                    profile=replay.profile,
-                    geometry=replay.geometry,
-                )
+                return replay
         self.use_multi_anchor_next = True
         return self.sample_real_anchor(
             batches,

@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -33,12 +33,25 @@ class AnchorCondition:
     planes: int
     conflicts: int
     source_voxels: int
-    regions: tuple[AnchorRegion, ...] = ()
-    active_batches: tuple[int, ...] | None = None
+    regions: tuple[AnchorRegion, ...]
+    active_batches: tuple[int, ...]
 
     @property
     def conflict_rate(self) -> float:
         return self.conflicts / self.source_voxels
+
+    def visible(self, visible: torch.Tensor | None) -> "AnchorCondition":
+        """Hide the anchor in batch items where visible is False."""
+        if visible is None:
+            return self
+        mask = visible.to(self.mask.device).reshape(-1, 1, 1, 1, 1)
+        return replace(
+            self,
+            image=self.image * mask,
+            mask=self.mask & mask,
+            axis_masks=self.axis_masks & mask,
+            active_batches=tuple(visible.nonzero().flatten().tolist()),
+        )
 
 
 def anchor_origin(
@@ -166,6 +179,7 @@ def encode_anchors(
         conflicts=conflicts,
         source_voxels=source_voxels,
         regions=tuple(regions),
+        active_batches=tuple(range(batch_size)),
     )
 
 

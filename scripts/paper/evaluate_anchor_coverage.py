@@ -9,14 +9,14 @@ import matplotlib.pyplot as plt
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(SCRIPT_DIR))
 
-from evaluation_io import set_seed
-from make_assets import OUTPUT_DIR
-from provenance import build_provenance, file_record, validate_output_paths
-
+from scripts.paper.make_assets import OUTPUT_DIR
+from scripts.paper.provenance import (
+    build_provenance,
+    file_record,
+    validate_output_paths,
+)
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator, resolve_weights
 from src.config.generation import load_generation_settings
@@ -66,7 +66,7 @@ def main() -> None:
     validate_output_paths(provenance, (OUTPUT, METADATA))
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    set_seed(REFERENCE_SEED, device)
+    torch.manual_seed(REFERENCE_SEED)
     print("Generating controlled reference...", flush=True)
     reference = generator.generate(
         anchors=(),
@@ -83,7 +83,7 @@ def main() -> None:
             PlaneAnchor(image=reference_slices[index], axis=AXIS, index=index)
             for index in indices
         )
-        set_seed(GENERATION_SEED, device)
+        torch.manual_seed(GENERATION_SEED)
         print(f"Generating with {count:3d} nested planes...", flush=True)
         generated = generator.generate(
             anchors=anchors,
@@ -129,8 +129,6 @@ def main() -> None:
 
 def nested_plane_order(size: int) -> tuple[int, ...]:
     """Return a deterministic nested order with broad coverage at every prefix."""
-    if size <= 0:
-        raise ValueError("size must be positive.")
     selected: list[int] = []
     remaining = set(range(size))
     while remaining:

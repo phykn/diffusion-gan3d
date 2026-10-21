@@ -14,7 +14,6 @@ from src.model.layers import (
     embedding_mlp,
     run_block,
 )
-from src.model.pyramid import area_pyramid
 
 
 @dataclass(frozen=True)
@@ -22,6 +21,13 @@ class CriticScores:
     logits_global: torch.Tensor
     logits_local: torch.Tensor | None = None
     levels: tuple["CriticScores", ...] = ()
+
+
+def area_pyramid(images, min_size=16):
+    yield images
+    while min(images.shape[-2:]) >= 2 * min_size:
+        images = adaptive_pool(images, tuple(n // 2 for n in images.shape[-2:]))
+        yield images
 
 
 def _select(scores: CriticScores, part: slice) -> CriticScores:
@@ -242,10 +248,6 @@ class SeamCritic2D(CriticBase):
         time: torch.Tensor,
         domain: torch.Tensor,
     ) -> CriticScores:
-        if bands.ndim != 4:
-            raise ValueError("bands must have shape [B, C, H, W].")
-        if axes.shape != (bands.shape[0],):
-            raise ValueError("axes must have shape [B].")
         axes = axes.to(device=bands.device, dtype=torch.long)
         axis_embedding = self.axis_embedding(axes).to(dtype=bands.dtype)
         time_embedding = self.time_mlp(
@@ -291,10 +293,6 @@ class ConnectivityCritic2D(CriticBase):
         height: torch.Tensor | None = None,
         profile: torch.Tensor | None = None,
     ) -> CriticScores:
-        if axes.shape != (triplets.shape[0],):
-            raise ValueError("axes must have shape [B].")
-        if gaps.shape != (triplets.shape[0],):
-            raise ValueError("gaps must have shape [B].")
         axes = axes.to(device=triplets.device, dtype=torch.long)
         gaps = gaps.to(device=triplets.device, dtype=torch.float32)
         valid = ((axes >= 0) & (axes <= 2) & (gaps >= 1)).all()
@@ -332,19 +330,13 @@ class ConnectivityCritic2D(CriticBase):
                     forward.logits_local,
                     (forward.logits_local + reverse.logits_local) * 0.5,
                 ),
-            )
-
-        result = combine(forward, reverse)
-        if forward.levels:
-            return CriticScores(
-                result.logits_global,
-                result.logits_local,
-                tuple(
+                levels=tuple(
                     combine(f, r)
                     for f, r in zip(forward.levels, reverse.levels, strict=True)
                 ),
             )
-        return result
+
+        return combine(forward, reverse)
 
     def score_once(
         self,
@@ -368,8 +360,6 @@ class ConnectivityCritic2D(CriticBase):
 
     @staticmethod
     def connectivity_images(triplets: torch.Tensor) -> torch.Tensor:
-        if triplets.ndim != 5 or triplets.shape[1] != 3:
-            raise ValueError("triplets must have shape [B, 3, C, H, W].")
         phases = (triplets + 1.0) * 0.5
         first = phases[:, 1] - phases[:, 0]
         second = phases[:, 2] - phases[:, 1]

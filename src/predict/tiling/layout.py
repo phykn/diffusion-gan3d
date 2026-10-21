@@ -76,7 +76,7 @@ def output_plan(
         plan,
         shape=output_shape,
         seams=seams,
-        generation_shape=plan.generation_shape or plan.shape,
+        generation_shape=plan.generation_shape,
     )
 
 

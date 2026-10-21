@@ -122,7 +122,7 @@ where $s_A=0.90$ and $f=8$ is the model downsampling factor. The corrected logit
 
 After each posterior update, the normalized Gaussian $w/s_A$ coupled the conditional state to the same-noise baseline state. Thus the anchor plane used the conditional trajectory and distant regions continuously approached the ordinary trajectory without a second hand-chosen coupling radius. No constrained voxel was initialized from the anchor, clamped during denoising, or overwritten after sampling.
 
-The current code no longer has this distance weighting or trajectory coupling. It interpolates the whole logit field once, $\ell_{\mathrm{plain}}+s\,\Delta\ell$, with $s$ the `anchor_strength` in `config/gen.yaml` (currently 0.8). The recorded numbers have not been regenerated with it.
+The current code no longer has this distance weighting or trajectory coupling. It interpolates the whole logit field once, $\ell_{\mathrm{plain}}+s\,\Delta\ell$, with $s$ the `anchor_strength` in `config/gen.yaml`. The recorded numbers have not been regenerated with it.
 
 ### 3.6 Shared-state scale-up
 

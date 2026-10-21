@@ -13,6 +13,7 @@ import torch
 from PIL import Image
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
+import src.train.run.low_res as low_res
 from src.config.files import load_yaml, save_yaml
 from src.plane import PLANES
 from src.train.metrics import Metrics, write_metrics
@@ -206,6 +207,7 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
 @pytest.mark.parametrize("axes", ((0, 1, 2), (0,)))
 def test_cpu_entrypoint_saves_complete_anchor_run(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     axes: tuple[int, ...],
 ) -> None:
     folders = {}
@@ -304,26 +306,9 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
             },
         },
     )
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = str(PROJECT_ROOT)
-    runner = (
-        "import sys; "
-        "from pathlib import Path; "
-        "import src.train.run.low_res as low_res; "
-        "low_res.PROJECT_ROOT = Path(sys.argv[1]); "
-        "low_res.run_low_res_train('cpu', config=Path(sys.argv[2]))"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", runner, str(tmp_path), str(config)],
-        cwd=PROJECT_ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    monkeypatch.setattr(low_res, "PROJECT_ROOT", tmp_path)
+    low_res.run_low_res_train("cpu", config=config)
 
-    assert result.returncode == 0, result.stderr
     run_dirs = tuple(run_root.iterdir())
     assert len(run_dirs) == 1
     timestamp, stage = run_dirs[0].name.split("_", 1)
@@ -342,22 +327,20 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     checkpoints = sorted((run_dirs[0] / "checkpoints").glob("step_*.pt"))
     assert len(checkpoints) == 2
     for step, checkpoint in enumerate(checkpoints, start=1):
-        payload = __import__("torch").load(checkpoint, weights_only=True)
+        payload = torch.load(checkpoint, weights_only=True)
         assert payload["step"] == step
         assert payload["format"] == "diffusion-gan3d.lr.train"
         assert payload["generator_optim"]["state"]
         assert checkpoint.name == f"step_{step:08d}.pt"
         assert checkpoint.with_suffix(".complete").is_file()
-        exported = __import__("torch").load(
+        exported = torch.load(
             checkpoint.with_name(f"generator_{step:08d}.pt"), weights_only=True
         )
-        __import__("torch").testing.assert_close(exported, payload["ema"])
+        torch.testing.assert_close(exported, payload["ema"])
     assert not list((run_dirs[0] / "checkpoints").glob("*/generator.pt"))
-    values = __import__("torch").load(weights, weights_only=True)
+    values = torch.load(weights, weights_only=True)
     assert values
-    assert all(
-        isinstance(value, __import__("torch").Tensor) for value in values.values()
-    )
+    assert all(isinstance(value, torch.Tensor) for value in values.values())
 
 
 def test_lr_run_saves_the_supplied_yaml_and_step_override_only(
@@ -369,18 +352,13 @@ def test_lr_run_saves_the_supplied_yaml_and_step_override_only(
         Image.fromarray(
             ((np.indices((8, 8)).sum(0) + index) % 3).astype(np.uint8)
         ).save(folder / f"{index}.png")
-    data = tmp_path / "data.yaml"
-    save_yaml(
-        data,
-        {
-            "domains": {0: {plane: [str(folder)] for plane in PLANES}},
-            "crop_size": 8,
-            "num_phases": 3,
-            "lo_res_size": 8,
-        },
-    )
     source = load_yaml(PROJECT_ROOT / "tests/fixtures/config/train/low_res.yaml")
-    source["data"] = str(data)
+    source["data"] = {
+        "domains": {0: {plane: [str(folder)] for plane in PLANES}},
+        "crop_size": 8,
+        "num_phases": 3,
+        "lo_res_size": 8,
+    }
     source["model"]["generator"].update(
         channels=[4, 8], embedding_channels=8, latent_channels=4
     )
@@ -465,3 +443,23 @@ def test_second_interrupt_stops_the_step_at_once(capsys):
         with pytest.raises(KeyboardInterrupt):
             signal.raise_signal(signal.SIGINT)
     assert "press Ctrl+C again" in capsys.readouterr().out
+
+
+def test_interrupt_while_saving_stops_without_saving_again(tmp_path, monkeypatch):
+    trainer = SimpleNamespace(cfg={"stage": "low_res"}, completed_steps=0)
+
+    def step(index):
+        trainer.completed_steps = index + 1
+
+    trainer.step = step
+    saves = []
+
+    def interrupted_save(trainer, root, stage):
+        saves.append(trainer.completed_steps)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("src.train.run.loop.write_metrics", lambda *args: None)
+    monkeypatch.setattr("src.train.run.loop.save_checkpoint", interrupted_save)
+    with pytest.raises(KeyboardInterrupt):
+        run_train(trainer, steps=1, save_every=1, run_dir=tmp_path)
+    assert saves == [1]

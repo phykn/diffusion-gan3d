@@ -11,7 +11,7 @@ from PIL import Image
 from backend.src.app import create_app
 from backend.src.config import load_server_config
 from src.build.data import build_datasets
-from src.build.model import build_sr_model
+from src.build.model import build_denoiser
 from src.build.sr import build_sr_trainer
 from src.config.data import get_resolution
 from src.config.train import get_sr_resolution, load_train_config
@@ -69,7 +69,7 @@ def sr_config(tmp_path, scale=1.5, phases=3):
 
 
 def export_model(path, cfg):
-    model = build_sr_model(cfg)
+    model = build_denoiser(cfg)
     torch.save(
         {"format": "diffusion-gan3d.sr", "config": cfg, "model": model.state_dict()},
         path,
@@ -155,7 +155,8 @@ def test_sr_augments_clean_target_before_corruption_and_preserves_bank(
     ):
         prepared = trainer.prepare_step(0, transition=0)
     expected = before.flip(-1)
-    assert augment.call_args.kwargs["preserve_height"] is height
+    # yz neither rotates nor flips z, so the bank volumes keep z as it is.
+    assert augment.call_args.kwargs == {"permute_z": False, "flip_z": False}
     torch.testing.assert_close(corrupt.call_args.args[0], expected)
     torch.testing.assert_close(prepared.coarse_target, expected)
     torch.testing.assert_close(
@@ -200,8 +201,6 @@ def test_hr_coarsening_averages_phase_occupancy_not_numeric_ids():
     assert torch.all(fractions[0] == 0.5)
     assert torch.all(fractions[1] == 0)
     assert torch.all(fractions[2] == 0.5)
-    with pytest.raises(ValueError, match="align"):
-        coarsen_volume(labels[:7], 2, 3)
 
 
 def test_hr_extension_rejects_misaligned_geometry_before_lr_sampling(tmp_path):
@@ -285,14 +284,14 @@ def test_invalid_sr_grid_is_rejected_before_model_construction(high):
     cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     cfg["data"]["hi_res_size"] = high
     with pytest.raises(ValueError):
-        build_sr_model(cfg)
+        build_denoiser(cfg)
 
 
 def test_sr_requires_its_own_grid(tmp_path):
     cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
     del cfg["data"]["hi_res_size"]
     with pytest.raises(ValueError, match="data.hi_res_size"):
-        build_sr_model(cfg)
+        build_denoiser(cfg)
 
 
 def test_crop_hr_lr_pipeline_and_phase_ids(tmp_path):
@@ -437,7 +436,8 @@ def test_predict_fractional_shape_seed_and_tiled_coverage(tmp_path, scale):
     path = tmp_path / "model.pt"
     export_model(path, cfg)
     api = SuperResolutionAPI(path, "cpu")
-    low = torch.randint(3, (12, 14, 16))
+    # Half the LR extent at 4x still spans several 16-voxel HR tiles.
+    low = torch.randint(3, (6, 7, 8) if scale == 4 else (12, 14, 16))
     rng = torch.get_rng_state().clone()
     expected = tuple(int(n * scale) for n in low.shape)
     full = api.refine_probs(low, seed=11)
@@ -506,7 +506,7 @@ def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
 
     monkeypatch.setattr(sr_module, "fraction_channels", fail)
     monkeypatch.setattr(sr_module, "resize_phases", fail)
-    monkeypatch.setattr(api, "_sample_clean", fail)
+    monkeypatch.setattr(api.generator, "sample", fail)
     with pytest.raises(MemoryError, match="SR RAM"):
         api.refine_probs(low)
 
@@ -555,7 +555,7 @@ def test_sr_labels_match_probabilities_and_use_correct_budget(
     modes = []
 
     def record(*args, **kwargs):
-        modes.append(kwargs["output_kind"])
+        modes.append(kwargs["probabilities"])
         return original(*args, **kwargs)
 
     monkeypatch.setattr(sr_module, "estimate_sr_memory", record)
@@ -567,7 +567,7 @@ def test_sr_labels_match_probabilities_and_use_correct_budget(
         monkeypatch.setattr(sr_module, "owned_clean_to_probs_", fail)
         monkeypatch.setattr(api, "refine_probs", fail)
     actual = api.refine(low, **options)
-    assert modes == ["labels"]
+    assert modes == [False]
     torch.testing.assert_close(actual, expected)
 
 
@@ -675,7 +675,7 @@ def test_sr_cfg_keeps_coarse_and_height_in_both_branches(tmp_path, guidance, cou
     from src.model.layers import NULL_DOMAIN
 
     cfg = sr_config(tmp_path, scale=2)
-    model = build_sr_model(cfg)
+    model = build_denoiser(cfg)
     current = torch.randn(1, 3, 16, 16, 16)
     coarse = torch.rand_like(current).softmax(1)
     height = torch.rand(1, 1, 16, 16, 16)
@@ -708,7 +708,7 @@ def test_sr_cfg_keeps_coarse_and_height_in_both_branches(tmp_path, guidance, cou
     "condition", ["vf", "vf_present", "anchor_image", "anchor_mask"]
 )
 def test_sr_rejects_untrained_anchor_and_vf_conditions(tmp_path, condition):
-    model = build_sr_model(sr_config(tmp_path))
+    model = build_denoiser(sr_config(tmp_path))
     current = torch.zeros(1, 3, 12, 12, 12)
     for guidance in (0, 1, 2):
         with pytest.raises(
@@ -904,7 +904,7 @@ def test_wrong_artifact_kind_and_explicit_scale_setting_are_rejected(tmp_path):
     cfg = sr_config(tmp_path)
     cfg["model"]["generator"]["scale_factor"] = 1.5
     with pytest.raises(ValueError, match="unknown training setting"):
-        build_sr_model(cfg)
+        build_denoiser(cfg)
     path = tmp_path / "training.pt"
     torch.save({"format": "diffusion-gan3d.sr.train"}, path)
     with pytest.raises(ValueError, match="use exported SR weights"):

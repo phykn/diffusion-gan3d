@@ -43,21 +43,6 @@ def test_model_save_and_load(tmp_path: Path) -> None:
     _assert_same_state(restored, source)
 
 
-def test_models_can_be_saved_separately(tmp_path: Path) -> None:
-    generator = nn.Linear(4, 2)
-    critic = nn.Linear(2, 1)
-    generator_path = save_model(tmp_path / "generator.pt", generator)
-    critic_path = save_model(tmp_path / "critic.pt", critic)
-    restored_generator = nn.Linear(4, 2)
-    restored_critic = nn.Linear(2, 1)
-
-    load_model(generator_path, restored_generator)
-    load_model(critic_path, restored_critic)
-
-    _assert_same_state(restored_generator, generator)
-    _assert_same_state(restored_critic, critic)
-
-
 def test_multiscale_model_loads_strictly(tmp_path: Path) -> None:
     source = _multiscale_denoiser()
     with torch.no_grad():

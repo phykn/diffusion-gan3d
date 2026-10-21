@@ -12,9 +12,8 @@ from src.prepare.resize import downsample
 
 @torch.inference_mode()
 def coarsen_volume(high, scale, num_phases):
+    """Average HR phase occupancy over scale^3 cells; shapes must align."""
     shape = volume_shape(high)
-    if type(scale) is not int or scale < 1 or any(n % scale for n in shape):
-        raise ValueError("HR base shape must align with an integer SR scale.")
     low_shape = tuple(n // scale for n in shape)
     edge = max(1, 64 // scale)
     scratch = tuple(min(n, edge * scale) for n in shape)

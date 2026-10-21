@@ -54,6 +54,7 @@ def pack(
     particles: list[Particle] = []
     region = (slice(padding, padding + size), slice(None), slice(None))
     periodic = np.array((not graded, True, True))
+    radius_scales = radius_profile(size, padding, radius_gradient)
     for label, vf in ((2, big_vf), (1, small_vf)):
         target = round(vf * size**3)
         placed = place(
@@ -65,7 +66,7 @@ def pack(
             big_radius=float(big_radius),
             small_radius=float(small_radius),
             elongation=big_elongation,
-            radius_scales=radius_profile(size, padding, radius_gradient),
+            radius_scales=radius_scales,
             region=region,
             periodic=periodic,
             rng=rng,
@@ -233,7 +234,7 @@ def invalidate_centers(
     center: np.ndarray,
     candidate: np.ndarray,
     previous: np.ndarray,
-    periodic=(False, False, False),
+    periodic,
 ) -> None:
     span = candidate + previous
     bounds = np.ceil(span).astype(np.int32)

@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SAMPLE_PATH = PROJECT_ROOT / "data" / "sample.png"
 OUTPUT_DIR = PROJECT_ROOT / "assets" / "paper"
 PHASE_COLORS = ("#000000", "#9E9E9E")
+PHASE_RGB = [to_rgb(color) for color in PHASE_COLORS]
 CROP_SIZE = 128
 ROI_COLOR = "#F97316"
 ROI_POSITIONS = ((18, 16), (281, 58), (536, 24))
@@ -35,7 +36,7 @@ def main() -> None:
     if volume.ndim != 3 or volume.dtype != np.uint8:
         raise ValueError("reference must be a 3D uint8 phase volume.")
 
-    colors = [to_rgb(color) for color in PHASE_COLORS]
+    colors = PHASE_RGB
     if int(volume.max()) >= len(colors):
         raise ValueError("paper palette does not define every volume phase.")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,131 +99,26 @@ def draw_volume(
     last = tuple(size - 1 for size in volume.shape)
     center = tuple(size // 2 for size in volume.shape)
 
-    # Complete outer faces away from the removed camera-facing octant.
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=0,
-        index=0,
-        first=(0, last[1]),
-        second=(0, last[2]),
-        light=0.88,
+    faces = (
+        # (axis, index, first, second, light); first the complete outer faces
+        # away from the removed camera-facing octant,
+        (0, 0, (0, last[1]), (0, last[2]), 0.88),
+        (1, last[1], (0, last[0]), (0, last[2]), 0.82),
+        (2, 0, (0, last[0]), (0, last[1]), 0.75),
+        # then the camera-facing outer faces split around the missing 1/8 corner,
+        (0, last[0], (0, last[1]), (0, center[2]), 0.88),
+        (0, last[0], (center[1], last[1]), (center[2], last[2]), 0.88),
+        (1, 0, (0, last[0]), (0, center[2]), 0.78),
+        (1, 0, (0, center[0]), (center[2], last[2]), 0.78),
+        (2, last[2], (0, center[0]), (0, last[1]), 1.08),
+        (2, last[2], (center[0], last[0]), (center[1], last[1]), 1.08),
+        # and the three internal faces exposed by removing x-high/y-low/z-high.
+        (0, center[0], (0, center[1]), (center[2], last[2]), 0.58),
+        (1, center[1], (center[0], last[0]), (center[2], last[2]), 0.66),
+        (2, center[2], (center[0], last[0]), (0, center[1]), 0.68),
     )
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=1,
-        index=last[1],
-        first=(0, last[0]),
-        second=(0, last[2]),
-        light=0.82,
-    )
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=2,
-        index=0,
-        first=(0, last[0]),
-        second=(0, last[1]),
-        light=0.75,
-    )
-
-    # Camera-facing outer faces, split around the missing 1/8 corner.
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=0,
-        index=last[0],
-        first=(0, last[1]),
-        second=(0, center[2]),
-        light=0.88,
-    )
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=0,
-        index=last[0],
-        first=(center[1], last[1]),
-        second=(center[2], last[2]),
-        light=0.88,
-    )
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=1,
-        index=0,
-        first=(0, last[0]),
-        second=(0, center[2]),
-        light=0.78,
-    )
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=1,
-        index=0,
-        first=(0, center[0]),
-        second=(center[2], last[2]),
-        light=0.78,
-    )
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=2,
-        index=last[2],
-        first=(0, center[0]),
-        second=(0, last[1]),
-        light=1.08,
-    )
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=2,
-        index=last[2],
-        first=(center[0], last[0]),
-        second=(center[1], last[1]),
-        light=1.08,
-    )
-
-    # The three internal faces exposed by removing x-high/y-low/z-high.
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=0,
-        index=center[0],
-        first=(0, center[1]),
-        second=(center[2], last[2]),
-        light=0.58,
-    )
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=1,
-        index=center[1],
-        first=(center[0], last[0]),
-        second=(center[2], last[2]),
-        light=0.66,
-    )
-    plot_face(
-        panel,
-        volume,
-        rgba,
-        axis=2,
-        index=center[2],
-        first=(center[0], last[0]),
-        second=(0, center[1]),
-        light=0.68,
-    )
+    for face in faces:
+        plot_face(panel, volume, rgba, *face)
 
     extent = np.asarray(last, dtype=float)
     draw_box(panel, extent)
@@ -243,24 +139,14 @@ def plot_face(
     index: int,
     first: tuple[int, int],
     second: tuple[int, int],
-    light: float = 1.0,
+    light: float,
 ) -> None:
     other_axes = tuple(value for value in range(3) if value != axis)
     first_cells = np.arange(first[0], first[1])
     second_cells = np.arange(second[0], second[1])
-    first_coords = np.linspace(
-        first[0],
-        first[1],
-        len(first_cells) + 1,
-    )
-    second_coords = np.linspace(
-        second[0],
-        second[1],
-        len(second_cells) + 1,
-    )
     first_grid, second_grid = np.meshgrid(
-        first_coords,
-        second_coords,
+        np.arange(first[0], first[1] + 1, dtype=float),
+        np.arange(second[0], second[1] + 1, dtype=float),
         indexing="ij",
     )
     coordinates = [None, None, None]

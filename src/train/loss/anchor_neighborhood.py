@@ -11,11 +11,7 @@ def compute_anchor_neighborhood_loss(
     zero = probs.sum(dtype=torch.float32) * 0.0
     totals = [zero.expand(radius)] + [zero.detach().expand(radius) for _ in range(3)]
     far_pairs, reference_axes = zero.detach(), zero.detach()
-    active = (
-        range(len(probs))
-        if condition.active_batches is None
-        else condition.active_batches
-    )
+    active = condition.active_batches
     with torch.autocast(device_type=probs.device.type, enabled=False):
         for batch in active:
             for axis in range(3):

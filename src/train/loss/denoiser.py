@@ -239,17 +239,11 @@ def adversarial_loss(batch, critics, groups, diagnose):
     return loss, diagnostics
 
 
-def profile_supervised(batch, settings):
-    # With height conditioning the real crop profile is still the target for
-    # samples whose vf/profile was dropped for CFG: the height field alone must
-    # carry the depth gradient at inference.
-    if settings.preserve_height:
-        return torch.ones_like(batch.vf_present, dtype=torch.bool)
-    return batch.vf_present.bool()
-
-
 def profile_loss(batch, settings):
-    supervised = profile_supervised(batch, settings)
+    # Profiles require height conditioning. The real crop profile is still the
+    # target for samples whose vf/profile was dropped for CFG: the height field
+    # alone must carry the depth gradient at inference.
+    supervised = torch.ones_like(batch.vf_present, dtype=torch.bool)
     loss = compute_profile_loss(
         batch.clean_probs,
         batch.profile,

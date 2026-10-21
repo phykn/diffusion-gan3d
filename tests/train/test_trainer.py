@@ -19,7 +19,6 @@ from src.build.trainer import build_optimizers
 from src.data.augment import CriticAugment
 from src.data.slice import TripletBatch
 from src.data.slice import sample_pairs as sample_volume_pairs
-from src.evaluate.label import compute_vf
 from src.model.diffusion import Diffusion
 from src.model.layers import NULL_DOMAIN
 from src.plane import PLANE_DIRECTIONS, PLANES
@@ -36,38 +35,6 @@ from src.train.trainer import (
     TrainerComponents,
     TrainerSettings,
 )
-
-
-class Config(dict):
-    def __getattr__(self, name):
-        return self[name]
-
-
-def _anchor_config(**values):
-    cfg = Config(
-        multiscale_input=False,
-        train_prob=0.0,
-        start_step=0,
-        ramp_steps=0,
-        cross_domain_prob=0.0,
-        pixel_weight=0.05,
-    )
-    cfg.update(values)
-    return cfg
-
-
-def _connectivity_config(**values):
-    cfg = Config(
-        weight=0.0,
-    )
-    cfg.update(values)
-    return cfg
-
-
-def _conditioning_config(**values):
-    cfg = Config(joint_each_prob=0.0)
-    cfg.update(values)
-    return cfg
 
 
 def sample_pairs(
@@ -265,40 +232,15 @@ def test_connectivity_uses_axis_critic_domain_for_shared_context() -> None:
 
 
 def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
-    data = Config(
-        domains={0: {0: "."}, 1: {0: ".", 1: ".", 2: "."}},
-        crop_size=8,
-        input_size=8,
-        num_phases=2,
-        batch_size=2,
-        domain_dropout=0.0,
-    )
-    model = Config(
-        base_channels=4,
-        channel_multipliers=(1, 2),
-        embedding_channels=8,
-        latent_channels=4,
-        critic_channels=(4, 8),
-        gradient_checkpointing=False,
-    )
-    optim = Config(
-        denoiser_lr=1e-3,
-        critic_lr=1e-3,
-        beta1=0.0,
-        beta2=0.9,
-        r1_gamma=0.0,
-        r1_interval=2,
-        connectivity_local_weight=0.5,
-    )
     cfg = _config(
-        data,
-        model,
-        optim,
-        anchor=_anchor_config(
-            train_prob=1.0,
-            cross_domain_prob=1.0,
-        ),
+        domains={0: {"xy": ["."]}, 1: {plane: ["."] for plane in PLANES}},
+        data={"num_phases": 2},
+        conditioning={
+            "anchor": {"probability": 1.0, "borrowed_plane_probability": 1.0},
+            "domain_keep_probability": 1.0,
+        },
     )
+    phases = cfg["data"]["num_phases"]
     denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
     denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
@@ -306,16 +248,15 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
     )
     images = (
         torch.arange(64, dtype=torch.long)
-        .remainder(data.num_phases)
+        .remainder(phases)
         .reshape(1, 8, 8)
-        .expand(data.batch_size, -1, -1)
+        .expand(cfg["train"]["real_batch_size"], -1, -1)
         .clone()
     )
     streams = {
-        0: {0: _ConstantStream(phase_channels(images, data.num_phases))},
+        0: {0: _ConstantStream(phase_channels(images, phases))},
         1: {
-            axis: _ConstantStream(phase_channels(images, data.num_phases))
-            for axis in (0, 1, 2)
+            axis: _ConstantStream(phase_channels(images, phases)) for axis in (0, 1, 2)
         },
     }
     trainer = _make_trainer(
@@ -361,40 +302,16 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
 
 @pytest.mark.parametrize("real_only", [False, True])
 def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
-    data = Config(
-        domains={0: {0: ".", 1: ".", 2: "."}},
-        crop_size=8,
-        input_size=8,
-        num_phases=3,
-        batch_size=2,
-    )
-    model = Config(
-        base_channels=4,
-        channel_multipliers=(1, 2),
-        embedding_channels=8,
-        latent_channels=4,
-        critic_channels=(4, 8),
-        gradient_checkpointing=False,
-    )
-    optim = Config(
-        denoiser_lr=1e-3,
-        critic_lr=1e-3,
-        beta1=0.0,
-        beta2=0.9,
-        r1_gamma=0.01,
-        r1_interval=1,
-        connectivity_local_weight=0.5,
-    )
-    cfg = _config(data, model, optim)
+    cfg = _config(loss={"r1_weight": 0.01, "r1_every_steps": 1})
+    phases = cfg["data"]["num_phases"]
     denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
     denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
         denoiser, critics, connectivity_critic, None, cfg
     )
-    images = torch.randint(0, data.num_phases, (data.batch_size, 8, 8))
+    images = torch.randint(0, phases, (cfg["train"]["real_batch_size"], 8, 8))
     streams = {
-        axis: _ConstantStream(phase_channels(images, data.num_phases))
-        for axis in (0, 1, 2)
+        axis: _ConstantStream(phase_channels(images, phases)) for axis in (0, 1, 2)
     }
     trainer = _make_trainer(
         cfg,
@@ -475,44 +392,14 @@ def test_training_step_with_one_axis_updates_only_that_critic(axis: int) -> None
 
 
 def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
-    data = Config(
-        domains={0: {0: ".", 1: ".", 2: "."}},
-        crop_size=8,
-        input_size=8,
-        num_phases=3,
-        batch_size=2,
-    )
-    model = Config(
-        base_channels=4,
-        channel_multipliers=(1, 2),
-        embedding_channels=8,
-        latent_channels=4,
-        critic_channels=(4, 8),
-        gradient_checkpointing=False,
-    )
-    optim = Config(
-        denoiser_lr=1e-3,
-        critic_lr=1e-3,
-        beta1=0.0,
-        beta2=0.9,
-        r1_gamma=0.0,
-        r1_interval=2,
-        connectivity_local_weight=0.5,
-    )
-    cfg = _config(
-        data,
-        model,
-        optim,
-        anchor=_anchor_config(
-            train_prob=1.0,
-        ),
-    )
+    cfg = _config(conditioning={"anchor": {"probability": 1.0}})
+    phases = cfg["data"]["num_phases"]
     denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
     denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
         denoiser, critics, connectivity_critic, None, cfg
     )
-    images = torch.randint(0, data.num_phases, (data.batch_size, 8, 8))
+    images = torch.randint(0, phases, (cfg["train"]["real_batch_size"], 8, 8))
     trainer = _make_trainer(
         cfg,
         denoiser=denoiser,
@@ -520,8 +407,7 @@ def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
         critics=critics,
         connectivity_critic=connectivity_critic,
         streams={
-            axis: _ConstantStream(phase_channels(images, data.num_phases))
-            for axis in (0, 1, 2)
+            axis: _ConstantStream(phase_channels(images, phases)) for axis in (0, 1, 2)
         },
         diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
         denoiser_optim=denoiser_optim,
@@ -614,7 +500,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     assert vfs[0].shape == (1, 3)
     region = measured[0].regions[0]
     image = (measured[0].image.select(region.axis + 2, region.index) + 1) * 0.5
-    expected_vf = compute_vf({region.axis: image}, num_phases=3)
+    expected_vf = image.sum((0, 2, 3)) / image[:, 0].numel()
     assert torch.allclose(vfs[0][0], expected_vf)
     assert vf_batch_ids == critic_batch_ids
 
@@ -785,8 +671,7 @@ def test_generate_pair_keeps_initial_noise_and_posterior_unprojected() -> None:
 def test_training_volume_and_critic_use_patch_size() -> None:
     trainer, denoiser, streams = _conditioning_trainer(
         anchored=True,
-        crop_size=8,
-        patch_size=8,
+        data={"crop_size": 8, "lo_res_size": 8},
     )
     shapes = []
     hooks = [
@@ -869,7 +754,7 @@ def test_real_anchor_preserves_a_rectangular_observation() -> None:
 def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
     trainer, denoiser, streams = _conditioning_trainer(
         anchored=False,
-        cfg_drop_each_probability=0.1,
+        conditioning={"dropout_probability_per_case": 0.1},
     )
     hidden = ConditionPresence(
         anchor=torch.zeros(1, dtype=torch.bool),
@@ -906,7 +791,7 @@ def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
 def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
     trainer, _, _ = _conditioning_trainer(
         anchored=True,
-        connectivity_weight=0.25,
+        loss={"connectivity": {"adversarial_weight": 0.25}},
     )
     trainer.settings = replace(
         trainer.settings,
@@ -1276,66 +1161,20 @@ def _changed(before: tuple[torch.Tensor, ...], model: nn.Module) -> bool:
 def _conditioning_trainer(
     *,
     anchored: bool,
-    crop_size: int = 8,
-    patch_size: int = 8,
-    anchor_start_step: int = 0,
-    anchor_ramp_steps: int = 0,
-    connectivity_weight: float = 0.0,
-    cfg_drop_each_probability: float = 0.0,
     axes: tuple[int, ...] = (0, 1, 2),
-    critic_mode: str = "single",
+    **overrides,
 ) -> tuple[Trainer, nn.Module, dict[int, _ConstantStream]]:
-    data = Config(
-        domains={0: {axis: "." for axis in axes}},
-        crop_size=crop_size,
-        input_size=patch_size,
-        num_phases=3,
-        batch_size=2,
-    )
-    model = Config(
-        base_channels=4,
-        channel_multipliers=(1, 2),
-        embedding_channels=8,
-        latent_channels=4,
-        critic_channels=(4, 8),
-        gradient_checkpointing=False,
-    )
-    optim = Config(
-        denoiser_lr=1e-3,
-        critic_lr=1e-3,
-        beta1=0.0,
-        beta2=0.9,
-        r1_gamma=0.0,
-        r1_interval=2,
-        connectivity_local_weight=0.5,
-    )
-    cfg = _config(
-        data,
-        model,
-        optim,
-        anchor=_anchor_config(
-            train_prob=1.0 if anchored else 0.0,
-            start_step=anchor_start_step,
-            ramp_steps=anchor_ramp_steps,
-        ),
-        connectivity=_connectivity_config(
-            weight=connectivity_weight,
-        ),
-        conditioning=_conditioning_config(
-            joint_each_prob=cfg_drop_each_probability,
-        ),
-    )
-    cfg["model"]["critic"]["input_mode"] = critic_mode
+    cfg = _config(domains={0: {PLANES[axis]: ["."] for axis in axes}})
+    cfg["conditioning"]["anchor"]["probability"] = 1.0 if anchored else 0.0
+    cfg["model"]["critic"]["input_mode"] = "single"
+    _merge(cfg, overrides)
     denoiser, critics, connectivity_critic = build_models(cfg)
     ema = build_ema(denoiser)
     denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
         denoiser, critics, connectivity_critic, None, cfg
     )
-    base = torch.arange(2 * crop_size * crop_size).reshape(
-        2,
-        crop_size,
-        crop_size,
-    )
+    size = cfg["data"]["crop_size"]
+    base = torch.arange(2 * size * size).reshape(2, size, size)
     streams = {
         axis: _ConstantStream(phase_channels((base + axis).remainder(3).long(), 3))
         for axis in axes
@@ -1357,7 +1196,7 @@ def _conditioning_trainer(
 
 
 def _make_trainer(
-    cfg: Config,
+    cfg: dict,
     *,
     denoiser,
     ema_denoiser,
@@ -1371,7 +1210,10 @@ def _make_trainer(
     connectivity_optim,
     device,
 ) -> Trainer:
-    use_amp = cfg.train.mixed_precision and device.type == "cuda"
+    data, train, loss = cfg["data"], cfg["train"], cfg["loss"]
+    conditioning = cfg["conditioning"]
+    anchor = conditioning["anchor"]
+    use_amp = train["mixed_precision"] and device.type == "cuda"
     return Trainer(
         components=TrainerComponents(
             denoiser=denoiser,
@@ -1387,33 +1229,33 @@ def _make_trainer(
             device=device,
         ),
         settings=TrainerSettings(
-            volume_batch_size=cfg.train.volume_batch_size,
-            num_phases=cfg.data.num_phases,
-            patch_size=cfg.data.lo_res_size,
-            slice_pairs_per_axis=cfg.train.slice_pairs_per_plane,
-            ema_decay=cfg.optim.ema_decay,
-            r1_gamma=cfg.loss.r1_weight,
-            r1_interval=cfg.loss.r1_every_steps,
+            volume_batch_size=train["volume_batch_size"],
+            num_phases=data["num_phases"],
+            patch_size=data["lo_res_size"],
+            slice_pairs_per_axis=train["slice_pairs_per_plane"],
+            ema_decay=cfg["optim"]["ema_decay"],
+            r1_gamma=loss["r1_weight"],
+            r1_interval=loss["r1_every_steps"],
             loss=DenoiserLossSettings(
-                connectivity_local_weight=cfg.loss.connectivity.local_weight,
-                connectivity_weight=cfg.loss.connectivity.adversarial_weight,
-                vf_weight=cfg.loss.volume_fraction_weight,
+                connectivity_local_weight=loss["connectivity"]["local_weight"],
+                connectivity_weight=loss["connectivity"]["adversarial_weight"],
+                vf_weight=loss["volume_fraction_weight"],
                 real_transition_weight=0.0,
                 profile_bins=16,
                 profile_weight=0.0,
                 profile_gradient_weight=0.0,
                 consistency_weight=0.0,
                 consistency_tolerance=0.0,
-                num_phases=cfg.data.num_phases,
+                num_phases=data["num_phases"],
             ),
-            anchor_training_probability=cfg.conditioning.anchor.probability,
-            anchor_start_step=cfg.conditioning.anchor.start_step,
-            anchor_ramp_steps=cfg.conditioning.anchor.ramp_steps,
-            anchor_shared_axis_probability=cfg.conditioning.anchor.borrowed_plane_probability,
-            anchor_pixel_loss_weight=cfg.loss.anchor_pixel_weight,
-            domain_dropout=1.0 - cfg.conditioning.domain_keep_probability,
-            cfg_drop_each_probability=cfg.conditioning.dropout_probability_per_case,
-            latent_channels=cfg.model.generator.latent_channels,
+            anchor_training_probability=anchor["probability"],
+            anchor_start_step=anchor["start_step"],
+            anchor_ramp_steps=anchor["ramp_steps"],
+            anchor_shared_axis_probability=anchor["borrowed_plane_probability"],
+            anchor_pixel_loss_weight=loss["anchor_pixel_weight"],
+            domain_dropout=1.0 - conditioning["domain_keep_probability"],
+            cfg_drop_each_probability=conditioning["dropout_probability_per_case"],
+            latent_channels=cfg["model"]["generator"]["latent_channels"],
             amp_enabled=use_amp,
             connectivity_ramp_steps=0,
             connectivity_windows_per_plane=1,
@@ -1421,95 +1263,79 @@ def _make_trainer(
     )
 
 
-def _config(
-    data: Config,
-    model: Config,
-    optim: Config,
-    *,
-    anchor: Config | None = None,
-    connectivity: Config | None = None,
-    vf: Config | None = None,
-    conditioning: Config | None = None,
-) -> Config:
-    anchor = _anchor_config() if anchor is None else anchor
-    anchor["connectivity"] = (
-        _connectivity_config() if connectivity is None else connectivity
-    )
-    conditioning = _conditioning_config() if conditioning is None else conditioning
-    connectivity = anchor["connectivity"]
-    vf = Config(weight=1.0) if vf is None else vf
-    return Config(
-        data=Config(
-            domains={
-                domain: {
-                    PLANES[axis]: [paths] if isinstance(paths, str) else paths
-                    for axis, paths in planes.items()
-                }
-                for domain, planes in data.domains.items()
+def _config(domains=None, **overrides) -> dict:
+    if domains is None:
+        domains = {0: {plane: ["."] for plane in PLANES}}
+    cfg = {
+        "data": {
+            "domains": domains,
+            "num_phases": 3,
+            "crop_size": 8,
+            "lo_res_size": 8,
+        },
+        "model": {
+            "gradient_checkpointing": False,
+            "generator": {
+                "channels": [4, 8],
+                "embedding_channels": 8,
+                "latent_channels": 4,
+                "anchor_multiscale_input": False,
             },
-            num_phases=data.num_phases,
-            crop_size=data.crop_size,
-            lo_res_size=data.input_size,
-        ),
-        model=Config(
-            gradient_checkpointing=model.gradient_checkpointing,
-            generator=Config(
-                channels=[
-                    model.base_channels * multiplier
-                    for multiplier in model.channel_multipliers
-                ],
-                embedding_channels=model.embedding_channels,
-                latent_channels=model.latent_channels,
-                anchor_multiscale_input=anchor.multiscale_input,
-            ),
-            critic=Config(
-                channels=model.critic_channels,
-                plane_groups=[
+            "critic": {
+                "channels": (4, 8),
+                "plane_groups": [
                     [plane]
-                    for axis, plane in enumerate(PLANES)
-                    if any(axis in planes for planes in data.domains.values())
+                    for plane in PLANES
+                    if any(plane in planes for planes in domains.values())
                 ],
-            ),
-            diffusion=Config(num_steps=2, beta_min=0.1, beta_max=2.0),
-        ),
-        conditioning=Config(
-            anchor=Config(
-                probability=anchor.train_prob,
-                start_step=anchor.start_step,
-                ramp_steps=anchor.ramp_steps,
-                borrowed_plane_probability=anchor.cross_domain_prob,
-            ),
-            domain_keep_probability=1.0 - data.get("domain_dropout", 0),
-            dropout_probability_per_case=conditioning.joint_each_prob,
-        ),
-        loss=Config(
-            r1_weight=optim.r1_gamma,
-            r1_every_steps=optim.r1_interval,
-            anchor_pixel_weight=anchor.pixel_weight,
-            volume_fraction_weight=vf.weight,
-            connectivity=Config(
-                adversarial_weight=connectivity.weight,
-                local_weight=optim.connectivity_local_weight,
-            ),
-        ),
-        optim=Config(
-            generator_lr=optim.denoiser_lr,
-            critic_lr=optim.critic_lr,
-            adam_betas=[optim.beta1, optim.beta2],
-            ema_decay=0.9,
-        ),
-        train=Config(
-            initial_weights=None,
-            total_steps=1,
-            volume_batch_size=1,
-            slice_pairs_per_plane=2,
-            mixed_precision=False,
-            weights_every_steps=1,
-            archive_every_steps=1,
-            real_batch_size=data.batch_size,
-            num_workers=0,
-        ),
-    )
+            },
+            "diffusion": {"num_steps": 2, "beta_min": 0.1, "beta_max": 2.0},
+        },
+        "conditioning": {
+            "anchor": {
+                "probability": 0.0,
+                "start_step": 0,
+                "ramp_steps": 0,
+                "borrowed_plane_probability": 0.0,
+            },
+            "domain_keep_probability": 1.0,
+            "dropout_probability_per_case": 0.0,
+        },
+        "loss": {
+            "r1_weight": 0.0,
+            "r1_every_steps": 2,
+            "anchor_pixel_weight": 0.05,
+            "volume_fraction_weight": 1.0,
+            "connectivity": {"adversarial_weight": 0.0, "local_weight": 0.5},
+        },
+        "optim": {
+            "generator_lr": 1e-3,
+            "critic_lr": 1e-3,
+            "adam_betas": [0.0, 0.9],
+            "ema_decay": 0.9,
+        },
+        "train": {
+            "initial_weights": None,
+            "total_steps": 1,
+            "volume_batch_size": 1,
+            "slice_pairs_per_plane": 2,
+            "mixed_precision": False,
+            "weights_every_steps": 1,
+            "archive_every_steps": 1,
+            "real_batch_size": 2,
+            "num_workers": 0,
+        },
+    }
+    _merge(cfg, overrides)
+    return cfg
+
+
+def _merge(cfg: dict, overrides: dict) -> None:
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(cfg.get(key), dict):
+            _merge(cfg[key], value)
+        else:
+            cfg[key] = value
 
 
 @pytest.mark.parametrize("size,count", [(8, 4), (16, 8)])
@@ -1562,7 +1388,9 @@ def test_replay_connectivity_reference_excludes_pasted_measurement_jump():
 
 @pytest.mark.parametrize("mode", ["single", "pair"])
 def test_generator_input_diagnostics_preserve_training_updates_and_rng(mode):
-    trainer, _, _ = _conditioning_trainer(anchored=False, axes=(0,), critic_mode=mode)
+    trainer, _, _ = _conditioning_trainer(
+        anchored=False, axes=(0,), model={"critic": {"input_mode": mode}}
+    )
     trainer.settings = replace(trainer.settings, r1_interval=1)
     trainer.conditions.settings = trainer.settings
     control = copy.deepcopy(trainer)

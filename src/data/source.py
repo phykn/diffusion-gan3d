@@ -72,10 +72,9 @@ def fill_height_extents(cfg: dict) -> dict:
 
 
 def fill_depth_profiles(cfg: dict) -> dict:
-    profile = cfg["conditioning"].get("spatial_profile", {})
     if (
-        cfg.get("stage") == "low_res"
-        and profile.get("enabled", False)
+        cfg["stage"] == "low_res"
+        and cfg["conditioning"]["spatial_profile"]["enabled"]
         and "depth_profiles" not in cfg["data"]
     ):
         cfg["data"]["depth_profiles"] = infer_depth_profiles(cfg["data"])

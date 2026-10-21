@@ -70,7 +70,7 @@ class VolumeCondition:
     noise: torch.Tensor
     region: tuple[slice, slice, slice]
     weight: torch.Tensor
-    preserve: bool = False
+    preserve: bool
 
     def intersection(self, region):
         common = tuple(
@@ -162,9 +162,9 @@ def prepare_base(volume, num_phases, shape, margin, offset, shell, preserve):
     )
 
 
-def validate_base_anchors(base, anchors, shape, margin) -> VolumeCondition | None:
+def validate_base_anchors(base, anchors, shape, margin) -> None:
     if base is None or not base.preserve:
-        return base
+        return
     for anchor in anchors:
         axis = anchor.axis
         index = anchor.index + margin
@@ -198,4 +198,3 @@ def validate_base_anchors(base, anchors, shape, margin) -> VolumeCondition | Non
         known = base.clean[(0, slice(None), *source)].squeeze(axis + 1)
         if not torch.allclose(known, expected, atol=1e-5, rtol=0):
             raise ValueError("anchor conflicts with the preserved base region.")
-    return base

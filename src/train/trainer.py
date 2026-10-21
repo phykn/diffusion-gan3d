@@ -109,8 +109,14 @@ class TrainerSettings:
     coarse_corruption_probability: float = 0.0
     coarse_corruption_strength: float = 0.0
     height_data: dict | None = None
+    volume_permute_z: bool = True
+    volume_flip_z: bool = True
     profile_settings: dict = field(
-        default_factory=lambda: {"enabled": False, "num_bins": 16}
+        default_factory=lambda: {
+            "enabled": False,
+            "num_bins": 16,
+            "critic_enabled": False,
+        }
     )
 
 
@@ -215,7 +221,7 @@ class Trainer:
         profile_present = presence.vf.to(self.device)
         profile = (
             prepared.model_conditions.get("profile")
-            if self.settings.profile_settings.get("critic_enabled", False)
+            if self.settings.profile_settings["critic_enabled"]
             else None
         )
         has_profile = profile is not None
@@ -240,9 +246,7 @@ class Trainer:
         )
         if selection is not None and transition == 0:
             self.diagnostics.update(
-                anchor_boundary_metrics(
-                    prediction, self.visible_anchor(measured, presence.anchor)
-                )
+                anchor_boundary_metrics(prediction, measured.visible(presence.anchor))
             )
         connectivity_domains = self.get_axis_domains(
             prepared.critic_domains,
@@ -423,8 +427,8 @@ class Trainer:
         anchor_present = prepared.presence.anchor
         visible = excluded = None
         if selection is not None:
-            visible = self.visible_anchor(selection.condition, anchor_present)
-            excluded = self.visible_anchor(selection.measured, anchor_present)
+            visible = selection.condition.visible(anchor_present)
+            excluded = selection.measured.visible(anchor_present)
         result = SampledPairs(pairs={})
         for axis in self.active_axes:
             height = volume_height if axis in real.heights else None
@@ -540,8 +544,8 @@ class Trainer:
         visible = prepared.presence.anchor
         loss, diagnostics = compute_anchor_continuity_loss(
             clean_probs,
-            self.visible_anchor(selection.measured, visible),
-            self.visible_anchor(selection.condition, visible),
+            selection.measured.visible(visible),
+            selection.condition.visible(visible),
             statistics,
             self.settings.connectivity_max_gap,
             prepared.model_conditions.get("height"),
@@ -559,7 +563,7 @@ class Trainer:
         ):
             loss, diagnostics = compute_anchor_neighborhood_loss(
                 clean_probs,
-                self.visible_anchor(selection.condition, prepared.presence.anchor),
+                selection.condition.visible(prepared.presence.anchor),
                 self.settings.loss.anchor_neighborhood_radius,
             )
         self.diagnostics.update(diagnostics)
@@ -632,7 +636,7 @@ class Trainer:
             or reference_prediction is None
         ):
             return empty, empty
-        anchor = self.visible_anchor(anchor, visible)
+        anchor = anchor.visible(visible)
         real, fake = self.anchor_triplets.sample(
             prediction,
             reference_prediction,
@@ -663,9 +667,7 @@ class Trainer:
         )
         real, fake = sample_seam_bands(
             prediction,
-            self.visible_anchor(anchor, visible)
-            if enabled and anchor is not None
-            else None,
+            anchor.visible(visible) if enabled and anchor is not None else None,
             self.settings.loss.anchor_seam_rows,
             self.settings.patch_size // 2,
             self.settings.slice_pairs_per_axis,
@@ -686,22 +688,6 @@ class Trainer:
             device=axes.device,
             dtype=torch.long,
         )[axes]
-
-    @staticmethod
-    def visible_anchor(
-        anchor: AnchorCondition,
-        visible: torch.Tensor | None,
-    ) -> AnchorCondition:
-        if visible is None:
-            return anchor
-        mask = visible.to(anchor.mask.device).reshape(-1, 1, 1, 1, 1)
-        return replace(
-            anchor,
-            image=anchor.image * mask,
-            mask=anchor.mask & mask,
-            axis_masks=anchor.axis_masks & mask,
-            active_batches=tuple(visible.nonzero().flatten().tolist()),
-        )
 
     def regularization(self, name: str) -> tuple[bool, bool, bool]:
         """Lazy R1/R2 schedule for one critic's next update."""
@@ -731,16 +717,7 @@ class Trainer:
             optimizer = self.critic_optims[group]
             optimizer.zero_grad(set_to_none=True)
             for axis in axes:
-                images = batches.images[axis]
-                if (
-                    images.ndim != 4
-                    or images.shape[1] != self.settings.num_phases
-                    or not images.is_floating_point()
-                ):
-                    raise ValueError(
-                        "training images must be floating-point [B,C,H,W] phase fractions."
-                    )
-                real = images.mul(2.0).sub(1.0)
+                real = batches.images[axis].mul(2.0).sub(1.0)
                 real_time = self.make_time(transition, real.shape[0])
                 real_prev, real_curr = self.diffusion.sample_pair(
                     real,
@@ -850,9 +827,6 @@ class Trainer:
     ) -> tuple[float, float, float, float]:
         if not len(fake):
             return 0.0, 0.0, 0.0, 0.0
-        if len(real) != len(fake):
-            raise ValueError("connectivity real and fake triplets must pair up.")
-
         regularize, apply_r1, apply_r2 = self.regularization("connectivity")
         self.connectivity_optim.zero_grad(set_to_none=True)
         real_values = real.values.detach().float().requires_grad_(apply_r1)

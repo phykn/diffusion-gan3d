@@ -5,6 +5,7 @@ anisotropic acquisition, absolute height conditioning, or measured 3D fidelity.
 """
 
 import argparse
+import contextlib
 import copy
 import json
 import sys
@@ -24,6 +25,7 @@ from src.build.trainer import build_trainer
 from src.config.files import save_yaml
 from src.config.sample import build_train_config, load_sample
 from src.config.train import load_train_config
+from src.device import check_device, default_device, empty_cache
 from src.prepare.resize import resize_labels
 from src.storage import save_volume
 from src.train.checkpoint import resolve_checkpoint
@@ -79,7 +81,9 @@ def main():
     parser.add_argument("--image", type=Path, default=Path("data/sample.png"))
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--sr-steps", type=int, default=100)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--device", choices=("cpu", "cuda", "mps"), default=default_device()
+    )
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument(
         "--continue-run",
@@ -89,6 +93,7 @@ def main():
     args = parser.parse_args()
     if args.steps < 2 or args.sr_steps < 1:
         raise ValueError("at least two LR steps and one SR step are required.")
+    device = check_device(args.device)
     torch.set_num_threads(1)
     root = args.run_dir or Path("checks") / datetime.now().strftime(
         "%Y%m%d-%H%M%S-stability"
@@ -104,28 +109,35 @@ def main():
     if phases < 2 or not np.array_equal(np.unique(labels), np.arange(phases)):
         raise ValueError("phase IDs must be contiguous from zero.")
     split = labels.shape[1] * 2 // 3
-    crop_size = 128
+    reference = load_train_config(build_train_config(load_sample("default"), "low_res"))
+    data = reference["data"]
+    crop_size = data["crop_size"]
     if min(labels.shape[0], split, labels.shape[1] - split) < crop_size:
         raise ValueError(
-            "image is too small for disjoint 128px train/validation regions."
+            f"image is too small for disjoint {crop_size}px train/validation regions."
         )
     train_images = root / "train_images"
     train_images.mkdir(exist_ok=args.continue_run)
     Image.fromarray(labels[:, :split]).save(train_images / "train.png")
     Image.fromarray(labels[:, split:]).save(root / "validation.png")
     crops = [
-        torch.from_numpy(labels[row : row + 128, split : split + 128].copy()).long()
-        for row in (0, labels.shape[0] - 128)
+        torch.from_numpy(
+            labels[row : row + crop_size, split : split + crop_size].copy()
+        ).long()
+        for row in (0, labels.shape[0] - crop_size)
     ]
     report = {
         "image": str(args.image.resolve()),
         "split_column": split,
         "purpose": "execution and short-run stability; one image, isotropic plane reuse; not 3D reconstruction quality proof",
-        "grid": {"crop": 128, "low": 64, "high": 128},
+        "grid": {
+            "crop": crop_size,
+            "low": data["lo_res_size"],
+            "high": data["hi_res_size"],
+        },
         "variants": {},
     }
-    reference = load_train_config(build_train_config(load_sample("default"), "low_res"))
-    reference["data"].update(
+    data.update(
         domains={0: {p: [str(train_images.resolve())] for p in ("xy", "xz", "yz")}},
         num_phases=phases,
     )
@@ -154,13 +166,11 @@ def main():
         cfg["loss"].update(r1_weight=r1, r2_weight=r2)
         out = root / name
         out.mkdir(exist_ok=args.continue_run)
-        trainer = build_trainer(cfg, torch.device(args.device))
+        trainer = build_trainer(cfg, device)
         checkpoint = None
         if args.continue_run:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 checkpoint = resolve_checkpoint(out)
-            except FileNotFoundError:
-                pass
         reused = checkpoint is not None
         if reused:
             resume_training(
@@ -178,13 +188,13 @@ def main():
             resolve_checkpoint(out), map_location="cpu", weights_only=True
         )
         del trainer
-        restored = build_trainer(cfg, torch.device(args.device))
+        restored = build_trainer(cfg, device)
         resume_training(restored, payload)
         restored.step(args.steps)
         resumed = restored.completed_steps == args.steps + 1
         del restored, payload
-        torch.cuda.empty_cache() if args.device == "cuda" else None
-        api = LowResolutionAPI(out / "generator.pt", device=args.device)
+        empty_cache(device)
+        api = LowResolutionAPI(out / "generator.pt", device=device)
         validation, _ = evaluate(api, crops, out, [100, 101])
         del api
         records = read_metrics(out / "tensorboard")
@@ -227,14 +237,14 @@ def main():
     )
     save_yaml(root / "sr.yaml", sr_cfg)
     sr_run = run_sr_train(
-        device=args.device,
+        device=device,
         base_weights=base / "generator.pt",
         config=root / "sr.yaml",
         run_dir=root / "sr",
     )
-    api = LowResolutionAPI(base / "generator.pt", device=args.device)
+    api = LowResolutionAPI(base / "generator.pt", device=device)
     _, low_volumes = evaluate(api, crops, root, [200, 201])
-    sr = SuperResolutionAPI(sr_run / "generator.pt", device=args.device)
+    sr = SuperResolutionAPI(sr_run / "generator.pt", device=device)
     sr_checks = []
     for index, low in enumerate(low_volumes):
         high = sr.refine(low, seed=300 + index)

@@ -71,7 +71,7 @@ class Denoiser3DTest(unittest.TestCase):
                     f"tests/fixtures/config/train/{stage}.yaml", stage
                 )
                 cfg["model"]["generator"]["channels"] = [1, 2]
-                with self.assertRaisesRegex(ValueError, "at least two"):
+                with self.assertRaisesRegex(ValueError, "generator.channels"):
                     build_denoiser(cfg)
 
     def test_smallest_supported_channels_keep_input_gradients(self):
@@ -382,10 +382,6 @@ class Denoiser3DTest(unittest.TestCase):
         torch.testing.assert_close(pooled[0, -1, 0, 0, 0], torch.tensor(0.125))
         torch.testing.assert_close(pooled[0, -1, 0, 0, 1], torch.tensor(1.0))
         self.assertEqual(float(pooled[0, :, 1, 1, 1].abs().sum()), 0.0)
-
-    def test_anchor_multiscale_requires_boolean(self):
-        with self.assertRaisesRegex(TypeError, "anchor_multiscale"):
-            _denoiser(anchor_multiscale="multiscale")  # type: ignore[arg-type]
 
     def test_anchor_adapter_requires_paired_inputs(self):
         model = _denoiser()

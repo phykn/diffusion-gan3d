@@ -1,9 +1,10 @@
+import argparse
 import gc
 import json
 import sys
 from pathlib import Path
 
-import torch
+import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.common.cli import (
     add_device_argument,
     add_height_arguments,
-    check_parser,
+    add_sample_arguments,
     non_negative_int,
     positive_int,
     result_directory,
@@ -20,8 +21,9 @@ from scripts.common.cli import (
 from src.build.predict import resolve_weights
 from src.config.data import validate_sr_source
 from src.config.files import load_yaml
-from src.device import check_device
+from src.device import check_device, empty_cache
 from src.evaluate.label import phase_fractions
+from src.plane import PLANES
 from src.predict.inference import LowResolutionAPI
 from src.predict.sr.inference import SuperResolutionAPI, load_sr_export
 from src.prepare.resize import downsample, phase_channels
@@ -45,17 +47,13 @@ def latest_sr():
 
 
 def comparison(low, high, phases, path, show):
-    import matplotlib
-
     if not show:
-        matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+        plt.switch_backend("Agg")
     fig, panels = plt.subplots(3, 3, figsize=(10, 10))
     for row, (title, volume) in enumerate(
         (("LR", low), ("Nearest baseline", high), ("Generated HR", high))
     ):
-        for axis, plane in enumerate(("xy", "xz", "yz")):
+        for axis, plane in enumerate(PLANES):
             index = volume.shape[axis] // 2
             if row == 1:
                 # The three displayed planes match 3D nearest interpolation
@@ -86,13 +84,13 @@ def comparison(low, high, phases, path, show):
 
 
 def main(argv=None):
-    parser = check_parser(
-        __file__, "Inspect SR using its saved LR source; only SR --weight is needed."
+    parser = argparse.ArgumentParser(
+        description="Inspect SR using its saved LR source; only SR --weight is needed."
     )
     parser.add_argument(
         "--weight",
         type=Path,
-        help="SR generator.pt or run directory; default: latest trained SR run.",
+        help="SR generator.pt or run directory (default: latest SR run in run/).",
     )
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
@@ -104,28 +102,33 @@ def main(argv=None):
     parser.add_argument(
         "--out",
         type=Path,
-        help="Output directory; default: a new directory under checks/.",
+        help="Output directory (default: a new directory under checks/).",
     )
     add_device_argument(parser)
-    parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=0)
+    add_sample_arguments(parser)
     add_height_arguments(parser)
-    parser.add_argument("--lr-guidance", type=float)
-    parser.add_argument("--guidance", type=float, default=1.0, help="SR guidance.")
+    parser.add_argument(
+        "--lr-guidance",
+        type=float,
+        help="LR guidance scale (default: config/gen.yaml).",
+    )
+    parser.add_argument(
+        "--guidance", type=float, default=1.0, help="SR guidance scale (default: 1)."
+    )
     parser.add_argument(
         "--tile-size",
         type=positive_int,
-        help="HR tile edge; default: up to 64, aligned to the SR scale.",
+        help="HR tile edge (default: up to 64, aligned to the SR scale).",
     )
     parser.add_argument(
         "--overlap",
         type=non_negative_int,
-        help="HR overlap; default: scale-aligned up to 8.",
+        help="HR overlap (default: scale-aligned up to 8).",
     )
     parser.add_argument(
         "--margin",
         type=non_negative_int,
-        help="HR context margin; default: model context.",
+        help="HR context margin (default: model context).",
     )
     parser.add_argument(
         "--napari",
@@ -157,15 +160,12 @@ def main(argv=None):
         if args.lr_weight:
             lr_weight = resolve_weights(args.lr_weight)
         elif stored_source:
-            lr_weight = Path(stored_source)
-            if not lr_weight.is_absolute():
-                lr_weight = PROJECT_ROOT / lr_weight
+            lr_weight = PROJECT_ROOT / stored_source
+            load_frozen_source({**cfg["source"], "weights": str(lr_weight)})
         else:
             raise ValueError(
                 "SR export has no LR source. Supply --lr-weight or --input."
             )
-        if not args.lr_weight:
-            load_frozen_source({**cfg["source"], "weights": str(lr_weight)})
         print(f"LR weights: {lr_weight}\nGenerating LR...", flush=True)
         lr = LowResolutionAPI(lr_weight, device)
         validate_sr_source(cfg["data"], lr.data)
@@ -174,8 +174,7 @@ def main(argv=None):
         low = lr.generate_probs(guidance=args.lr_guidance, **common)
         del lr
         gc.collect()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        empty_cache(device)
     print(f"SR weights: {weight}\nRefining LR {tuple(low.shape[-3:])}...", flush=True)
     sr = SuperResolutionAPI(weight, device)
     tile_size = args.tile_size
@@ -198,7 +197,7 @@ def main(argv=None):
         guidance=args.guidance,
         **common,
     )
-    root = args.out or result_directory("06_check_hr")
+    root = args.out or result_directory(__file__)
     root.mkdir(parents=True, exist_ok=True)
     low_labels = low.argmax(0) if low.ndim == 4 else low
     save_volume(low_labels, root / "lr.tiff")

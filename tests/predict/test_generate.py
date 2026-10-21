@@ -115,7 +115,7 @@ def test_generator_loads_numbered_checkpoint_with_run_config(tmp_path: Path) -> 
     save_yaml(run_dir / "train.yaml", cfg)
     denoiser, _, _ = build_models(cfg)
     weights = save_model(
-        run_dir / "checkpoints" / "step_00000010" / "generator.pt",
+        run_dir / "checkpoints" / "generator_00000010.pt",
         build_ema(denoiser),
     )
 
@@ -1725,6 +1725,36 @@ def test_scale_quality_skips_axes_without_seams() -> None:
     assert quality.transition_tv[1:] == (None, None)
     assert quality.continuation_delta[0] is not None
     assert quality.continuation_delta[1:] == (None, None)
+
+
+def test_zero_anchor_strength_ignores_anchors_in_both_paths() -> None:
+    generator = _generator(_PhaseModel(1), Diffusion(1))
+    outside = PlaneAnchor(torch.zeros(4, 4, dtype=torch.uint8), axis=0, index=99)
+    assert generator.generate(anchors=(outside,), anchor_strength=0.0).shape == (
+        4,
+        4,
+        4,
+    )
+    volume = TiledGenerator(generator).generate(
+        shape=(6, 4, 4),
+        overlap=1,
+        anchors=(outside,),
+        anchor_strength=0.0,
+        progress=False,
+    )
+    assert volume.shape == (6, 4, 4)
+
+
+@pytest.mark.parametrize("margin", [0, 1])
+def test_bool_anchor_index_is_rejected_in_both_paths(margin) -> None:
+    generator = _generator(_PhaseModel(1), Diffusion(1))
+    anchor = PlaneAnchor(torch.zeros(4, 4, dtype=torch.uint8), axis=0, index=True)
+    with pytest.raises(ValueError, match="anchor.index"):
+        generator.generate(anchors=(anchor,), margin=margin)
+    with pytest.raises(ValueError, match="anchor.index"):
+        TiledGenerator(generator).generate(
+            shape=(6, 4, 4), overlap=1, anchors=(anchor,), margin=margin, progress=False
+        )
 
 
 @dataclass(frozen=True)

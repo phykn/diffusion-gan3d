@@ -1,9 +1,13 @@
 import matplotlib.pyplot as plt
 import torch
+from matplotlib.colors import ListedColormap
 
+from src.evaluate.anchor import SliceSmoothness
 from src.evaluate.label import voxel_accuracy
 from src.plane import PLANES
 from src.random import preserved_rng
+
+DIFF_CMAP = ListedColormap(("#f7f7f7", "#e63946"))
 
 
 def select_indices(size: int, count: int) -> tuple[int, ...]:
@@ -67,24 +71,64 @@ def format_profile(values: tuple[float | None, ...], near_label: str) -> str:
     )
 
 
+def print_anchor_effect(
+    smoothness: SliceSmoothness, profile: tuple[float | None, ...], label: str
+) -> None:
+    peak = ""
+    if smoothness.peak_anchor_distance is not None:
+        peak = f" at distance {smoothness.peak_anchor_distance}"
+    print(
+        "Smoothness    : "
+        f"p95 {format_ratio(smoothness.p95_ratio)}, "
+        f"peak {format_ratio(smoothness.max_ratio)}{peak}"
+    )
+    if smoothness.reversal_rate is not None:
+        print(
+            "Surface bumps : "
+            f"{smoothness.reversal_rate:.2%} vs baseline "
+            f"{format_percent(smoothness.baseline_reversal_rate)} "
+            f"({format_ratio(smoothness.reversal_ratio)})"
+        )
+    if profile:
+        print(f"Anchor effect : {format_profile(profile, label)}")
+
+
 def middle_slices(volume: torch.Tensor) -> tuple[torch.Tensor, ...]:
     """Center xy, xz and yz sections."""
     middle = tuple(size // 2 for size in volume.shape)
     return volume[middle[0]], volume[:, middle[1]], volume[:, :, middle[2]]
 
 
-def show_slices(volume: torch.Tensor, num_phases: int, title: str) -> None:
+def show_labels(panel, image: torch.Tensor, num_phases: int, title: str) -> None:
+    panel.imshow(
+        image.numpy(),
+        cmap="gray",
+        vmin=-0.5,
+        vmax=num_phases - 0.5,
+        interpolation="nearest",
+    )
+    panel.set_title(title)
+    panel.axis("off")
+
+
+def show_difference(panel, mask: torch.Tensor, title: str, **options) -> None:
+    panel.imshow(
+        mask.numpy(), cmap=DIFF_CMAP, vmin=0, vmax=1, interpolation="nearest", **options
+    )
+    panel.set_title(title)
+    panel.axis("off")
+
+
+def slice_figure(volume: torch.Tensor, num_phases: int):
     fig, panels = plt.subplots(1, 3, figsize=(10, 4))
     for panel, plane, image in zip(panels, PLANES, middle_slices(volume), strict=True):
-        panel.imshow(
-            image.numpy(),
-            cmap="gray",
-            vmin=-0.5,
-            vmax=num_phases - 0.5,
-            interpolation="nearest",
-        )
-        panel.set_title(plane)
-        panel.axis("off")
+        show_labels(panel, image, num_phases, plane)
+    fig.tight_layout()
+    return fig
+
+
+def show_slices(volume: torch.Tensor, num_phases: int, title: str) -> None:
+    fig = slice_figure(volume, num_phases)
     fig.suptitle(title)
     fig.tight_layout()
     plt.show()
@@ -94,6 +138,6 @@ def show_napari(volume: torch.Tensor, name: str = "Generated output") -> None:
     import napari
 
     viewer = napari.Viewer()
-    viewer.add_labels(volume.detach().cpu().numpy(), name=name)
+    viewer.add_labels(volume.numpy(), name=name)
     viewer.dims.ndisplay = 3
     napari.run()

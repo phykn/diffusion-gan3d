@@ -14,12 +14,11 @@ from src.build.trainer import build_trainer
 from src.config.files import load_yaml, save_yaml
 from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
-from src.storage import load_volume
+from src.storage import file_hash, load_volume
 from src.train.checkpoint import resolve_checkpoint
-from src.train.run.bank import publish_bank, refresh_bank, save_bank
+from src.train.run.bank import publish_bank, refresh_bank
 from src.train.run.loop import run_train
 from src.train.run.low_res import run_low_res_train
-from src.train.run.source import file_hash
 from src.train.run.sr import run_sr_train
 
 
@@ -94,9 +93,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
         }[source_mode]
     }
     sr_config = tmp_path / "sr.yaml"
-    data_file = tmp_path / "data.yaml"
-    save_yaml(data_file, sr_cfg["data"])
-    save_yaml(sr_config, {**sr_cfg, "data": str(data_file)})
+    save_yaml(sr_config, sr_cfg)
     monkeypatch.setattr("src.train.run.sr.PROJECT_ROOT", tmp_path)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -132,7 +129,6 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     if source_mode == "cli":
         expected["source"]["weights"] = str(base_dir)
     assert stored == expected
-    assert stored["data"] == str(data_file)
     source = archived["config"]["source"]
     assert source["weights"] == str((base_dir / "generator.pt").resolve())
     assert Path(source["bank"]) == sr_dir / "lr_bank/step_00000000.pt"
@@ -273,12 +269,13 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
 
 
 def test_bank_snapshot_cannot_overwrite_a_published_step(tmp_path):
-    source = save_bank(tmp_path, 0, {"volumes": torch.ones(2)})
+    cfg = {"data": {}, "source": {}}
+    publish_bank({"volumes": torch.ones(2)}, cfg, tmp_path, 0)
+    source = dict(cfg["source"])
     path = Path(source["bank"])
-    digest = source["bank_sha256"]
     with pytest.raises(FileExistsError):
-        save_bank(tmp_path, 0, {"volumes": torch.zeros(2)})
-    assert file_hash(path) == digest == source["bank_sha256"]
+        publish_bank({"volumes": torch.zeros(2)}, cfg, tmp_path, 0)
+    assert file_hash(path) == source["bank_sha256"]
     assert torch.load(path, weights_only=True)["volumes"].eq(1).all()
 
 

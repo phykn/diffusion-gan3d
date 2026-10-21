@@ -1,3 +1,4 @@
+import argparse
 import sys
 from pathlib import Path
 
@@ -8,7 +9,8 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.cli import check_parser, result_directory
+from scripts.common.cli import add_sample_arguments, result_directory
+from scripts.common.diagnostic import show_labels
 from src.build.data import build_datasets
 from src.build.predict import resolve_weights
 from src.config.files import find_saved_config, load_yaml
@@ -20,39 +22,34 @@ SAMPLES = 4
 
 
 def main() -> None:
-    parser = check_parser(
-        __file__,
-        "Inspect training crops from saved weights or the current data preset.",
+    parser = argparse.ArgumentParser(
+        description="Inspect training crops of a sample or of a trained run."
     )
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
         "--weight",
         type=Path,
-        help="Use the data configuration saved with these weights.",
+        help="Use the data saved with this run's weights.",
     )
     source.add_argument(
         "--sample",
         default="default",
-        help="Name in config/samples/ or a sample YAML path.",
+        help="Name in config/samples/ or a sample YAML path (default: default).",
     )
     parser.add_argument(
         "--stage",
         choices=("low_res", "sr"),
         default="low_res",
-        help="With --sample: sr shows the HR crops.",
+        help="With --sample: sr shows the HR crops (default: low_res).",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        help="Preview PNG; default: a new directory under checks/.",
+        help="Preview PNG (default: a new directory under checks/).",
     )
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--no-view", action="store_true")
+    add_sample_arguments(parser)
     parser.add_argument(
-        "--domain",
-        type=int,
-        default=0,
-        help="numeric domain ID (default: 0)",
+        "--no-view", action="store_true", help="Save results without a viewer."
     )
     args = parser.parse_args()
     if args.no_view:
@@ -82,19 +79,11 @@ def main() -> None:
         for col in range(SAMPLES):
             group = ds.path_groups[np.random.randint(len(ds.path_groups))]
             path = group[np.random.randint(len(group))]
-            img = ds[path]["image"].argmax(0).numpy()
-            panels[row, col].imshow(
-                img,
-                cmap="gray",
-                vmin=-0.5,
-                vmax=cfg["data"]["num_phases"] - 0.5,
-                interpolation="nearest",
-            )
-            panels[row, col].set_title(PLANES[axis])
-            panels[row, col].axis("off")
+            img = ds[path]["image"].argmax(0)
+            show_labels(panels[row, col], img, cfg["data"]["num_phases"], PLANES[axis])
     fig.suptitle("Random training crops (dominant phase; training retains fractions)")
     fig.tight_layout()
-    output = args.out or result_directory("01_check_dataset") / "crops.png"
+    output = args.out or result_directory(__file__) / "crops.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150)
     print(f"Preview : {output.resolve()}")

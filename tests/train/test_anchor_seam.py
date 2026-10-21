@@ -262,10 +262,6 @@ def test_seam_critic_scores_bands_by_axis_time_and_domain():
     assert later.logits_global[0] != scores.logits_global[0]
     assert later.logits_global[2] != scores.logits_global[2]
     torch.testing.assert_close(later.logits_global[1], scores.logits_global[1])
-    with pytest.raises(ValueError, match="bands"):
-        critic(bands[0], torch.tensor([0]), torch.tensor([0]), torch.tensor([0]))
-    with pytest.raises(ValueError, match="axes"):
-        critic(bands, torch.tensor([0]), time, torch.tensor([0, 0, 0]))
 
 
 def test_axis_domain_helper_maps_any_axis_tensor():

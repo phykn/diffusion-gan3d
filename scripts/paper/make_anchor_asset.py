@@ -9,29 +9,27 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from matplotlib.colors import ListedColormap, to_rgb
+from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
 from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from evaluation_io import set_seed
-from make_assets import (
+from scripts.paper.make_assets import (
     CROP_SIZE,
     OUTPUT_DIR,
-    PHASE_COLORS,
+    PHASE_RGB,
     ROI_COLOR,
     ROI_POSITIONS,
     SAMPLE_PATH,
     draw_volume,
 )
-from provenance import (
+from scripts.paper.provenance import (
     build_provenance,
     file_record,
     validate_output_paths,
 )
-
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator, resolve_weights
 from src.config.generation import load_generation_settings
@@ -77,7 +75,7 @@ def main() -> None:
     validate_output_paths(provenance, (output, metadata))
     anchor = load_center_roi(generator.patch_size)
     index = generator.patch_size // 2
-    set_seed(SEED, device)
+    torch.manual_seed(SEED)
 
     print("\nPaper anchor example")
     print("---------------------")
@@ -152,7 +150,7 @@ def render_result(
     volume: torch.Tensor,
     output: Path,
 ) -> None:
-    colors = [to_rgb(color) for color in PHASE_COLORS]
+    colors = PHASE_RGB
     cmap = ListedColormap(colors)
     figure = plt.figure(figsize=(12.4, 4.4), facecolor="white")
     grid = figure.add_gridspec(

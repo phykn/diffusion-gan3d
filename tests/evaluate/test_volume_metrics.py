@@ -2,9 +2,8 @@ import numpy as np
 import pytest
 import torch
 
-import src.evaluate.volume as metrics_module
-from src.evaluate.tortuosity import tau
-from src.evaluate.volume import pore_tortuosity
+import src.evaluate.tortuosity as metrics_module
+from src.evaluate.tortuosity import pore_tortuosity, tau
 
 
 def test_pore_tortuosity_uses_phase_zero_and_thickness_axis(monkeypatch):

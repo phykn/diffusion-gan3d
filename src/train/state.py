@@ -2,9 +2,8 @@ from pathlib import Path
 
 import torch
 
-from src.config.data import get_plane_groups
 from src.config.train import normalize_train_config
-from src.storage import torch_save
+from src.storage import SR_FORMAT, torch_save
 
 TRAIN_FORMATS = {
     "low_res": "diffusion-gan3d.lr.train",
@@ -64,11 +63,10 @@ def save_sr_training(trainer, path: str | Path) -> None:
 def resume_sr_training(trainer, payload: dict) -> None:
     if payload["data_fingerprint"] != trainer.data_fingerprint:
         raise ValueError("SR source images changed since the checkpoint.")
-    saved = normalize_train_config(payload["config"], "sr")
-    if get_plane_groups(saved) != get_plane_groups(trainer.cfg):
-        raise ValueError("critic plane_groups cannot change on resume.")
     _require_saved_config(
-        saved, trainer.cfg, "SR resume must use its saved resolved configuration."
+        normalize_train_config(payload["config"], "sr"),
+        trainer.cfg,
+        "SR resume must use its saved resolved configuration.",
     )
     _restore_state(trainer, payload)
 
@@ -126,7 +124,7 @@ def _restore_state(trainer, payload: dict) -> None:
 def export_sr(trainer, path, *, overwrite=True):
     torch_save(
         {
-            "format": "diffusion-gan3d.sr",
+            "format": SR_FORMAT,
             "config": trainer.cfg,
             "step": trainer.completed_steps,
             "model": trainer.ema_denoiser.state_dict(),

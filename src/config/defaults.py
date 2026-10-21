@@ -81,6 +81,7 @@ INACTIVE_DEFAULTS = {
     "sr": {
         "conditioning.spatial_profile.enabled": False,
         "conditioning.spatial_profile.num_bins": 16,
+        "conditioning.spatial_profile.critic_enabled": False,
         "conditioning.anchor.probability": 0.0,
         "conditioning.anchor.start_step": 0,
         "conditioning.anchor.ramp_steps": 0,

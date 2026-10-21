@@ -4,7 +4,7 @@ Generate 3D microstructures from **2D label images**, without measured 3D traini
 Learn the appearance of real sections, guide generation with known planes,
 and build larger or higher-resolution volumes.
 
-[Quick start](#quick-start) · [Run and inspect](docs/checks.md) · [Development](docs/development.md) · [Method & experiments](PAPER.md)
+[Install](#install) · [Run and inspect](docs/checks.md) · [Development](docs/development.md) · [Method & experiments](PAPER.md)
 
 | 2D training image and example crops | Generated 3D volume |
 | :---: | :---: |
@@ -16,9 +16,10 @@ Examples from the [recorded experiments](PAPER.md); their settings differ from c
 - **Plane conditions:** guide generation with known sections, called anchors.
 - **Larger outputs:** combine overlapping tiles; refine with a separate super-resolution model.
 
-## Quick start
+## Install
 
-Use Python 3.11+ with a PyTorch build for your GPU (CUDA or Apple MPS) or CPU.
+Use Python 3.11+. Install the [PyTorch build](https://pytorch.org/get-started/locally/) for
+your GPU (CUDA or Apple MPS) or CPU first, then the rest:
 
 ```bash
 git clone https://github.com/phykn/diffusion-gan3d.git
@@ -28,14 +29,11 @@ source .venv/bin/activate   # PowerShell: .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
-## Samples
+## Train
 
-Each sample is one file in [config/samples/](config/samples/), all with the shape of
-[default.yaml](config/samples/default.yaml): `images` (a folder of 2D uint8 label images
-per plane; the phase count comes from the images), `structure` (what the material looks
-like), and `tune` (`lr`, `sr`: single values to change). Settings apply in order, later
-winning: [config/base/](config/base/)`<stage>.yaml`, then `structure`, then `tune`;
-`--show` prints the result.
+Training has two stages. The **LR** (low-resolution) model generates volumes from noise
+at `lo_res_size` voxels per `crop_size` source pixels (default 64 per 128). The **SR**
+(super-resolution) model then refines LR volumes to `hi_res_size` voxels (default 128).
 
 ```bash
 python scripts/01_check_dataset.py --sample default --no-view
@@ -44,19 +42,40 @@ python scripts/02_check_generated.py --weight "run/my-run-lr" --no-view
 python scripts/06_check_hr.py --weight "run/my-run-sr" --no-view
 ```
 
-`run_train.py` trains the LR model, then the super-resolution (SR) model from its frozen
-volumes and the real high-resolution sections. `--run-dir NAME` writes `NAME-lr` and
-`NAME-sr`, and rerunning the command skips a finished stage; without it, each stage gets a
-new timestamped folder in `run/`. `--show` prints the settings built for both stages, and
-`--resume` continues an interrupted stage from its checkpoints. Inspection results go to
-`checks/`. The device is CUDA, then MPS, then CPU unless `--device` is given; mixed
-precision runs only on CUDA.
+`run_train.py` trains the LR model, then the SR model from frozen LR volumes and the real
+high-resolution sections. `--run-dir NAME` writes `NAME-lr` and `NAME-sr`, and rerunning
+the command skips a finished stage; without it, each stage gets a new timestamped folder in
+`run/`. `--resume` continues one interrupted stage ([Save and resume](docs/checks.md#save-and-resume)).
+The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
+only on CUDA.
 
-To add a sample, copy `default.yaml` and change its folders and `structure`.
+### Samples
+
+A sample is one file in [config/samples/](config/samples/); copy
+[default.yaml](config/samples/default.yaml) to add one.
+
+- `images` maps `xy`, `xz`, and `yz` to folders of 2D uint8 label images with one shared
+  pixel size; in `xz` and `yz` images, z runs down the rows. Labels are phases `0..K-1`,
+  and phase 0 is pore. `K` is the largest label plus one unless `num_phases` is set;
+  `resolution` can override `crop_size`, `lo_res_size`, and `hi_res_size`.
+- `structure` says what the material looks like:
+  - `isotropic: false` judges `xy` sections apart from `xz`/`yz` sections.
+  - `depth_gradient: true` conditions both stages on height and, in LR, on the phase
+    fractions at each height.
+  - `mirror_symmetric: false` flips sections less often (probability 0.2), so a tilt stays visible.
+
+  When z differs from x and y (either of the first two flags), training never rotates
+  `xz`/`yz` sections, which would swap z with x or y; with a depth gradient it also
+  never flips z.
+- `tune.lr` and `tune.sr` change single settings of that stage.
+
+Settings apply in order, later winning: code defaults, [config/base/](config/base/)`<lr|sr>.yaml`,
+`structure`, then `tune`. `python run_train.py default --show` prints the YAML of both
+stages without the code defaults.
 
 ## Web interface
 
-Start the backend with an LR run, then the frontend in another terminal (Node.js required):
+Start the backend with an LR run, then the frontend in another terminal (Node.js 20.19+ or 22.12+):
 
 ```bash
 python backend/run.py --weight "run/my-run-lr"
@@ -75,10 +94,20 @@ and `POST /api/generate`; HTTP limits are in [backend/config.yaml](backend/confi
 
 ## Python API
 
-[src/api.py](src/api.py) provides `LowResolutionAPI`, `PlaneAnchor`, and `SuperResolutionAPI`.
-`generate` returns labels and `generate_probs` phase fractions, for example
-`api.generate_probs(shape=(96, 64, 64), seed=1)`. SR's `refine` and `refine_probs` take an
-LR volume and the same keyword options; `seed=None` leaves the RNG unseeded.
+[src/api.py](src/api.py) provides `LowResolutionAPI`, `PlaneAnchor`, `SuperResolutionAPI`,
+and `extend_hr`. Volumes are `(z, y, x)`.
+
+```python
+from src.api import LowResolutionAPI, SuperResolutionAPI
+
+lr = LowResolutionAPI("run/my-run-lr")  # a run directory or its generator.pt
+labels = lr.generate(shape=(96, 64, 64), seed=1)  # uint8 phase labels
+sr = SuperResolutionAPI("run/my-run-sr")
+high = sr.refine(labels, seed=1, tile_size=64)  # (192, 128, 128) at the default 2x
+```
+
+`generate_probs` and `refine_probs` return phase fractions instead of labels and take the
+same options; `seed=None` leaves the RNG unseeded.
 
 Generated volumes are plausible samples, not measurements of an unknown 3D specimen.
 

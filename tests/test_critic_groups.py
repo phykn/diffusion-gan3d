@@ -197,7 +197,7 @@ def test_sr_groups_step_once_per_critic_update_and_restore_state(tmp_path, group
     other["model"]["critic"]["plane_groups"] = (
         GROUPS[1] if len(groups) != 2 else GROUPS[0]
     )
-    with pytest.raises(ValueError, match="plane_groups cannot change"):
+    with pytest.raises(ValueError, match="saved resolved configuration"):
         resume_sr_training(
             build_sr_trainer(other, bank, torch.device("cpu")),
             torch.load(path, weights_only=True),

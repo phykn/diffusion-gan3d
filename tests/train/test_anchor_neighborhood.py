@@ -9,7 +9,6 @@ from anchor_neighborhood_reference import (
 from src.anchor import PlaneAnchor, encode_anchors
 from src.prepare.resize import phase_channels
 from src.train.loss.anchor_neighborhood import compute_anchor_neighborhood_loss
-from src.train.trainer import Trainer
 
 
 def make_condition(volume, indices=(5,), axis=0, position=None, patch=None):
@@ -128,14 +127,14 @@ def test_far_reference_is_separate_for_each_volume_and_cfg_dropout_is_respected(
     )
     assert loss == single / 2
     volume.requires_grad_()
-    visible = Trainer.visible_anchor(condition, torch.tensor([True, False]))
+    visible = condition.visible(torch.tensor([True, False]))
     visible_loss, visible_logs = compute_anchor_neighborhood_loss(volume, visible, 2)
     assert visible_loss == single
     assert visible_logs["anchor_neighborhood/distance0/pairs"] == 128
     assert logs["anchor_neighborhood/distance0/pairs"] == 256
     visible_loss.backward()
     assert volume.grad[1].abs().sum() == 0
-    hidden = Trainer.visible_anchor(condition, torch.tensor([False, False]))
+    hidden = condition.visible(torch.tensor([False, False]))
     hidden_loss, hidden_logs = compute_anchor_neighborhood_loss(volume, hidden, 2)
     assert hidden_loss == 0
     assert hidden_logs["anchor_neighborhood/far_pairs"] == 0
@@ -241,7 +240,7 @@ def test_batched_joints_match_loop_loss_gradients_and_all_metrics(axis, radius, 
 
 
 @pytest.mark.parametrize("length,radius", ((1, 2), (2, 1), (4, 2), (9, 1), (9, 12)))
-@pytest.mark.parametrize("active", (None, (0,), ()))
+@pytest.mark.parametrize("active", ((0, 1), (0,), ()))
 def test_batched_joints_match_loop_for_boundaries_and_dropout(length, radius, active):
     rng = torch.Generator().manual_seed(83)
     volume = torch.randn(2, 3, length, 4, 5, generator=rng).softmax(1)

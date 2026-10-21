@@ -1,3 +1,4 @@
+import argparse
 import sys
 from pathlib import Path
 
@@ -6,10 +7,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
     add_generation_arguments,
-    check_parser,
     height_options,
     prepare_check,
-    save_preview,
+    save_results,
 )
 from scripts.common.diagnostic import show_napari, show_slices
 from simul.src.anode import depth_profile
@@ -17,24 +17,25 @@ from src.build.predict import load_generator
 from src.config.files import load_yaml
 from src.device import check_device
 from src.random import seeded_rng
-from src.storage import save_volume
 
 
 def main() -> None:
-    parser = check_parser(__file__, "Inspect an LR model with three orthogonal slices.")
+    parser = argparse.ArgumentParser(
+        description="Inspect an LR model with three orthogonal slices."
+    )
     add_generation_arguments(parser)
     parser.add_argument(
         "--vf-profile",
         type=Path,
         help="YAML/JSON file with a z vf_profile (axis, points, interpolation), or "
-        "an anode simulation config for its target depth fractions; "
-        "default: height conditioning only.",
+        "an anode simulation config for its target depth fractions "
+        "(default: the training depth profile of a profile-conditioned model).",
     )
     args = parser.parse_args()
     prepare_check(args, __file__)
 
     device = check_device(args.device)
-    print(f"\nWeights : {args.weight.resolve()}", flush=True)
+    print(f"\nWeights : {args.weight}", flush=True)
 
     generator = load_generator(args.weight, device=device)
     shape = (generator.patch_size,) * 3
@@ -56,9 +57,7 @@ def main() -> None:
             ),
             margin=generator.default_margin,
         )
-    save_volume(vol, args.out)
-    print(f"Saved   : {args.out.resolve()}", flush=True)
-    save_preview(vol, args, generator.num_phases)
+    save_results(vol, args, generator.num_phases)
     if args.no_view:
         return
     if args.napari:

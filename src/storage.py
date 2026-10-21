@@ -1,8 +1,6 @@
+import hashlib
 import logging
 import os
-import tempfile
-import time
-from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -10,56 +8,12 @@ import tifffile
 import torch
 from torch import nn
 
-
-def atomic_torch_save(payload, path: str | Path) -> Path:
-    """Replace path with a complete artifact; readers never see a partial file."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = tempfile.NamedTemporaryFile(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
-    )
-    temporary_path = Path(temporary.name)
-    complete = False
-    retain = False
-    try:
-        with temporary:
-            torch.save(payload, temporary)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        complete = True
-        _retry_file_operation(lambda: temporary_path.replace(path))
-    except OSError as error:
-        if complete and getattr(error, "winerror", None) in (5, 32, 33):
-            retain = True
-            error.add_note(
-                f"Publication failed; complete file retained at "
-                f"{temporary_path.resolve()}"
-            )
-        raise
-    finally:
-        if not retain:
-            try:
-                _retry_file_operation(lambda: temporary_path.unlink(missing_ok=True))
-            except OSError:
-                # Cleanup must not mask a save error or invalidate a published file.
-                logging.getLogger(__name__).warning(
-                    "Could not remove temporary file %s",
-                    temporary_path,
-                    exc_info=True,
-                )
-    return path
+SR_FORMAT = "diffusion-gan3d.sr"
 
 
-def _retry_file_operation(operation: Callable[[], object]) -> None:
-    for attempt in range(11):
-        try:
-            operation()
-            return
-        except OSError as error:
-            # Windows can report a locked replacement target as access denied (5).
-            if getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 10:
-                raise
-            time.sleep(min(0.1 * 2**attempt, 1.0))
+def file_hash(path: str | Path) -> str:
+    with Path(path).open("rb") as file:
+        return hashlib.file_digest(file, "sha256").hexdigest()
 
 
 def torch_save(payload, path: str | Path, *, overwrite: bool = True) -> Path:
@@ -131,7 +85,7 @@ def validate_probabilities(probs: torch.Tensor) -> torch.Tensor:
 
 def save_probabilities(probs: torch.Tensor, path: str | Path) -> Path:
     probs = validate_probabilities(probs)
-    return atomic_torch_save(probs.detach().float().cpu(), path)
+    return torch_save(probs.detach().float().cpu(), path)
 
 
 def save_model(path: str | Path, model: nn.Module) -> Path:

@@ -13,9 +13,6 @@ data:
   lo_res_size: 64
   hi_res_size: 128
 
-source:
-  weights: tests/fixtures/generator.pt
-
 model:
   generator:
     channels: [16, 32, 64, 64]

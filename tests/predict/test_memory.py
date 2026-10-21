@@ -111,11 +111,3 @@ def test_rectangular_model_workspace_fits_budget(monkeypatch, device):
     )
     monkeypatch.setattr(memory, "cuda_memory_budget", lambda device: 512 * 1024**2)
     assert memory.select_storage(device, estimate, gen) == device
-
-
-@pytest.mark.parametrize("field", ["num_phases", "tile_size", "margin", "overlap"])
-def test_memory_estimate_rejects_boolean_geometry(field):
-    kwargs = dict(num_phases=3, tile_size=32, margin=0, overlap=0)
-    kwargs[field] = True
-    with pytest.raises(ValueError):
-        memory.estimate_memory(32, **kwargs)

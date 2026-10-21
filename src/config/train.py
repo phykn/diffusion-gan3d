@@ -1,5 +1,3 @@
-"""Resolve presets or saved run settings."""
-
 import copy
 import math
 from collections.abc import Mapping, Sequence
@@ -14,7 +12,11 @@ from src.config.data import (
 from src.config.defaults import INACTIVE_DEFAULTS, STAGE_DEFAULTS, TRAIN_DEFAULTS
 from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml
 from src.config.schema import validate_config_keys
-from src.config.values import _integer, validate_training_values
+from src.config.values import (
+    check_boolean,
+    check_integer,
+    validate_training_values,
+)
 from src.data.source import fill_depth_profiles, fill_height_extents
 from src.plane import PLANE_DIRECTIONS, PLANES
 
@@ -43,24 +45,13 @@ def load_train_config(config: str | Path | Mapping, stage: str = "low_res") -> d
         cfg = copy.deepcopy(dict(config))
     else:
         cfg = load_yaml(config)
-    if isinstance(cfg.get("data"), str):
-        cfg["data"] = load_yaml(resolve_external_data_path(cfg["data"]))
     cfg = fill_height_extents(normalize_loaded_train_config(cfg, stage))
     return fill_depth_profiles(cfg)
 
 
-def resolve_external_data_path(path: str | Path) -> Path:
-    data_path = Path(path).expanduser()
-    if not data_path.is_absolute():
-        data_path = PROJECT_ROOT / data_path
-    return data_path
-
-
 def normalize_loaded_train_config(cfg: dict, stage: str = "low_res") -> dict:
     if "data" not in cfg:
-        raise ValueError(
-            "training config must select a data file or embed data settings."
-        )
+        raise ValueError("training config must embed its data settings.")
     if stage == "sr" and "guidance" not in cfg.get("lr_bank", {}):
         raise ValueError("SR config must set lr_bank.guidance explicitly.")
     cfg = normalize_train_config(cfg, stage)
@@ -99,70 +90,74 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         raise ValueError("nickname must be a valid folder-name component.")
     cfg["nickname"] = nickname
     flags = [
-        ("conditioning.height_enabled", cfg["conditioning"]["height_enabled"]),
-        ("train.mixed_precision", cfg["train"]["mixed_precision"]),
-        ("model.gradient_checkpointing", cfg["model"]["gradient_checkpointing"]),
-        ("augmentation.real_only", cfg["augmentation"]["real_only"]),
+        "conditioning.height_enabled",
+        "train.mixed_precision",
+        "model.gradient_checkpointing",
+        "augmentation.real_only",
     ]
     if stage == "low_res":
-        name = "model.generator.anchor_multiscale_input"
-        flags.append((name, cfg["model"]["generator"]["anchor_multiscale_input"]))
-    for name, value in flags:
-        # YAML reads a quoted "false" as text, which would act as true.
-        if type(value) is not bool:
-            raise ValueError(f"{name} must be a boolean.")
-    for name in ("embedding_channels", "latent_channels"):
-        _integer(cfg["model"]["generator"][name], f"model.generator.{name}")
-    channels = cfg["model"]["critic"].get("channels")
-    if channels is not None and (
-        not isinstance(channels, list)
-        or not channels
-        or any(type(value) is not int or value < 1 for value in channels)
-    ):
-        raise ValueError("model.critic.channels must list positive integers.")
+        flags += [
+            "model.generator.anchor_multiscale_input",
+            "conditioning.spatial_profile.enabled",
+            "conditioning.spatial_profile.critic_enabled",
+        ]
+    for name in flags:
+        check_boolean(_setting(cfg, name), name)
+    integers = [
+        ("model.generator.embedding_channels", 1),
+        ("model.generator.latent_channels", 1),
+        ("train.structure_every_steps", 0),
+        ("model.critic.pyramid_min_size", 2),
+        ("loss.group_statistics.max_gap", 1),
+    ]
+    if stage == "low_res":
+        integers += [
+            ("loss.anchor_neighborhood_radius", 1),
+            ("loss.anchor_seam_rows", 1),
+            ("loss.connectivity.max_slice_gap", 1),
+            ("conditioning.spatial_profile.num_bins", 1),
+        ]
+    for name, minimum in integers:
+        check_integer(_setting(cfg, name), name, minimum)
+    # Generator widths are normalized by channel groups, so they need two or more.
+    for name, minimum in (("generator", 2), ("critic", 1)):
+        channels = cfg["model"][name].get("channels")
+        if channels is not None and (
+            not isinstance(channels, list)
+            or not channels
+            or any(type(value) is not int or value < minimum for value in channels)
+        ):
+            raise ValueError(
+                f"model.{name}.channels must list integers of at least {minimum}."
+            )
+    channels = cfg["model"]["generator"].get("channels")
+    if channels and any(value % channels[0] for value in channels):
+        raise ValueError(
+            "model.generator.channels must be integer multiples of its first value."
+        )
+    steps = cfg["model"]["diffusion"].get("num_steps")
+    if steps is not None:
+        check_integer(steps, "model.diffusion.num_steps")
+    if cfg["model"]["diffusion"]["time_embedding"] not in ("index", "scaled"):
+        raise ValueError("model.diffusion.time_embedding must be index or scaled.")
     augmentation = cfg["augmentation"]
     auto_planes = augmentation.get("auto_planes", False)
-    if type(auto_planes) is not bool:
-        raise ValueError("augmentation.auto_planes must be a boolean.")
+    check_boolean(auto_planes, "augmentation.auto_planes")
     if auto_planes:
         if "planes" in augmentation:
             raise ValueError("choose augmentation.auto_planes or explicit planes.")
-        height_axis = "z" if cfg["conditioning"]["height_enabled"] else None
-        augmentation["planes"] = {
-            plane: {
-                "flip_axes": [axis for axis in axes if axis != height_axis],
-                "rotate_90": height_axis not in axes,
-            }
-            for plane, axes in PLANE_DIRECTIONS.items()
-        }
         # Store resolved policies so checkpoint behavior is independent of defaults.
+        augmentation["planes"] = auto_plane_policies(cfg)
         augmentation.pop("auto_planes")
-    _integer(cfg["train"]["structure_every_steps"], "train.structure_every_steps", 0)
-    _integer(
-        cfg["model"]["critic"]["pyramid_min_size"], "model.critic.pyramid_min_size", 2
-    )
     if cfg["model"]["critic"]["input_mode"] not in ("pair", "single"):
         raise ValueError("model.critic.input_mode must be pair or single.")
-    statistics = cfg["loss"]["group_statistics"]
-    _integer(statistics["max_gap"], "loss.group_statistics.max_gap")
-    get_schedule_steps(statistics, "loss.group_statistics")
+    get_schedule_steps(cfg["loss"]["group_statistics"], "loss.group_statistics")
     if stage == "low_res":
-        loss = cfg["loss"]
-        _integer(loss["anchor_neighborhood_radius"], "loss.anchor_neighborhood_radius")
-        _integer(loss["anchor_seam_rows"], "loss.anchor_seam_rows")
-        _integer(
-            loss["connectivity"]["max_slice_gap"], "loss.connectivity.max_slice_gap"
-        )
         profile = cfg["conditioning"]["spatial_profile"]
-        if type(profile["enabled"]) is not bool:
-            raise ValueError("spatial_profile.enabled must be a boolean.")
-        if type(profile["critic_enabled"]) is not bool or (
-            profile["critic_enabled"] and not profile["enabled"]
-        ):
+        if profile["critic_enabled"] and not profile["enabled"]:
             raise ValueError(
                 "spatial_profile.critic_enabled requires an enabled profile."
             )
-        _integer(profile["num_bins"], "spatial_profile.num_bins")
         if profile["enabled"] and not cfg["conditioning"]["height_enabled"]:
             raise ValueError("spatial_profile requires height_enabled.")
     optim = cfg["optim"]
@@ -172,9 +167,24 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     return cfg
 
 
+def auto_plane_policies(cfg: Mapping) -> dict:
+    height = cfg["conditioning"]["height_enabled"]
+    groups = cfg["model"]["critic"].get("plane_groups") or ()
+    # Rotating xz/yz swaps z with x or y. That hides a height gradient, and hides
+    # z anisotropy whenever xy is judged apart from the side planes.
+    fixed_z = height or not any("xy" in group and len(group) > 1 for group in groups)
+    return {
+        plane: {
+            "flip_axes": [axis for axis in axes if not (height and axis == "z")],
+            "rotate_90": not (fixed_z and "z" in axes),
+        }
+        for plane, axes in PLANE_DIRECTIONS.items()
+    }
+
+
 def validate_training_settings(cfg: Mapping) -> None:
     """Check settings used only by training, before data or models are built."""
-    _require_settings(cfg, TRAINING_SETTINGS, " for training")
+    _require_settings(cfg, TRAINING_SETTINGS)
     train = cfg["train"]
     conditioning, _ = get_trainer_sections(cfg)
     anchor = conditioning["anchor"]
@@ -191,13 +201,19 @@ def validate_training_settings(cfg: Mapping) -> None:
             )
 
 
-def _require_settings(cfg: Mapping, paths: Sequence[str], purpose: str = "") -> None:
+def _require_settings(cfg: Mapping, paths: Sequence[str]) -> None:
     for path in paths:
         target = cfg
         for key in path.split("."):
             if not isinstance(target, Mapping) or key not in target:
-                raise ValueError(f"missing required setting{purpose}: {path}")
+                raise ValueError(f"missing required setting for training: {path}")
             target = target[key]
+
+
+def _setting(cfg: Mapping, path: str):
+    for key in path.split("."):
+        cfg = cfg[key]
+    return cfg
 
 
 def _fill_defaults(cfg: dict, defaults: Mapping) -> None:
@@ -223,22 +239,17 @@ def get_trainer_sections(cfg: Mapping) -> tuple[dict, dict]:
 
 def validate_sr_config(cfg: dict) -> dict:
     cfg = normalize_train_config(cfg, "sr")
-    data_sha256 = cfg.get("source", {}).get("data_sha256")
-    if data_sha256 is not None and (
-        not isinstance(data_sha256, str)
-        or len(data_sha256) != 64
-        or any(char not in "0123456789abcdef" for char in data_sha256)
-    ):
-        raise ValueError("source.data_sha256 must be a SHA-256 hex digest.")
     get_sr_resolution(cfg)  # Requires data.hi_res_size.
     groups = get_plane_groups(cfg)
     cfg["model"]["critic"]["plane_groups"] = [
         [PLANES[axis] for axis in axes] for axes in groups.values()
     ]
     validate_training_settings(cfg)
-    _require_settings(cfg, ("lr_bank.samples_per_domain",), " for training")
-    _integer(cfg["lr_bank"]["samples_per_domain"], "lr_bank.samples_per_domain")
-    _integer(cfg["lr_bank"]["refresh_every_steps"], "lr_bank.refresh_every_steps", 0)
+    _require_settings(cfg, ("lr_bank.samples_per_domain",))
+    check_integer(cfg["lr_bank"]["samples_per_domain"], "lr_bank.samples_per_domain")
+    check_integer(
+        cfg["lr_bank"]["refresh_every_steps"], "lr_bank.refresh_every_steps", 0
+    )
     guidance = cfg["lr_bank"]["guidance"]
     if (
         isinstance(guidance, bool)
@@ -262,5 +273,5 @@ def get_schedule_steps(
     start = section["start_step"]
     ramp = section["ramp_steps"]
     for field, value in (("start_step", start), ("ramp_steps", ramp)):
-        _integer(value, f"{name}.{field}", 0)
+        check_integer(value, f"{name}.{field}", 0)
     return start, ramp

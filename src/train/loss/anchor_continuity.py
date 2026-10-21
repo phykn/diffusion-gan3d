@@ -65,11 +65,7 @@ def compute_anchor_continuity_loss(
     """
     zero = probs.sum(dtype=torch.float32) * 0.0
     near = torch.zeros_like(condition.mask)
-    active = (
-        tuple(range(len(probs)))
-        if measured.active_batches is None
-        else measured.active_batches
-    )
+    active = measured.active_batches
     diagnostics = {}
     losses, valid_gaps = [], []
     # Reused for both sides of every plane when height is absent.

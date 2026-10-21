@@ -35,11 +35,7 @@ def run_low_res_train(
     else:
         source = load_source(config)
         cfg = load_train_config(source)
-    set_total_steps(cfg, source, steps)
-    start = 0 if payload is None else payload["step"]
-    if cfg["train"]["total_steps"] <= start:
-        raise ValueError("total steps must exceed completed steps.")
-
+    set_total_steps(cfg, source, steps, payload)
     build_cfg = copy.deepcopy(cfg)
     if payload:
         build_cfg["train"]["initial_weights"] = None
@@ -54,7 +50,7 @@ def run_low_res_train(
         save_every=cfg["train"]["weights_every_steps"],
         run_dir=run_dir,
         checkpoint_every=cfg["train"]["archive_every_steps"],
-        start_step=start,
+        start_step=0 if payload is None else payload["step"],
         config=source,
     )
     return run_dir

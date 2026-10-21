@@ -44,15 +44,7 @@ def sample_pairs(
         if measured is None
         else {r.index for r in measured.regions if r.axis == axis}
     )
-    active = (
-        ()
-        if measured is None
-        else (
-            range(previous.shape[0])
-            if measured.active_batches is None
-            else measured.active_batches
-        )
-    )
+    active = () if measured is None else measured.active_batches
     candidates = [
         (batch, index)
         for batch in range(previous.shape[0])
@@ -78,8 +70,7 @@ def sample_pairs(
             focused.extend(
                 (batch, index, region)
                 for batch, index in candidates
-                if (anchor.active_batches is None or batch in anchor.active_batches)
-                and start <= index < start + length
+                if batch in anchor.active_batches and start <= index < start + length
             )
         for slot in range(max(1, count // 2) if focused else 0):
             batch, index, region = focused[int(torch.randint(len(focused), ()))]
@@ -109,11 +100,7 @@ def sample_pairs(
 
 class AnchorTripletSampler:
     def __init__(self, max_gap: int = 1, windows_per_plane: int = 1) -> None:
-        if not isinstance(max_gap, int) or isinstance(max_gap, bool) or max_gap < 1:
-            raise ValueError("max_gap must be a positive integer.")
         self.max_gap = max_gap
-        if type(windows_per_plane) is not int or windows_per_plane < 1:
-            raise ValueError("windows_per_plane must be a positive integer.")
         self.windows_per_plane = windows_per_plane
 
     def sample(
@@ -124,12 +111,6 @@ class AnchorTripletSampler:
         generator: torch.Generator | None = None,
         height: torch.Tensor | None = None,
     ) -> tuple[TripletBatch, TripletBatch]:
-        prediction = self._check_volume(prediction)
-        reference = self._check_volume(reference)
-        if prediction.shape != reference.shape:
-            raise ValueError(
-                "prediction and reference volumes must have matching shapes."
-            )
         reference = reference.detach()
         located = self._sample_anchor_triplets(
             prediction,
@@ -176,20 +157,9 @@ class AnchorTripletSampler:
         condition: AnchorCondition,
         generator: torch.Generator | None = None,
     ) -> LocatedTriplets:
-        expected_axis_shape = (volume.shape[0], 3) + tuple(volume.shape[2:])
-        expected_mask_shape = (volume.shape[0], 1) + tuple(volume.shape[2:])
-        if condition.axis_masks.shape != expected_axis_shape:
-            raise ValueError("anchor axis masks must match the generated volume.")
-        if condition.mask.shape != expected_mask_shape:
-            raise ValueError("anchor mask must match the generated volume.")
-
         triplets, axes, gaps, center_slots, locations, regions = [], [], [], [], [], []
         relations = []
-        active = (
-            range(volume.shape[0])
-            if condition.active_batches is None
-            else condition.active_batches
-        )
+        active = condition.active_batches
         for batch in active:
             for axis in AXES:
                 moved = volume[batch].movedim(axis + 1, 1)
@@ -284,11 +254,6 @@ class AnchorTripletSampler:
             tuple(relations),
         )
 
-    def _check_volume(self, volume: torch.Tensor) -> torch.Tensor:
-        if volume.ndim != 5:
-            raise ValueError("volume must have shape [B, C, D, H, W].")
-        return volume
-
     def _sample_gap(
         self,
         index: int,
@@ -358,13 +323,7 @@ def sample_seam_bands(
         if type(value) is not int or value < 1:
             raise ValueError(f"{name} must be a positive integer.")
     near, far = [], []
-    active = (
-        ()
-        if condition is None
-        else range(volume.shape[0])
-        if condition.active_batches is None
-        else condition.active_batches
-    )
+    active = () if condition is None else condition.active_batches
     for batch in active:
         for axis in AXES:
             regions = [region for region in condition.regions if region.axis == axis]

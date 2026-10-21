@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -200,3 +202,15 @@ def test_cli_show_prints_both_stages(capsys):
 def test_cli_resume_rejects_a_sample():
     with pytest.raises(SystemExit):
         run_train.parse_args(["default", "--resume", "run/x"])
+
+
+@pytest.mark.parametrize("option", ["--sr-steps", "--bank-size"])
+def test_cli_resume_rejects_options_of_the_other_stage(option):
+    with pytest.raises(SystemExit):
+        run_train.parse_args(["--resume", "run/x", option, "5"])
+
+
+def test_cli_expands_home_in_run_paths():
+    args = run_train.parse_args(["--resume", "~/x", "--run-dir", "~/y"])
+    assert args.resume == Path.home() / "x"
+    assert args.run_dir == Path.home() / "y"

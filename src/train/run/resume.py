@@ -40,7 +40,12 @@ def load_resume(
     return payload, cfg, copy.deepcopy(payload["config"])
 
 
-def set_total_steps(cfg: dict, source: dict, steps: int | None) -> None:
+def set_total_steps(
+    cfg: dict, source: dict, steps: int | None, payload: dict | None
+) -> None:
+    """Apply a --steps override; a resumed run must have steps left to train."""
     if steps is not None:
         cfg["train"]["total_steps"] = steps
         source.setdefault("train", {})["total_steps"] = steps
+    if payload is not None and cfg["train"]["total_steps"] <= payload["step"]:
+        raise ValueError("total steps must exceed completed steps.")
