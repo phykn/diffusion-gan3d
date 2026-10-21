@@ -38,7 +38,6 @@ def build_optimizers(
     torch.optim.Optimizer | None,
     torch.optim.Optimizer | None,
 ]:
-    cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
     optim = cfg["optim"]
     betas = tuple(optim["adam_betas"])
 

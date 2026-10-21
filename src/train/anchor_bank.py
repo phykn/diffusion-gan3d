@@ -18,15 +18,6 @@ class AnchorReplay:
 
 class AnchorBank:
     def __init__(self, capacity: int = 4, plane_spacing: int = 16):
-        if (
-            type(capacity) is not int
-            or capacity < 1
-            or type(plane_spacing) is not int
-            or plane_spacing < 1
-        ):
-            raise ValueError(
-                "anchor bank capacity and plane spacing must be positive integers."
-            )
         self.capacity = capacity
         self.plane_spacing = plane_spacing
         self.entries: dict[int, list[dict]] = {}

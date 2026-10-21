@@ -1,6 +1,8 @@
+import matplotlib.pyplot as plt
 import torch
 
 from src.evaluate.label import voxel_accuracy
+from src.plane import PLANES
 from src.random import preserved_rng
 
 
@@ -49,6 +51,43 @@ def format_percent(value: float | None) -> str:
 
 def format_ratio(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}x"
+
+
+def format_profile(values: tuple[float | None, ...], near_label: str) -> str:
+    valid = [
+        (distance, value) for distance, value in enumerate(values) if value is not None
+    ]
+    if not valid:
+        return "n/a"
+    mean = sum(value for _, value in valid) / len(valid)
+    distance, farthest = valid[-1]
+    return (
+        f"{near_label} {format_percent(valid[0][1])}, mean {format_percent(mean)}, "
+        f"farthest {format_percent(farthest)} at distance {distance}"
+    )
+
+
+def middle_slices(volume: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Center xy, xz and yz sections."""
+    middle = tuple(size // 2 for size in volume.shape)
+    return volume[middle[0]], volume[:, middle[1]], volume[:, :, middle[2]]
+
+
+def show_slices(volume: torch.Tensor, num_phases: int, title: str) -> None:
+    fig, panels = plt.subplots(1, 3, figsize=(10, 4))
+    for panel, plane, image in zip(panels, PLANES, middle_slices(volume), strict=True):
+        panel.imshow(
+            image.numpy(),
+            cmap="gray",
+            vmin=-0.5,
+            vmax=num_phases - 0.5,
+            interpolation="nearest",
+        )
+        panel.set_title(plane)
+        panel.axis("off")
+    fig.suptitle(title)
+    fig.tight_layout()
+    plt.show()
 
 
 def show_napari(volume: torch.Tensor, name: str = "Generated output") -> None:

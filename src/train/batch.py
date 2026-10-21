@@ -54,8 +54,7 @@ class DenoiserBatch:
     logits: torch.Tensor
     clean_probs: torch.Tensor
     anchor: AnchorCondition | None
-    anchor_observed_mask: torch.Tensor | None
-    anchor_observed_axis_masks: torch.Tensor | None
+    anchor_measured: AnchorCondition | None
     anchor_present: torch.Tensor
     anchor_ramp: float
     target_vf: torch.Tensor
@@ -95,11 +94,9 @@ class StepPreparation:
 
 @dataclass(frozen=True)
 class AnchorSelection:
-    condition: AnchorCondition | None
-    observed_mask: torch.Tensor | None
-    observed_axis_masks: torch.Tensor | None
+    condition: AnchorCondition
     source: Literal["real", "shared", "multi"]
-    measured: AnchorCondition | None = None
+    measured: AnchorCondition
     reference: torch.Tensor | None = None
     height: torch.Tensor | None = None
     profile: torch.Tensor | None = None

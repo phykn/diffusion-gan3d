@@ -3,6 +3,9 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
+
+from src.device import assert_all
 
 INV_SQRT_TWO = 1.0 / math.sqrt(2.0)
 INV_SQRT_THREE = 1.0 / math.sqrt(3.0)
@@ -20,10 +23,7 @@ def embed_domain(
         raise ValueError("domain must contain integer IDs.")
     domain = domain.to(device=embedding.weight.device, dtype=torch.long)
     valid = ((domain >= NULL_DOMAIN) & (domain < embedding.num_embeddings)).all()
-    if domain.device.type == "cuda":
-        torch._assert_async(valid, "domain contains an invalid ID.")
-    elif not bool(valid):
-        raise ValueError("domain contains an invalid ID.")
+    assert_all(valid, "domain contains an invalid ID.")
     present = domain != NULL_DOMAIN
     values = embedding(domain.clamp_min(0)).to(dtype=dtype)
     return values * present[:, None].to(dtype=dtype)
@@ -71,3 +71,52 @@ class AdaptiveNorm(nn.Module):
         scale = scale.reshape(scale.shape + dims)
         shift = shift.reshape(shift.shape + dims)
         return self.norm(x) * (1.0 + scale) + shift
+
+
+class AdaptiveResBlock(nn.Module):
+    def __init__(
+        self,
+        norm: type[nn.Module],
+        conv: type[nn.Module],
+        in_channels: int,
+        out_channels: int,
+        embedding_channels: int,
+    ) -> None:
+        super().__init__()
+        self.norm1 = AdaptiveNorm(norm, in_channels, embedding_channels)
+        self.conv1 = conv(in_channels, out_channels, 3, padding=1)
+        self.norm2 = AdaptiveNorm(norm, out_channels, embedding_channels)
+        self.conv2 = conv(out_channels, out_channels, 3, padding=1)
+        self.skip = (
+            nn.Identity()
+            if in_channels == out_channels
+            else conv(in_channels, out_channels, 1)
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        emb: torch.Tensor,
+    ) -> torch.Tensor:
+        h = self.conv1(F.silu(self.norm1(x, emb)))
+        h = self.conv2(F.silu(self.norm2(h, emb)))
+        return (self.skip(x) + h) * INV_SQRT_TWO
+
+
+def run_block(
+    block: nn.Module,
+    inputs: torch.Tensor,
+    emb: torch.Tensor,
+    checkpointing: bool,
+) -> torch.Tensor:
+    if checkpointing and torch.is_grad_enabled():
+        return checkpoint(block, inputs, emb, use_reentrant=False)
+    return block(inputs, emb)
+
+
+def embedding_mlp(in_channels: int, channels: int) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Linear(in_channels, channels),
+        nn.SiLU(),
+        nn.Linear(channels, channels),
+    )

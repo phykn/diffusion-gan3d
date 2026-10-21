@@ -39,3 +39,35 @@ def stop_generation_timer(device: torch.device, start: float) -> float:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     return perf_counter() - start
+
+
+def set_seed(seed: int, device: torch.device) -> None:
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+
+def summarize(
+    rows: Sequence[Mapping[str, object]],
+    conditions: Sequence[str],
+    metrics: Sequence[str],
+) -> list[dict[str, object]]:
+    """Per-condition mean and sample standard deviation, skipping missing values."""
+    result = []
+    for condition in conditions:
+        selected = [row for row in rows if row["condition"] == condition]
+        summary: dict[str, object] = {
+            "condition": condition,
+            "samples": len(selected),
+        }
+        for metric in metrics:
+            values = np.asarray(
+                [row[metric] for row in selected if row[metric] is not None],
+                dtype=float,
+            )
+            summary[f"{metric}_mean"] = float(values.mean()) if values.size else None
+            summary[f"{metric}_std"] = (
+                float(values.std(ddof=1)) if values.size > 1 else None
+            )
+        result.append(summary)
+    return result

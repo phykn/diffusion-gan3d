@@ -4,15 +4,13 @@ import scipy.ndimage as ndi
 # Volume axes are (z, y, x); "zy" is the slope dz/dy of a particle's voxels.
 TILT_PAIRS = {"zy": (0, 1), "zx": (0, 2), "yx": (1, 2)}
 
-_CONNECTIVITY = ndi.generate_binary_structure(3, 1)
-
 
 def component_slopes(labels, phase: int, min_voxels: int = 8) -> dict[str, np.ndarray]:
     """Per-particle least-squares slopes cov(a, b) / var(b) for each axis pair."""
     labels = np.asarray(labels)
     if labels.ndim != 3:
         raise ValueError("tilt labels must be a 3D volume.")
-    components, count = ndi.label(labels == phase, structure=_CONNECTIVITY)
+    components, count = ndi.label(labels == phase)
     flat = components.ravel()
     coords = [axis.ravel().astype(np.float64) for axis in np.indices(labels.shape)]
     size = np.bincount(flat, minlength=count + 1)[1:]

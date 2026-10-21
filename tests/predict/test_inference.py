@@ -315,7 +315,6 @@ def test_label_and_probability_generation_share_one_keyword_call_shape():
 def test_prepared_anchor_fractions_stay_within_the_unit_interval(api):
     from src.prepare.resize import resize_crop
 
-    api._crop_size = 105
     api.data = {"crop_size": 105, "lo_res_size": 64}
     api.generator.num_phases = 3
     labels = torch.zeros((105, 105), dtype=torch.long)

@@ -23,6 +23,14 @@ def check_device(device: str | torch.device) -> torch.device:
     return device
 
 
+def assert_all(valid: torch.Tensor, message: str) -> None:
+    # CUDA checks asynchronously to avoid a host sync on every call.
+    if valid.device.type == "cuda":
+        torch._assert_async(valid, message)
+    elif not bool(valid):
+        raise ValueError(message)
+
+
 def empty_cache(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.empty_cache()

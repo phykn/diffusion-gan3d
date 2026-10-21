@@ -7,7 +7,7 @@ and behavior are defined by `config/train/` and the source code.
 
 ## Abstract
 
-We present a diffusion-GAN framework that learns three-dimensional categorical microstructures from unregistered two-dimensional sections and accepts a supplied section as a spatial condition. The objective is not to copy the section voxel by voxel, but to generate a compatible 3D realization whose neighboring sections change naturally. A coarse-dominant anchor loss permits boundary adaptation, while a conditional exponential-moving-average (EMA) completion bank supplies aligned three-section relations without imposing a hidden teacher volume as a reconstruction target. This separates supervision of measured 2D appearance from supervision of 3D continuation, allowing conditional training without measured 3D volumes. At inference, same-noise baseline and anchor trajectories are coupled by the same model-derived Gaussian used for logit guidance, so the condition decays smoothly into ordinary generation. The same 128³ model also generates a 352³ volume through shared-state overlapping blocks. On one binary 226 × 690 training image, direct and scaled samples obtain 192-dimensional FID values of 1.30 ± 0.29 and 0.94 ± 0.27, respectively. Across 12 generated-control internal anchors, conditioning raises pooled anchor similarity from 58.25 ± 2.96% to 90.91 ± 1.29%. For four external boundary-section trials, it raises similarity from 56.83 ± 0.88% to 92.76 ± 0.64%; the 95th-percentile slice flicker is 1.19 ± 0.07 times the same-noise baseline, and the measured farthest-section drift is zero. In a fixed-seed controlled-reference sweep, nested axis-0 sections raise whole-volume agreement from 54.01% without anchors to 94.52% with 64 sections, while complete 128-plane conditioning falls to 88.84%. These are controlled generation results, not experimental 3D reconstruction accuracy; no measured 3D ground truth is available.
+We present a diffusion-GAN framework that learns three-dimensional categorical microstructures from unregistered two-dimensional sections and accepts a supplied section as a spatial condition. The objective is not to copy the section voxel by voxel, but to generate a compatible 3D realization whose neighboring sections change naturally. A coarse-dominant anchor loss permits boundary adaptation, while a conditional exponential-moving-average (EMA) completion bank supplies aligned three-section relations without imposing a hidden teacher volume as a reconstruction target. This separates supervision of measured 2D appearance from supervision of 3D continuation, allowing conditional training without measured 3D volumes. In the recorded experiments, same-noise baseline and anchor trajectories were coupled by the same model-derived Gaussian used for logit guidance, so the condition decayed smoothly into ordinary generation; the current code instead applies one global anchor logit interpolation (Section 3.5). The same 128³ model also generates a 352³ volume through shared-state overlapping blocks. On one binary 226 × 690 training image, direct and scaled samples obtain 192-dimensional FID values of 1.30 ± 0.29 and 0.94 ± 0.27, respectively. Across 12 generated-control internal anchors, conditioning raises pooled anchor similarity from 58.25 ± 2.96% to 90.91 ± 1.29%. For four external boundary-section trials, it raises similarity from 56.83 ± 0.88% to 92.76 ± 0.64%; the 95th-percentile slice flicker is 1.19 ± 0.07 times the same-noise baseline, and the measured farthest-section drift is zero. In a fixed-seed controlled-reference sweep, nested axis-0 sections raise whole-volume agreement from 54.01% without anchors to 94.52% with 64 sections, while complete 128-plane conditioning falls to 88.84%. These are controlled generation results, not experimental 3D reconstruction accuracy; no measured 3D ground truth is available.
 
 ## 1. Introduction
 
@@ -21,7 +21,7 @@ Our contributions are:
 
 1. a multiscale, mask-normalized plane condition whose loss emphasizes coarse morphology and gives exact pixels only a small weight;
 2. a relation-only conditional EMA completion bank that separates a measured root section from generated pseudo-planes and enables anchor training without measured 3D targets;
-3. a same-noise coupled sampler that applies joint multi-anchor guidance in logit space and returns continuously to an unconditioned trajectory with distance; and
+3. a same-noise coupled sampler, used for the recorded experiments, that applies joint multi-anchor guidance in logit space and returns continuously to an unconditioned trajectory with distance; and
 4. a shared-state tiled sampler that uses the same fixed-size model to synthesize larger 3D volumes.
 
 We evaluate direct generation, internal anchoring, controlled recovery as nested reference sections are added, one-sided generation from a boundary section, and 352³ scale-up. Exact pixel agreement is reported as a secondary diagnostic; the main conditional evidence measures coarse agreement, adjacent-section change, slice flicker, distance-wise drift, and whole-volume agreement only where a synthetic reference is known.
@@ -106,21 +106,23 @@ where $r_A(s)$ is a 500-step anchor ramp. The optional phase-fraction term is pa
 
 ### 3.5 Same-noise coupled anchor sampling
 
-At inference, baseline and anchor trajectories begin from identical ordinary noise and share every transition's latent vector and posterior noise. The conditional branch computes one joint multi-anchor logit residual
+The recorded experiments used the following sampler. Baseline and anchor trajectories began from identical ordinary noise and shared every transition's latent vector and posterior noise. The conditional branch computed one joint multi-anchor logit residual
 
 $$
 \Delta\ell=\ell_{\mathrm{anchor}}-\ell_{\mathrm{plain}}.
 $$
 
-For distance $d(v,A)$ from the nearest observed anchor support, its spatial weight is
+For distance $d(v,A)$ from the nearest observed anchor support, its spatial weight was
 
 $$
-w(v)=s_A\exp\left[-\frac{d(v,A)^2}{2\sigma^2}\right],\qquad \sigma=\rho_A P,
+w(v)=s_A\exp\left[-\frac{d(v,A)^2}{2\sigma^2}\right],\qquad \sigma=\sqrt{3}\,f,
 $$
 
-where $s_A=0.90$, $\rho_A=0.20$ is the configured anchor spread, and $P$ is the generated patch side ($\sigma=\rho_A P$, hence $\sigma=25.6$ for the current $128^3$ patch). The corrected logits are $\ell_{\mathrm{plain}}+w\Delta\ell$. Exact-plane guidance grows toward the final transition, while surrounding-context guidance decreases with the remaining diffusion noise. Numeric results generated before changing $\rho_A$ require regeneration before being compared with this setting.
+where $s_A=0.90$ and $f=8$ is the model downsampling factor. The corrected logits were $\ell_{\mathrm{plain}}+w\Delta\ell$. Exact-plane guidance grew toward the final transition, while surrounding-context guidance decreased with the remaining diffusion noise.
 
-After each posterior update, the normalized Gaussian $w/s_A$ couples the conditional state to the same-noise baseline state. Thus the anchor plane uses the conditional trajectory and distant regions continuously approach the ordinary trajectory without a second hand-chosen coupling radius. No constrained voxel is initialized from the anchor, clamped during denoising, or overwritten after sampling.
+After each posterior update, the normalized Gaussian $w/s_A$ coupled the conditional state to the same-noise baseline state. Thus the anchor plane used the conditional trajectory and distant regions continuously approached the ordinary trajectory without a second hand-chosen coupling radius. No constrained voxel was initialized from the anchor, clamped during denoising, or overwritten after sampling.
+
+The current code no longer has this distance weighting or trajectory coupling. It interpolates the whole logit field once, $\ell_{\mathrm{plain}}+s\,\Delta\ell$, with $s$ the `anchor_strength` in `config/gen.yaml` (currently 0.8). The recorded numbers have not been regenerated with it.
 
 ### 3.6 Shared-state scale-up
 
@@ -218,7 +220,7 @@ Placing the section at index 0 turns the experiment into one-sided spatial conti
 <p align="center"><img src="assets/paper/05-boundary-continuation.png" alt="One-sided continuation from generated-control and external boundary sections" width="900"></p>
 <p align="center"><em>Figure 5. One-sided continuation. Top: a section drawn from an unconditioned reference. Bottom: a real external crop. The input and generated d=0 plane are shown separately, followed by sections at increasing distance. These are possible stochastic continuations, not predictions of a unique measured 3D volume.</em></p>
 
-The zero farthest drift in Table 2 is observed at distance 64 for internal center-plane tests and distance 127 for boundary tests. It is not caused by final output copying; the Gaussian guidance becomes numerically negligible and the coupled trajectory returns to the same-noise baseline.
+The zero farthest drift in Table 2 is observed at distance 64 for internal center-plane tests and distance 127 for boundary tests. It is not caused by final output copying; under the recorded sampler, the Gaussian guidance becomes numerically negligible and the coupled trajectory returns to the same-noise baseline.
 
 ### 5.4 Anchored scale-up
 

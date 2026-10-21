@@ -3,6 +3,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from itertools import pairwise, product
 
+DEFAULT_OVERLAP = 8
+
 
 @dataclass(frozen=True)
 class TilePlan:
@@ -85,6 +87,11 @@ def axis_starts(size: int, tile_size: int, stride: int) -> tuple[int, ...]:
     starts = [index * stride for index in range(count - 1)]
     starts.append(size - tile_size)
     return tuple(starts)
+
+
+def check_overlap(tile_size: int, overlap: int) -> None:
+    if type(overlap) is not int or not 0 <= 2 * overlap < tile_size:
+        raise ValueError("overlap must satisfy 0 <= 2 * overlap < tile_size.")
 
 
 def parse_shape(value: int | Sequence[int]) -> tuple[int, int, int]:

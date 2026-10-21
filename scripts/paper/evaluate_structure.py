@@ -12,14 +12,14 @@ import torch.nn.functional as F
 from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(SCRIPT_DIR))
 
 from evaluation_io import (
     load_binary_volume,
+    set_seed,
     start_generation_timer,
     stop_generation_timer,
+    summarize,
     write_csv,
 )
 from make_assets import CROP_SIZE, OUTPUT_DIR, SAMPLE_PATH
@@ -139,7 +139,19 @@ def main() -> None:
         generation_times=generation_times,
     )
     write_csv(raw_rows, RAW_CSV)
-    summary = summarize(raw_rows)
+    summary = summarize(
+        raw_rows,
+        ("Real 2D crops", *CONDITIONS),
+        (
+            "fid",
+            "kid",
+            "phase_0_fraction",
+            "interface_density",
+            "tortuosity_axis0",
+            "percolation",
+            "generation_seconds",
+        ),
+    )
     RESULTS.write_text(
         json.dumps(
             {
@@ -233,21 +245,7 @@ def evaluate(
             make_row(
                 "Real 2D crops",
                 seed,
-                fid=compute_fid(
-                    real_reference.astype(bool),
-                    crops.astype(bool),
-                    device,
-                    FID_FEATURE_DIMENSIONS,
-                ),
-                kid=compute_kid(
-                    real_reference.astype(bool),
-                    crops.astype(bool),
-                    device,
-                    FID_FEATURE_DIMENSIONS,
-                    subset_size=KID_SUBSET_SIZE,
-                    subsets=KID_SUBSETS,
-                    seed=seed,
-                ),
+                **image_scores(real_reference, crops, device, seed),
                 phase_0_fraction=phase_fraction(crops, PORE_PHASE),
                 interface_density_value=interface_density(crops, spatial_dimensions=2),
             )
@@ -266,21 +264,7 @@ def evaluate(
                 condition,
                 seed,
                 guidance=guidance,
-                fid=compute_fid(
-                    real_reference.astype(bool),
-                    sections.astype(bool),
-                    device,
-                    FID_FEATURE_DIMENSIONS,
-                ),
-                kid=compute_kid(
-                    real_reference.astype(bool),
-                    sections.astype(bool),
-                    device,
-                    FID_FEATURE_DIMENSIONS,
-                    subset_size=KID_SUBSET_SIZE,
-                    subsets=KID_SUBSETS,
-                    seed=seed,
-                ),
+                **image_scores(real_reference, sections, device, seed),
                 phase_0_fraction=phase_fraction(volume, PORE_PHASE),
                 interface_density_value=interface_density(volume, spatial_dimensions=3),
                 tortuosity_axis0=tortuosity(
@@ -298,6 +282,24 @@ def evaluate(
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return rows
+
+
+def image_scores(
+    reference: np.ndarray, images: np.ndarray, device: torch.device, seed: int
+) -> dict[str, object]:
+    reference, images = reference.astype(bool), images.astype(bool)
+    return {
+        "fid": compute_fid(reference, images, device, FID_FEATURE_DIMENSIONS),
+        "kid": compute_kid(
+            reference,
+            images,
+            device,
+            FID_FEATURE_DIMENSIONS,
+            subset_size=KID_SUBSET_SIZE,
+            subsets=KID_SUBSETS,
+            seed=seed,
+        ),
+    }
 
 
 def sample_real_crops(seed: int, output_size: int) -> np.ndarray:
@@ -391,35 +393,6 @@ def make_row(
     }
 
 
-def summarize(rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    result = []
-    for condition in ("Real 2D crops", *CONDITIONS):
-        selected = [row for row in rows if row["condition"] == condition]
-        summary: dict[str, object] = {
-            "condition": condition,
-            "samples": len(selected),
-        }
-        for metric in (
-            "fid",
-            "kid",
-            "phase_0_fraction",
-            "interface_density",
-            "tortuosity_axis0",
-            "percolation",
-            "generation_seconds",
-        ):
-            values = np.asarray(
-                [row[metric] for row in selected if row[metric] is not None],
-                dtype=float,
-            )
-            summary[f"{metric}_mean"] = float(values.mean()) if values.size else None
-            summary[f"{metric}_std"] = (
-                float(values.std(ddof=1)) if values.size > 1 else None
-            )
-        result.append(summary)
-    return result
-
-
 def volume_path(condition: str, seed: int) -> Path:
     slug = "direct" if condition == DIRECT else "scale"
     return TEMP_DIR / f"{slug}_seed_{seed}.tiff"
@@ -437,12 +410,6 @@ def load_generation_times(path: Path) -> dict[tuple[str, int], float]:
     if set(values) != expected:
         raise ValueError("cached generation times do not match the evaluation set.")
     return values
-
-
-def set_seed(seed: int, device: torch.device) -> None:
-    torch.manual_seed(seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(seed)
 
 
 def print_result(row: dict[str, object]) -> None:

@@ -1,12 +1,13 @@
 import math
 from dataclasses import dataclass
 
-import psutil
 import torch
 
 from src.predict.convert import label_chunk_depth
 from src.predict.memory import (
+    base_bytes,
     cuda_memory_budget,
+    ram_budget,
     require_memory,
     tile_buffer_bytes,
     workspace_bytes,
@@ -121,9 +122,7 @@ def estimate_sr_memory(
         output_bytes=high_voxels if labels else 4 * num_phases * high_voxels,
         cpu_label_bytes=label_workspace if shared else 0,
         model_label_bytes=label_workspace if not shared else 0,
-        base_bytes=(12 * num_phases + 24) * math.prod(parse_shape(base_shape))
-        if base_shape is not None
-        else 0,
+        base_bytes=0 if base_shape is None else base_bytes(num_phases, base_shape),
         # Fraction validation runs on the original input device, before CPU
         # staging. Account for it even if the model uses a different device.
         cuda_input_bytes=validation if input_on_cuda and not label_input else 0,
@@ -164,4 +163,4 @@ def check_sr_memory(estimate: SRMemoryEstimate, generator, input_device=None) ->
         require_memory(
             estimate.cuda_input_bytes, cuda_memory_budget(input_device), "SR input CUDA"
         )
-    require_memory(cpu_required, int(psutil.virtual_memory().available * 0.8), "SR RAM")
+    require_memory(cpu_required, ram_budget(), "SR RAM")

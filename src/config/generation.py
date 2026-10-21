@@ -1,7 +1,8 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 from src.config.files import PROJECT_ROOT, load_yaml
+from src.config.values import _integer
 
 
 @dataclass(frozen=True)
@@ -13,11 +14,7 @@ class GenerationSettings:
 
 def load_generation_settings() -> GenerationSettings:
     section = load_yaml(PROJECT_ROOT / "config" / "gen.yaml")
-    unknown = set(section) - {
-        "guidance",
-        "anchor_strength",
-        "overlap",
-    }
+    unknown = set(section) - {field.name for field in fields(GenerationSettings)}
     if unknown:
         names = ", ".join(sorted(unknown))
         raise ValueError(f"unknown generation setting: {names}")
@@ -35,8 +32,7 @@ def load_generation_settings() -> GenerationSettings:
     ):
         raise ValueError("anchor_strength must be between zero and one.")
     overlap = section.get("overlap", defaults.overlap)
-    if not isinstance(overlap, int) or isinstance(overlap, bool) or overlap < 0:
-        raise ValueError("overlap must be a non-negative integer.")
+    _integer(overlap, "overlap", 0)
     return GenerationSettings(
         guidance=float(guidance),
         anchor_strength=float(anchor_strength),

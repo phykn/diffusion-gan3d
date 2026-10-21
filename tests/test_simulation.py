@@ -201,6 +201,18 @@ def test_seeded_export_is_repeatable_and_records_measured_fractions(tmp_path):
     assert metadata["measured"][0]["big_vf"] == pytest.approx((volumes[0] == 2).mean())
 
 
+def test_relative_data_dir_resolves_from_project_root(tmp_path, monkeypatch):
+    import simul.src.export as export
+
+    project = tmp_path / "project"
+    monkeypatch.setattr(export, "PROJECT_ROOT", project)
+    monkeypatch.chdir(tmp_path)
+    result = generate(_config(Path("data/generated/relative"), 1))
+    assert result.volumes[0].parent == project / "data/generated/relative/volumes"
+    assert (project / "data/generated/relative/simulation.yaml").is_file()
+    assert not (tmp_path / "data").exists()
+
+
 ANODE = {
     "kind": "anode",
     "size": 32,

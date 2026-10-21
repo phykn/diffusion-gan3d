@@ -226,6 +226,18 @@ def test_axis_without_far_bands_contributes_no_near_bands():
     assert len(near) and len(far)
 
 
+def test_near_and_far_bands_without_a_shared_orientation_are_empty():
+    # The axis-0 anchor has near and far bands, but in different section
+    # planes, so none can be matched.
+    anchors = [(0, 8, (2, 16), (7, 0))]
+    anchors += [(2, index, (6, 16), (0, 0)) for index in (1, 4, 7, 10, 13)]
+    anchors += [(2, index, (5, 16), (11, 0)) for index in (2, 5, 8, 11, 14)]
+    far, near = bands(
+        torch.randn(1, 3, 16, 16, 16), condition(anchors, size=16), count=100
+    )
+    assert len(far) == len(near) == 0
+
+
 @pytest.mark.parametrize("name", ("rows", "width", "count"))
 @pytest.mark.parametrize("value", (0, -1, 1.5, True))
 def test_band_sizes_must_be_positive_integers(name, value):
@@ -297,8 +309,6 @@ def fixed_anchor(trainer, axis=0, index=4):
         )
         return AnchorSelection(
             condition=anchor,
-            observed_mask=anchor.mask,
-            observed_axis_masks=anchor.axis_masks,
             source="real",
             measured=anchor,
         )

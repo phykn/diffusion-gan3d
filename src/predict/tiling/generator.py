@@ -7,7 +7,9 @@ from src.anchor import PlaneAnchor, anchor_origin, encode_anchors
 from src.predict.generator import Generator, profile_feasible
 from src.predict.memory import estimate_memory, select_storage
 from src.predict.tiling.layout import (
+    DEFAULT_OVERLAP,
     TilePlan,
+    check_overlap,
     make_plan,
     make_tiles,
     output_plan,
@@ -32,15 +34,12 @@ class TiledGenerator:
     def plan(
         self,
         shape: int | Sequence[int],
-        overlap: int = 8,
+        overlap: int = DEFAULT_OVERLAP,
     ) -> TilePlan:
         shape = parse_shape(shape)
         factor = self.generator.default_margin
-        if type(overlap) is not int or overlap < 0:
-            raise ValueError("overlap must be a non-negative integer.")
         tile_size = self.generator.patch_size
-        if 2 * overlap >= tile_size:
-            raise ValueError("twice overlap must be smaller than patch_size.")
+        check_overlap(tile_size, overlap)
         if tile_size % factor:
             raise ValueError(
                 "patch_size must be divisible by the denoiser "
@@ -67,13 +66,13 @@ class TiledGenerator:
             raise ValueError("provide exactly one of blocks or shape.")
         if blocks is None:
             return shape
-        return self.shape_from_blocks(blocks, options.get("overlap", 8))
+        return self.shape_from_blocks(blocks, options.get("overlap", DEFAULT_OVERLAP))
 
     @torch.no_grad()
     def _generate(
         self,
         shape: int | Sequence[int],
-        overlap: int = 8,
+        overlap: int = DEFAULT_OVERLAP,
         base: torch.Tensor | None = None,
         vf: Sequence[float] | None = None,
         progress: bool = True,
@@ -91,6 +90,7 @@ class TiledGenerator:
         probabilities: bool = False,
     ) -> torch.Tensor:
         self.stats = None
+        domain = self.generator.resolve_domain(domain)
         guidance = self.generator.validate_guidance(guidance)
         margin = self.generator.default_margin if margin is None else margin
         output_shape = parse_shape(shape)
@@ -124,8 +124,6 @@ class TiledGenerator:
         anchor_strength = self.generator.validate_anchor_strength(anchor_strength)
         tile_anchors = self.prepare_anchors(anchors, tiles, plan)
         vf = self.generator.prepare_vf(vf)
-        height_domain = domain
-        domain = self.generator.prepare_domain(domain)
         base = self.prepare_base(base, plan, offset=base_offset, preserve=preserve_base)
         if anchor_strength > 0:
             base = validate_base_anchors(base, anchors, output_shape, plan.margin)
@@ -136,7 +134,7 @@ class TiledGenerator:
             tiles,
             tile_anchors if anchor_strength == 1 else ((),) * len(tiles),
             base,
-            height_domain,
+            domain,
             height_origin,
             height_extent,
         )
@@ -161,15 +159,14 @@ class TiledGenerator:
                     anchor_strength=anchor_strength,
                 )
             offset = tile.source[0].start - plan.margin
-            if generator.height_data is not None:
-                result["height"] = generator.height_condition(
-                    shape, height_domain, height_origin, offset, height_extent
-                )
+            result["height"] = generator.height_condition(
+                shape, domain, height_origin, offset, height_extent
+            )
             if vf_profile is not None:
                 profile = generator.profile_condition(
                     vf_profile,
                     shape[0],
-                    height_domain,
+                    domain,
                     height_origin,
                     offset,
                     height_extent,
@@ -182,7 +179,7 @@ class TiledGenerator:
             plan,
             base,
             vf,
-            domain,
+            self.generator.prepare_domain(domain),
             probabilities=probabilities,
             storage=storage,
             progress=progress,
@@ -300,14 +297,11 @@ class TiledGenerator:
     def shape_from_blocks(
         self,
         blocks: int | Sequence[int],
-        overlap: int = 8,
+        overlap: int = DEFAULT_OVERLAP,
     ) -> tuple[int, int, int]:
         counts = parse_shape(blocks)
         patch_size = self.generator.patch_size
-        if type(overlap) is not int or overlap < 0:
-            raise ValueError("overlap must be a non-negative integer.")
-        if 2 * overlap >= patch_size:
-            raise ValueError("twice overlap must be smaller than patch_size.")
+        check_overlap(patch_size, overlap)
         stride = patch_size - 2 * overlap
         return tuple(patch_size + (count - 1) * stride for count in counts)
 

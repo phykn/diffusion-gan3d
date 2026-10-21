@@ -5,9 +5,12 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
+from scripts.common.diagnostic import middle_slices
 from src.build.predict import resolve_weights
 from src.config.files import PROJECT_ROOT
+from src.config.generation import load_generation_settings
 from src.device import default_device
+from src.plane import PLANES
 
 
 def check_parser(script, description):
@@ -110,6 +113,7 @@ def result_directory(name):
 
 
 def prepare_check(args, script):
+    """Resolve paths and unset generation options; return config/gen.yaml settings."""
     if args.no_view:
         plt.switch_backend("Agg")
     args.weight = resolve_weights(args.weight)
@@ -117,15 +121,18 @@ def prepare_check(args, script):
         args.out = result_directory(Path(script).stem) / "volume.tiff"
     args.out = args.out.expanduser().resolve()
     print(f"Results : {args.out.parent}", flush=True)
-    return args
+    settings = load_generation_settings()
+    if args.guidance is None:
+        args.guidance = settings.guidance
+    if hasattr(args, "anchor_strength") and args.anchor_strength is None:
+        args.anchor_strength = settings.anchor_strength
+    return settings
 
 
 def save_preview(volume, args, num_phases):
     volume = volume.detach().cpu()
-    middle = tuple(size // 2 for size in volume.shape)
-    images = (volume[middle[0]], volume[:, middle[1]], volume[:, :, middle[2]])
     fig, panels = plt.subplots(1, 3, figsize=(10, 4))
-    for panel, plane, image in zip(panels, ("xy", "xz", "yz"), images):
+    for panel, plane, image in zip(panels, PLANES, middle_slices(volume)):
         panel.imshow(
             image.numpy(),
             cmap="gray",

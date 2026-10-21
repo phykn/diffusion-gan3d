@@ -219,8 +219,6 @@ def test_half_mirroring_hides_tilt_sign_from_the_critic():
     assert torch.equal(mirrored, tilted.flip(-1))
 
 
-def test_real_only_must_be_boolean():
+def test_real_only_defaults_to_false():
     assert not CriticAugment().real_only
     assert CriticAugment(real_only=True).real_only
-    with pytest.raises(ValueError, match="real_only"):
-        CriticAugment(real_only="yes")

@@ -8,6 +8,7 @@ from src.train.loss.gan import (
     active_groups,
     get_generator_loss,
     score_plane,
+    score_triplets,
 )
 from src.train.loss.group_statistics import compute_group_statistics_loss
 from src.train.loss.spatial_profile import compute_profile_loss
@@ -54,15 +55,11 @@ def denoiser_objective(
     connectivity = adversarial.new_zeros(())
     connectivity_global = adversarial.new_zeros(())
     connectivity_local = adversarial.new_zeros(())
-    if len(batch.connectivity_fake) and settings.connectivity_weight > 0.0:
+    # Triplets are sampled only while the connectivity loss is enabled.
+    if len(batch.connectivity_fake):
         fake = batch.connectivity_fake
-        scores = connectivity_critic(
-            fake.values,
-            fake.axes,
-            fake.gaps,
-            batch.connectivity_domains,
-            **({"height": fake.height} if fake.height is not None else {}),
-            **({"profile": fake.profile} if fake.profile is not None else {}),
+        scores = score_triplets(
+            connectivity_critic, fake, fake.values, batch.connectivity_domains
         )
         head = get_generator_loss(scores)
         connectivity_global, connectivity_local = head.global_loss, head.local_loss
@@ -76,8 +73,8 @@ def denoiser_objective(
             batch.logits,
             batch.anchor,
             batch.anchor_present,
-            batch.anchor_observed_mask,
-            batch.anchor_observed_axis_masks,
+            batch.anchor_measured.mask,
+            batch.anchor_measured.axis_masks,
         )
         anchor = result.total
         anchor_coarse = result.coarse

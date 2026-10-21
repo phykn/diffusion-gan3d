@@ -13,6 +13,7 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 import run_train_2nd
 from src.build.trainer import build_trainer
 from src.config.files import load_yaml, save_yaml
+from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
 from src.storage import load_volume
 from src.train.checkpoint import resolve_checkpoint
@@ -215,7 +216,10 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
         ]
     )
     assert torch.equal(load_volume(out / "hr.tiff"), load_volume(out2 / "hr.tiff"))
-    assert json.loads((out / "report.json").read_text())["lr_source_verified"] is True
+    report = json.loads((out / "report.json").read_text())
+    assert report["lr_source_verified"] is True
+    assert report["lr_guidance"] == load_generation_settings().guidance
+    assert json.loads((out2 / "report.json").read_text())["lr_guidance"] is None
     with (base_dir / "train.yaml").open("a") as config_file:
         config_file.write("\n# changed after SR training\n")
     with pytest.raises(ValueError, match="configuration changed"):

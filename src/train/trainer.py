@@ -39,6 +39,7 @@ from src.train.loss.gan import (
     active_groups,
     critic_objective,
     score_plane,
+    score_triplets,
 )
 from src.train.loss.transition import (
     compute_real_transition_loss,
@@ -119,15 +120,7 @@ class Trainer:
         components: TrainerComponents,
         settings: TrainerSettings,
     ) -> None:
-        self.settings = replace(
-            settings,
-            anchor_training_probability=float(settings.anchor_training_probability),
-            anchor_shared_axis_probability=float(
-                settings.anchor_shared_axis_probability
-            ),
-            cfg_drop_each_probability=float(settings.cfg_drop_each_probability),
-            domain_dropout=float(settings.domain_dropout),
-        )
+        self.settings = settings
         self.denoiser = components.denoiser
         self.ema_denoiser = components.ema_denoiser
         self.critics = components.critics
@@ -171,18 +164,6 @@ class Trainer:
             max_gap=settings.connectivity_max_gap,
             windows_per_plane=settings.connectivity_windows_per_plane,
         )
-        if (
-            type(settings.r1_interval) is not int
-            or settings.r1_interval < 1
-            or not math.isfinite(settings.r1_gamma)
-            or settings.r1_gamma < 0
-            or not math.isfinite(settings.r2_gamma)
-            or settings.r2_gamma < 0
-        ):
-            raise ValueError(
-                "R1 interval must be a positive integer and R1/R2 weights "
-                "finite and non-negative."
-            )
         self.updates = {
             name: 0 for name in (*self.critics, "connectivity", "generator")
         }
@@ -231,9 +212,22 @@ class Trainer:
         anchor = None if selection is None else selection.condition
         clean_probs = (prediction + 1.0) * 0.5
         measured = None if selection is None else selection.measured
-        profile = self._critic_profile(prepared)
         profile_present = presence.vf.to(self.device)
-        fake = self._sample_fake_pairs(previous, current, prepared)
+        profile = (
+            prepared.model_conditions.get("profile")
+            if self.settings.profile_settings.get("critic_enabled", False)
+            else None
+        )
+        has_profile = profile is not None
+        critic_height = self._with_profile(
+            prepared.model_conditions.get("height"),
+            profile,
+            profile_present,
+            prediction.shape[-3:],
+        )
+        fake = self._sample_fake_pairs(
+            previous, current, prepared, critic_height, has_profile
+        )
         connectivity_real, connectivity_fake = self.make_connectivity_triplets(
             prediction,
             None if selection is None else selection.reference,
@@ -241,11 +235,10 @@ class Trainer:
             transition,
             self._anchor_visibility(presence),
             None if selection is None else selection.source,
-            height=prepared.model_conditions.get("height"),
-            profile=profile,
-            profile_present=profile_present,
+            height=critic_height,
+            has_profile=has_profile,
         )
-        if measured is not None and transition == 0:
+        if selection is not None and transition == 0:
             self.diagnostics.update(
                 anchor_boundary_metrics(
                     prediction, self.visible_anchor(measured, presence.anchor)
@@ -265,24 +258,20 @@ class Trainer:
             critic_domains,
             profile_present=profile_present,
         )
-        if self.settings.loss.connectivity_weight > 0.0:
-            (
-                critic_connectivity,
-                connectivity_r1,
-                critic_connectivity_global,
-                critic_connectivity_local,
-            ) = self.update_connectivity_critic(
-                connectivity_real,
-                connectivity_fake,
-                connectivity_domains,
-            )
-        else:
-            critic_connectivity, connectivity_r1 = 0.0, 0.0
-            critic_connectivity_global, critic_connectivity_local = 0.0, 0.0
-        if self.seam_critic is not None and self.settings.loss.anchor_seam_weight > 0.0:
-            self.update_seam_critic(
-                transition, seam_real, seam_fake, prepared.critic_domains
-            )
+        # Disabled critics receive empty batches, which skip their updates.
+        (
+            critic_connectivity,
+            connectivity_r1,
+            critic_connectivity_global,
+            critic_connectivity_local,
+        ) = self.update_connectivity_critic(
+            connectivity_real,
+            connectivity_fake,
+            connectivity_domains,
+        )
+        self.update_seam_critic(
+            transition, seam_real, seam_fake, prepared.critic_domains
+        )
         denoiser_update = self.update_denoiser(
             self._make_denoiser_batch(
                 prepared=prepared,
@@ -300,7 +289,6 @@ class Trainer:
             and transition == 0
             and selection is not None
             and selection.source in ("real", "shared")
-            and measured is not None
         ):
             self.conditions.anchor_bank.add(
                 prepared.domain,
@@ -336,31 +324,108 @@ class Trainer:
             connectivity_r1=connectivity_r1,
         )
 
+    def prepare_step(
+        self,
+        step: int,
+        transition: int | None,
+    ) -> StepPreparation:
+        self.denoiser.train()
+        for critic in self.critic_modules():
+            critic.train()
+
+        domain = self.conditions.sample_target_domain()
+        if self.critic_groups_by_domain is not None:
+            self._use_critic_groups(self.critic_groups_by_domain[domain])
+        self.conditions.active_axes = self.active_axes
+        model_domain = self.conditions.sample_domain_condition(domain)
+        batch_domains = self.conditions.select_batch_domains(domain)
+        batches = self.conditions.get_batches(domain, batch_domains)
+        critic_domains = self.conditions.make_critic_domains(
+            domain,
+            model_domain,
+            batch_domains,
+        )
+        if self.conditions.bank is not None:
+            prepared = self.conditions.prepare_sr_step(
+                domain, model_domain, critic_domains, batches, transition
+            )
+        else:
+            prepared = self.conditions.prepare_lr_step(
+                step, domain, model_domain, critic_domains, batches, transition
+            )
+        self.diagnostics.update(prepared.diagnostics)
+        ramp = self.conditions.schedule_ramp(
+            step,
+            self.settings.group_statistics_start_step,
+            self.settings.group_statistics_ramp_steps,
+        )
+        return replace(prepared, group_statistics_ramp=ramp)
+
+    def generate_pair(
+        self,
+        transition: int,
+        model_conditions: dict[str, torch.Tensor],
+        volume_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        shape = (
+            self.settings.volume_batch_size,
+            self.settings.num_phases,
+            volume_size,
+            volume_size,
+            volume_size,
+        )
+        current = torch.randn(shape, device=self.device, dtype=torch.float32)
+
+        with torch.no_grad(), self.autocast():
+            for index in reversed(range(transition + 1, self.diffusion.timesteps)):
+                time = self.make_time(index, current.shape[0])
+                latent = self.sample_latent(current.shape[0], current.dtype)
+                prediction = self.denoiser(
+                    current,
+                    time,
+                    latent,
+                    **model_conditions,
+                )
+                current = self.diffusion.sample_posterior(
+                    current,
+                    prediction,
+                    index,
+                )
+
+        current = current.detach()
+        time = self.make_time(transition, current.shape[0])
+        latent = self.sample_latent(current.shape[0], current.dtype)
+        with self.autocast():
+            logits = self.denoiser.compute_logits(
+                current,
+                time,
+                latent,
+                **model_conditions,
+            )
+            prediction = self.denoiser.decode(logits)
+            previous = self.diffusion.sample_posterior(
+                current,
+                prediction,
+                transition,
+            )
+        return previous, current, logits, prediction
+
     def _sample_fake_pairs(
         self,
         previous: torch.Tensor,
         current: torch.Tensor,
         prepared: StepPreparation,
+        volume_height: torch.Tensor | None,
+        has_profile: bool,
     ) -> SampledPairs:
         real = prepared.real
         selection = prepared.selection
-        anchor = None if selection is None else selection.condition
-        measured = None if selection is None else selection.measured
         anchor_present = prepared.presence.anchor
-        visible = (
-            None if anchor is None else self.visible_anchor(anchor, anchor_present)
-        )
-        excluded = (
-            None if measured is None else self.visible_anchor(measured, anchor_present)
-        )
+        visible = excluded = None
+        if selection is not None:
+            visible = self.visible_anchor(selection.condition, anchor_present)
+            excluded = self.visible_anchor(selection.measured, anchor_present)
         result = SampledPairs(pairs={})
-        profile = self._critic_profile(prepared)
-        volume_height = self._with_profile(
-            prepared.model_conditions.get("height"),
-            profile,
-            prepared.presence.vf.to(self.device),
-            previous.shape[-3:],
-        )
         for axis in self.active_axes:
             height = volume_height if axis in real.heights else None
             pairs = sample_pairs(
@@ -378,14 +443,9 @@ class Trainer:
             result.pairs[axis] = pairs[:2]
             if len(pairs) == 3:
                 result.heights[axis] = pairs[2][:, :1]
-                if profile is not None:
+                if has_profile:
                     result.profiles[axis] = pairs[2][:, 1:]
         return result
-
-    def _critic_profile(self, prepared: StepPreparation) -> torch.Tensor | None:
-        if not self.settings.profile_settings.get("critic_enabled", False):
-            return None
-        return prepared.model_conditions.get("profile")
 
     def _anchor_visibility(self, presence) -> torch.Tensor:
         # With profiles on, an anchor counts only where its profile is visible too.
@@ -413,19 +473,16 @@ class Trainer:
         seam_domains: torch.Tensor | None = None,
     ) -> DenoiserBatch:
         selection = prepared.selection
+        # SR never selects anchors, so a selection implies an LR step.
         continuity = (
-            self.conditions.bank is None
-            and self.settings.loss.anchor_continuity_weight > 0
-            and selection is not None
-            and selection.measured is not None
+            selection is not None and self.settings.loss.anchor_continuity_weight > 0
+        )
+        real_transition = (
+            self.settings.loss.real_transition_weight > 0 and prepared.transition == 0
         )
         statistics = (
             self._transition_statistics(prepared)
-            if continuity
-            or (
-                self.settings.loss.real_transition_weight > 0
-                and prepared.transition == 0
-            )
+            if continuity or real_transition
             else None
         )
         return DenoiserBatch(
@@ -437,12 +494,7 @@ class Trainer:
             logits=logits,
             clean_probs=clean_probs,
             anchor=None if selection is None else selection.condition,
-            anchor_observed_mask=(
-                None if selection is None else selection.observed_mask
-            ),
-            anchor_observed_axis_masks=(
-                None if selection is None else selection.observed_axis_masks
-            ),
+            anchor_measured=None if selection is None else selection.measured,
             anchor_present=prepared.presence.anchor,
             anchor_ramp=prepared.anchor_ramp,
             connectivity_ramp=prepared.connectivity_ramp,
@@ -453,8 +505,10 @@ class Trainer:
             profile=prepared.model_conditions.get("profile"),
             coarse_target=prepared.coarse_target,
             coarse_mask=prepared.coarse_mask,
-            real_transition_loss=self._real_transition_loss(
-                prepared, clean_probs, statistics
+            real_transition_loss=(
+                self._real_transition_loss(prepared, clean_probs, statistics)
+                if real_transition
+                else None
             ),
             anchor_continuity_loss=(
                 self._anchor_continuity_loss(prepared, clean_probs, statistics)
@@ -497,7 +551,7 @@ class Trainer:
 
     def _anchor_neighborhood_loss(self, prepared, clean_probs):
         selection = prepared.selection
-        if selection is None or selection.condition is None:
+        if selection is None:
             return None
         with torch.set_grad_enabled(
             torch.is_grad_enabled()
@@ -512,8 +566,6 @@ class Trainer:
         return loss
 
     def _real_transition_loss(self, prepared, clean_probs, statistics=None):
-        if self.settings.loss.real_transition_weight == 0.0 or prepared.transition != 0:
-            return None
         real, fake, real_heights, fake_heights = {}, {}, {}, {}
         height = prepared.model_conditions.get("height")
         for axis in self.streams[prepared.domain]:
@@ -547,43 +599,6 @@ class Trainer:
         self.diagnostics.update(diagnostics)
         return loss
 
-    def prepare_step(
-        self,
-        step: int,
-        transition: int | None,
-    ) -> StepPreparation:
-        self.denoiser.train()
-        for critic in self.critic_modules():
-            critic.train()
-
-        domain = self.conditions.sample_target_domain()
-        if self.critic_groups_by_domain is not None:
-            self._use_critic_groups(self.critic_groups_by_domain[domain])
-        self.conditions.active_axes = self.active_axes
-        model_domain = self.conditions.sample_domain_condition(domain)
-        batch_domains = self.conditions.select_batch_domains(domain)
-        batches = self.conditions.get_batches(domain, batch_domains)
-        critic_domains = self.conditions.make_critic_domains(
-            domain,
-            model_domain,
-            batch_domains,
-        )
-        if self.conditions.bank is not None:
-            prepared = self.conditions.prepare_sr_step(
-                domain, model_domain, critic_domains, batches, transition
-            )
-        else:
-            prepared = self.conditions.prepare_lr_step(
-                step, domain, model_domain, critic_domains, batches, transition
-            )
-        self.diagnostics.update(prepared.diagnostics)
-        ramp = self.conditions.schedule_ramp(
-            step,
-            self.settings.group_statistics_start_step,
-            self.settings.group_statistics_ramp_steps,
-        )
-        return replace(prepared, group_statistics_ramp=ramp)
-
     def make_connectivity_triplets(
         self,
         prediction: torch.Tensor,
@@ -593,8 +608,7 @@ class Trainer:
         visible: torch.Tensor | None = None,
         source: str | None = None,
         height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
-        profile_present: torch.Tensor | None = None,
+        has_profile: bool = False,
     ) -> tuple[TripletBatch, TripletBatch]:
         empty = TripletBatch(
             values=prediction.new_empty(
@@ -619,10 +633,6 @@ class Trainer:
         ):
             return empty, empty
         anchor = self.visible_anchor(anchor, visible)
-
-        height = self._with_profile(
-            height, profile, profile_present, prediction.shape[-3:]
-        )
         real, fake = self.anchor_triplets.sample(
             prediction,
             reference_prediction,
@@ -635,23 +645,11 @@ class Trainer:
             else (real.values, fake.values, real.height),
             plane=real.axes,
         )
+        height = None if real.height is None else augmented[2][:, :, :1]
+        profile = augmented[2][:, :, 1:] if has_profile else None
         return (
-            TripletBatch(
-                values=augmented[0],
-                height=None if real.height is None else augmented[2][:, :, :1],
-                profile=augmented[2][:, :, 1:] if profile is not None else None,
-                axes=real.axes,
-                gaps=real.gaps,
-                center_slots=real.center_slots,
-            ),
-            TripletBatch(
-                values=augmented[1],
-                height=None if real.height is None else augmented[2][:, :, :1],
-                profile=augmented[2][:, :, 1:] if profile is not None else None,
-                axes=fake.axes,
-                gaps=fake.gaps,
-                center_slots=fake.center_slots,
-            ),
+            replace(real, values=augmented[0], height=height, profile=profile),
+            replace(fake, values=augmented[1], height=height, profile=profile),
         )
 
     def make_seam_bands(
@@ -704,55 +702,6 @@ class Trainer:
             axis_masks=anchor.axis_masks & mask,
             active_batches=tuple(visible.nonzero().flatten().tolist()),
         )
-
-    def generate_pair(
-        self,
-        transition: int,
-        model_conditions: dict[str, torch.Tensor],
-        volume_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        shape = (
-            self.settings.volume_batch_size,
-            self.settings.num_phases,
-            volume_size,
-            volume_size,
-            volume_size,
-        )
-        current = torch.randn(shape, device=self.device, dtype=torch.float32)
-
-        with torch.no_grad(), self.autocast():
-            for index in reversed(range(transition + 1, self.diffusion.timesteps)):
-                time = self.make_time(index, current.shape[0])
-                latent = self.sample_latent(current.shape[0], current.dtype)
-                prediction = self.denoiser(
-                    current,
-                    time,
-                    latent,
-                    **model_conditions,
-                )
-                current = self.diffusion.sample_posterior(
-                    current,
-                    prediction,
-                    index,
-                )
-
-        current = current.detach()
-        time = self.make_time(transition, current.shape[0])
-        latent = self.sample_latent(current.shape[0], current.dtype)
-        with self.autocast():
-            logits = self.denoiser.compute_logits(
-                current,
-                time,
-                latent,
-                **model_conditions,
-            )
-            prediction = self.denoiser.decode(logits)
-            previous = self.diffusion.sample_posterior(
-                current,
-                prediction,
-                transition,
-            )
-        return previous, current, logits, prediction
 
     def regularization(self, name: str) -> tuple[bool, bool, bool]:
         """Lazy R1/R2 schedule for one critic's next update."""
@@ -910,8 +859,12 @@ class Trainer:
         fake_values = fake.values.detach().float().requires_grad_(apply_r2)
         autocast = self.autocast(self.settings.amp_enabled and not regularize)
         with autocast:
-            real_score = self._score_triplets(real, real_values, domains)
-            fake_score = self._score_triplets(fake, fake_values, domains)
+            real_score = score_triplets(
+                self.connectivity_critic, real, real_values, domains
+            )
+            fake_score = score_triplets(
+                self.connectivity_critic, fake, fake_values, domains
+            )
             losses = critic_objective(
                 real_score,
                 fake_score,
@@ -939,16 +892,6 @@ class Trainer:
             losses.r1.detach(),
             losses.adversarial.global_loss.detach(),
             losses.adversarial.local_loss.detach(),
-        )
-
-    def _score_triplets(self, batch: TripletBatch, values, domains):
-        return self.connectivity_critic(
-            values,
-            batch.axes,
-            batch.gaps,
-            domains,
-            **({"height": batch.height} if batch.height is not None else {}),
-            **({"profile": batch.profile} if batch.profile is not None else {}),
         )
 
     def update_seam_critic(

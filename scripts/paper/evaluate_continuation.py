@@ -13,10 +13,9 @@ from matplotlib.colors import ListedColormap, to_rgb
 from matplotlib.patches import Rectangle
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(SCRIPT_DIR))
 
+from evaluation_io import set_seed, summarize
 from make_anchor_asset import load_center_roi
 from make_assets import OUTPUT_DIR, PHASE_COLORS, ROI_COLOR, SAMPLE_PATH
 from provenance import build_provenance, file_record, validate_output_paths
@@ -76,6 +75,32 @@ def main() -> None:
     rows: list[dict[str, object]] = []
     examples: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     external_anchor = load_center_roi(generator.patch_size)
+
+    def run_case(condition, seed, anchor, axis, index, case_seed):
+        set_seed(case_seed, device)
+        generated, baseline = generate_with_baseline(
+            generator,
+            (PlaneAnchor(anchor, axis, index),),
+            anchor_strength,
+            guidance=guidance,
+            domain=args.domain,
+            margin=margin,
+        )
+        rows.append(
+            measure_case(
+                condition,
+                seed,
+                axis,
+                index,
+                anchor,
+                generated,
+                baseline,
+                generator.num_phases,
+            )
+        )
+        if seed == 0 and condition != INTERNAL:
+            examples[condition] = (anchor.cpu(), generated.cpu())
+
     for seed in SEEDS:
         set_seed(40_000 + seed, device)
         reference = generator.generate(
@@ -85,86 +110,36 @@ def main() -> None:
             domain=args.domain,
             margin=margin,
         )
+        index = generator.patch_size // 2
         for axis in INTERNAL_AXES:
-            index = generator.patch_size // 2
-            anchor = reference.movedim(axis, 0)[index]
-            generated, baseline = generate_pair(
-                generator,
-                anchor,
+            run_case(
+                INTERNAL,
+                seed,
+                reference.movedim(axis, 0)[index],
                 axis,
                 index,
-                seed=50_000 + seed * len(INTERNAL_AXES) + axis,
-                domain=args.domain,
-                guidance=guidance,
-                anchor_strength=anchor_strength,
-                margin=margin,
+                50_000 + seed * len(INTERNAL_AXES) + axis,
             )
-            rows.append(
-                measure_case(
-                    INTERNAL,
-                    seed,
-                    axis,
-                    index,
-                    anchor,
-                    generated,
-                    baseline,
-                    generator.num_phases,
-                )
-            )
+        run_case(BOUNDARY, seed, reference[0], 0, 0, 60_000 + seed)
+        run_case(EXTERNAL, seed, external_anchor, 0, 0, 70_000 + seed)
 
-        generated, baseline = generate_pair(
-            generator,
-            reference[0],
-            axis=0,
-            index=0,
-            seed=60_000 + seed,
-            domain=args.domain,
-            guidance=guidance,
-            anchor_strength=anchor_strength,
-            margin=margin,
-        )
-        rows.append(
-            measure_case(
-                BOUNDARY,
-                seed,
-                0,
-                0,
-                reference[0],
-                generated,
-                baseline,
-                generator.num_phases,
-            )
-        )
-        if seed == 0:
-            examples[BOUNDARY] = (reference[0].cpu(), generated.cpu())
-
-        generated, baseline = generate_pair(
-            generator,
-            external_anchor,
-            axis=0,
-            index=0,
-            seed=70_000 + seed,
-            domain=args.domain,
-            guidance=guidance,
-            anchor_strength=anchor_strength,
-            margin=margin,
-        )
-        rows.append(
-            measure_case(
-                EXTERNAL,
-                seed,
-                0,
-                0,
-                external_anchor,
-                generated,
-                baseline,
-                generator.num_phases,
-            )
-        )
-        if seed == 0:
-            examples[EXTERNAL] = (external_anchor.cpu(), generated.cpu())
-
-    summary = summarize(rows)
+    summary = summarize(
+        rows,
+        (INTERNAL, BOUNDARY, EXTERNAL),
+        (
+            "pool4_similarity",
+            "baseline_pool4_similarity",
+            "pool4_gain",
+            "pixel_accuracy",
+            "baseline_pixel_accuracy",
+            "pixel_gain",
+            "first_change_ratio",
+            "smoothness_p95_ratio",
+            "smoothness_peak_ratio",
+            "farthest_drift",
+            "mean_drift",
+        ),
+    )
     render(examples, generator.num_phases, OUTPUT)
     METADATA.write_text(
         json.dumps(
@@ -212,29 +187,6 @@ def main() -> None:
     print_summary(summary)
     print(f"Figure  : {OUTPUT.resolve()}")
     print(f"Metadata: {METADATA.resolve()}")
-
-
-def generate_pair(
-    generator,
-    anchor: torch.Tensor,
-    axis: int,
-    index: int,
-    *,
-    seed: int,
-    domain: int,
-    guidance: float,
-    anchor_strength: float,
-    margin: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    set_seed(seed, generator.device)
-    return generate_with_baseline(
-        generator,
-        (PlaneAnchor(anchor, axis, index),),
-        anchor_strength,
-        guidance=guidance,
-        domain=domain,
-        margin=margin,
-    )
 
 
 def measure_case(
@@ -297,40 +249,6 @@ def pooled_similarity(
     return 1.0 - float(distance.mean())
 
 
-def summarize(rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    metrics = (
-        "pool4_similarity",
-        "baseline_pool4_similarity",
-        "pool4_gain",
-        "pixel_accuracy",
-        "baseline_pixel_accuracy",
-        "pixel_gain",
-        "first_change_ratio",
-        "smoothness_p95_ratio",
-        "smoothness_peak_ratio",
-        "farthest_drift",
-        "mean_drift",
-    )
-    result = []
-    for condition in (INTERNAL, BOUNDARY, EXTERNAL):
-        selected = [row for row in rows if row["condition"] == condition]
-        summary: dict[str, object] = {
-            "condition": condition,
-            "samples": len(selected),
-        }
-        for metric in metrics:
-            values = np.asarray(
-                [row[metric] for row in selected if row[metric] is not None],
-                dtype=float,
-            )
-            summary[f"{metric}_mean"] = float(values.mean()) if values.size else None
-            summary[f"{metric}_std"] = (
-                float(values.std(ddof=1)) if values.size > 1 else None
-            )
-        result.append(summary)
-    return result
-
-
 def render(
     examples: dict[str, tuple[torch.Tensor, torch.Tensor]],
     num_phases: int,
@@ -382,12 +300,6 @@ def render(
     figure.tight_layout()
     figure.savefig(output, dpi=180, bbox_inches="tight", pad_inches=0.05)
     plt.close(figure)
-
-
-def set_seed(seed: int, device: torch.device) -> None:
-    torch.manual_seed(seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(seed)
 
 
 def print_summary(rows: list[dict[str, object]]) -> None:

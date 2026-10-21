@@ -120,18 +120,12 @@ class TileSampler:
         plan: TilePlan,
         output: torch.Tensor | None,
         fusion: Fusion,
-        tile_buffer: TileBuffer | None = None,
+        tile_buffer: TileBuffer,
         guidance: float = 1.0,
         tile_conditions=None,
         base: VolumeCondition | None = None,
     ) -> None:
         generator = self.generator
-        if tile_buffer is None:
-            tile_buffer = TileBuffer(
-                generator.num_phases,
-                tuple(min(plan.tile_size, size) for size in plan.shape),
-                current.values.device.type == "cpu" and generator.device.type == "cuda",
-            )
         fusion.pred_sum.zero_()
         fusion.weight_sum.zero_()
         layer_start = 0

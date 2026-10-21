@@ -13,21 +13,23 @@ from scripts.common.cli import (
     add_generation_arguments,
     check_parser,
     height_options,
+    non_negative_int,
     prepare_check,
     save_preview,
 )
 from scripts.common.diagnostic import (
     anchor_accuracy,
     format_percent,
+    format_profile,
     format_ratio,
     generate_with_baseline,
+    middle_slices,
     select_display_index,
     select_indices,
     show_napari,
 )
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
-from src.config.generation import load_generation_settings
 from src.device import check_device
 from src.evaluate.anchor import (
     SliceSmoothness,
@@ -52,30 +54,19 @@ def main() -> None:
     )
     parser.add_argument(
         "--count",
-        type=int,
+        type=non_negative_int,
         default=3,
         help="number of evenly distributed anchor planes to use (default: 3)",
     )
     add_generation_arguments(parser, anchors=True)
     args = parser.parse_args()
-    args = prepare_check(args, __file__)
-    if args.count < 0:
-        parser.error("--count must be non-negative.")
-    settings = load_generation_settings()
-    anchor_strength = (
-        settings.anchor_strength
-        if args.anchor_strength is None
-        else args.anchor_strength
-    )
-    anchor_count = args.count if anchor_strength > 0.0 else 0
+    prepare_check(args, __file__)
+    anchor_count = args.count if args.anchor_strength > 0.0 else 0
 
     device = check_device(args.device)
-    weight = args.weight
-    print(f"\nWeights : {Path(weight).resolve()}")
+    print(f"\nWeights : {args.weight.resolve()}")
 
-    generator = load_generator(weight, device=device)
-    guidance = settings.guidance if args.guidance is None else args.guidance
-    args.guidance, args.anchor_strength = guidance, anchor_strength
+    generator = load_generator(args.weight, device=device)
     if anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
     with seeded_rng(args.seed, device):
@@ -83,32 +74,28 @@ def main() -> None:
         target = generator.generate(
             anchors=(),
             anchor_strength=0.0,
-            guidance=guidance,
+            guidance=args.guidance,
             domain=args.domain,
             **height_options(args),
             margin=generator.default_margin,
         )
-        target_slices = get_slices(target, args.axis)
+        target_slices = target.movedim(args.axis, 0)
         indices = select_indices(target_slices.shape[0], anchor_count)
         anchors = tuple(
             PlaneAnchor(image=target_slices[index], axis=args.axis, index=index)
             for index in indices
         )
-        print_selection(
-            shape=tuple(target.shape),
-            device=device,
-            axis=args.axis,
-            indices=indices,
-        )
+        print(f"Input   : {' x '.join(map(str, target.shape))}, {device}")
+        print(f"Anchors : {len(indices)} planes on axis {args.axis}")
         if indices:
-            print(f"Guidance : strength {anchor_strength:.2f}")
+            print(f"Guidance : strength {args.anchor_strength:.2f}")
         print("Generating conditioned sample...", flush=True)
 
         gen, baseline = generate_with_baseline(
             generator,
             anchors,
-            anchor_strength,
-            guidance=guidance,
+            args.anchor_strength,
+            guidance=args.guidance,
             domain=args.domain,
             margin=generator.default_margin,
             **height_options(args),
@@ -116,7 +103,7 @@ def main() -> None:
     save_volume(gen, args.out)
     print(f"Saved   : {args.out.resolve()}", flush=True)
     save_preview(gen, args, generator.num_phases)
-    gen_slices = get_slices(gen, args.axis)
+    gen_slices = gen.movedim(args.axis, 0)
     anchor_acc = anchor_accuracy(gen, target, indices, args.axis)
     index = select_display_index(generator.patch_size, indices)
     target_plane = target_slices[index]
@@ -132,11 +119,7 @@ def main() -> None:
     )
     smoothness = measure_slice_smoothness(gen, indices, args.axis, baseline)
 
-    print_quality(
-        anchor_acc=anchor_acc,
-        baseline_profile=baseline_profile,
-        smoothness=smoothness,
-    )
+    print_quality(anchor_acc, baseline_profile, smoothness)
     if args.no_view:
         return
     if args.napari:
@@ -155,61 +138,33 @@ def main() -> None:
         )
 
 
-def print_selection(
-    shape: tuple[int, ...],
-    device: torch.device,
-    axis: int,
-    indices: tuple[int, ...],
-) -> None:
-    print(f"Input   : {' x '.join(map(str, shape))}, {device}")
-    print(f"Anchors : {len(indices)} planes on axis {axis}")
-
-
 def print_quality(
     anchor_acc: float | None,
-    baseline_profile: tuple[float | None, ...] = (),
-    smoothness: SliceSmoothness | None = None,
+    baseline_profile: tuple[float | None, ...],
+    smoothness: SliceSmoothness,
 ) -> None:
     print("\nQuality")
     score = "n/a" if anchor_acc is None else f"{anchor_acc:7.2%}"
     print(f"Anchor match  : {score}")
-    if smoothness is not None:
-        distance = (
-            "n/a"
-            if smoothness.peak_anchor_distance is None
-            else str(smoothness.peak_anchor_distance)
-        )
-        print(
-            "Smoothness    : "
-            f"p95 {format_ratio(smoothness.p95_ratio)}, "
-            f"peak {format_ratio(smoothness.max_ratio)} at distance {distance}"
-        )
-        if smoothness.reversal_rate is not None:
-            print(
-                "Surface bumps : "
-                f"{smoothness.reversal_rate:.2%} vs baseline "
-                f"{format_percent(smoothness.baseline_reversal_rate)} "
-                f"({format_ratio(smoothness.reversal_ratio)})"
-            )
-    if baseline_profile:
-        print(f"Anchor effect  : {format_profile(baseline_profile)}")
-
-
-def format_profile(
-    values: tuple[float | None, ...],
-) -> str:
-    valid = [
-        (distance, value) for distance, value in enumerate(values) if value is not None
-    ]
-    if not valid:
-        return "n/a"
-    anchor = next((value for distance, value in valid if distance == 0), None)
-    mean = sum(value for _, value in valid) / len(valid)
-    distance, farthest = valid[-1]
-    return (
-        f"anchor {format_percent(anchor)}, mean {format_percent(mean)}, "
-        f"farthest {format_percent(farthest)} at distance {distance}"
+    distance = (
+        "n/a"
+        if smoothness.peak_anchor_distance is None
+        else str(smoothness.peak_anchor_distance)
     )
+    print(
+        "Smoothness    : "
+        f"p95 {format_ratio(smoothness.p95_ratio)}, "
+        f"peak {format_ratio(smoothness.max_ratio)} at distance {distance}"
+    )
+    if smoothness.reversal_rate is not None:
+        print(
+            "Surface bumps : "
+            f"{smoothness.reversal_rate:.2%} vs baseline "
+            f"{format_percent(smoothness.baseline_reversal_rate)} "
+            f"({format_ratio(smoothness.reversal_ratio)})"
+        )
+    if baseline_profile:
+        print(f"Anchor effect  : {format_profile(baseline_profile, 'anchor')}")
 
 
 def show_result(
@@ -223,7 +178,7 @@ def show_result(
     num_phases: int,
     accuracy: float,
 ) -> None:
-    slices = get_slices(vol, axis)
+    slices = vol.movedim(axis, 0)
     cmap = "gray"
     diff_cmap = ListedColormap(("#f7f7f7", "#e63946"))
     fig, panels = plt.subplots(3, 3, figsize=(10, 9))
@@ -276,7 +231,7 @@ def show_result(
         orth_axes,
         strict=True,
     ):
-        section = get_slices(vol, view_axis)[vol.shape[view_axis] // 2]
+        section = middle_slices(vol)[view_axis]
         anchor_dim = axis if axis < view_axis else axis - 1
         oriented = section if anchor_dim == 0 else section.T
         panel.imshow(
@@ -312,10 +267,6 @@ def show_result(
     )
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     plt.show()
-
-
-def get_slices(vol: torch.Tensor, axis: int) -> torch.Tensor:
-    return vol.movedim(axis, 0)
 
 
 if __name__ == "__main__":

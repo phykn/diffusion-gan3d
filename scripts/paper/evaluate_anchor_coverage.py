@@ -9,10 +9,9 @@ import matplotlib.pyplot as plt
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(SCRIPT_DIR))
 
+from evaluation_io import set_seed
 from make_assets import OUTPUT_DIR
 from provenance import build_provenance, file_record, validate_output_paths
 
@@ -147,12 +146,6 @@ def nested_plane_order(size: int) -> tuple[int, ...]:
         selected.append(choice)
         remaining.remove(choice)
     return tuple(selected)
-
-
-def set_seed(seed: int, device: torch.device) -> None:
-    torch.manual_seed(seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(seed)
 
 
 def render(rows: list[dict[str, object]], output: Path) -> None:

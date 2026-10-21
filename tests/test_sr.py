@@ -276,7 +276,6 @@ def test_sr_scale_changes_hr_without_changing_lr_data_or_preparation(tmp_path, s
 
     api = object.__new__(LowResolutionAPI)
     api.data = cfg["data"]
-    api._crop_size = 16
     api.generator = SimpleNamespace(num_phases=3, patch_size=8)
     assert torch.equal(api.prepare_image(labels), expected_lr)
 
@@ -323,7 +322,6 @@ def test_web_anchor_preparation_matches_new_dataset(tmp_path):
     cfg = sr_config(tmp_path)
     api = object.__new__(LowResolutionAPI)
     api.data = cfg["data"]
-    api._crop_size = 16
     api.generator = SimpleNamespace(num_phases=3, patch_size=8)
     crop = torch.arange(16 * 16).reshape(16, 16) % 3
     expected = resize_crop(crop, 8, 3)
@@ -489,8 +487,8 @@ def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
 ):
     from types import SimpleNamespace
 
+    import src.predict.memory as memory
     import src.predict.sr.inference as sr_module
-    import src.predict.sr.memory as sr_memory
 
     cfg = sr_config(tmp_path, scale=2)
     path = tmp_path / "model.pt"
@@ -500,7 +498,7 @@ def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
     if fractions:
         low = torch.ones(3, 8, 8, 8) / 3
     monkeypatch.setattr(
-        sr_memory.psutil, "virtual_memory", lambda: SimpleNamespace(available=1)
+        memory.psutil, "virtual_memory", lambda: SimpleNamespace(available=1)
     )
 
     def fail(*args, **kwargs):
@@ -508,7 +506,7 @@ def test_sr_rejects_memory_budget_before_converting_coarse_or_predicting(
 
     monkeypatch.setattr(sr_module, "fraction_channels", fail)
     monkeypatch.setattr(sr_module, "resize_phases", fail)
-    monkeypatch.setattr(api, "_predict", fail)
+    monkeypatch.setattr(api, "_sample_clean", fail)
     with pytest.raises(MemoryError, match="SR RAM"):
         api.refine_probs(low)
 
@@ -566,7 +564,7 @@ def test_sr_labels_match_probabilities_and_use_correct_budget(
         def fail(*args, **kwargs):
             pytest.fail("single-block labels materialized CPU probabilities")
 
-        monkeypatch.setattr(api, "_predict", fail)
+        monkeypatch.setattr(sr_module, "owned_clean_to_probs_", fail)
         monkeypatch.setattr(api, "refine_probs", fail)
     actual = api.refine(low, **options)
     assert modes == ["labels"]

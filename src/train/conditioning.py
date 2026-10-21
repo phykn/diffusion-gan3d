@@ -120,7 +120,9 @@ class ConditionSampler:
         transition: int | None,
     ) -> StepPreparation:
         own_batches = {axis: batches.images[axis] for axis in self.streams[domain]}
-        ramp = self.get_anchor_ramp(step)
+        ramp = self.schedule_ramp(
+            step, self.settings.anchor_start_step, self.settings.anchor_ramp_steps
+        )
         selection = (
             None
             if ramp == 0.0
@@ -298,7 +300,7 @@ class ConditionSampler:
         selection: AnchorSelection | None,
         owned_axes: tuple[int, ...],
     ) -> torch.Tensor:
-        if selection is not None and selection.measured is not None:
+        if selection is not None:
             measured = selection.measured
             mask = measured.mask[:, 0].float()
             sums = torch.einsum("bcdhw,bdhw->bc", measured.image.float(), mask)
@@ -314,24 +316,19 @@ class ConditionSampler:
 
     def sample_condition_presence(self, has_anchor: bool) -> ConditionPresence:
         batch = self.settings.volume_batch_size
-        anchor = torch.full(
-            (batch,),
-            has_anchor,
-            device="cpu",
-            dtype=torch.bool,
-        )
-        vf = torch.ones(batch, device="cpu", dtype=torch.bool)
+        probability = self.settings.cfg_drop_each_probability
         random = torch.rand(batch, device="cpu")
-        if has_anchor:
-            probability = self.settings.cfg_drop_each_probability
-            joint_null = random < probability
-            anchor_null = (random >= probability) & (random < 2.0 * probability)
-            vf_null = (random >= 2.0 * probability) & (random < 3.0 * probability)
-            anchor = ~(joint_null | anchor_null)
-            vf = ~(joint_null | vf_null)
-        else:
-            vf = random >= 2.0 * self.settings.cfg_drop_each_probability
-        return ConditionPresence(anchor=anchor, vf=vf)
+        if not has_anchor:
+            return ConditionPresence(
+                anchor=torch.zeros(batch, dtype=torch.bool),
+                vf=random >= 2.0 * probability,
+            )
+        joint_null = random < probability
+        anchor_null = (random >= probability) & (random < 2.0 * probability)
+        vf_null = (random >= 2.0 * probability) & (random < 3.0 * probability)
+        return ConditionPresence(
+            anchor=~(joint_null | anchor_null), vf=~(joint_null | vf_null)
+        )
 
     @staticmethod
     def make_model_conditions(
@@ -350,11 +347,6 @@ class ConditionSampler:
             conditions["anchor_image"] = anchor.image
             conditions["anchor_mask"] = anchor.mask * visible.to(anchor.mask.dtype)
         return conditions
-
-    def get_anchor_ramp(self, step: int) -> float:
-        return self.schedule_ramp(
-            step, self.settings.anchor_start_step, self.settings.anchor_ramp_steps
-        )
 
     @staticmethod
     def schedule_ramp(step: int, start: int, ramp: int) -> float:
@@ -384,8 +376,6 @@ class ConditionSampler:
             if replay is not None:
                 return AnchorSelection(
                     condition=replay.condition,
-                    observed_mask=replay.measured.mask,
-                    observed_axis_masks=replay.measured.axis_masks,
                     source="multi",
                     measured=replay.measured,
                     reference=replay.reference,
@@ -452,8 +442,6 @@ class ConditionSampler:
         )
         return AnchorSelection(
             condition=condition,
-            observed_mask=condition.mask,
-            observed_axis_masks=condition.axis_masks,
             source="shared" if use_shared else "real",
             measured=condition,
             height=self.volume_height(

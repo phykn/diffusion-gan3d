@@ -56,11 +56,13 @@ def refine_tiled(
             )
         else:
             values = whole
-        result = {"coarse": values, "corruption_level": values.new_zeros(1)}
-        height = api._height(expanded, origin, domain_id, height_origin, height_extent)
-        if height is not None:
-            result["height"] = height
-        return result
+        return {
+            "coarse": values,
+            "corruption_level": values.new_zeros(1),
+            "height": api._height(
+                expanded, origin, domain_id, height_origin, height_extent
+            ),
+        }
 
     return TileSampler(api.generator).sample(
         tiles,

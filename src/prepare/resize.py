@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from src.device import adaptive_pool, wide_dtype
+from src.device import adaptive_pool, assert_all, wide_dtype
 
 
 def scaled_size(size: int, scale: float) -> int:
@@ -33,10 +33,7 @@ def phase_channels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:
         raise ValueError(f"phase labels must be in [0, {num_phases - 1}].")
     indices = labels.to(torch.int64)
     valid = ((indices >= 0) & (indices < num_phases)).all()
-    if labels.device.type == "cuda":
-        torch._assert_async(valid, "phase labels are outside num_phases.")
-    elif not bool(valid):
-        raise ValueError(f"phase labels must be in [0, {num_phases - 1}].")
+    assert_all(valid, f"phase labels must be in [0, {num_phases - 1}].")
     channels = torch.zeros(
         (labels.shape[0], num_phases, *labels.shape[1:]),
         device=labels.device,

@@ -1,10 +1,10 @@
-import math
 from collections.abc import Mapping, Sequence
 from itertools import permutations
 
 import torch
 
-from src.plane import PLANE_DIRECTIONS, PLANES, get_axis
+from src.device import assert_all
+from src.plane import PLANE_DIRECTIONS, get_axis
 
 
 def augment_volumes(
@@ -41,10 +41,6 @@ class CriticAugment:
         real_only: bool = False,
     ) -> None:
         self.prob = float(prob)
-        if not math.isfinite(self.prob) or not 0 <= self.prob <= 1:
-            raise ValueError("augmentation probability must be between zero and one.")
-        if type(real_only) is not bool:
-            raise ValueError("augmentation.real_only must be true or false.")
         # Flipping fakes too makes a mirror-image bias (one-way particle tilt)
         # invisible to the plane critics; with mirror-symmetric data only reals
         # need it.
@@ -55,12 +51,6 @@ class CriticAugment:
                 raise ValueError("augmentation.planes must be a non-empty mapping.")
             self.plane_transforms = {}
             for plane, policy in planes.items():
-                if plane not in PLANES or not isinstance(policy, Mapping):
-                    raise ValueError(
-                        "augmentation.planes must map xy, xz or yz to policies."
-                    )
-                if set(policy) - {"flip_axes", "rotate_90"}:
-                    raise ValueError(f"unknown augmentation policy for {plane}.")
                 rows, cols = PLANE_DIRECTIONS[plane]
                 flips = policy.get("flip_axes", [])
                 rotate = policy.get("rotate_90", False)
@@ -151,12 +141,7 @@ class CriticAugment:
         valid = torch.zeros_like(axes, dtype=torch.bool)
         for axis in self.plane_transforms:
             valid |= axes == axis
-        if axes.device.type == "cuda":
-            torch._assert_async(
-                valid.all(), "missing augmentation policy for plane axis"
-            )
-        elif not bool(valid.all()):
-            raise ValueError("missing augmentation policy for plane axis")
+        assert_all(valid.all(), "missing augmentation policy for plane axis")
         for axis in self.plane_transforms:
             allowed = self.plane_transforms[axis]
             if not square:
@@ -178,15 +163,10 @@ class CriticAugment:
     ) -> torch.Tensor:
         height, width = inputs.shape[-2:]
         if height != width:
-            valid = (transforms.remainder(2) == 0).all()
-            if transforms.device.type == "cuda":
-                torch._assert_async(
-                    valid, "rectangular inputs require shape-preserving transforms."
-                )
-            elif not bool(valid):
-                raise ValueError(
-                    "rectangular inputs require shape-preserving transforms."
-                )
+            assert_all(
+                (transforms.remainder(2) == 0).all(),
+                "rectangular inputs require shape-preserving transforms.",
+            )
         maps = self.get_index_maps(inputs.device, height, width)
         indices = maps.index_select(0, transforms.to(torch.long))
         flattened = inputs.reshape(inputs.shape[0], -1, height * width)

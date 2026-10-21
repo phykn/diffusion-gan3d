@@ -2,6 +2,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
+from src.config.values import _integer
 from src.plane import PLANES, get_axis
 
 
@@ -31,8 +32,7 @@ def validate_sr_source(data: Mapping, base_data: Mapping) -> Mapping:
 def get_resolution(data: Mapping[str, object]) -> DataResolution:
     crop, low = data["crop_size"], data["lo_res_size"]
     for name, size in (("crop_size", crop), ("lo_res_size", low)):
-        if isinstance(size, bool) or not isinstance(size, int) or size < 1:
-            raise ValueError(f"{name} must be a positive integer.")
+        _integer(size, name)
     high = data.get("hi_res_size", low)
     if type(high) is not int or high < low:
         raise ValueError("hi_res_size must be an integer at least lo_res_size.")

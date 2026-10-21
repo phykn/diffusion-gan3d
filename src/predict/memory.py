@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import psutil
 import torch
 
-from src.predict.tiling.layout import parse_shape
+from src.predict.tiling.layout import check_overlap, parse_shape
 
 
 @dataclass(frozen=True)
@@ -53,13 +53,7 @@ def estimate_memory(
     tile_size = max(generation_shape) if tile_size is None else tile_size
     if isinstance(tile_size, bool) or not isinstance(tile_size, int) or tile_size < 1:
         raise ValueError("tile_size must be a positive integer.")
-    if (
-        isinstance(overlap, bool)
-        or not isinstance(overlap, int)
-        or overlap < 0
-        or 2 * overlap >= tile_size
-    ):
-        raise ValueError("overlap must satisfy 0 <= 2 * overlap < tile_size.")
+    check_overlap(tile_size, overlap)
     stride = tile_size - 2 * overlap
     tile_shape = tuple(min(size, tile_size) for size in generation_shape)
     voxels = math.prod(generation_shape)
@@ -82,11 +76,17 @@ def estimate_memory(
             if probabilities
             else voxels + math.prod(shape)
         ),
-        base_bytes=(12 * num_phases + 24) * math.prod(parse_shape(base_shape))
-        if base_shape is not None
-        else 0,
+        base_bytes=0 if base_shape is None else base_bytes(num_phases, base_shape),
         tiled=tiled,
     )
+
+
+def base_bytes(num_phases: int, shape) -> int:
+    return (12 * num_phases + 24) * math.prod(parse_shape(shape))
+
+
+def ram_budget() -> int:
+    return int(psutil.virtual_memory().available * 0.8)
 
 
 def tile_buffer_bytes(num_phases: int, shape: tuple[int, int, int]) -> int:
@@ -151,6 +151,5 @@ def select_storage(storage: str, estimate: MemoryEstimate, generator) -> str:
         cpu_required += estimate.storage_bytes
     if device.type != "cuda":
         cpu_required += reserve
-    cpu_budget = int(psutil.virtual_memory().available * 0.8)
-    require_memory(cpu_required, cpu_budget, "RAM")
+    require_memory(cpu_required, ram_budget(), "RAM")
     return storage

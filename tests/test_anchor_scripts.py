@@ -10,6 +10,7 @@ import tifffile
 import torch
 from PIL import Image
 
+import scripts.common.cli as cli
 from src.build.model import build_models
 from src.config.files import save_yaml
 from src.config.generation import GenerationSettings, load_generation_settings
@@ -46,8 +47,8 @@ def test_boundary_continuation_defaults_to_an_unconditioned_reference(
     output_path = tmp_path / "continuation.tiff"
 
     module = _load_script("05_check_continuation.py")
-    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -92,8 +93,8 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     figure_path = tmp_path / "continuation.png"
 
     module = _load_script("05_check_continuation.py")
-    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -224,8 +225,8 @@ def test_anchor_check_script_runs_with_generated_reference(
 
     filename = "03_check_anchor.py"
     module = _load_script(filename)
-    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -289,10 +290,10 @@ def test_anchor_graph_uses_nearest_selected_plane() -> None:
 def test_anchor_effect_profile_reports_parameter_free_distances() -> None:
     module = _load_script("03_check_anchor.py")
 
-    assert module.format_profile((0.2, 0.4, 0.8)) == (
+    assert module.format_profile((0.2, 0.4, 0.8), "anchor") == (
         "anchor 20.00%, mean 46.67%, farthest 80.00% at distance 2"
     )
-    assert module.format_profile((0.2, 0.4, None)) == (
+    assert module.format_profile((0.2, 0.4, None), "anchor") == (
         "anchor 20.00%, mean 30.00%, farthest 40.00% at distance 1"
     )
 
@@ -336,13 +337,13 @@ def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
     monkeypatch.setattr(
-        module,
+        cli,
         "load_generation_settings",
         lambda: GenerationSettings(),
     )
     monkeypatch.setattr(module, "show_result", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         module.sys,
         "argv",
@@ -393,12 +394,12 @@ def test_anchor_check_uses_generated_reference_and_same_rng_baseline(
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
     monkeypatch.setattr(
-        module,
+        cli,
         "load_generation_settings",
         lambda: GenerationSettings(),
     )
-    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         module.sys,
         "argv",
@@ -456,8 +457,8 @@ def test_unconditioned_check_routes_only_domain_condition(
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
     monkeypatch.setattr(module, "show_slices", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(
         module.sys,
         "argv",
@@ -693,8 +694,8 @@ def test_weight_directory_alone_saves_manual_check_results(
     save_model(run_dir / "generator.pt", model)
     module = _load_script(filename)
     monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(module.torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(sys, "argv", [filename, "--weight", str(run_dir), "--no-view"])
     module.main()
     results = list((tmp_path / "checks").glob("*/volume.tiff"))

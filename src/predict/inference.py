@@ -36,9 +36,7 @@ class LowResolutionAPI:
         self.settings = load_generation_settings()
         cfg = load_train_config(find_saved_config(self.weights))
         self.generator = build_generator(self.weights, cfg, device=self.device)
-        data = cfg["data"]
-        self.data = data
-        self._crop_size = data["crop_size"]
+        self.data = cfg["data"]
         self.scaled = TiledGenerator(self.generator)
 
     @property
@@ -48,7 +46,7 @@ class LowResolutionAPI:
 
     @property
     def crop_size(self) -> int:
-        return self._crop_size
+        return self.data["crop_size"]
 
     @property
     def num_phases(self) -> int:
@@ -72,9 +70,7 @@ class LowResolutionAPI:
         probabilities=False,
         base_shape=None,
     ):
-        if sum(value is not None for value in (blocks, shape, size)) > 1:
-            raise ValueError("blocks and shape and size cannot be provided together.")
-        tiled = blocks is not None or shape is not None
+        tiled = _tiling_mode(blocks, shape, size)
         overlap = self.settings.overlap if overlap is None else overlap
         if blocks is not None:
             shape = self.scaled.shape_from_blocks(blocks, overlap)
@@ -193,24 +189,24 @@ class LowResolutionAPI:
         self,
         anchors: Sequence[PlaneAnchor],
         *,
-        probabilities: bool,
-        blocks: int | Sequence[int] | None = None,
-        shape: int | Sequence[int] | None = None,
-        size: int | None = None,
-        base: torch.Tensor | None = None,
-        vf: Sequence[float] | None = None,
-        domain: int | None = None,
-        seed: int | None = None,
-        guidance: float | None = None,
-        anchor_strength: float | None = None,
-        overlap: int | None = None,
-        storage: str = "auto",
-        progress: bool = False,
-        height_origin: float = 0.0,
-        base_offset=None,
-        preserve_base: bool = False,
-        height_extent: float | None = None,
-        vf_profile: dict | None = None,
+        probabilities,
+        blocks,
+        shape,
+        size,
+        base,
+        vf,
+        domain,
+        seed,
+        guidance,
+        anchor_strength,
+        overlap,
+        storage,
+        progress,
+        height_origin,
+        base_offset,
+        preserve_base,
+        height_extent,
+        vf_profile,
     ) -> torch.Tensor:
         """blocks or shape tile the output; size, or neither, samples one block.
 
@@ -253,14 +249,19 @@ class LowResolutionAPI:
             return sampler.generate(**common)
 
 
+def _tiling_mode(blocks, shape, size) -> bool:
+    if blocks is not None and shape is not None:
+        raise ValueError("blocks and shape cannot be provided together.")
+    tiled = blocks is not None or shape is not None
+    if tiled and size is not None:
+        raise ValueError("size cannot be combined with blocks or shape.")
+    return tiled
+
+
 def _validate_generation_options(
     blocks, shape, size, base, base_offset, preserve_base, storage, overlap
 ) -> bool:
-    tiled = blocks is not None or shape is not None
-    if blocks is not None and shape is not None:
-        raise ValueError("blocks and shape cannot be provided together.")
-    if tiled and size is not None:
-        raise ValueError("size cannot be combined with blocks or shape.")
+    tiled = _tiling_mode(blocks, shape, size)
     if not tiled and base is not None:
         raise ValueError("base requires blocks or shape.")
     if base is None and (base_offset is not None or preserve_base):

@@ -10,7 +10,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
     add_device_argument,
+    add_height_arguments,
     check_parser,
+    height_options,
     non_negative_int,
     positive_int,
     result_directory,
@@ -52,6 +54,7 @@ def main() -> None:
     parser.add_argument("--min-voxels", type=non_negative_int, default=8)
     parser.add_argument("--out", type=Path, help="report.json path")
     add_device_argument(parser)
+    add_height_arguments(parser)
     args = parser.parse_args()
     if args.weight is None and not args.volumes:
         parser.error("give --weight or --volumes.")
@@ -106,6 +109,7 @@ def generate(args: argparse.Namespace) -> list[np.ndarray]:
                 vf=None,
                 guidance=guidance,
                 domain=args.domain,
+                **height_options(args),
                 margin=generator.default_margin,
             )
         volumes.append(vol.detach().cpu().numpy())

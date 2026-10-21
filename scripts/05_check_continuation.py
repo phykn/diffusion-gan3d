@@ -19,6 +19,7 @@ from scripts.common.cli import (
 )
 from scripts.common.diagnostic import (
     format_percent,
+    format_profile,
     format_ratio,
     generate_with_baseline,
     show_napari,
@@ -26,7 +27,6 @@ from scripts.common.diagnostic import (
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.config.files import find_saved_config
-from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
 from src.device import check_device
 from src.evaluate.anchor import (
@@ -56,24 +56,16 @@ def main() -> None:
     )
     add_generation_arguments(parser, anchors=True, origin_default=None)
     args = parser.parse_args()
-    args = prepare_check(args, __file__)
+    prepare_check(args, __file__)
     if args.figure is None:
         args.figure = args.out.with_name(args.out.stem + "_continuation.png")
 
     device = check_device(args.device)
     generator = load_generator(args.weight, device=device)
-    settings = load_generation_settings()
-    guidance = settings.guidance if args.guidance is None else args.guidance
-    anchor_strength = (
-        settings.anchor_strength
-        if args.anchor_strength is None
-        else args.anchor_strength
-    )
-    args.guidance, args.anchor_strength = guidance, anchor_strength
     index = 0 if args.side == "start" else generator.patch_size - 1
     print(f"\nWeights : {args.weight.resolve()}")
     print(f"Boundary: axis {args.axis}, {args.side} plane {index}")
-    print(f"Strength: {anchor_strength:.2f}")
+    print(f"Strength: {args.anchor_strength:.2f}")
     with seeded_rng(args.seed, device):
         if args.anchor is None:
             print("Anchor  : unconditioned reference boundary")
@@ -81,7 +73,7 @@ def main() -> None:
             reference = generator.generate(
                 anchors=(),
                 anchor_strength=0.0,
-                guidance=guidance,
+                guidance=args.guidance,
                 domain=args.domain,
                 **height_options(args),
                 margin=generator.default_margin,
@@ -114,8 +106,8 @@ def main() -> None:
         generated, baseline = generate_with_baseline(
             generator,
             (anchor,),
-            anchor_strength,
-            guidance=guidance,
+            args.anchor_strength,
+            guidance=args.guidance,
             domain=args.domain,
             margin=generator.default_margin,
             **height_options(args),
@@ -211,7 +203,7 @@ def print_quality(
         f"{format_percent(smoothness.baseline_reversal_rate)} "
         f"({format_ratio(smoothness.reversal_ratio)})"
     )
-    print(f"Anchor effect : {format_profile(profile)}")
+    print(f"Anchor effect : {format_profile(profile, 'boundary')}")
 
 
 def render_strip(
@@ -280,21 +272,6 @@ def render_strip(
     if show:
         plt.show()
     plt.close(figure)
-
-
-def format_profile(values: tuple[float | None, ...]) -> str:
-    valid = [
-        (distance, value) for distance, value in enumerate(values) if value is not None
-    ]
-    if not valid:
-        return "n/a"
-    near = valid[0][1]
-    mean = sum(value for _, value in valid) / len(valid)
-    distance, farthest = valid[-1]
-    return (
-        f"boundary {format_percent(near)}, mean {format_percent(mean)}, "
-        f"farthest {format_percent(farthest)} at distance {distance}"
-    )
 
 
 if __name__ == "__main__":

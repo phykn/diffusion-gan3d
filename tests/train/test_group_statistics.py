@@ -215,8 +215,7 @@ def objective_batch():
         logits=probs,
         clean_probs=probs,
         anchor=None,
-        anchor_observed_mask=None,
-        anchor_observed_axis_masks=None,
+        anchor_measured=None,
         anchor_present=torch.tensor([False]),
         anchor_ramp=1,
         target_vf=torch.tensor([[0.5, 0.5]]),
@@ -297,7 +296,13 @@ def test_objective_excludes_borrowed_domains_and_active_anchor_cases():
         replace(batch, observed_axes=(2,)), {}, None, None, ALL, None, settings
     )
     assert update.total == 0
-    batch = replace(batch, anchor=object(), anchor_present=torch.tensor([True]))
+    anchor = SimpleNamespace(mask=None, axis_masks=None)
+    batch = replace(
+        batch,
+        anchor=anchor,
+        anchor_measured=anchor,
+        anchor_present=torch.tensor([True]),
+    )
 
     def anchor_loss(*args):
         zero = batch.clean_probs.sum() * 0

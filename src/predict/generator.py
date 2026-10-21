@@ -23,37 +23,14 @@ class GuidedDenoiser:
         self.guidance = guidance
         self.anchor_strength = anchor_strength
 
-    def __call__(
-        self,
-        current: torch.Tensor,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        domain: torch.Tensor,
-        vf: torch.Tensor | None = None,
-        anchor_image: torch.Tensor | None = None,
-        anchor_mask: torch.Tensor | None = None,
-        height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
-        coarse: torch.Tensor | None = None,
-        corruption_level: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def __call__(self, current, time, latent, **conditions) -> torch.Tensor:
         return self.generator.predict(
             current,
             time,
             latent,
             guidance=self.guidance,
             anchor_strength=self.anchor_strength,
-            domain=domain,
-            vf=vf,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
-            **({"height": height} if height is not None else {}),
-            **({"profile": profile} if profile is not None else {}),
-            **(
-                {"coarse": coarse, "corruption_level": corruption_level}
-                if coarse is not None
-                else {}
-            ),
+            **conditions,
         )
 
 
@@ -97,73 +74,33 @@ class Generator:
         latent: torch.Tensor,
         domain: torch.Tensor,
         guidance: float = 1.0,
-        vf: torch.Tensor | None = None,
-        anchor_image: torch.Tensor | None = None,
-        anchor_mask: torch.Tensor | None = None,
-        height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
         anchor_strength: float = 1.0,
-        coarse: torch.Tensor | None = None,
-        corruption_level: torch.Tensor | None = None,
+        **conditions,
     ) -> torch.Tensor:
         if anchor_strength == 0:
-            anchor_image = anchor_mask = None
-        conditions = self.prepare_conditions(
-            domain,
-            vf,
-            anchor_image,
-            anchor_mask,
-            height,
-            profile,
-            coarse,
-            corruption_level,
-        )
-        partial_anchor = anchor_mask is not None and 0.0 < anchor_strength < 1.0
+            conditions.update(anchor_image=None, anchor_mask=None)
+        conditions = {
+            name: value for name, value in conditions.items() if value is not None
+        }
+        partial_anchor = "anchor_mask" in conditions and 0.0 < anchor_strength < 1.0
         if guidance == 1.0 and not partial_anchor:
-            return self.model(current, time, latent, **conditions)
+            return self.model(current, time, latent, domain=domain, **conditions)
         logits = self.model.apply_guidance_logits(
             current,
             time,
             latent,
             guidance,
             **({"anchor_strength": anchor_strength} if partial_anchor else {}),
+            domain=domain,
             **conditions,
         )
         return Denoiser3D.decode(logits).to(current.dtype)
 
-    @staticmethod
-    def prepare_conditions(
-        domain: torch.Tensor,
-        vf: torch.Tensor | None = None,
-        anchor_image: torch.Tensor | None = None,
-        anchor_mask: torch.Tensor | None = None,
-        height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
-        coarse: torch.Tensor | None = None,
-        corruption_level: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
-        conditions = {"domain": domain}
-        if profile is not None:
-            conditions["profile"] = profile
-        if coarse is not None:
-            conditions["coarse"] = coarse
-        if corruption_level is not None:
-            conditions["corruption_level"] = corruption_level
-        if height is not None:
-            conditions["height"] = height
-        if vf is not None:
-            conditions["vf"] = vf
-        if anchor_image is not None:
-            conditions["anchor_image"] = anchor_image
-        if anchor_mask is not None:
-            conditions["anchor_mask"] = anchor_mask
-        return conditions
-
-    def prepare_domain(self, domain: int | None) -> torch.Tensor:
+    def resolve_domain(self, domain: int | None) -> int:
         if domain is None:
             if self.num_domains != 1:
                 raise ValueError("domain is required for a multi-domain model.")
-            domain = 0
+            return 0
         if (
             not isinstance(domain, int)
             or isinstance(domain, bool)
@@ -172,8 +109,11 @@ class Generator:
             raise ValueError(
                 f"domain must be an integer from 0 to {self.num_domains - 1}."
             )
+        return domain
+
+    def prepare_domain(self, domain: int | None) -> torch.Tensor:
         return torch.tensor(
-            (domain,),
+            (self.resolve_domain(domain),),
             device=self.device,
             dtype=torch.long,
         )
@@ -216,6 +156,7 @@ class Generator:
         vf_profile: dict | None = None,
         probabilities: bool = False,
     ) -> torch.Tensor:
+        domain = self.resolve_domain(domain)
         size = self.patch_size if size is None else size
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
             raise ValueError("size must be a positive integer.")
@@ -252,23 +193,21 @@ class Generator:
         )
         anchor = None
         if anchor_strength > 0.0:
-            shifted_anchors = self.offset_anchors(anchors, size, margin)
             anchor = encode_anchors(
-                shifted_anchors,
+                self.offset_anchors(anchors, size, margin),
                 batch_size=1,
                 num_phases=self.num_phases,
                 volume_size=generation_size,
                 device=self.device,
                 dtype=initial_noise.dtype,
             )
-        conditions = {"domain": self.prepare_domain(domain)}
-        height = self.height_condition(
-            (generation_size,) * 3, domain, height_origin, -margin, height_extent
-        )
-        if height is not None:
-            conditions["height"] = height
-        if vf is not None:
-            conditions["vf"] = vf
+        conditions = {
+            "domain": self.prepare_domain(domain),
+            "height": self.height_condition(
+                (generation_size,) * 3, domain, height_origin, -margin, height_extent
+            ),
+            "vf": vf,
+        }
         if vf_profile is not None:
             profile = self.profile_condition(
                 vf_profile,
@@ -280,16 +219,12 @@ class Generator:
             )
             conditions.update(profile=profile, vf=profile.mean(-1))
             if anchor is not None and anchor_strength == 1:
-                region = (slice(None), slice(None)) + (
-                    slice(margin, margin + size),
-                ) * 3
-                if not self.profile_matches_anchor(
-                    profile[..., margin : margin + size],
-                    replace(
-                        anchor, image=anchor.image[region], mask=anchor.mask[region]
-                    ),
-                    (size,) * 3,
-                ):
+                region = (..., *(slice(margin, margin + size),) * 3)
+                mask = anchor.mask[region]
+                known = ((anchor.image[region] + 1) * 0.5 * mask).sum((-1, -2))
+                area = size * size
+                target = profile[..., margin : margin + size] * area
+                if not profile_feasible(target, known, area - mask.sum((-1, -2))):
                     raise ValueError(
                         "profile conflicts with fixed anchor phase fractions."
                     )
@@ -306,24 +241,22 @@ class Generator:
                 self.latent_channels,
                 conditions=conditions,
             )
-        return self.crop_clean(clean, size, margin)
+        if margin:
+            region = slice(margin, margin + size)
+            clean = clean[:, :, region, region, region].clone()
+        return clean
 
     def height_condition(self, shape, domain, origin, offset=0, extent=None):
         if self.height_data is None:
             return None
-        if not math.isfinite(origin) or origin < 0:
-            raise ValueError(
-                "height_origin must be finite and non-negative (source pixels)."
-            )
         data = self.height_data
-        domain = 0 if domain is None else domain
         spacing = data["crop_size"] / data["lo_res_size"]
         return height_field(
             shape,
             0,
             origin + offset * spacing,
             spacing,
-            resolve_extent(data, domain, extent),
+            resolve_extent(data, self.resolve_domain(domain), extent),
             self.device,
         )
 
@@ -332,11 +265,8 @@ class Generator:
             if extent is not None:
                 raise ValueError("height_extent requires a height-conditioned model.")
             return
-        domain = 0 if domain is None and self.num_domains == 1 else domain
-        if type(domain) is not int or not 0 <= domain < self.num_domains:
-            raise ValueError("height conditioning requires a valid domain.")
         data = self.height_data
-        extent = resolve_extent(data, domain, extent)
+        extent = resolve_extent(data, self.resolve_domain(domain), extent)
         length = shape[0] * data["crop_size"] / data["lo_res_size"]
         if not math.isfinite(origin) or origin < 0 or origin + length > extent:
             raise ValueError(
@@ -346,7 +276,6 @@ class Generator:
         return extent
 
     def profile_condition(self, spec, depth, domain, origin, offset=0, extent=None):
-        domain = 0 if domain is None else domain
         data = self.height_data
         spacing = data["crop_size"] / data["lo_res_size"]
         return sample_profile(
@@ -355,7 +284,7 @@ class Generator:
             depth,
             origin + offset * spacing,
             spacing,
-            resolve_extent(data, domain, extent),
+            resolve_extent(data, self.resolve_domain(domain), extent),
             self.device,
         )
 
@@ -363,8 +292,8 @@ class Generator:
         """Training-data depth profile; height alone flattens strong gradients."""
         if getattr(self.model, "profile_input", None) is None:
             return None
-        profiles = (self.height_data or {}).get("depth_profiles") or {}
-        return profiles.get(0 if domain is None else domain)
+        profiles = self.height_data.get("depth_profiles") or {}
+        return profiles.get(domain)
 
     def validate_profile_request(self, spec, depth, domain, origin, extent, vf):
         if spec is None:
@@ -381,13 +310,6 @@ class Generator:
             )
 
         return spec
-
-    @staticmethod
-    def profile_matches_anchor(profile, anchor, shape) -> bool:
-        known = ((anchor.image + 1) * 0.5 * anchor.mask).sum((-1, -2))
-        free = shape[1] * shape[2] - anchor.mask.sum((-1, -2))
-        target = profile * (shape[1] * shape[2])
-        return profile_feasible(target, known, free)
 
     @staticmethod
     def validate_anchor_strength(strength: float) -> float:
@@ -426,87 +348,23 @@ class Generator:
         if margin == 0:
             return anchors
         return tuple(
-            PlaneAnchor(
-                image=anchor.image,
-                axis=anchor.axis,
+            replace(
+                anchor,
                 index=anchor.index + margin,
-                position=(
-                    None
-                    if anchor.position is None
-                    else (
-                        anchor.position[0] + margin,
-                        anchor.position[1] + margin,
-                    )
-                ),
+                position=None
+                if anchor.position is None
+                else (anchor.position[0] + margin, anchor.position[1] + margin),
             )
             for anchor in anchors
         )
 
-    @staticmethod
-    def crop_clean(
-        clean: torch.Tensor,
-        size: int,
-        margin: int,
-    ) -> torch.Tensor:
-        if margin == 0:
-            return clean
-        region = slice(margin, margin + size)
-        return clean[:, :, region, region, region].clone()
+    def generate_probs(self, **options) -> torch.Tensor:
+        """Phase fractions (C,D,H,W); options are those of _sample_clean."""
+        clean = self._sample_clean(probabilities=True, **options)
+        return owned_clean_to_probs_(clean).squeeze(0).cpu()
 
-    def generate_probs(
-        self,
-        anchors: Sequence[PlaneAnchor] = (),
-        vf: Sequence[float] | None = None,
-        size: int | None = None,
-        anchor_strength: float = 1.0,
-        guidance: float = 1.0,
-        domain: int | None = None,
-        margin: int | None = None,
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
-        vf_profile: dict | None = None,
-    ) -> torch.Tensor:
-        clean = self._sample_clean(
-            anchors=anchors,
-            vf=vf,
-            size=size,
-            anchor_strength=anchor_strength,
-            guidance=guidance,
-            domain=domain,
-            margin=margin,
-            height_origin=height_origin,
-            height_extent=height_extent,
-            vf_profile=vf_profile,
-            probabilities=True,
-        )
-        probs = owned_clean_to_probs_(clean)
-        return probs.squeeze(0).cpu()
-
-    def generate(
-        self,
-        anchors: Sequence[PlaneAnchor] = (),
-        vf: Sequence[float] | None = None,
-        size: int | None = None,
-        anchor_strength: float = 1.0,
-        guidance: float = 1.0,
-        domain: int | None = None,
-        margin: int | None = None,
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
-        vf_profile: dict | None = None,
-    ) -> torch.Tensor:
-        clean = self._sample_clean(
-            anchors=anchors,
-            vf=vf,
-            size=size,
-            anchor_strength=anchor_strength,
-            guidance=guidance,
-            domain=domain,
-            margin=margin,
-            height_origin=height_origin,
-            height_extent=height_extent,
-            vf_profile=vf_profile,
-            probabilities=False,
-        )
+    def generate(self, **options) -> torch.Tensor:
+        """uint8 labels (D,H,W); options are those of _sample_clean."""
+        clean = self._sample_clean(probabilities=False, **options)
         # Chunked argmax avoids a full int64 label volume on the model device.
         return labels_from_channels(clean.squeeze(0))

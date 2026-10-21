@@ -13,7 +13,7 @@ from src.config.data import (
 from src.config.defaults import INACTIVE_DEFAULTS, STAGE_DEFAULTS, TRAIN_DEFAULTS
 from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml
 from src.config.schema import validate_config_keys
-from src.config.values import validate_training_values
+from src.config.values import _integer, validate_training_values
 from src.data.source import fill_depth_profiles, fill_height_extents
 from src.plane import PLANE_DIRECTIONS, PLANES
 
@@ -111,9 +111,7 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         if type(value) is not bool:
             raise ValueError(f"{name} must be a boolean.")
     for name in ("embedding_channels", "latent_channels"):
-        value = cfg["model"]["generator"][name]
-        if type(value) is not int or value < 1:
-            raise ValueError(f"model.generator.{name} must be a positive integer.")
+        _integer(cfg["model"]["generator"][name], f"model.generator.{name}")
     channels = cfg["model"]["critic"].get("channels")
     if channels is not None and (
         not isinstance(channels, list)
@@ -121,7 +119,7 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         or any(type(value) is not int or value < 1 for value in channels)
     ):
         raise ValueError("model.critic.channels must list positive integers.")
-    augmentation = cfg.get("augmentation", {})
+    augmentation = cfg["augmentation"]
     auto_planes = augmentation.get("auto_planes", False)
     if type(auto_planes) is not bool:
         raise ValueError("augmentation.auto_planes must be a boolean.")
@@ -138,49 +136,32 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         }
         # Store resolved policies so checkpoint behavior is independent of defaults.
         augmentation.pop("auto_planes")
-    if (
-        type(cfg["train"]["structure_every_steps"]) is not int
-        or cfg["train"]["structure_every_steps"] < 0
-    ):
-        raise ValueError("train.structure_every_steps must be a non-negative integer.")
-    if (
-        type(cfg["model"]["critic"]["pyramid_min_size"]) is not int
-        or cfg["model"]["critic"]["pyramid_min_size"] < 2
-    ):
-        raise ValueError(
-            "model.critic.pyramid_min_size must be an integer of at least two."
-        )
+    _integer(cfg["train"]["structure_every_steps"], "train.structure_every_steps", 0)
+    _integer(
+        cfg["model"]["critic"]["pyramid_min_size"], "model.critic.pyramid_min_size", 2
+    )
     if cfg["model"]["critic"]["input_mode"] not in ("pair", "single"):
         raise ValueError("model.critic.input_mode must be pair or single.")
     statistics = cfg["loss"]["group_statistics"]
-    if type(statistics["max_gap"]) is not int or statistics["max_gap"] < 1:
-        raise ValueError("loss.group_statistics.max_gap must be a positive integer.")
+    _integer(statistics["max_gap"], "loss.group_statistics.max_gap")
     get_schedule_steps(statistics, "loss.group_statistics")
     if stage == "low_res":
-        radius = cfg["loss"]["anchor_neighborhood_radius"]
-        if type(radius) is not int or radius < 1:
-            raise ValueError(
-                "loss.anchor_neighborhood_radius must be a positive integer."
-            )
-        rows = cfg["loss"]["anchor_seam_rows"]
-        if type(rows) is not int or rows < 1:
-            raise ValueError("loss.anchor_seam_rows must be a positive integer.")
-        gap = cfg["loss"]["connectivity"]["max_slice_gap"]
-        if type(gap) is not int or gap < 1:
-            raise ValueError(
-                "loss.connectivity.max_slice_gap must be a positive integer."
-            )
+        loss = cfg["loss"]
+        _integer(loss["anchor_neighborhood_radius"], "loss.anchor_neighborhood_radius")
+        _integer(loss["anchor_seam_rows"], "loss.anchor_seam_rows")
+        _integer(
+            loss["connectivity"]["max_slice_gap"], "loss.connectivity.max_slice_gap"
+        )
         profile = cfg["conditioning"]["spatial_profile"]
+        if type(profile["enabled"]) is not bool:
+            raise ValueError("spatial_profile.enabled must be a boolean.")
         if type(profile["critic_enabled"]) is not bool or (
             profile["critic_enabled"] and not profile["enabled"]
         ):
             raise ValueError(
                 "spatial_profile.critic_enabled requires an enabled profile."
             )
-        if type(profile["enabled"]) is not bool:
-            raise ValueError("spatial_profile.enabled must be a boolean.")
-        if type(profile["num_bins"]) is not int or profile["num_bins"] < 1:
-            raise ValueError("spatial_profile.num_bins must be a positive integer.")
+        _integer(profile["num_bins"], "spatial_profile.num_bins")
         if profile["enabled"] and not cfg["conditioning"]["height_enabled"]:
             raise ValueError("spatial_profile requires height_enabled.")
     optim = cfg["optim"]
@@ -254,17 +235,10 @@ def validate_sr_config(cfg: dict) -> dict:
         [PLANES[axis] for axis in axes] for axes in groups.values()
     ]
     validate_training_settings(cfg)
-    if "samples_per_domain" not in cfg["lr_bank"]:
-        raise ValueError(
-            "missing required setting for training: lr_bank.samples_per_domain"
-        )
-    count = cfg["lr_bank"]["samples_per_domain"]
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-        raise ValueError("lr_bank.samples_per_domain must be a positive integer.")
+    _require_settings(cfg, ("lr_bank.samples_per_domain",), " for training")
+    _integer(cfg["lr_bank"]["samples_per_domain"], "lr_bank.samples_per_domain")
+    _integer(cfg["lr_bank"]["refresh_every_steps"], "lr_bank.refresh_every_steps", 0)
     guidance = cfg["lr_bank"]["guidance"]
-    refresh = cfg["lr_bank"]["refresh_every_steps"]
-    if type(refresh) is not int or refresh < 0:
-        raise ValueError("lr_bank.refresh_every_steps must be a non-negative integer.")
     if (
         isinstance(guidance, bool)
         or not isinstance(guidance, (int, float))
@@ -275,7 +249,6 @@ def validate_sr_config(cfg: dict) -> dict:
 
 
 def get_sr_resolution(cfg: Mapping) -> DataResolution:
-    cfg = normalize_train_config(cfg, "sr")
     if "hi_res_size" not in cfg["data"]:
         raise ValueError("SR requires data.hi_res_size.")
     return get_resolution(cfg["data"])
@@ -288,6 +261,5 @@ def get_schedule_steps(
     start = section["start_step"]
     ramp = section["ramp_steps"]
     for field, value in (("start_step", start), ("ramp_steps", ramp)):
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"{name}.{field} must be a non-negative integer.")
+        _integer(value, f"{name}.{field}", 0)
     return start, ramp

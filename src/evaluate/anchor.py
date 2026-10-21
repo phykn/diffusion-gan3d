@@ -27,7 +27,7 @@ def measure_boundaries(
 ) -> BoundaryQuality:
     if not indices:
         return BoundaryQuality(None, None, None)
-    slices = _get_slices(vol, axis)
+    slices = vol.movedim(axis, 0)
     pair_count = slices.shape[0] - 1
     boundary_indices = sorted(
         {
@@ -42,16 +42,8 @@ def measure_boundaries(
     if not boundary_indices or not ordinary_indices:
         return BoundaryQuality(None, None, None)
 
-    boundary_change = float(
-        (slices[boundary_indices] != slices[[pair + 1 for pair in boundary_indices]])
-        .to(torch.float32)
-        .mean()
-    )
-    ordinary_change = float(
-        (slices[ordinary_indices] != slices[[pair + 1 for pair in ordinary_indices]])
-        .to(torch.float32)
-        .mean()
-    )
+    boundary_change = _change(slices, boundary_indices)
+    ordinary_change = _change(slices, ordinary_indices)
     ratio = None if ordinary_change == 0.0 else boundary_change / ordinary_change
     return BoundaryQuality(boundary_change, ordinary_change, ratio)
 
@@ -65,8 +57,8 @@ def measure_distance_divergence(
 ) -> tuple[float | None, ...]:
     if not indices:
         return ()
-    anchored_slices = _get_slices(anchored, axis)
-    baseline_slices = _get_slices(baseline, axis)
+    anchored_slices = anchored.movedim(axis, 0)
+    baseline_slices = baseline.movedim(axis, 0)
     changes = (anchored_slices != baseline_slices).to(torch.float32).mean((1, 2))
     positions = torch.arange(anchored_slices.shape[0], device=anchored_slices.device)
     anchors = torch.as_tensor(indices, dtype=torch.long, device=positions.device)
@@ -96,8 +88,6 @@ def measure_slice_smoothness(
         None if not indices else min(abs(peak_index - index) for index in indices)
     )
     reversal_rate = _slice_reversal_rate(vol, axis)
-    baseline_p95 = None
-    baseline_max = None
     baseline_reversal_rate = None
     p95_ratio = None
     max_ratio = None
@@ -125,12 +115,13 @@ def measure_slice_smoothness(
     )
 
 
-def _get_slices(vol: torch.Tensor, axis: int) -> torch.Tensor:
-    return vol.movedim(axis, 0)
+def _change(slices: torch.Tensor, pairs: list[int]) -> float:
+    following = [pair + 1 for pair in pairs]
+    return float((slices[pairs] != slices[following]).to(torch.float32).mean())
 
 
 def _slice_acceleration(vol: torch.Tensor, axis: int) -> torch.Tensor:
-    slices = _get_slices(vol, axis)
+    slices = vol.movedim(axis, 0)
     change = (slices[1:] != slices[:-1]).to(torch.float32).mean((1, 2))
     if change.numel() < 2:
         return change.new_empty(0)
@@ -138,7 +129,7 @@ def _slice_acceleration(vol: torch.Tensor, axis: int) -> torch.Tensor:
 
 
 def _slice_reversal_rate(vol: torch.Tensor, axis: int) -> float:
-    slices = _get_slices(vol, axis)
+    slices = vol.movedim(axis, 0)
     if slices.shape[0] < 3:
         return 0.0
     reversals = (slices[:-2] == slices[2:]) & (slices[1:-1] != slices[:-2])

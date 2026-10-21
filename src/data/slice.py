@@ -176,7 +176,6 @@ class AnchorTripletSampler:
         condition: AnchorCondition,
         generator: torch.Generator | None = None,
     ) -> LocatedTriplets:
-        volume = self._check_volume(volume)
         expected_axis_shape = (volume.shape[0], 3) + tuple(volume.shape[2:])
         expected_mask_shape = (volume.shape[0], 1) + tuple(volume.shape[2:])
         if condition.axis_masks.shape != expected_axis_shape:
@@ -197,6 +196,12 @@ class AnchorTripletSampler:
                 depth, height, width = moved.shape[1:]
                 if depth < 3:
                     continue
+                crop_h, crop_w = (
+                    (height, width)
+                    if self.windows_per_plane == 1
+                    else (max(1, height // 2), max(1, width // 2))
+                )
+                tangents = [normal for normal in AXES if normal != axis]
                 own = [region for region in condition.regions if region.axis == axis]
                 selected = own or list(condition.regions[:1])
                 for region in selected:
@@ -218,21 +223,12 @@ class AnchorTripletSampler:
                         slice_indices = _relation_indices(index_value, depth, gap)
                         if slice_indices is None:
                             continue
-                        crop_h = (
-                            height
-                            if self.windows_per_plane == 1
-                            else max(1, height // 2)
-                        )
-                        crop_w = (
-                            width if self.windows_per_plane == 1 else max(1, width // 2)
-                        )
                         coordinates[other[0]] = region.row + self._random_index(
                             region.height, generator
                         )
                         coordinates[other[1]] = region.col + self._random_index(
                             region.width, generator
                         )
-                        tangents = [normal for normal in AXES if normal != axis]
                         row = min(
                             max(coordinates[tangents[0]] - crop_h // 2, 0),
                             height - crop_h,
@@ -331,8 +327,6 @@ def _relation_indices(
     size: int,
     gap: int,
 ) -> tuple[int, int, int] | None:
-    if gap < 1:
-        return None
     if index - gap >= 0 and index + gap < size:
         return index - gap, index, index + gap
     if index + 2 * gap < size:
@@ -415,8 +409,8 @@ def _matched_sites(near, far, count, generator):
     The critic sees only the section plane, so near and far must also share
     the orientation of rows within it, which the anchor axis determines.
     """
+    empty = torch.empty(0, dtype=torch.long)
     if near is None:
-        empty = torch.empty(0, dtype=torch.long)
         return empty, empty
     near_keys = (near[:, 1] * 3 + _band_labels(near)).cpu()
     far_keys = (far[:, 1] * 3 + _band_labels(far)).cpu()
@@ -441,6 +435,8 @@ def _matched_sites(near, far, count, generator):
             taken = int((near_keys[chosen] == key).sum())
             order = torch.randperm(len(far_index), generator=generator)
             far_keep.append(far_index[order[:taken]])
+    if not near_keep:
+        return empty, empty
     return torch.cat(near_keep), torch.cat(far_keep)
 
 

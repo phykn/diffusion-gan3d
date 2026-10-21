@@ -1,18 +1,20 @@
 from collections.abc import Sequence
+from functools import partial
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.utils.checkpoint import checkpoint
 
 from src.device import adaptive_pool
 from src.model.layers import (
     INV_SQRT_THREE,
     INV_SQRT_TWO,
     NULL_DOMAIN,
-    AdaptiveNorm,
+    AdaptiveResBlock,
     SinusoidalEmbedding,
     embed_domain,
+    embedding_mlp,
+    run_block,
 )
 from src.prepare.profile import profile_field
 
@@ -50,34 +52,6 @@ class ChannelNorm3D(nn.Module):
         scale = self.scale.to(dtype=x.dtype).view(shape)
         shift = self.shift.to(dtype=x.dtype).view(shape)
         return x * scale + shift
-
-
-class AdaptiveResBlock3D(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        embedding_channels: int,
-    ) -> None:
-        super().__init__()
-        self.norm1 = AdaptiveNorm(ChannelNorm3D, in_channels, embedding_channels)
-        self.conv1 = nn.Conv3d(in_channels, out_channels, 3, padding=1)
-        self.norm2 = AdaptiveNorm(ChannelNorm3D, out_channels, embedding_channels)
-        self.conv2 = nn.Conv3d(out_channels, out_channels, 3, padding=1)
-        self.skip = (
-            nn.Identity()
-            if in_channels == out_channels
-            else nn.Conv3d(in_channels, out_channels, 1)
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        emb: torch.Tensor,
-    ) -> torch.Tensor:
-        h = self.conv1(F.silu(self.norm1(x, emb)))
-        h = self.conv2(F.silu(self.norm2(h, emb)))
-        return (self.skip(x) + h) * INV_SQRT_TWO
 
 
 class Upsample3D(nn.Module):
@@ -128,16 +102,8 @@ class Denoiser3D(nn.Module):
 
         self.time_emb = SinusoidalEmbedding(embedding_channels)
         self.time_scale = time_scale
-        self.time_mlp = nn.Sequential(
-            nn.Linear(embedding_channels, embedding_channels),
-            nn.SiLU(),
-            nn.Linear(embedding_channels, embedding_channels),
-        )
-        self.latent_mlp = nn.Sequential(
-            nn.Linear(latent_channels, embedding_channels),
-            nn.SiLU(),
-            nn.Linear(embedding_channels, embedding_channels),
-        )
+        self.time_mlp = embedding_mlp(embedding_channels, embedding_channels)
+        self.latent_mlp = embedding_mlp(latent_channels, embedding_channels)
         self.num_domains = num_domains
         self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv3d(num_phases, channels[0], 3, padding=1)
@@ -166,10 +132,11 @@ class Denoiser3D(nn.Module):
         if self.anchor_input is not None:
             nn.init.zeros_(self.anchor_input.weight)
 
+        block = partial(AdaptiveResBlock, ChannelNorm3D, nn.Conv3d)
         self.encoder = nn.ModuleList()
         self.downsample = nn.ModuleList()
         for idx, ch in enumerate(channels):
-            self.encoder.append(AdaptiveResBlock3D(ch, ch, embedding_channels))
+            self.encoder.append(block(ch, ch, embedding_channels))
             if idx + 1 < len(channels):
                 self.downsample.append(
                     nn.Sequential(
@@ -179,18 +146,7 @@ class Denoiser3D(nn.Module):
                 )
 
         self.middle = nn.ModuleList(
-            (
-                AdaptiveResBlock3D(
-                    channels[-1],
-                    channels[-1],
-                    embedding_channels,
-                ),
-                AdaptiveResBlock3D(
-                    channels[-1],
-                    channels[-1],
-                    embedding_channels,
-                ),
-            )
+            block(channels[-1], channels[-1], embedding_channels) for _ in range(2)
         )
 
         self.upsample = nn.ModuleList()
@@ -198,13 +154,7 @@ class Denoiser3D(nn.Module):
         ch = channels[-1]
         for skip_ch in reversed(channels[:-1]):
             self.upsample.append(Upsample3D(ch, skip_ch))
-            self.decoder.append(
-                AdaptiveResBlock3D(
-                    2 * skip_ch,
-                    skip_ch,
-                    embedding_channels,
-                )
-            )
+            self.decoder.append(block(2 * skip_ch, skip_ch, embedding_channels))
             ch = skip_ch
 
         self.output_norm = ChannelNorm3D(channels[0])
@@ -237,13 +187,7 @@ class Denoiser3D(nn.Module):
             else None
         )
         self.corruption_embedding = (
-            nn.Sequential(
-                nn.Linear(1, embedding_channels),
-                nn.SiLU(),
-                nn.Linear(embedding_channels, embedding_channels),
-            )
-            if coarse_enabled
-            else None
+            embedding_mlp(1, embedding_channels) if coarse_enabled else None
         )
 
     def forward(
@@ -343,9 +287,10 @@ class Denoiser3D(nn.Module):
         )
         if anchor is not None:
             x = x + self.anchor_input(torch.cat(anchor, dim=1))
+        checkpointing = self.gradient_checkpointing and self.training
         skips = []
         for idx, block in enumerate(self.encoder):
-            x = self.apply_block(block, x, emb)
+            x = run_block(block, x, emb, checkpointing)
             if idx < len(self.downsample):
                 skips.append(x)
                 x = self.downsample[idx](x)
@@ -357,7 +302,7 @@ class Denoiser3D(nn.Module):
                     x = x + self.anchor_pyramid[idx](anchor_at_scale)
 
         for block in self.middle:
-            x = self.apply_block(block, x, emb)
+            x = run_block(block, x, emb, checkpointing)
 
         for upsample, block, skip in zip(
             self.upsample,
@@ -370,7 +315,7 @@ class Denoiser3D(nn.Module):
                 (x * INV_SQRT_TWO, skip * INV_SQRT_TWO),
                 dim=1,
             )
-            x = self.apply_block(block, x, emb)
+            x = run_block(block, x, emb, checkpointing)
 
         logits = self.output(F.silu(self.output_norm(x)))
         return logits
@@ -490,21 +435,6 @@ class Denoiser3D(nn.Module):
                 vf_present = vf_present.to(device=inputs.device)
                 emb = torch.where(vf_present[:, None], emb + vf_emb, emb)
         return emb
-
-    def apply_block(
-        self,
-        block: nn.Module,
-        inputs: torch.Tensor,
-        emb: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
-            return checkpoint(
-                block,
-                inputs,
-                emb,
-                use_reentrant=False,
-            )
-        return block(inputs, emb)
 
     def _prepare_anchor(
         self,

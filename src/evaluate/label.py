@@ -1,6 +1,6 @@
 import torch
 
-from src.device import wide_dtype
+from src.device import assert_all, wide_dtype
 from src.plane import AXES
 
 LABEL_CHUNK_ELEMENTS = 1024**2
@@ -33,10 +33,7 @@ def phase_labels(values, num_phases: int | None = None) -> torch.Tensor:
     if num_phases is not None:
         valid &= (labels < num_phases).all()
         message = f"labels must contain integer phases from 0 to {num_phases - 1}."
-    if labels.device.type == "cuda":
-        torch._assert_async(valid, message)
-    elif not bool(valid):
-        raise ValueError(message)
+    assert_all(valid, message)
     return labels
 
 

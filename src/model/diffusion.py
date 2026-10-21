@@ -3,6 +3,15 @@ import math
 import torch
 from torch import nn
 
+from src.device import assert_all
+
+
+def _stats_dtype(values: torch.Tensor) -> torch.dtype:
+    # Half-precision noise coefficients lose the small step sizes.
+    if values.dtype in (torch.float16, torch.bfloat16):
+        return torch.float32
+    return values.dtype
+
 
 class Diffusion(nn.Module):
     def __init__(
@@ -91,11 +100,7 @@ class Diffusion(nn.Module):
             step_noise = self.validate_shape("step_noise", step_noise, clean)
 
         states = transitions + 1
-        dtype = (
-            torch.float32
-            if clean.dtype in (torch.float16, torch.bfloat16)
-            else clean.dtype
-        )
+        dtype = _stats_dtype(clean)
         alpha = self.extract(self.alphas, states, clean, dtype=dtype)
         beta = self.extract(self.betas, states, clean, dtype=dtype)
         current = (
@@ -198,13 +203,8 @@ class Diffusion(nn.Module):
         clean_coef = self.extract(self.posterior_clean_coef, transitions, current)
         current_coef = self.extract(self.posterior_current_coef, transitions, current)
         mean = clean_coef * pred + current_coef * current
-        dtype = (
-            torch.float32
-            if current.dtype in (torch.float16, torch.bfloat16)
-            else current.dtype
-        )
         variance = self.extract(
-            self.posterior_variance, transitions, current, dtype=dtype
+            self.posterior_variance, transitions, current, dtype=_stats_dtype(current)
         )
         return mean, variance
 
@@ -253,8 +253,5 @@ class Diffusion(nn.Module):
         elif time.shape != (ref.shape[0],):
             raise ValueError(f"{name} must be scalar or have one value per batch item.")
         valid = ((time >= 0) & (time <= limit)).all()
-        if time.device.type == "cuda":
-            torch._assert_async(valid, f"{name} must be between 0 and {limit}.")
-        elif not bool(valid):
-            raise ValueError(f"{name} must be between 0 and {limit}.")
+        assert_all(valid, f"{name} must be between 0 and {limit}.")
         return time

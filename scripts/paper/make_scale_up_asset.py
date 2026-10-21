@@ -1,3 +1,5 @@
+"""Render the paper anchored scale-up example."""
+
 import argparse
 import json
 import sys
@@ -13,6 +15,7 @@ from matplotlib.patches import Rectangle
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from evaluation_io import set_seed
 from make_anchor_asset import AXIS, SEED, load_center_roi
 from make_assets import (
     CROP_SIZE,
@@ -105,9 +108,7 @@ def main() -> None:
     validate_output_paths(provenance, (output, metadata))
     anchor = load_center_roi(generator.patch_size)
     anchor_index = generator.patch_size // 2
-    torch.manual_seed(SEED)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(SEED)
+    set_seed(SEED, device)
 
     print("\nPaper scale-up example")
     print("-----------------------")

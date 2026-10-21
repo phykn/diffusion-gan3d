@@ -5,8 +5,6 @@ import torch
 from src.device import wide_dtype
 from src.evaluate.label import check_labels, phase_labels
 
-_CONNECTIVITY = ndi.generate_binary_structure(3, 1)
-
 
 def transition_counts(previous, current, num_phases: int) -> torch.Tensor:
     previous = phase_labels(previous, num_phases)
@@ -74,7 +72,7 @@ def spanning_fractions(mask: np.ndarray) -> tuple[float, float, float]:
     phase_voxels = int(mask.sum())
     if phase_voxels == 0:
         return 0.0, 0.0, 0.0
-    components, _ = ndi.label(mask, structure=_CONNECTIVITY)
+    components, _ = ndi.label(mask)
     sizes = np.bincount(components.reshape(-1))
     fractions = []
     for axis in range(3):

@@ -169,6 +169,8 @@ def main(argv=None):
         print(f"LR weights: {lr_weight}\nGenerating LR...", flush=True)
         lr = LowResolutionAPI(lr_weight, device)
         validate_sr_source(cfg["data"], lr.data)
+        if args.lr_guidance is None:
+            args.lr_guidance = lr.settings.guidance
         low = lr.generate_probs(guidance=args.lr_guidance, **common)
         del lr
         gc.collect()

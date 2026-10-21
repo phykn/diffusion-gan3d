@@ -17,6 +17,14 @@ def _number(value, name, maximum=None, *, exclusive=False):
         raise ValueError(f"{name} must be in [0, {maximum}{end}.")
 
 
+def _integer(value, name, minimum=1):
+    if type(value) is not int or value < minimum:
+        bound = {0: "a non-negative integer", 1: "a positive integer"}.get(
+            minimum, f"an integer of at least {minimum}"
+        )
+        raise ValueError(f"{name} must be {bound}.")
+
+
 def validate_training_values(cfg):
     """Check supplied numeric settings for both stages, including sparse configs."""
     data = cfg.get("data", {})
@@ -49,26 +57,21 @@ def validate_training_values(cfg):
             "conditioning.dropout_probability_per_case",
             1 / 3,
         )
+    anchor = conditioning.get("anchor", {})
     for name in ("probability", "borrowed_plane_probability"):
-        anchor = conditioning.get("anchor", {})
         if name in anchor:
             _number(anchor[name], f"conditioning.anchor.{name}", 1)
-    augmentation = cfg.get("augmentation", {})
-    if "probability" in augmentation:
-        _number(augmentation["probability"], "augmentation.probability", 1)
+    _number(cfg["augmentation"]["probability"], "augmentation.probability", 1)
 
+    connectivity = cfg["loss"].get("connectivity", {})
     for section, values in (
         ("loss", cfg["loss"]),
-        ("loss.connectivity", cfg["loss"].get("connectivity", {})),
+        ("loss.connectivity", connectivity),
     ):
         for name, value in values.items():
             if name.endswith("_weight") or name == "downsample_mse_tolerance":
                 _number(value, f"{section}.{name}")
-    interval = cfg["loss"]["r1_every_steps"]
-    if type(interval) is not int or interval < 1:
-        raise ValueError("loss.r1_every_steps must be a positive integer.")
-    anchor = conditioning.get("anchor", {})
-    connectivity = cfg["loss"].get("connectivity", {})
+    _integer(cfg["loss"]["r1_every_steps"], "loss.r1_every_steps")
     for name, value in (
         ("conditioning.anchor.bank_capacity", anchor.get("bank_capacity", 1)),
         ("conditioning.anchor.plane_spacing", anchor.get("plane_spacing", 1)),
@@ -77,9 +80,8 @@ def validate_training_values(cfg):
             connectivity.get("windows_per_plane", 1),
         ),
     ):
-        if type(value) is not int or value < 1:
-            raise ValueError(f"{name} must be a positive integer.")
-    diffusion = cfg.get("model", {}).get("diffusion", {})
+        _integer(value, name)
+    diffusion = cfg["model"]["diffusion"]
     beta_min, beta_max = diffusion["beta_min"], diffusion["beta_max"]
     _number(beta_min, "model.diffusion.beta_min")
     _number(beta_max, "model.diffusion.beta_max")
@@ -103,7 +105,4 @@ def validate_training_values(cfg):
         value = cfg["train"][name]
         if name == "archive_every_steps" and value is None:
             continue
-        minimum = 0 if name == "num_workers" else 1
-        if type(value) is not int or value < minimum:
-            qualifier = "non-negative" if minimum == 0 else "positive"
-            raise ValueError(f"train.{name} must be a {qualifier} integer.")
+        _integer(value, f"train.{name}", 0 if name == "num_workers" else 1)

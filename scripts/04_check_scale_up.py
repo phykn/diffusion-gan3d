@@ -25,13 +25,14 @@ from scripts.common.cli import (
 from scripts.common.diagnostic import (
     anchor_accuracy,
     format_percent,
+    middle_slices,
     select_display_index,
     select_indices,
     show_napari,
+    show_slices,
 )
 from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
-from src.config.generation import load_generation_settings
 from src.device import check_device
 from src.evaluate.label import phase_fractions
 from src.evaluate.seam import SeamQuality, measure_seams
@@ -91,14 +92,11 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     )
     parser.add_argument(
         "--count",
-        type=int,
+        type=non_negative_int,
         help="generate a base with this many anchor planes",
     )
     add_generation_arguments(parser, anchors=True)
     args = parser.parse_args()
-    args = prepare_check(args, __file__)
-    if args.count is not None and args.count < 0:
-        parser.error("--count must be non-negative.")
     return parser, args
 
 
@@ -198,12 +196,7 @@ def assess_result(
 
 def main() -> None:
     parser, args = parse_args()
-    settings = load_generation_settings()
-    args.anchor_strength = (
-        settings.anchor_strength
-        if args.anchor_strength is None
-        else args.anchor_strength
-    )
+    settings = prepare_check(args, __file__)
     anchor_count = args.count if args.count is None or args.anchor_strength > 0.0 else 0
     if anchor_count is not None and anchor_count > 0 and args.gt is None:
         parser.error("--gt is required when --count is positive.")
@@ -213,28 +206,25 @@ def main() -> None:
         )
 
     device = check_device(args.device)
-    weight = args.weight
-    print(f"\nWeights : {weight.resolve()}", flush=True)
+    print(f"\nWeights : {args.weight.resolve()}", flush=True)
 
-    generator = load_generator(weight, device=device)
+    generator = load_generator(args.weight, device=device)
     overlap = (
         min(settings.overlap, (generator.patch_size - 1) // 2)
         if args.overlap is None
         else args.overlap
     )
-    margin = generator.default_margin if args.margin is None else args.margin
-    guidance = settings.guidance if args.guidance is None else args.guidance
-    args.guidance = guidance
-    args.margin = margin
+    if args.margin is None:
+        args.margin = generator.default_margin
     scaled = TiledGenerator(generator)
     shape = scaled.shape_from_blocks(tuple(args.blocks), overlap)
-    generation_shape = tuple(size + 2 * margin for size in shape)
+    generation_shape = tuple(size + 2 * args.margin for size in shape)
     plan = scaled.plan(generation_shape, overlap)
     print_plan(plan, device)
-    print(f"Output  : {' × '.join(map(str, shape))}, margin {margin}")
+    print(f"Output  : {' × '.join(map(str, shape))}, margin {args.margin}")
     with seeded_rng(args.seed, device):
         base_args = copy.copy(args)
-        if getattr(generator, "height_data", None) is not None:
+        if generator.height_data is not None:
             generator.validate_height(
                 shape, args.domain, args.height_origin, args.height_extent
             )
@@ -245,10 +235,6 @@ def main() -> None:
                 / generator.height_data["lo_res_size"]
             )
         base_result = generate_base(parser, base_args, generator, anchor_count)
-        base = base_result.volume
-        target = base_result.target
-        indices = base_result.indices
-        base_acc = base_result.accuracy
 
         print("Scaling...", flush=True)
 
@@ -260,10 +246,10 @@ def main() -> None:
         vol = scaled.generate(
             blocks=tuple(args.blocks),
             overlap=overlap,
-            margin=margin,
-            base=base,
+            margin=args.margin,
+            base=base_result.volume,
             vf=None,
-            guidance=guidance,
+            guidance=args.guidance,
             domain=args.domain,
             **height_options(args),
         )
@@ -280,23 +266,20 @@ def main() -> None:
         generator.num_phases,
     )
     quality = assessment.quality
-    vfs = assessment.phase_fractions
-    scaled_acc = assessment.scaled_accuracy
-    base_match = assessment.base_match
-    base_interior_match = assessment.base_interior_match
-    center = assessment.center
+    base, target = base_result.volume, base_result.target
     print("\nQuality")
-    print(f"Phase VF        : {format_phases(vfs)}")
+    print(f"Phase VF        : {format_phases(assessment.phase_fractions)}")
     print(f"Seam TV         : {format_axes(quality.transition_tv)}")
     print(f"Seam continuity : {format_axes(quality.continuation_delta)}")
     if base is not None:
-        print(f"Base interior   : {format_percent(base_interior_match)}")
+        print(f"Base interior   : {format_percent(assessment.base_interior_match)}")
         if target is None:
-            print(f"Whole base      : {format_percent(base_match)}")
+            print(f"Whole base      : {format_percent(assessment.base_match)}")
         else:
             print(
                 "Anchor match   : "
-                f"{format_percent(base_acc)} → {format_percent(scaled_acc)}"
+                f"{format_percent(base_result.accuracy)} → "
+                f"{format_percent(assessment.scaled_accuracy)}"
             )
 
     performance = f"Elapsed : {elapsed:.1f} s"
@@ -309,12 +292,12 @@ def main() -> None:
         return
     if args.napari:
         show_napari(vol, name="scaled phases")
-    elif base is not None and center is not None:
+    elif base is not None:
         if target is None:
             show_unanchored_base_result(
                 vol,
                 base,
-                center,
+                assessment.center,
                 generator.num_phases,
             )
         else:
@@ -322,13 +305,13 @@ def main() -> None:
                 vol,
                 base,
                 target,
-                center,
-                indices,
+                assessment.center,
+                base_result.indices,
                 AXIS,
                 generator.num_phases,
             )
     else:
-        show_slices(vol, generator.num_phases)
+        show_slices(vol, generator.num_phases, "Joint tiled diffusion scale-up")
 
 
 def print_plan(plan: TilePlan, device: torch.device) -> None:
@@ -336,32 +319,6 @@ def print_plan(plan: TilePlan, device: torch.device) -> None:
         f"Plan    : {' × '.join(map(str, plan.grid))} tiles "
         f"({plan.tile_count} total), overlap {plan.overlap}, {device}"
     )
-
-
-def show_slices(
-    vol: torch.Tensor,
-    num_phases: int,
-) -> None:
-    mid = tuple(size // 2 for size in vol.shape)
-    imgs = (
-        vol[mid[0], :, :],
-        vol[:, mid[1], :],
-        vol[:, :, mid[2]],
-    )
-    fig, panels = plt.subplots(1, 3, figsize=(11, 4))
-    for axis, (panel, img) in enumerate(zip(panels, imgs, strict=True)):
-        panel.imshow(
-            img.numpy(),
-            cmap="gray",
-            vmin=-0.5,
-            vmax=num_phases - 0.5,
-            interpolation="nearest",
-        )
-        panel.set_title(f"axis {axis}")
-        panel.axis("off")
-    fig.suptitle("Joint tiled diffusion scale-up")
-    fig.tight_layout()
-    plt.show()
 
 
 def show_unanchored_base_result(
@@ -405,12 +362,7 @@ def show_unanchored_base_result(
     panels[0, 2].axis("off")
 
     start = resolve_offset(None, vol.shape, base.shape)
-    mid = tuple(size // 2 for size in vol.shape)
-    views = (
-        vol[mid[0], :, :],
-        vol[:, mid[1], :],
-        vol[:, :, mid[2]],
-    )
+    views = middle_slices(vol)
     for axis, (panel, img) in enumerate(zip(panels[1], views, strict=True)):
         plane_axes = tuple(value for value in range(3) if value != axis)
         top, left = (start[value] for value in plane_axes)
@@ -536,12 +488,7 @@ def show_base_result(
         panel.set_title(title)
         panel.axis("off")
 
-    mid = tuple(size // 2 for size in vol.shape)
-    views = (
-        vol[mid[0], :, :],
-        vol[:, mid[1], :],
-        vol[:, :, mid[2]],
-    )
+    views = middle_slices(vol)
     for view_axis, (panel, img) in enumerate(zip(panels[2], views, strict=True)):
         panel.imshow(
             img.numpy(),

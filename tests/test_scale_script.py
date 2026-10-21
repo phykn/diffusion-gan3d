@@ -5,6 +5,7 @@ import pytest
 import tifffile
 import torch
 
+import scripts.common.cli as cli
 from src.config.generation import GenerationSettings
 from src.predict.tiling import layout
 from src.predict.tiling.layout import TilePlan
@@ -57,6 +58,7 @@ def test_main_prints_plan_before_scaled_generation(
         patch_size = 4
         num_phases = 3
         default_margin = 0
+        height_data = None
 
     class FakeScaled:
         stats = None
@@ -87,7 +89,7 @@ def test_main_prints_plan_before_scaled_generation(
     scaled = FakeScaled()
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
     monkeypatch.setattr(
-        module,
+        cli,
         "load_generation_settings",
         lambda: GenerationSettings(),
     )
@@ -143,6 +145,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
         patch_size = 4
         num_phases = 3
         default_margin = 0
+        height_data = None
 
         def generate(self, *, guidance, domain, margin):
             events.append(("base", guidance, domain, margin))
@@ -173,7 +176,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
     monkeypatch.setattr(
-        module,
+        cli,
         "load_generation_settings",
         lambda: GenerationSettings(),
     )

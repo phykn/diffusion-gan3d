@@ -4,14 +4,15 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.utils.checkpoint import checkpoint
 
-from src.device import adaptive_pool
+from src.device import adaptive_pool, assert_all
 from src.model.layers import (
     INV_SQRT_TWO,
-    AdaptiveNorm,
+    AdaptiveResBlock,
     SinusoidalEmbedding,
     embed_domain,
+    embedding_mlp,
+    run_block,
 )
 from src.model.pyramid import area_pyramid
 
@@ -36,39 +37,11 @@ class GroupNorm(nn.GroupNorm):
         super().__init__(self.choose_groups(channels), channels, affine=affine)
 
     @staticmethod
-    def choose_groups(channels: int, maximum: int = 32) -> int:
-        limit = min(maximum, max(channels // 2, 1))
+    def choose_groups(channels: int) -> int:
+        limit = min(32, max(channels // 2, 1))
         for groups in range(limit, 0, -1):
             if channels % groups == 0:
                 return groups
-
-
-class AdaptiveResBlock2D(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        embedding_channels: int,
-    ) -> None:
-        super().__init__()
-        self.norm1 = AdaptiveNorm(GroupNorm, in_channels, embedding_channels)
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.norm2 = AdaptiveNorm(GroupNorm, out_channels, embedding_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.skip = (
-            nn.Identity()
-            if in_channels == out_channels
-            else nn.Conv2d(in_channels, out_channels, 1)
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        emb: torch.Tensor,
-    ) -> torch.Tensor:
-        h = self.conv1(F.silu(self.norm1(x, emb)))
-        h = self.conv2(F.silu(self.norm2(h, emb)))
-        return (self.skip(x) + h) * INV_SQRT_TWO
 
 
 class CriticBase(nn.Module):
@@ -98,7 +71,8 @@ class CriticBase(nn.Module):
         self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv2d(input_channels, widths[0], 3, padding=1)
         self.blocks = nn.ModuleList(
-            AdaptiveResBlock2D(ch, ch, embedding_channels) for ch in widths
+            AdaptiveResBlock(GroupNorm, nn.Conv2d, ch, ch, embedding_channels)
+            for ch in widths
         )
         self.downsample = nn.ModuleList(
             nn.Conv2d(
@@ -152,8 +126,9 @@ class CriticBase(nn.Module):
             x = x + self.profile_input(
                 adaptive_pool(profile.to(inputs), inputs.shape[-2:])
             )
+        checkpointing = self.gradient_checkpointing and self.training
         for idx, block in enumerate(self.blocks):
-            x = self.apply_block(block, x, embedding)
+            x = run_block(block, x, embedding, checkpointing)
             if idx == 1 and self.local_output is not None:
                 local = F.silu(self.local_norm(x))
                 logits_local = self.local_output(local).squeeze(1)
@@ -165,21 +140,6 @@ class CriticBase(nn.Module):
             logits_global=logits_global,
             logits_local=logits_local,
         )
-
-    def apply_block(
-        self,
-        block: nn.Module,
-        inputs: torch.Tensor,
-        emb: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
-            return checkpoint(
-                block,
-                inputs,
-                emb,
-                use_reentrant=False,
-            )
-        return block(inputs, emb)
 
 
 class PlaneCritic2D(CriticBase):
@@ -205,11 +165,7 @@ class PlaneCritic2D(CriticBase):
         )
         self.time_embedding = SinusoidalEmbedding(embedding_channels)
         self.time_scale = time_scale
-        self.time_mlp = nn.Sequential(
-            nn.Linear(embedding_channels, embedding_channels),
-            nn.SiLU(),
-            nn.Linear(embedding_channels, embedding_channels),
-        )
+        self.time_mlp = embedding_mlp(embedding_channels, embedding_channels)
 
     def forward(
         self,
@@ -277,11 +233,7 @@ class SeamCritic2D(CriticBase):
         self.axis_embedding = nn.Embedding(3, embedding_channels)
         self.time_embedding = SinusoidalEmbedding(embedding_channels)
         self.time_scale = time_scale
-        self.time_mlp = nn.Sequential(
-            nn.Linear(embedding_channels, embedding_channels),
-            nn.SiLU(),
-            nn.Linear(embedding_channels, embedding_channels),
-        )
+        self.time_mlp = embedding_mlp(embedding_channels, embedding_channels)
 
     def forward(
         self,
@@ -328,11 +280,7 @@ class ConnectivityCritic2D(CriticBase):
         self.axis_embedding = nn.Embedding(3, embedding_channels)
         self.directed_axis = directed_axis
         self.gap_embedding = SinusoidalEmbedding(embedding_channels)
-        self.gap_mlp = nn.Sequential(
-            nn.Linear(embedding_channels, embedding_channels),
-            nn.SiLU(),
-            nn.Linear(embedding_channels, embedding_channels),
-        )
+        self.gap_mlp = embedding_mlp(embedding_channels, embedding_channels)
 
     def forward(
         self,
@@ -343,8 +291,6 @@ class ConnectivityCritic2D(CriticBase):
         height: torch.Tensor | None = None,
         profile: torch.Tensor | None = None,
     ) -> CriticScores:
-        if triplets.ndim != 5 or triplets.shape[1] != 3:
-            raise ValueError("triplets must have shape [B, 3, C, H, W].")
         if axes.shape != (triplets.shape[0],):
             raise ValueError("axes must have shape [B].")
         if gaps.shape != (triplets.shape[0],):
@@ -352,12 +298,9 @@ class ConnectivityCritic2D(CriticBase):
         axes = axes.to(device=triplets.device, dtype=torch.long)
         gaps = gaps.to(device=triplets.device, dtype=torch.float32)
         valid = ((axes >= 0) & (axes <= 2) & (gaps >= 1)).all()
-        if axes.device.type == "cuda":
-            torch._assert_async(valid, "invalid connectivity axes or gaps")
-        elif not bool(valid):
-            raise ValueError(
-                "axes must contain only 0, 1, or 2 and gaps must be positive."
-            )
+        assert_all(
+            valid, "axes must contain only 0, 1, or 2 and gaps must be positive."
+        )
 
         # Score both slab orders in one pass; normalization is per sample.
         both = self.score_once(

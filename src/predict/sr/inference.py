@@ -12,6 +12,7 @@ from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 from src.predict.generator import Generator, GuidedDenoiser
 from src.predict.sr.memory import check_sr_memory, estimate_sr_memory
 from src.predict.sr.tiled import refine_tiled
+from src.predict.tiling.layout import DEFAULT_OVERLAP, check_overlap
 from src.predict.volume_condition import (
     fraction_channels,
     resolve_offset,
@@ -69,7 +70,7 @@ class SuperResolutionAPI:
         seed: int | None = None,
         guidance: float = 1.0,
         tile_size: int | None = None,
-        overlap: int = 8,
+        overlap: int = DEFAULT_OVERLAP,
         margin: int | None = None,
         height_origin: float = 0.0,
         height_extent: float | None = None,
@@ -100,7 +101,7 @@ class SuperResolutionAPI:
         seed: int | None = None,
         guidance: float = 1.0,
         tile_size: int | None = None,
-        overlap: int = 8,
+        overlap: int = DEFAULT_OVERLAP,
         margin: int | None = None,
         height_origin: float = 0.0,
         height_extent: float | None = None,
@@ -128,25 +129,25 @@ class SuperResolutionAPI:
         self,
         low: torch.Tensor,
         *,
-        output_kind: str,
-        domain: int | None = None,
-        seed: int | None = None,
-        guidance: float = 1.0,
-        tile_size: int | None = None,
-        overlap: int = 8,
-        margin: int | None = None,
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
-        base: torch.Tensor | None = None,
-        base_offset=None,
+        output_kind,
+        domain,
+        seed,
+        guidance,
+        tile_size,
+        overlap,
+        margin,
+        height_origin,
+        height_extent,
+        base,
+        base_offset,
     ):
         """Shared refine path; tile_size, overlap and margin are HR voxels."""
         if low.ndim not in (3, 4):
             raise ValueError(
                 "LR input must be D,H,W labels or K,D,H,W phase fractions."
             )
+        domain = self.generator.resolve_domain(domain)
         domain_ids = self.generator.prepare_domain(domain)
-        domain = int(domain_ids.item())
         low_shape = low.shape[-3:]
         shape = tuple(scaled_size(int(n), self.scale_factor) for n in low_shape)
         if base is None and base_offset is not None:
@@ -160,16 +161,10 @@ class SuperResolutionAPI:
                 margin = math.lcm(margin, int(self.scale_factor))
         if type(margin) is not int or margin < 0:
             raise ValueError("margin must be a non-negative integer of HR voxels.")
-        if tile_size is not None and (
-            type(tile_size) is not int
-            or tile_size < 1
-            or type(overlap) is not int
-            or overlap < 0
-            or 2 * overlap >= tile_size
-        ):
-            raise ValueError(
-                "tile_size must be positive and 0 <= 2 * overlap < tile_size."
-            )
+        if tile_size is not None:
+            if type(tile_size) is not int or tile_size < 1:
+                raise ValueError("tile_size must be a positive integer.")
+            check_overlap(tile_size, overlap)
         tiled = tile_size is not None and any(n > tile_size for n in shape)
         if tiled:
             if not self.scale_factor.is_integer():
@@ -187,9 +182,23 @@ class SuperResolutionAPI:
         height_extent = self._validate_height(
             low_shape, domain, height_origin, height_extent
         )
-        probs = self._prepare_probs(
-            low, shape, tile_size, margin, output_kind, volume_shape(base)
+        check_sr_memory(
+            estimate_sr_memory(
+                low_shape,
+                shape,
+                self.num_phases,
+                tile_size=tile_size,
+                margin=margin,
+                label_input=low.ndim == 3,
+                input_element_size=low.element_size(),
+                input_on_cuda=low.device.type == "cuda",
+                output_kind=output_kind,
+                base_shape=volume_shape(base),
+            ),
+            self.generator,
+            input_device=low.device,
         )
+        probs = fraction_channels(low, self.num_phases)
         with seeded_rng(seed, self.device):
             if not tiled and base is None:
                 return self._refine_block(
@@ -235,25 +244,6 @@ class SuperResolutionAPI:
 
         return extent
 
-    def _prepare_probs(self, low, shape, tile_size, margin, output_kind, base_shape):
-        check_sr_memory(
-            estimate_sr_memory(
-                low.shape[-3:],
-                shape,
-                self.num_phases,
-                tile_size=tile_size,
-                margin=margin,
-                label_input=low.ndim == 3,
-                input_element_size=low.element_size(),
-                input_on_cuda=low.device.type == "cuda",
-                output_kind=output_kind,
-                base_shape=base_shape,
-            ),
-            self.generator,
-            input_device=low.device,
-        )
-        return fraction_channels(low, self.num_phases)
-
     def _refine_block(
         self,
         probs,
@@ -275,11 +265,11 @@ class SuperResolutionAPI:
             height_extent,
         )
         region = (slice(None), *(slice(margin, margin + n) for n in shape))
+        clean = self._sample_clean(coarse, domain, height, guidance)
         if output_kind == "labels":
-            clean = self._sample_clean(coarse, domain, height, guidance)
             return labels_from_channels(clean.squeeze(0)[region])
-        predicted = self._predict(coarse, domain, height, guidance)
-        return predicted[region].contiguous()
+        probs = owned_clean_to_probs_(clean).squeeze(0).cpu()
+        return probs[region].contiguous()
 
     def _height(self, shape, start, domain, origin, extent=None):
         if not self.config["conditioning"]["height_enabled"]:
@@ -301,21 +291,14 @@ class SuperResolutionAPI:
             "domain": domain,
             "coarse": coarse,
             "corruption_level": coarse.new_zeros(len(coarse)),
+            "height": height,
         }
-        if height is not None:
-            conditions["height"] = height
         with torch.autocast(
             self.device.type, dtype=torch.float16, enabled=self.generator.use_amp
         ):
-            clean = self.generator.diffusion.sample(
+            return self.generator.diffusion.sample(
                 GuidedDenoiser(self.generator, guidance),
                 torch.randn_like(coarse),
                 self.generator.latent_channels,
                 conditions,
             )
-        return clean
-
-    def _predict(self, coarse, domain, height, guidance):
-        clean = self._sample_clean(coarse, domain, height, guidance)
-        probs = owned_clean_to_probs_(clean)
-        return probs.squeeze(0).cpu()

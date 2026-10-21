@@ -32,6 +32,17 @@ def score_plane(critic, previous, current, time, domain, **conditions):
     return critic(previous, current, time, domain, **conditions)
 
 
+def score_triplets(critic, batch, values, domains):
+    return critic(
+        values,
+        batch.axes,
+        batch.gaps,
+        domains,
+        **({"height": batch.height} if batch.height is not None else {}),
+        **({"profile": batch.profile} if batch.profile is not None else {}),
+    )
+
+
 def active_groups(fake, groups):
     active = {
         group: tuple(axis for axis in axes if len(fake[axis][0]))

@@ -1,12 +1,11 @@
 import math
 from itertools import product
 
-import psutil
 import torch
 
 from src.config.data import validate_sr_source
-from src.predict.memory import require_memory
-from src.predict.tiling.layout import parse_shape
+from src.predict.memory import base_bytes, ram_budget, require_memory
+from src.predict.tiling.layout import DEFAULT_OVERLAP, parse_shape
 from src.predict.volume_condition import fraction_channels, resolve_offset, volume_shape
 from src.prepare.resize import downsample
 
@@ -18,10 +17,10 @@ def coarsen_volume(high, scale, num_phases):
         raise ValueError("HR base shape must align with an integer SR scale.")
     low_shape = tuple(n // scale for n in shape)
     edge = max(1, 64 // scale)
-    scratch = math.prod(tuple(min(n, edge * scale) for n in shape))
+    scratch = tuple(min(n, edge * scale) for n in shape)
     require_memory(
-        4 * num_phases * math.prod(low_shape) + (12 * num_phases + 24) * scratch,
-        int(psutil.virtual_memory().available * 0.8),
+        4 * num_phases * math.prod(low_shape) + base_bytes(num_phases, scratch),
+        ram_budget(),
         "coarse conversion RAM",
     )
     low = torch.empty(num_phases, *low_shape, dtype=torch.float32)
@@ -51,7 +50,7 @@ def extend_hr(
     seed=None,
     lr_overlap=None,
     tile_size=None,
-    overlap=8,
+    overlap=DEFAULT_OVERLAP,
     margin=None,
     guidance=None,
     sr_guidance=1.0,

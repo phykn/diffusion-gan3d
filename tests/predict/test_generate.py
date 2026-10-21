@@ -1156,6 +1156,7 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
         plan,
         None,
         fusion,
+        TileBuffer(3, plan.tile_size, False),
     )
     expected = (
         F.avg_pool3d(current.values.float(), 3, stride=1, padding=1).half().float()
@@ -1203,6 +1204,7 @@ def test_circular_slab_matches_full_weighted_fusion(shape, overlap):
             plan,
             None,
             fusion,
+            TileBuffer(3, plan.tile_size, False),
         )
         torch.testing.assert_close(next_state.values, expected.half())
         assert not torch.count_nonzero(fusion.weight_sum)
@@ -1225,7 +1227,7 @@ def test_cuda_denoiser_streams_slabs_with_each_storage_mode(storage):
     generator = Generator(model, Diffusion(2).to(device), device, 8, 3, 4, True)
     scaled = TiledGenerator(generator)
     probs = scaled.generate_probs(
-        (13, 10, 10), overlap=2, storage=storage, progress=False
+        shape=(13, 10, 10), overlap=2, storage=storage, progress=False
     )
     assert probs.device.type == "cpu"
     assert torch.isfinite(probs).all()
@@ -1264,6 +1266,7 @@ def test_boundary_tile_reads_only_bounded_context() -> None:
         plan,
         None,
         fusion,
+        TileBuffer(3, plan.tile_size, False),
     )
 
     expected = coordinates[tile.source]
@@ -2270,6 +2273,24 @@ def test_generation_rejects_nonfinite_guidance(guidance, tiled):
             )
         else:
             generator.generate(guidance=guidance)
+
+
+@pytest.mark.parametrize("tiled", [False, True])
+def test_height_conditioned_multi_domain_generation_requires_domain(tiled):
+    generator = _generator(_TraceModel(), _TraceDiffusion(timesteps=1))
+    generator.num_domains = 2
+    generator.height_data = {
+        "crop_size": 4,
+        "lo_res_size": 4,
+        "height_extents": {0: 10.0, 1: 10.0},
+    }
+    with pytest.raises(ValueError, match="domain is required for a multi-domain"):
+        if tiled:
+            TiledGenerator(generator).generate(
+                shape=generator.patch_size, overlap=0, progress=False
+            )
+        else:
+            generator.generate()
 
 
 def test_tiled_plan_rejects_boolean_overlap():

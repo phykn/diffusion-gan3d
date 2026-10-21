@@ -10,8 +10,8 @@ def training_origin(shape, crop, excluded):
     # Disjoint rectangles of valid integer crop origins: above, below, left, right.
     overlap_start, overlap_end = max(0, top - crop + 1), min(max_y, top + rows)
     boxes = [
-        (0, min(max_y, max(0, top - crop + 1)), 0, max_x),
-        (min(max_y, top + rows), max_y, 0, max_x),
+        (0, min(max_y, overlap_start), 0, max_x),
+        (overlap_end, max_y, 0, max_x),
         (overlap_start, overlap_end, 0, min(max_x, max(0, left - crop + 1))),
         (overlap_start, overlap_end, min(max_x, left + cols), max_x),
     ]
