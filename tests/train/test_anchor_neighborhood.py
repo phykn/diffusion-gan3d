@@ -42,7 +42,8 @@ def seam_volume(axis=0, soft=False, start=4, stop=7):
 def test_seam_is_penalized_at_any_distance_from_the_anchor(
     axis, soft, start, stop, distance
 ):
-    # A radius-2 window left distance 2 free, and the generator moved its seam there.
+    # A loss window leaves its first outside pair free, and the generator moved the
+    # seam there.
     volume = seam_volume(axis, soft, start, stop)
     loss, logs = compute_anchor_neighborhood_loss(
         volume, make_condition(volume, axis=axis)
@@ -194,7 +195,7 @@ def compare_reference(volume, condition):
 
 @pytest.mark.parametrize("axis", (0, 1, 2))
 @pytest.mark.parametrize("dtype", (torch.float32, torch.float16, torch.bfloat16))
-def test_batched_joints_match_loop_loss_gradients_and_all_metrics(axis, dtype):
+def test_batched_loss_matches_loop_values_gradients_and_metrics(axis, dtype):
     rng = torch.Generator().manual_seed(527)
     plane = torch.randn(2, 3, 1, 7, 9, generator=rng).softmax(1)
     volume = plane.expand(-1, -1, 15, -1, -1).clone()
@@ -225,7 +226,7 @@ def test_batched_joints_match_loop_loss_gradients_and_all_metrics(axis, dtype):
 
 @pytest.mark.parametrize("length", (1, 2, 4, 9))
 @pytest.mark.parametrize("active", ((0, 1), (0,), ()))
-def test_batched_joints_match_loop_for_boundaries_and_dropout(length, active):
+def test_batched_loss_matches_loop_for_boundaries_and_dropout(length, active):
     rng = torch.Generator().manual_seed(83)
     volume = torch.randn(2, 3, length, 4, 5, generator=rng).softmax(1)
     condition = make_condition(volume, indices=(0, length - 1))
@@ -234,7 +235,7 @@ def test_batched_joints_match_loop_for_boundaries_and_dropout(length, active):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-def test_batched_joints_match_loop_under_cuda_autocast():
+def test_batched_loss_matches_loop_under_cuda_autocast():
     volume = seam_volume(soft=True).cuda().half()
     condition = make_condition(volume)
     with torch.autocast("cuda", dtype=torch.float16):

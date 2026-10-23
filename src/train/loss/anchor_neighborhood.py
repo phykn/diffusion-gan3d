@@ -50,9 +50,14 @@ def compute_anchor_neighborhood_loss(
                         torch.where(roots[region.index][patch], offset, size),
                     )
                 pairs = (distance < size) & ~(fixed[:-1] & fixed[1:])
-                positions = torch.stack((indices, indices + 1))
-                # Gather before casting so half-precision endpoint gradients are
-                # rounded separately, as in the original per-pair computation.
+                present = pairs.flatten(1).any(1)
+                if not present.any():
+                    continue
+                pairs, distance = pairs[present], distance[present]
+                index = indices[present]
+                positions = torch.stack((index, index + 1))
+                # Cast after gathering so each endpoint's half-precision gradient
+                # rounds on its own, as in the per-pair reference.
                 endpoints = torch.where(
                     fixed[positions, None],
                     observed[:, positions].movedim(0, 2).float().add(1).mul(0.5),
@@ -63,20 +68,11 @@ def compute_anchor_neighborhood_loss(
                 same = torch.einsum(
                     "pcn,pcn,pn->p", endpoints[0], endpoints[1], mask.float()
                 )
-                change = 1 - same / pixels.clamp_min(1)
-                present = pixels > 0
-                if not present.any():
-                    continue
-                center, tolerance = _reference(change.detach()[present])
+                change = 1 - same / pixels
+                center, tolerance = _reference(change.detach())
                 deviation = (change - center).abs()
                 penalty = (deviation - tolerance - torch.finfo(change.dtype).eps).relu()
-                nearest = (
-                    torch.where(pairs, distance, size)
-                    .flatten(1)
-                    .amin(1)
-                    .clamp_max(length - 1)
-                    .long()
-                )
+                nearest = torch.where(pairs, distance, size).flatten(1).amin(1).long()
                 totals = [
                     total.index_add(0, nearest, value * pixels)
                     for total, value in zip(
