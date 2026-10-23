@@ -11,6 +11,7 @@ from src.train.loss.gan import (
     score_triplets,
 )
 from src.train.loss.group_statistics import compute_group_statistics_loss
+from src.train.loss.mirror_balance import compute_mirror_balance_loss
 from src.train.loss.spatial_profile import compute_profile_loss
 from src.train.loss.sr import consistency_loss
 from src.train.loss.volume_fraction import compute_vf_loss
@@ -33,6 +34,9 @@ class DenoiserLossSettings:
     group_statistics_max_gap: int = 8
     group_statistics_tolerance: float = 0.01
     preserve_height: bool = False
+    mirror_balance_weight: float = 0.0
+    mirror_balance_max_gap: int = 4
+    mirror_balance_tolerance: float = 0.02
     anchor_continuity_weight: float = 0.0
     anchor_neighborhood_weight: float = 0.0
     anchor_neighborhood_radius: int = 2
@@ -169,6 +173,16 @@ def denoiser_objective(
             if active is None
             else active.float().mean().to(statistics)
         )
+    if settings.mirror_balance_weight > 0:
+        # The x0 prediction of every transition must keep the mirror symmetry.
+        mirror, values = compute_mirror_balance_loss(
+            batch.clean_probs,
+            settings.mirror_balance_max_gap,
+            settings.mirror_balance_tolerance,
+        )
+        total = total + settings.mirror_balance_weight * mirror
+        diagnostics.update(values)
+        diagnostics["loss/mirror_balance"] = mirror.detach()
     if batch.profile is not None:
         profile, values = profile_loss(batch, settings)
         total = total + profile

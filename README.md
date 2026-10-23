@@ -63,7 +63,10 @@ A sample is one file in [config/samples/](config/samples/); copy
   - `isotropic: false` judges `xy` sections apart from `xz`/`yz` sections.
   - `depth_gradient: true` conditions both stages on height and, in LR, on the phase
     fractions at each height.
-  - `mirror_symmetric: false` flips sections less often (probability 0.2), so a tilt stays visible.
+  - `mirror_symmetric: true` makes each volume's phase pairs along mirrored diagonals
+    agree in LR (`loss.mirror_balance`), so the generator cannot shear the volume to keep two
+    section planes realistic at the cost of the third. `false` turns that off and flips
+    sections less often (probability 0.2), so a tilt stays visible.
 
   When z differs from x and y (either of the first two flags), training never rotates
   `xz`/`yz` sections, which would swap z with x or y; with a depth gradient it also

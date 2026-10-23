@@ -12,6 +12,7 @@ from src.prepare.resize import phase_channels, resize_phases
 from src.train.batch import DenoiserBatch
 from src.train.loss.denoiser import DenoiserLossSettings, denoiser_objective
 from src.train.loss.group_statistics import compute_group_statistics_loss
+from src.train.loss.mirror_balance import compute_mirror_balance_loss
 from src.train.loss.transition import compute_real_transition_loss
 from src.train.state import (
     resume_sr_training,
@@ -383,3 +384,20 @@ def test_trainer_respects_group_statistics_start_and_ramp(tmp_path, stage):
         prepared = trainer.prepare_step(step, transition=0)
         assert prepared.group_statistics_ramp == expected
         assert prepared.domain == 0
+
+
+@pytest.mark.parametrize("transition", (0, 1))
+def test_objective_adds_mirror_balance_at_every_transition(transition):
+    batch, settings = objective_batch()
+    # Each z row of the x lamella shifts by one voxel: a shear f(x - z).
+    sheared = torch.stack([lamella(2)[0, :, 0].roll(z, -1) for z in range(8)], 1)
+    sheared = sheared[None]
+    settings = replace(settings, group_statistics_weight=0)
+    batch = replace(batch, transition=transition, clean_probs=sheared)
+    update, logs = denoiser_objective(batch, {}, None, None, ALL, None, settings)
+    assert update.total == 0 and "loss/mirror_balance" not in logs
+    settings = replace(settings, mirror_balance_weight=2.0, mirror_balance_tolerance=0)
+    update, logs = denoiser_objective(batch, {}, None, None, ALL, None, settings)
+    expected, _ = compute_mirror_balance_loss(sheared, 4, 0)
+    torch.testing.assert_close(update.total, 2.0 * expected)
+    assert logs["loss/mirror_balance"] > 0

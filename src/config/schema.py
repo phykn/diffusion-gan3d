@@ -59,7 +59,8 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
         | {
             "group_statistics": dict.fromkeys(
                 ("weight", "max_gap", "tolerance", "start_step", "ramp_steps")
-            )
+            ),
+            "mirror_balance": dict.fromkeys(("weight", "max_gap", "tolerance")),
         },
     }
     common["data"]["split"] = dict.fromkeys(("validation_files", "validation_regions"))

@@ -96,6 +96,9 @@ def validate_training_values(cfg):
     statistics = cfg["loss"]["group_statistics"]
     check_number(statistics["weight"], "loss.group_statistics.weight")
     check_number(statistics["tolerance"], "loss.group_statistics.tolerance", 1)
+    mirror = cfg["loss"]["mirror_balance"]
+    check_number(mirror["weight"], "loss.mirror_balance.weight")
+    check_number(mirror["tolerance"], "loss.mirror_balance.tolerance", 1)
 
     for name in (
         "total_steps",

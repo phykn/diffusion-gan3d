@@ -109,6 +109,7 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         ("train.structure_every_steps", 0),
         ("model.critic.pyramid_min_size", 2),
         ("loss.group_statistics.max_gap", 1),
+        ("loss.mirror_balance.max_gap", 1),
     ]
     if stage == "low_res":
         integers += [

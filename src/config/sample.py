@@ -110,7 +110,13 @@ def get_structure_settings(structure: Mapping, planes: list[str], stage: str) ->
             cfg["conditioning"]["spatial_profile"] = {"enabled": True}
             # smooth_l1 (beta=1) is quadratic at these profile errors, so 1.0 barely pulls.
             cfg["loss"] = {"spatial_profile_weight": 30.0}
-    if not structure["mirror_symmetric"]:
+    if structure["mirror_symmetric"]:
+        if stage == "low_res":
+            # A shear such as f(y, x - z) keeps two planes realistic at the cost
+            # of one; the critics accept that trade, so mirrored diagonals must
+            # agree. SR follows the LR volume through downsample consistency.
+            cfg.setdefault("loss", {})["mirror_balance"] = {"weight": 10.0}
+    else:
         # With height kept, a side plane's only transform is a flip; at 0.5 the
         # critic cannot tell either tilt from the real one and the generator drifts
         # to one. Rarer flips keep the tilt visible but still fight critic overfitting.

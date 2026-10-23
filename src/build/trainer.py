@@ -138,6 +138,7 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
     anchor = conditioning["anchor"]
     connectivity = loss["connectivity"]
     statistics = loss["group_statistics"]
+    mirror = loss["mirror_balance"]
     optim = cfg["optim"]
     anchor_start_step, anchor_ramp_steps = get_schedule_steps(
         anchor, "conditioning.anchor"
@@ -184,6 +185,9 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
             group_statistics_max_gap=statistics["max_gap"],
             group_statistics_tolerance=statistics["tolerance"],
             preserve_height=conditioning["height_enabled"],
+            mirror_balance_weight=mirror["weight"],
+            mirror_balance_max_gap=mirror["max_gap"],
+            mirror_balance_tolerance=mirror["tolerance"],
         ),
         volume_batch_size=train["volume_batch_size"],
         num_phases=data["num_phases"],
