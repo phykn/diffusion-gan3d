@@ -113,7 +113,6 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     ]
     if stage == "low_res":
         integers += [
-            ("loss.anchor_neighborhood_radius", 1),
             ("loss.anchor_seam_rows", 1),
             ("loss.connectivity.max_slice_gap", 1),
             ("conditioning.spatial_profile.num_bins", 1),

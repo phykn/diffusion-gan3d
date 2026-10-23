@@ -1,23 +1,23 @@
-"""Loop implementation from 0dce898, kept as a numerical regression oracle."""
+"""Per-pair loop implementation, kept as a numerical regression oracle."""
 
 import torch
 
 from src.anchor import AnchorCondition
+from src.train.loss.anchor_neighborhood import OUTLIER_SCALE
 
 
 def compute_anchor_neighborhood_loss(
     probs: torch.Tensor,
     condition: AnchorCondition,
-    radius: int,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     zero = probs.sum(dtype=torch.float32) * 0.0
+    length = max(probs.shape[2:])
     totals = [
-        [zero, zero.detach(), zero.detach(), zero.detach()] for _ in range(radius)
+        [zero, zero.detach(), zero.detach(), zero.detach()] for _ in range(length)
     ]
-    far_pairs, reference_axes = zero.detach(), zero.detach()
-    active = condition.active_batches
+    reference_axes = zero.detach()
     with torch.autocast(device_type=probs.device.type, enabled=False):
-        for batch in active:
+        for batch in condition.active_batches:
             for axis in range(3):
                 regions = [
                     region for region in condition.regions if region.axis == axis
@@ -28,74 +28,71 @@ def compute_anchor_neighborhood_loss(
                 fixed = condition.mask[batch, 0].movedim(axis, 0)
                 observed = condition.image[batch].detach().movedim(axis + 1, 1)
                 roots = condition.axis_masks[batch, axis].movedim(axis, 0)
-                length = values.shape[1]
-                indices = torch.arange(length - 1, device=probs.device)
-                distance = torch.full_like(fixed[:-1], length, dtype=torch.int32)
-                candidates = set()
+                size = values.shape[1]
+                distance = torch.full_like(fixed[:-1], size, dtype=torch.int32)
                 for region in regions:
                     patch = (
                         slice(region.row, region.row + region.height),
                         slice(region.col, region.col + region.width),
                     )
-                    offset = torch.minimum(
-                        (indices - region.index).abs(),
-                        (indices + 1 - region.index).abs(),
-                    )[:, None, None]
-                    distance[:, *patch] = torch.minimum(
-                        distance[:, *patch],
-                        torch.where(roots[region.index][patch], offset, length),
-                    )
-                    candidates.update(
-                        range(
-                            max(0, region.index - radius),
-                            min(length - 1, region.index + radius),
+                    for index in range(size - 1):
+                        offset = min(
+                            abs(index - region.index), abs(index + 1 - region.index)
                         )
-                    )
-                eligible = ~(fixed[:-1] & fixed[1:])
-                far = (distance >= radius) & (distance < length) & eligible
-                target, tolerance, count = _far_reference(values, observed, fixed, far)
-                supported = count > 0
-                far_pairs = far_pairs + count
-                reference_axes = reference_axes + supported
-                for index in sorted(candidates):
-                    for gap in range(radius):
-                        mask = (distance[index] == gap) & eligible[index] & supported
-                        joint, pixels = _pair_joint(
-                            values, observed, fixed, index, mask
+                        distance[index][patch] = torch.where(
+                            roots[region.index][patch],
+                            distance[index][patch].clamp_max(offset),
+                            distance[index][patch],
                         )
-                        tv = (joint - target).abs().sum() * 0.5
-                        penalty = (tv - tolerance - torch.finfo(tv.dtype).eps).relu()
-                        loss_sum, tv_sum, tolerance_sum, pairs = totals[gap]
-                        totals[gap] = [
-                            loss_sum + penalty * pixels,
-                            tv_sum + tv.detach() * pixels,
-                            tolerance_sum + tolerance * pixels,
-                            pairs + pixels,
-                        ]
+                pairs = (distance < size) & ~(fixed[:-1] & fixed[1:])
+                changes = {}
+                for index in range(size - 1):
+                    if pairs[index].any():
+                        changes[index] = _change(
+                            values, observed, fixed, index, pairs[index]
+                        )
+                if not changes:
+                    continue
+                rates = torch.stack([change.detach() for change in changes.values()])
+                center = rates.median()
+                tolerance = (rates - center).abs().median() * OUTLIER_SCALE
+                for index, change in changes.items():
+                    pixels = pairs[index].sum(dtype=torch.float32)
+                    deviation = (change - center).abs()
+                    penalty = (
+                        deviation - tolerance - torch.finfo(change.dtype).eps
+                    ).relu()
+                    nearest = min(int(distance[index][pairs[index]].min()), length - 1)
+                    loss_sum, deviation_sum, tolerance_sum, total = totals[nearest]
+                    totals[nearest] = [
+                        loss_sum + penalty * pixels,
+                        deviation_sum + deviation.detach() * pixels,
+                        tolerance_sum + tolerance * pixels,
+                        total + pixels,
+                    ]
+                reference_axes = reference_axes + 1
+    loss = zero
+    deviations = []
+    for loss_sum, deviation_sum, _, pixels in totals:
+        loss = loss + loss_sum / pixels.clamp_min(1)
+        deviations.append(deviation_sum / pixels.clamp_min(1))
+    deviations = torch.stack(deviations)
+    peak = deviations.argmax()
+    count = sum(total[3] for total in totals)
     diagnostics = {
-        "anchor_neighborhood/far_pairs": far_pairs,
+        "anchor_neighborhood/deviation": sum(total[1] for total in totals)
+        / count.clamp_min(1),
+        "anchor_neighborhood/tolerance": sum(total[2] for total in totals)
+        / count.clamp_min(1),
+        "anchor_neighborhood/pairs": count,
+        "anchor_neighborhood/peak_deviation": deviations[peak],
+        "anchor_neighborhood/peak_distance": peak.float(),
         "anchor_neighborhood/reference_axes": reference_axes,
     }
-    losses, valid = [], []
-    for gap, (loss_sum, tv_sum, tolerance_sum, pairs) in enumerate(totals):
-        loss = loss_sum / pairs.clamp_min(1)
-        losses.append(loss)
-        valid.append(pairs > 0)
-        prefix = f"anchor_neighborhood/distance{gap}"
-        diagnostics.update(
-            {
-                f"{prefix}/loss": loss.detach(),
-                f"{prefix}/tv": tv_sum / pairs.clamp_min(1),
-                f"{prefix}/tolerance": tolerance_sum / pairs.clamp_min(1),
-                f"{prefix}/pairs": pairs,
-            }
-        )
-    return torch.stack(losses).sum() / torch.stack(valid).sum().clamp_min(
-        1
-    ), diagnostics
+    return loss, diagnostics
 
 
-def _pair_joint(values, observed, fixed, index, mask):
+def _change(values, observed, fixed, index, mask):
     left, right = (
         torch.where(
             fixed[position],
@@ -104,33 +101,5 @@ def _pair_joint(values, observed, fixed, index, mask):
         )
         for position in (index, index + 1)
     )
-    count = mask.sum(dtype=torch.float32)
-    joint = torch.einsum("chw,dhw,hw->cd", left, right, mask.float())
-    return joint / count.clamp_min(1), count
-
-
-@torch.no_grad()
-def _far_reference(values, observed, fixed, mask):
-    joints, counts = [], []
-    for index in range(len(mask)):
-        joint, count = _pair_joint(values, observed, fixed, index, mask[index])
-        joints.append(joint)
-        counts.append(count)
-    if not joints:
-        return (
-            values.new_zeros((values.shape[0], values.shape[0]), dtype=torch.float32),
-            values.new_zeros((), dtype=torch.float32),
-            values.new_zeros((), dtype=torch.float32),
-        )
-    joints, counts = torch.stack(joints), torch.stack(counts)
-    count = counts.sum()
-    total = (joints * counts[:, None, None]).sum(0)
-    target = total / count.clamp_min(1)
-    other = count - counts
-    leave_one_out = (total - joints * counts[:, None, None]) / other.clamp_min(1)[
-        :, None, None
-    ]
-    deviation = (joints - leave_one_out).abs().sum((1, 2)) * 0.5
-    weights = counts * (other > 0)
-    tolerance = (deviation * weights).sum() / weights.sum().clamp_min(1)
-    return target, tolerance, count
+    same = torch.einsum("chw,chw,hw->", left, right, mask.float())
+    return 1 - same / mask.sum(dtype=torch.float32)

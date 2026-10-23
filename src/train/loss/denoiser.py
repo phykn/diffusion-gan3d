@@ -39,7 +39,6 @@ class DenoiserLossSettings:
     mirror_balance_tolerance: float = 0.02
     anchor_continuity_weight: float = 0.0
     anchor_neighborhood_weight: float = 0.0
-    anchor_neighborhood_radius: int = 2
     anchor_seam_weight: float = 0.0
     anchor_seam_rows: int = 4
 

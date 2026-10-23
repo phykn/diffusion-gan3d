@@ -48,8 +48,12 @@ ramp, and are LR-only. Their defaults are in [src/config/defaults.py](../src/con
   phase-pair statistics up to `loss.connectivity.max_slice_gap` must match the measured
   2D transition statistics. Only the total variation (TV, half the L1 distance between
   the two distributions) above real crop-to-crop variation is penalized.
-- **Neighborhood** (`loss.anchor_neighborhood_weight`, `loss.anchor_neighborhood_radius`):
-  adjacent-plane statistics near an anchor must match those far from it in the same volume.
+- **Neighborhood** (`loss.anchor_neighborhood_weight`): along an anchored axis, every
+  adjacent-plane change rate (the fraction of voxels whose phase differs) must stay near
+  the median of that axis in the same volume, with one term per distance from the
+  nearest anchor. Only deviations beyond four median absolute deviations are penalized,
+  which about 1% of unanchored pairs exceed. It has no radius: a window leaves its first
+  outside pair free, and the generator moved the seam there.
 - **Seam critic** (`loss.anchor_seam_weight`, off by default; `loss.anchor_seam_rows`):
   a 2D critic treats generated bands far from anchors as real and bands next to anchors
   as fake. Its "real" data is generated, not measured.

@@ -915,8 +915,10 @@ def test_anchor_continuity_updates_x0_at_every_transition_and_records_metrics(
 @pytest.mark.parametrize("replay", (False, True))
 @pytest.mark.parametrize("weight", (0.0, 0.2))
 def test_anchor_neighborhood_covers_all_transitions_and_logs_with_zero_weight(
-    tmp_path, transition, replay, weight
+    tmp_path, monkeypatch, transition, replay, weight
 ):
+    # An untrained model has no outlier pairs; penalize every deviation instead.
+    monkeypatch.setattr("src.train.loss.anchor_neighborhood.OUTLIER_SCALE", 0.0)
     torch.manual_seed(17)
     trainer, _, _ = _conditioning_trainer(anchored=True)
     trainer.settings = replace(
@@ -952,11 +954,11 @@ def test_anchor_neighborhood_covers_all_transitions_and_logs_with_zero_weight(
     for key in (
         "loss/anchor_neighborhood",
         "anchor_neighborhood/contribution",
-        "anchor_neighborhood/far_pairs",
-        "anchor_neighborhood/distance0/tv",
-        "anchor_neighborhood/distance1/loss",
-        "anchor_neighborhood/distance1/tolerance",
-        "anchor_neighborhood/distance1/pairs",
+        "anchor_neighborhood/deviation",
+        "anchor_neighborhood/tolerance",
+        "anchor_neighborhood/pairs",
+        "anchor_neighborhood/peak_deviation",
+        "anchor_neighborhood/peak_distance",
     ):
         assert record[key] == pytest.approx(metrics.diagnostics[key])
 

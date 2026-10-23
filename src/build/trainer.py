@@ -171,7 +171,6 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
             real_transition_weight=connectivity["real_transition_weight"],
             anchor_continuity_weight=loss["anchor_continuity_weight"],
             anchor_neighborhood_weight=loss["anchor_neighborhood_weight"],
-            anchor_neighborhood_radius=loss["anchor_neighborhood_radius"],
             anchor_seam_weight=loss["anchor_seam_weight"],
             anchor_seam_rows=loss["anchor_seam_rows"],
             vf_weight=loss["volume_fraction_weight"],

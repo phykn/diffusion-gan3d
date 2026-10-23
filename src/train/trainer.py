@@ -564,7 +564,6 @@ class Trainer:
             loss, diagnostics = compute_anchor_neighborhood_loss(
                 clean_probs,
                 selection.condition.visible(prepared.presence.anchor),
-                self.settings.loss.anchor_neighborhood_radius,
             )
         self.diagnostics.update(diagnostics)
         return loss

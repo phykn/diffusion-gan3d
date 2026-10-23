@@ -54,12 +54,6 @@ from src.train.run.sr import run_sr_train
             "loss.anchor_neighborhood_weight",
             0.1,
         ),
-        (
-            "low_res",
-            "loss.anchor_neighborhood_radius",
-            "loss.anchor_neighborhood_radius",
-            2,
-        ),
         ("low_res", "loss.anchor_seam_weight", "loss.anchor_seam_weight", 0.0),
         ("low_res", "loss.anchor_seam_rows", "loss.anchor_seam_rows", 4),
         ("low_res", "loss.volume_fraction_weight", "loss.vf_weight", 0.0),
@@ -246,12 +240,6 @@ def test_anchor_neighborhood_weight_is_validated(value):
         normalize_train_config({"loss": {"anchor_neighborhood_weight": value}})
 
 
-@pytest.mark.parametrize("value", (0, -1, 0.5, True))
-def test_anchor_neighborhood_radius_is_validated(value):
-    with pytest.raises(ValueError, match="anchor_neighborhood_radius"):
-        normalize_train_config({"loss": {"anchor_neighborhood_radius": value}})
-
-
 @pytest.mark.parametrize("value", (0, -1, 0.5, True, None))
 def test_anchor_seam_rows_must_be_a_positive_integer(value):
     with pytest.raises(ValueError, match="anchor_seam_rows"):
@@ -282,7 +270,7 @@ def test_anchor_seam_settings_are_explicit_and_lr_only(weight):
 
 @pytest.mark.parametrize("weight", (0, 0.37))
 def test_anchor_neighborhood_settings_are_explicit_and_lr_only(weight):
-    settings = {"anchor_neighborhood_weight": weight, "anchor_neighborhood_radius": 3}
+    settings = {"anchor_neighborhood_weight": weight}
     cfg = normalize_train_config({"loss": settings})
     assert all(cfg["loss"][key] == value for key, value in settings.items())
     assert normalize_train_config(cfg) == cfg

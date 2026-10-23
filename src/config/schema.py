@@ -92,7 +92,6 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                         "anchor_pixel_weight",
                         "anchor_continuity_weight",
                         "anchor_neighborhood_weight",
-                        "anchor_neighborhood_radius",
                         "anchor_seam_weight",
                         "anchor_seam_rows",
                         "volume_fraction_weight",
