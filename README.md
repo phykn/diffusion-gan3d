@@ -45,7 +45,8 @@ python scripts/06_check_hr.py --weight "run/my-run-sr" --no-view
 `run_train.py` trains the LR model, then the SR model from frozen LR volumes and the real
 high-resolution sections. `--run-dir NAME` writes `NAME-lr` and `NAME-sr`, and rerunning
 the command skips a finished stage; without it, each stage gets a new timestamped folder in
-`run/`. `--resume` continues one interrupted stage ([Save and resume](docs/checks.md#save-and-resume)).
+`run/`. `--lr-only` stops after LR, so a later run with the same `--run-dir` trains only SR.
+`--resume` continues one interrupted stage ([Save and resume](docs/checks.md#save-and-resume)).
 The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
 only on CUDA.
 

@@ -181,6 +181,9 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
     )
     name = tmp_path / "trial"
     args = [str(sample), "--run-dir", str(name), "--device", "cpu"]
+    run_train.main([*args, "--lr-only"])
+    assert (tmp_path / "trial-lr" / ".done").is_file()
+    assert not (tmp_path / "trial-sr").exists()
     run_train.main(args)
     lr_dir, sr_dir = tmp_path / "trial-lr", tmp_path / "trial-sr"
     for path in (lr_dir, sr_dir):
@@ -221,6 +224,14 @@ def test_cli_resume_rejects_a_sample():
 def test_cli_resume_rejects_options_of_the_other_stage(option):
     with pytest.raises(SystemExit):
         run_train.parse_args(["--resume", "run/x", option, "5"])
+
+
+@pytest.mark.parametrize(
+    "options", (["--resume", "run/x"], ["--sr-steps", "5"], ["--bank-size", "5"])
+)
+def test_cli_lr_only_rejects_resume_and_sr_options(options):
+    with pytest.raises(SystemExit):
+        run_train.parse_args(["--lr-only", *options])
 
 
 def test_cli_expands_home_in_run_paths():

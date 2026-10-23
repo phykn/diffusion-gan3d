@@ -34,6 +34,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "(default: new run/MMDDHHMM_<stage>_<sample> directories)."
         ),
     )
+    parser.add_argument(
+        "--lr-only",
+        action="store_true",
+        help="Stop after the LR stage; rerun without it and the same --run-dir for SR.",
+    )
     parser.add_argument("--steps", type=int, help="LR total steps.")
     parser.add_argument("--sr-steps", type=int, help="SR total steps.")
     parser.add_argument(
@@ -69,6 +74,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.resume = args.resume.expanduser()
     elif args.path_map:
         parser.error("--path-map requires --resume.")
+    if args.lr_only and (
+        args.resume is not None
+        or args.sr_steps is not None
+        or args.bank_size is not None
+    ):
+        parser.error("--lr-only trains a new LR stage; omit --resume and SR options.")
     if args.run_dir is not None:
         args.run_dir = args.run_dir.expanduser()
     return args
@@ -93,6 +104,9 @@ def main(argv: list[str] | None = None) -> None:
             args.device, config=configs["low_res"], run_dir=lr_dir, steps=args.steps
         )
         mark_done(lr_dir)
+    if args.lr_only:
+        print(f"Done: LR {lr_dir}", flush=True)
+        return
     if is_done(sr_dir):
         print(f"SR: {sr_dir} already finished", flush=True)
         return
