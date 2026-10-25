@@ -38,6 +38,8 @@ from src.train.loss.denoiser import DenoiserLossSettings, denoiser_objective
 from src.train.loss.gan import (
     active_groups,
     critic_objective,
+    get_critic_loss,
+    get_relativistic_loss,
     score_plane,
     score_triplets,
 )
@@ -234,6 +236,9 @@ class Trainer:
         fake = self._sample_fake_pairs(
             previous, current, prepared, critic_height, has_profile
         )
+        real_pairs = self._sample_real_pairs(
+            transition, real, profile_present, has_profile
+        )
         connectivity_real, connectivity_fake = self.make_connectivity_triplets(
             prediction,
             None if selection is None else selection.reference,
@@ -258,9 +263,8 @@ class Trainer:
         critic_vals, r1 = self.update_critics(
             transition,
             fake,
-            real,
+            real_pairs,
             critic_domains,
-            profile_present=profile_present,
         )
         # Disabled critics receive empty batches, which skip their updates.
         (
@@ -281,6 +285,7 @@ class Trainer:
                 prepared=prepared,
                 connectivity_domains=connectivity_domains,
                 fake=fake,
+                real=real_pairs,
                 connectivity_fake=connectivity_fake,
                 logits=logits,
                 clean_probs=clean_probs,
@@ -451,6 +456,39 @@ class Trainer:
                     result.profiles[axis] = pairs[2][:, 1:]
         return result
 
+    def _sample_real_pairs(
+        self,
+        transition: int,
+        real: RealBatch,
+        profile_present: torch.Tensor,
+        has_profile: bool,
+    ) -> SampledPairs:
+        result = SampledPairs(pairs={})
+        for axis in self.active_axes:
+            images = real.images[axis].mul(2.0).sub(1.0)
+            previous, current = self.diffusion.sample_pair(images, transition)
+            height = real.heights.get(axis)
+            if height is not None and has_profile:
+                profile = (real.profiles[axis] * 2 - 1)[..., None].expand(
+                    -1, -1, *height.shape[-2:]
+                )
+                present = profile_present[
+                    torch.randint(
+                        len(profile_present), (len(profile),), device=self.device
+                    )
+                ]
+                height = torch.cat((height, profile * present.reshape(-1, 1, 1, 1)), 1)
+            inputs = (
+                (previous, current) if height is None else (previous, current, height)
+            )
+            pairs = self.critic_augment.apply_together(inputs, plane=axis)
+            result.pairs[axis] = pairs[:2]
+            if len(pairs) == 3:
+                result.heights[axis] = pairs[2][:, :1]
+                if has_profile:
+                    result.profiles[axis] = pairs[2][:, 1:]
+        return result
+
     def _anchor_visibility(self, presence) -> torch.Tensor:
         # With profiles on, an anchor counts only where its profile is visible too.
         if self.settings.profile_settings["enabled"]:
@@ -470,6 +508,7 @@ class Trainer:
         prepared: StepPreparation,
         connectivity_domains: torch.Tensor,
         fake: SampledPairs,
+        real: SampledPairs,
         connectivity_fake: TripletBatch,
         logits: torch.Tensor,
         clean_probs: torch.Tensor,
@@ -493,7 +532,8 @@ class Trainer:
             transition=prepared.transition,
             connectivity_domains=connectivity_domains,
             critic_domains=prepared.critic_domains,
-            fake=fake.pairs,
+            fake=fake,
+            real=real,
             connectivity_fake=connectivity_fake,
             logits=logits,
             clean_probs=clean_probs,
@@ -504,8 +544,6 @@ class Trainer:
             connectivity_ramp=prepared.connectivity_ramp,
             target_vf=prepared.target_vf,
             vf_present=prepared.presence.vf,
-            fake_heights=fake.heights,
-            fake_profiles=fake.profiles,
             profile=prepared.model_conditions.get("profile"),
             coarse_target=prepared.coarse_target,
             coarse_mask=prepared.coarse_mask,
@@ -701,9 +739,8 @@ class Trainer:
         self,
         transition: int,
         fake: SampledPairs,
-        batches: RealBatch,
+        real: SampledPairs,
         domains: dict[int, int],
-        profile_present: torch.Tensor | None = None,
     ) -> tuple[list[float], float]:
         """Return per-axis adversarial critic losses (R1/R2 excluded) and mean R1."""
         critic_losses = [0.0] * len(AXES)
@@ -716,47 +753,12 @@ class Trainer:
             optimizer = self.critic_optims[group]
             optimizer.zero_grad(set_to_none=True)
             for axis in axes:
-                real = batches.images[axis].mul(2.0).sub(1.0)
-                real_time = self.make_time(transition, real.shape[0])
-                real_prev, real_curr = self.diffusion.sample_pair(
-                    real,
-                    transition,
+                # Copies keep the shared real pairs free of gradients for the generator.
+                real_prev, real_curr = (
+                    value.detach().requires_grad_(regularize)
+                    for value in real.pairs[axis]
                 )
-                real_height = batches.heights.get(axis)
-                if real_height is not None and axis in fake.profiles:
-                    profile = (batches.profiles[axis] * 2 - 1)[..., None].expand(
-                        -1, -1, *real_height.shape[-2:]
-                    )
-                    present = profile_present[
-                        torch.randint(
-                            len(profile_present),
-                            (len(profile),),
-                            device=self.device,
-                        )
-                    ]
-                    real_height = torch.cat(
-                        (real_height, profile * present.reshape(-1, 1, 1, 1)), 1
-                    )
-                inputs = (
-                    (real_prev, real_curr)
-                    if real_height is None
-                    else (real_prev, real_curr, real_height)
-                )
-                augmented = self.critic_augment.apply_together(inputs, plane=axis)
-                real_prev, real_curr = augmented[:2]
-                real_conditions = (
-                    {} if real_height is None else {"height": augmented[2][:, :1]}
-                )
-                fake_conditions = (
-                    {} if axis not in fake.heights else {"height": fake.heights[axis]}
-                )
-
-                if real_height is not None and axis in fake.profiles:
-                    real_conditions["profile"] = augmented[2][:, 1:]
-                    fake_conditions["profile"] = fake.profiles[axis]
-
-                real_prev.requires_grad_(regularize)
-                real_curr.requires_grad_(regularize)
+                real_time = self.make_time(transition, real_prev.shape[0])
                 fake_prev, fake_curr = fake.pairs[axis]
                 fake_prev = fake_prev.detach().float().requires_grad_(apply_r2)
                 fake_curr = fake_curr.detach().float()
@@ -776,7 +778,7 @@ class Trainer:
                         real_curr,
                         real_time,
                         real_domain,
-                        **real_conditions,
+                        **real.conditions(axis),
                     )
                     fake_score = score_plane(
                         critic,
@@ -784,9 +786,12 @@ class Trainer:
                         fake_curr,
                         fake_time,
                         fake_domain,
-                        **fake_conditions,
+                        **fake.conditions(axis),
                     )
+                    # Pairs need not share a height: fake volumes take their heights
+                    # from real crops, so each pair compares (section, height) samples.
                     losses = critic_objective(
+                        get_relativistic_loss(real_score, fake_score),
                         real_score,
                         fake_score,
                         (real_prev,),
@@ -839,6 +844,7 @@ class Trainer:
                 self.connectivity_critic, fake, fake_values, domains
             )
             losses = critic_objective(
+                get_critic_loss(real_score, fake_score),
                 real_score,
                 fake_score,
                 (real_values,),
@@ -894,6 +900,7 @@ class Trainer:
                 self.get_axis_domains(domains, fake.axes),
             )
             losses = critic_objective(
+                get_critic_loss(real_score, fake_score),
                 real_score,
                 fake_score,
                 (real_values,),

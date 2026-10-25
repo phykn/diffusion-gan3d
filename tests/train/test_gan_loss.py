@@ -8,6 +8,7 @@ from src.train.loss.gan import (
     get_critic_loss,
     get_generator_loss,
     get_gradient_penalty,
+    get_relativistic_loss,
 )
 
 
@@ -78,6 +79,37 @@ def test_critic_loss_allows_different_real_and_fake_batch_sizes() -> None:
     )
 
 
+def test_relativistic_loss_pairs_samples_and_reuses_the_smaller_batch() -> None:
+    real = CriticScores(torch.tensor([1.0, -2.0]))
+    fake = CriticScores(torch.tensor([0.5, 0.0, 3.0]))
+
+    critic = get_relativistic_loss(real, fake)
+    generator = get_relativistic_loss(fake, real)
+
+    margins = torch.tensor([0.5 - 1.0, 0.0 + 2.0, 3.0 - 1.0])
+    torch.testing.assert_close(critic.global_loss, F.softplus(margins).mean())
+    torch.testing.assert_close(generator.global_loss, F.softplus(-margins).mean())
+    assert critic.local_loss is None
+
+
+def test_relativistic_loss_depends_only_on_score_differences() -> None:
+    # An offset shared by both sides of every pair cannot change the loss; the
+    # logistic loss moves with it.
+    real = CriticScores(torch.tensor([0.3, -0.4]))
+    fake = CriticScores(torch.tensor([-0.2, 0.1]))
+    shifted_real = CriticScores(real.logits_global + 5.0)
+    shifted_fake = CriticScores(fake.logits_global + 5.0)
+
+    torch.testing.assert_close(
+        get_relativistic_loss(shifted_real, shifted_fake).global_loss,
+        get_relativistic_loss(real, fake).global_loss,
+    )
+    assert not torch.allclose(
+        get_critic_loss(shifted_real, shifted_fake).global_loss,
+        get_critic_loss(real, fake).global_loss,
+    )
+
+
 def test_r1_aggregation_is_independent_of_patch_count() -> None:
     small = _r1_penalty(2)
     large = _r1_penalty(16)
@@ -127,6 +159,7 @@ def test_critic_objective_preserves_penalty_weights_and_parameter_gradients(
         4 * fake[:, 0] * weight, (-5 * fake[:, 0] * weight)[:, None, None]
     )
     result = critic_objective(
+        get_critic_loss(real_scores, fake_scores),
         real_scores,
         fake_scores,
         (real,),
@@ -200,14 +233,22 @@ def test_global_only_objective_and_penalties_preserve_gradients(
     real_scores = CriticScores(real_levels[0].logits_global, levels=real_levels)
     fake_scores = CriticScores(fake_levels[0].logits_global, levels=fake_levels)
     result = critic_objective(
-        real_scores, fake_scores, (real,), (fake,), r1_weight, r2_weight, 4
+        get_relativistic_loss(real_scores, fake_scores),
+        real_scores,
+        fake_scores,
+        (real,),
+        (fake,),
+        r1_weight,
+        r2_weight,
+        4,
     )
     penalty = sum(k**2 for k in range(1, levels + 1)) / levels * weight.square()
     expected_r1 = penalty if r1_weight else weight.new_zeros(())
     expected_r2 = 4 * penalty if r2_weight else weight.new_zeros(())
+    # Three fakes pair with reals [0, 1, 0].
     adversarial = torch.stack(
         [
-            F.softplus(-r.logits_global).mean() + F.softplus(f.logits_global).mean()
+            F.softplus(f.logits_global - r.logits_global[[0, 1, 0]]).mean()
             for r, f in zip(real_levels, fake_levels, strict=True)
         ]
     ).mean()

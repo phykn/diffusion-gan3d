@@ -24,6 +24,15 @@ class SampledPairs:
     heights: dict[int, torch.Tensor] = field(default_factory=dict)
     profiles: dict[int, torch.Tensor] = field(default_factory=dict)
 
+    def conditions(self, axis: int) -> dict[str, torch.Tensor]:
+        """Critic height and profile inputs for one axis."""
+        values = {}
+        if axis in self.heights:
+            values["height"] = self.heights[axis]
+        if axis in self.profiles:
+            values["profile"] = self.profiles[axis]
+        return values
+
 
 @dataclass(frozen=True)
 class DenoiserUpdate:
@@ -49,7 +58,8 @@ class DenoiserBatch:
     transition: int
     connectivity_domains: torch.Tensor
     critic_domains: dict[int, int]
-    fake: dict[int, tuple[torch.Tensor, torch.Tensor]]
+    fake: SampledPairs
+    real: SampledPairs
     connectivity_fake: TripletBatch
     logits: torch.Tensor
     clean_probs: torch.Tensor
@@ -60,8 +70,6 @@ class DenoiserBatch:
     target_vf: torch.Tensor
     vf_present: torch.Tensor
     connectivity_ramp: float = 1.0
-    fake_heights: dict[int, torch.Tensor] = field(default_factory=dict)
-    fake_profiles: dict[int, torch.Tensor] = field(default_factory=dict)
     profile: torch.Tensor | None = None
     coarse_target: torch.Tensor | None = None
     coarse_mask: torch.Tensor | None = None

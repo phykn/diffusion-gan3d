@@ -62,7 +62,7 @@ $$
 
 The reverse process follows denoising diffusion GANs [16,17] with ten transitions. The U-Net channel widths are 16, 32, 64, and 64; its condition embedding has 128 channels and its stochastic latent has 64 channels.
 
-Because no paired 3D target exists, an axis-specific 2D critic evaluates section pairs cut from generated volumes against real section pairs. In these experiments each critic contained a global and local head; current plane critics use only the global head. The experiments use one image distribution for all three axes.
+Because no paired 3D target exists, an axis-specific 2D critic evaluates section pairs cut from generated volumes against real section pairs. In these experiments each critic contained a global and local head; current plane critics use only the global head. The experiments trained critics with the logistic GAN loss; current plane critics instead use a relativistic pairing loss [21] that scores each generated section against a paired real section, because the logistic loss let the generator reproduce only one of several particle tilts present in the data. The experiments use one image distribution for all three axes.
 
 ### 3.3 Soft multiscale anchor conditioning
 
@@ -292,3 +292,5 @@ The method learns 3D microstructure generation from 2D sections, uses supplied p
 [19] M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter, “GANs trained by a two time-scale update rule converge to a Nash equilibrium,” in *Advances in Neural Information Processing Systems*, vol. 30, 2017.
 
 [20] Y. Meng, J. Jiang, B. Zhao, S. Ye, D. Wang, and J. Wu, “Inferring internal structures of porous media from orthogonal external surfaces: A novel 2D-to-3D reconstruction method based on a deep conditional diffusion model,” *Journal of Geophysical Research: Machine Learning and Computation*, vol. 3, art. e2025JH001101, 2026.
+
+[21] Y. Huang, A. Gokaslan, V. Kuleshov, and J. Tompkin, “The GAN is dead; long live the GAN! A modern GAN baseline,” in *Advances in Neural Information Processing Systems*, vol. 37, 2024.

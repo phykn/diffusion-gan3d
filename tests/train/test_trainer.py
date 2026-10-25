@@ -458,7 +458,7 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     vf_batch_ids = []
     critic_batch_ids = []
     original_sample_vf = trainer.conditions.sample_vf
-    original_update_critics = trainer.update_critics
+    original_sample_real_pairs = trainer._sample_real_pairs
     measured = []
 
     def track_vfs(batches, selection, owned_axes):
@@ -466,19 +466,13 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
         measured.append(selection.measured)
         return original_sample_vf(batches, selection, owned_axes)
 
-    def track_critics(transition, fake, batches, domain, **kwargs):
+    def track_critics(transition, batches, *args):
         critic_batch_ids.extend(id(batches.images[axis]) for axis in (0, 1, 2))
-        return original_update_critics(
-            transition,
-            fake,
-            batches,
-            domain,
-            **kwargs,
-        )
+        return original_sample_real_pairs(transition, batches, *args)
 
     with (
         patch.object(trainer.conditions, "sample_vf", side_effect=track_vfs),
-        patch.object(trainer, "update_critics", side_effect=track_critics),
+        patch.object(trainer, "_sample_real_pairs", side_effect=track_critics),
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
             denoiser,

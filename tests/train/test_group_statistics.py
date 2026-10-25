@@ -9,7 +9,7 @@ from src.build.trainer import build_trainer
 from src.config.train import load_train_config
 from src.data.slice import TripletBatch
 from src.prepare.resize import phase_channels, resize_phases
-from src.train.batch import DenoiserBatch
+from src.train.batch import DenoiserBatch, SampledPairs
 from src.train.loss.denoiser import DenoiserLossSettings, denoiser_objective
 from src.train.loss.group_statistics import compute_group_statistics_loss
 from src.train.loss.mirror_balance import compute_mirror_balance_loss
@@ -208,10 +208,13 @@ def objective_batch():
         transition=0,
         connectivity_domains=torch.empty(0, dtype=torch.long),
         critic_domains={},
-        fake={
-            axis: (torch.empty(0, 2, 8, 8), torch.empty(0, 2, 8, 8))
-            for axis in range(3)
-        },
+        fake=SampledPairs(
+            {
+                axis: (torch.empty(0, 2, 8, 8), torch.empty(0, 2, 8, 8))
+                for axis in range(3)
+            }
+        ),
+        real=SampledPairs({}),
         connectivity_fake=empty,
         logits=probs,
         clean_probs=probs,

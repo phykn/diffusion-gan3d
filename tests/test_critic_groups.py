@@ -14,7 +14,7 @@ from src.config.data import get_plane_groups
 from src.config.train import load_train_config
 from src.model.critic import CriticScores
 from src.plane import PLANES
-from src.train.batch import RealBatch, SampledPairs
+from src.train.batch import SampledPairs
 from src.train.run.loop import run_train
 from src.train.state import resume_sr_training, save_sr_training
 
@@ -149,18 +149,14 @@ def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
         )
         for axis in range(3)
     }
-    trainer.diffusion.sample_pair = lambda images, transition: (
-        images,
-        torch.zeros_like(images),
-    )
     trainer.update_critics(
         0,
         SampledPairs(fake),
-        RealBatch({axis: (pair[0] + 1) * 0.5 for axis, pair in real.items()}),
+        SampledPairs(real),
         {axis: 0 for axis in range(3)},
     )
     for name, axes in trainer.critic_groups.items():
-        # At weight=0, d softplus(-w*x)/dw = -x/2. Fake x is zero.
+        # At weight=0, d softplus(w*(fake - real))/dw = (fake - real)/2. Fake is zero.
         expected = sum(axis + 1 for axis in axes) / (2 * len(axes)) / len(groups)
         assert trainer.critics[name].weight.item() == pytest.approx(expected)
 

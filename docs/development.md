@@ -29,7 +29,11 @@
   generated volume from the `AnchorBank`, when one is stored, as a multi-plane anchor. Its state is saved
   through `src/train/state.py`.
 - `src/train/loss/denoiser.py` owns the generator objective; `src/train/loss/gan.py`
-  holds the adversarial losses and R1/R2 penalties shared by every critic.
+  holds the adversarial losses and R1/R2 penalties shared by every critic. Plane critics
+  use the relativistic pairing loss (RpGAN): each generated section is scored against a
+  paired real section, so a generator that covers only one mode of the data, such as one
+  particle tilt, is still penalized. The connectivity and seam critics keep the logistic
+  loss. `Trainer.step` samples real section pairs once and both updates use them.
 - With `augmentation.auto_planes`, `auto_plane_policies` in `src/config/train.py` picks
   each plane's flips and rotations. z stays fixed (no `xz`/`yz` rotation) when height is
   enabled or no critic group judges `xy` with a side plane; z flips are off with height.

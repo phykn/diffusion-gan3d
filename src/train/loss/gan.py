@@ -80,7 +80,35 @@ def get_critic_loss(
     )
 
 
+def get_relativistic_loss(
+    preferred: CriticScores,
+    other: CriticScores,
+) -> HeadLoss:
+    """RpGAN loss: each other sample should score below its paired preferred one.
+
+    Judging pairs instead of single samples removes the mode-dropping optima of
+    the logistic loss, where a generator covering one mode of the data already
+    looks real. The smaller batch is reused to pair every sample.
+    """
+    if preferred.levels or other.levels:
+        return mean_heads(
+            [
+                get_relativistic_loss(first, second)
+                for first, second in zip(
+                    preferred.levels or (preferred,),
+                    other.levels or (other,),
+                    strict=True,
+                )
+            ]
+        )
+    first, second = preferred.logits_global, other.logits_global
+    index = torch.arange(max(len(first), len(second)), device=first.device)
+    margin = second[index % len(second)] - first[index % len(first)]
+    return HeadLoss(global_loss=F.softplus(margin).mean())
+
+
 def critic_objective(
+    adversarial: HeadLoss,
     real_scores: CriticScores,
     fake_scores: CriticScores,
     real_inputs: Sequence[torch.Tensor],
@@ -90,7 +118,6 @@ def critic_objective(
     interval: int,
     local_weight: float = 0.0,
 ) -> CriticObjective:
-    adversarial = get_critic_loss(real_scores, fake_scores)
     total = adversarial.combine(local_weight)
     r1 = total.new_zeros(())
     r2 = total.new_zeros(())

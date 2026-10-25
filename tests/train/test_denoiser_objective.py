@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from src.model.critic import CriticScores
+from src.train.batch import SampledPairs
 from src.train.loss.denoiser import adversarial_loss, profile_loss
 
 
@@ -24,12 +25,13 @@ def test_grouped_objective_preserves_weighting_and_generator_gradient(diagnose):
         for axis, factor in factors.items()
     }
     current = torch.ones(2, 2, 3, 3)
+    # Three real pairs score 0.5 + 0.25 against two fake pairs; one fake repeats.
+    real = (torch.full((3, 2, 3, 3), 0.5), torch.ones(3, 2, 3, 3))
     batch = SimpleNamespace(
-        fake={axis: (value, current) for axis, value in previous.items()},
+        fake=SampledPairs({axis: (value, current) for axis, value in previous.items()}),
+        real=SampledPairs({axis: real for axis in factors}),
         transition=1,
         critic_domains={axis: 0 for axis in factors},
-        fake_heights={},
-        fake_profiles={},
         logits=weight,
     )
     loss, diagnostics = adversarial_loss(
@@ -39,7 +41,7 @@ def test_grouped_objective_preserves_weighting_and_generator_gradient(diagnose):
         diagnose=diagnose,
     )
     expected = sum(
-        F.softplus(-(weight * factors[axis] + 0.25)) / divisor
+        F.softplus(0.75 - (weight * factors[axis] + 0.25)) / divisor
         for axis, divisor in ((0, 2), (1, 4), (2, 4))
     )
     assert weight.grad is None
@@ -56,7 +58,7 @@ def test_grouped_objective_preserves_weighting_and_generator_gradient(diagnose):
 def test_empty_adversarial_batch_returns_differentiable_zero():
     logits = torch.ones(1, 2, 3, 3, 3, requires_grad=True)
     empty = torch.empty(0, 2, 3, 3)
-    batch = SimpleNamespace(fake={0: (empty, empty)}, logits=logits)
+    batch = SimpleNamespace(fake=SampledPairs({0: (empty, empty)}), logits=logits)
     loss, diagnostics = adversarial_loss(batch, {}, {"xy": (0,)}, True)
     assert loss == 0
     loss.backward()

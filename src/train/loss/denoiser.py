@@ -7,6 +7,7 @@ from src.train.batch import DenoiserBatch, DenoiserUpdate
 from src.train.loss.gan import (
     active_groups,
     get_generator_loss,
+    get_relativistic_loss,
     score_plane,
     score_triplets,
 )
@@ -207,10 +208,11 @@ def denoiser_objective(
 def adversarial_loss(batch, critics, groups, diagnose):
     losses = []
     diagnostics = {}
-    groups = active_groups(batch.fake, groups)
+    groups = active_groups(batch.fake.pairs, groups)
     axis_critics = {axis: group for group, axes in groups.items() for axis in axes}
     for axis in sorted(axis_critics):
-        fake_prev, fake_curr = batch.fake[axis]
+        critic = critics[axis_critics[axis]]
+        fake_prev, fake_curr = batch.fake.pairs[axis]
         if diagnose:
             # The preceding reverse chain is already detached during sampling.
             fake_curr = fake_curr.detach().requires_grad_(True)
@@ -226,20 +228,24 @@ def adversarial_loss(batch, critics, groups, diagnose):
             device=fake_prev.device,
             dtype=torch.long,
         )
-        conditions = {}
-        if axis in batch.fake_heights:
-            conditions["height"] = batch.fake_heights[axis]
-            if axis in batch.fake_profiles:
-                conditions["profile"] = batch.fake_profiles[axis]
         scores = score_plane(
-            critics[axis_critics[axis]],
+            critic,
             fake_prev,
             fake_curr,
             time,
             domains,
-            **conditions,
+            **batch.fake.conditions(axis),
         )
-        loss = get_generator_loss(scores).global_loss
+        real_prev, real_curr = batch.real.pairs[axis]
+        real_scores = score_plane(
+            critic,
+            real_prev,
+            real_curr,
+            time.new_full((len(real_prev),), batch.transition),
+            domains.new_full((len(real_prev),), batch.critic_domains[axis]),
+            **batch.real.conditions(axis),
+        )
+        loss = get_relativistic_loss(scores, real_scores).global_loss
         if diagnose:
             # Undo only the batch mean, retaining pyramid weights.
             norms = input_gradient_norms(loss * len(fake_prev), (fake_prev, fake_curr))
