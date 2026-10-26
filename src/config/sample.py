@@ -2,7 +2,7 @@ import copy
 from collections.abc import Mapping
 from pathlib import Path
 
-from src.config.files import PROJECT_ROOT, load_yaml
+from src.config.files import PROJECT_ROOT, load_yaml, project_path
 from src.data.source import infer_num_phases
 from src.plane import PLANES
 
@@ -68,7 +68,7 @@ def build_train_config(sample: Mapping, stage: str) -> dict:
     num_phases = sample.get("num_phases")
     if num_phases is None:
         folders = {
-            plane: [str(PROJECT_ROOT / path) for path in paths]
+            plane: [str(project_path(path)) for path in paths]
             for plane, paths in images.items()
         }
         num_phases = infer_num_phases({"domains": {0: folders}})

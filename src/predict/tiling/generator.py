@@ -37,7 +37,7 @@ class TiledGenerator:
         overlap: int = DEFAULT_OVERLAP,
     ) -> TilePlan:
         shape = parse_shape(shape)
-        factor = self.generator.default_margin
+        factor = self.generator.model.downsample_factor
         tile_size = self.generator.patch_size
         check_overlap(tile_size, overlap)
         if tile_size % factor:
@@ -146,7 +146,7 @@ class TiledGenerator:
         def conditions(tile, index):
             generator = self.generator
             shape = tuple(part.stop - part.start for part in tile.source)
-            result = {}
+            result = {"vf": vf}
             if tile_anchors[index]:
                 anchor = encode_anchors(
                     tile_anchors[index],
@@ -182,7 +182,6 @@ class TiledGenerator:
             tiles,
             plan,
             base,
-            vf,
             self.generator.prepare_domain(domain),
             probabilities=probabilities,
             storage=storage,

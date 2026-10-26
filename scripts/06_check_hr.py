@@ -12,15 +12,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
     add_device_argument,
+    add_domain_seed_arguments,
     add_height_arguments,
-    add_sample_arguments,
     non_negative_int,
     positive_int,
     result_directory,
 )
 from src.build.predict import resolve_weights
 from src.config.data import validate_sr_source
-from src.config.files import load_yaml
+from src.config.files import load_yaml, project_path
 from src.device import check_device, empty_cache
 from src.evaluate.label import phase_fractions
 from src.plane import PLANES
@@ -105,7 +105,7 @@ def main(argv=None):
         help="Output directory (default: a new directory under checks/).",
     )
     add_device_argument(parser)
-    add_sample_arguments(parser)
+    add_domain_seed_arguments(parser)
     add_height_arguments(parser)
     parser.add_argument(
         "--lr-guidance",
@@ -160,7 +160,7 @@ def main(argv=None):
         if args.lr_weight:
             lr_weight = resolve_weights(args.lr_weight)
         elif stored_source:
-            lr_weight = PROJECT_ROOT / stored_source
+            lr_weight = project_path(stored_source)
             load_frozen_source({**cfg["source"], "weights": str(lr_weight)})
         else:
             raise ValueError(

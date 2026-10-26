@@ -7,7 +7,7 @@ from src.build.data import build_augmentation
 from src.build.predict import resolve_weights
 from src.build.sr import build_sr_trainer
 from src.config.data import validate_sr_source
-from src.config.files import PROJECT_ROOT, find_saved_config
+from src.config.files import PROJECT_ROOT, find_saved_config, project_path
 from src.config.train import get_sr_resolution, load_train_config, validate_sr_config
 from src.data.bank import load_bank
 from src.data.source import fill_height_extents, infer_height_extents
@@ -110,7 +110,7 @@ def prepare_source(cfg: dict, base_weights: Path | None) -> None:
             raise ValueError(
                 "set source.weights in the SR config or pass base_weights."
             )
-        base_weights = PROJECT_ROOT / Path(configured).expanduser()
+        base_weights = project_path(configured)
     base_path = resolve_weights(base_weights)
     base_cfg = read_source_config(find_saved_config(base_path))
     fill_height_extents(base_cfg)

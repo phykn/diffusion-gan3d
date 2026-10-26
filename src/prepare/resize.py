@@ -91,6 +91,11 @@ def _resize_fraction_axis(probs, axis, size):
         return (values.movedim(axis, -1) @ overlap.to(values.dtype).T).movedim(-1, axis)
 
 
+def resize_anchor(labels: torch.Tensor, size: int, num_phases: int) -> torch.Tensor:
+    # Area resizing can round a full cell to 1 + eps; anchors require [0, 1].
+    return resize_crop(labels, size, num_phases).clamp_(0.0, 1.0)
+
+
 def resize_labels(labels: torch.Tensor, size: int, num_phases: int) -> torch.Tensor:
     return resize_crop(labels, size, num_phases).argmax(0)
 

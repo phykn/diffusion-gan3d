@@ -6,6 +6,11 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def project_path(path: str | Path) -> Path:
+    """Resolve a configured path; relative paths follow the project root."""
+    return (PROJECT_ROOT / Path(path).expanduser()).resolve()
+
+
 def find_saved_config(weights: str | Path) -> Path:
     """Find the run's saved train.yaml beside or above its weights/checkpoints."""
     path = Path(weights).resolve()

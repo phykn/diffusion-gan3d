@@ -461,10 +461,10 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     original_sample_real_pairs = trainer._sample_real_pairs
     measured = []
 
-    def track_vfs(batches, selection, owned_axes):
+    def track_vfs(batches, selection, *args):
         vf_batch_ids.extend(id(batches.images[axis]) for axis in (0, 1, 2))
         measured.append(selection.measured)
-        return original_sample_vf(batches, selection, owned_axes)
+        return original_sample_vf(batches, selection, *args)
 
     def track_critics(transition, batches, *args):
         critic_batch_ids.extend(id(batches.images[axis]) for axis in (0, 1, 2))
@@ -600,11 +600,18 @@ def test_unanchored_vf_and_height_use_the_same_owned_crops():
 
 def test_profile_keeps_priority_over_crop_vf():
     trainer, _, _ = _conditioning_trainer(anchored=False)
-    trainer.settings = replace(trainer.settings, profile_settings={"enabled": True})
+    # Profiles require height conditioning, so the side crop carries both.
+    trainer.settings = replace(
+        trainer.settings,
+        profile_settings={"enabled": True},
+        height_data={"crop_size": 8, "height_extents": {0: None}},
+    )
     trainer.conditions.settings = trainer.settings
     profile = torch.tensor([[[0.2, 0.4], [0.3, 0.2], [0.5, 0.4]]])
     batches = RealBatch(
         images={axis: torch.full((2, 3, 8, 8), 1 / 3) for axis in (0, 1, 2)},
+        origins={1: torch.zeros(2)},
+        extents={1: torch.full((2,), 8.0)},
         profiles={1: profile},
     )
     with patch.object(trainer.conditions, "get_batches", return_value=batches):

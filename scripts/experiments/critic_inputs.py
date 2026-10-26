@@ -14,11 +14,12 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from scripts.common.cli import add_device_argument
 from scripts.common.metrics import read_metrics
 from src.build.trainer import build_trainer
 from src.config.sample import build_train_config, load_sample
 from src.config.train import load_train_config
-from src.device import check_device, default_device
+from src.device import check_device
 from src.train.run.loop import run_train
 
 
@@ -117,9 +118,7 @@ def main():
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--seeds", type=int, nargs="+", default=[11, 22, 33])
     parser.add_argument("--steps", type=int, required=True)
-    parser.add_argument(
-        "--device", choices=("cpu", "cuda", "mps"), default=default_device()
-    )
+    add_device_argument(parser)
     args = parser.parse_args()
     torch.set_num_threads(1)
     compare(

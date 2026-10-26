@@ -35,9 +35,8 @@ def test_estimate_counts_margin_and_overlap_in_resolved_tiles():
     gen = SimpleNamespace(
         device=torch.device("cpu"),
         num_phases=2,
-        model=None,
+        model=SimpleNamespace(downsample_factor=4),
         patch_size=32,
-        default_margin=4,
     )
     for overlap in (0, 8, 15):
         estimate = memory.estimate_memory(

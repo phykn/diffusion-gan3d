@@ -10,7 +10,6 @@ import copy
 import json
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -19,13 +18,14 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from scripts.common.cli import add_device_argument, result_directory
 from scripts.common.metrics import read_metrics
 from src.api import LowResolutionAPI, PlaneAnchor, SuperResolutionAPI
 from src.build.trainer import build_trainer
-from src.config.files import save_yaml
+from src.config.files import PROJECT_ROOT, save_yaml
 from src.config.sample import build_train_config, load_sample
 from src.config.train import load_train_config
-from src.device import check_device, default_device, empty_cache
+from src.device import check_device, empty_cache
 from src.prepare.resize import resize_labels
 from src.storage import save_volume
 from src.train.checkpoint import resolve_checkpoint
@@ -78,12 +78,10 @@ def evaluate(api, crops, out, seeds):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", type=Path, default=Path("data/sample.png"))
+    parser.add_argument("--image", type=Path, default=PROJECT_ROOT / "data/sample.png")
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--sr-steps", type=int, default=100)
-    parser.add_argument(
-        "--device", choices=("cpu", "cuda", "mps"), default=default_device()
-    )
+    add_device_argument(parser)
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument(
         "--continue-run",
@@ -95,9 +93,7 @@ def main():
         raise ValueError("at least two LR steps and one SR step are required.")
     device = check_device(args.device)
     torch.set_num_threads(1)
-    root = args.run_dir or Path("checks") / datetime.now().strftime(
-        "%Y%m%d-%H%M%S-stability"
-    )
+    root = args.run_dir or result_directory(__file__)
     if args.continue_run and args.run_dir is None:
         raise ValueError("--continue-run requires --run-dir.")
     root.mkdir(parents=True, exist_ok=args.continue_run)

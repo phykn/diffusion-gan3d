@@ -43,17 +43,21 @@ def build_generator(
             f"weights file is not compatible with the configured denoiser: {path}"
         ) from exc
     denoiser.eval()
+    return make_generator(
+        denoiser, cfg, device, get_resolution(cfg["data"]).lo_res_size
+    )
+
+
+def make_generator(denoiser, cfg: dict, device: torch.device, patch_size: int):
+    """Sample a loaded LR or SR denoiser with its config's diffusion and conditions."""
     data = cfg["data"]
-    model = cfg["model"]
-    train = cfg["train"]
-    use_amp = inference_amp(train["mixed_precision"], device)
     return Generator(
         denoiser,
         build_diffusion(cfg).to(device),
         device=device,
-        patch_size=get_resolution(data).lo_res_size,
+        patch_size=patch_size,
         num_phases=data["num_phases"],
-        latent_channels=model["generator"]["latent_channels"],
-        use_amp=use_amp,
+        latent_channels=cfg["model"]["generator"]["latent_channels"],
+        use_amp=inference_amp(cfg["train"]["mixed_precision"], device),
         height_data=data if cfg["conditioning"]["height_enabled"] else None,
     )

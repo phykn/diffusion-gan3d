@@ -19,7 +19,6 @@ class TileSampler:
         tiles: tuple[Tile, ...],
         plan: TilePlan,
         base: VolumeCondition | None,
-        vf: torch.Tensor | None,
         domain: torch.Tensor,
         probabilities: bool = False,
         storage: str = "cpu",
@@ -72,7 +71,6 @@ class TileSampler:
                     tiles,
                     time,
                     latent,
-                    vf,
                     domain,
                     transition,
                     plan,
@@ -114,7 +112,6 @@ class TileSampler:
         tiles: tuple[Tile, ...],
         time: torch.Tensor,
         latent: torch.Tensor,
-        vf: torch.Tensor | None,
         domain: torch.Tensor,
         transition: int,
         plan: TilePlan,
@@ -137,22 +134,17 @@ class TileSampler:
                 None if base is None else base.prediction(tile.source, generator.device)
             )
             if pred is None:
-                conditions = {"vf": vf}
-                if tile_conditions is not None:
-                    conditions.update(tile_conditions(tile, index))
-                with torch.autocast(
-                    device_type=generator.device.type,
-                    dtype=torch.float16,
-                    enabled=generator.use_amp,
-                ):
-                    pred = generator.predict(
-                        values,
-                        time,
-                        latent,
-                        guidance=guidance,
-                        domain=domain,
-                        **conditions,
-                    )
+                conditions = (
+                    {} if tile_conditions is None else tile_conditions(tile, index)
+                )
+                pred = generator.predict(
+                    values,
+                    time,
+                    latent,
+                    guidance=guidance,
+                    domain=domain,
+                    **conditions,
+                )
             expected = (1, generator.num_phases, *values.shape[-3:])
             if pred.shape != expected:
                 raise ValueError(f"model prediction must have shape {expected}.")

@@ -189,15 +189,14 @@ def _measured_mean(total, count):
 def _sharpness_metrics(probs, near, fixed, active):
     totals = [probs.new_zeros((), dtype=torch.float32) for _ in range(4)]
     for batch in active:
-        # Accumulate plane by plane without another full floating-point volume.
-        for index in range(probs.shape[2]):
-            sharpness = probs[batch, :, index].float().square().sum(0)
-            close = near[batch, 0, index]
-            far = ~close & ~fixed[batch, 0, index]
-            totals[0] += (sharpness * close).sum()
-            totals[1] += close.sum()
-            totals[2] += (sharpness * far).sum()
-            totals[3] += far.sum()
+        # One float volume per sample; a per-plane loop costs ~5 ms on MPS.
+        sharpness = probs[batch].float().square().sum(0)
+        close = near[batch, 0]
+        far = ~close & ~fixed[batch, 0]
+        totals[0] += (sharpness * close).sum()
+        totals[1] += close.sum()
+        totals[2] += (sharpness * far).sum()
+        totals[3] += far.sum()
     near_value = _measured_mean(totals[0], totals[1])
     far_value = _measured_mean(totals[2], totals[3])
     return {

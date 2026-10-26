@@ -12,7 +12,7 @@ from src.device import check_device, default_device
 from src.predict.memory import estimate_memory, select_storage
 from src.predict.tiling.generator import TiledGenerator
 from src.predict.tiling.layout import parse_shape
-from src.prepare.resize import resize_crop
+from src.prepare.resize import resize_anchor
 from src.random import seeded_rng
 
 
@@ -57,8 +57,7 @@ class LowResolutionAPI:
             raise ValueError(
                 f"image must be a {self.crop_size} x {self.crop_size} original crop."
             )
-        # Area resizing can round a full cell to 1 + eps; anchors require [0, 1].
-        return resize_crop(image, self.input_size, self.num_phases).clamp_(0.0, 1.0)
+        return resize_anchor(image, self.input_size, self.num_phases)
 
     def estimate_memory(
         self,

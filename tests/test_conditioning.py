@@ -1,4 +1,5 @@
 import copy
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -8,6 +9,7 @@ import pytest
 import torch
 from PIL import Image
 
+from scripts.common.diagnostic import generate_with_baseline
 from src.anchor import PlaneAnchor, encode_anchors
 from src.build.data import build_datasets, build_stream
 from src.build.predict import load_generator
@@ -251,6 +253,18 @@ def configuration(tmp_path, stage="low_res", height=False):
         cfg["data"]["hi_res_size"] = 16
         cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2)
     return cfg
+
+
+def test_lr_run_predicts_without_its_training_images(tmp_path):
+    torch.set_num_threads(1)
+    cfg = configuration(tmp_path, height=True)
+    cfg["conditioning"]["spatial_profile"]["enabled"] = True
+    save_yaml(tmp_path / "lr.yaml", cfg)
+    run_low_res_train(config=tmp_path / "lr.yaml", steps=1, run_dir=tmp_path / "lr")
+    trained = load_generator(tmp_path / "lr", torch.device("cpu")).height_data
+    assert trained["height_extents"] and trained["depth_profiles"]
+    shutil.rmtree(tmp_path / "images")
+    assert load_generator(tmp_path / "lr", torch.device("cpu")).height_data == trained
 
 
 def test_relocated_lr_resume_saves_moved_paths_for_inference(tmp_path):
@@ -564,6 +578,25 @@ def test_profile_tiles_use_global_coordinates_and_local_means(tmp_path):
     assert not torch.equal(calls[0]["vf"], calls[1]["vf"])
     with pytest.raises(ValueError, match="profile mean"):
         generator.generate(vf_profile=spec, vf=[1, 0], height_extent=32)
+
+
+def test_anchor_baseline_keeps_the_conditioned_profile_decision(tmp_path):
+    cfg = configuration(tmp_path, height=True)
+    cfg["conditioning"]["spatial_profile"]["enabled"] = True
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    save_yaml(tmp_path / "train.yaml", trainer.cfg)
+    torch.save(trainer.denoiser.state_dict(), tmp_path / "generator.pt")
+    generator = load_generator(tmp_path / "generator.pt", torch.device("cpu"))
+    anchor = PlaneAnchor(torch.zeros(8, 8, dtype=torch.long), 0, 0)
+    with patch.object(generator, "predict", wraps=generator.predict) as predict:
+        generate_with_baseline(
+            generator, (anchor,), 0.7, guidance=1.0, domain=0, margin=0
+        )
+    calls = predict.call_args_list
+    conditioned, baseline = calls[: len(calls) // 2], calls[len(calls) // 2 :]
+    assert all("anchor_image" in call.kwargs for call in conditioned)
+    assert all(call.kwargs.get("anchor_image") is None for call in baseline)
+    assert {call.kwargs.get("profile") is None for call in calls} == {True}
 
 
 def test_height_only_generation_defaults_to_training_depth_profile(tmp_path):

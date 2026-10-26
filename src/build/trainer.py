@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import torch
 from torch import nn
 
@@ -10,7 +8,7 @@ from src.build.data import (
 )
 from src.build.model import build_diffusion, build_models, build_seam_critic
 from src.config.data import get_resolution, get_sr_plane_groups
-from src.config.files import PROJECT_ROOT
+from src.config.files import project_path
 from src.config.train import (
     get_schedule_steps,
     get_sr_resolution,
@@ -77,7 +75,7 @@ def build_trainer(
     seam_critic = build_seam_critic(cfg)
     initial_weights = None if sr else train["initial_weights"]
     if initial_weights is not None:
-        root = PROJECT_ROOT / Path(initial_weights).expanduser()
+        root = project_path(initial_weights)
         load_model(root / "generator.pt", denoiser)
         for plane, critic_model in critics.items():
             load_model(root / f"critic_{plane}.pt", critic_model)

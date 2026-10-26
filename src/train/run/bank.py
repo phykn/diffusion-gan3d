@@ -97,8 +97,7 @@ def refresh_bank(
         if datasets is not None:
             payload["height_origins"][domain][index] = recorded["height_origin"]
             payload["height_extents"][domain][index] = recorded["height_extent"]
-        if payload.get("conditions") is not None:
-            payload["conditions"][domain][index] = recorded
+        payload["conditions"][domain][index] = recorded
     del generator
     empty_cache(device)
 

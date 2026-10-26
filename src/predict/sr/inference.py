@@ -5,12 +5,11 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from src.build.model import build_denoiser, build_diffusion
-from src.build.predict import resolve_weights
+from src.build.model import build_denoiser
+from src.build.predict import make_generator, resolve_weights
 from src.config.train import get_sr_resolution, normalize_train_config
-from src.device import check_device, default_device, inference_amp
+from src.device import check_device, default_device
 from src.predict.convert import labels_from_channels, owned_clean_to_probs_
-from src.predict.generator import Generator
 from src.predict.sr.memory import check_sr_memory, estimate_sr_memory
 from src.predict.tiling.layout import (
     DEFAULT_OVERLAP,
@@ -59,17 +58,8 @@ class SuperResolutionAPI:
         self.hi_res_size = resolution.hi_res_size
         self.scale_factor = self.hi_res_size / self.lo_res_size
         self.num_phases = self.config["data"]["num_phases"]
-        self.generator = Generator(
-            self.model,
-            build_diffusion(self.config).to(self.device),
-            self.device,
-            self.hi_res_size,
-            self.num_phases,
-            self.config["model"]["generator"]["latent_channels"],
-            inference_amp(self.config["train"]["mixed_precision"], self.device),
-            height_data=self.config["data"]
-            if self.config["conditioning"]["height_enabled"]
-            else None,
+        self.generator = make_generator(
+            self.model, self.config, self.device, self.hi_res_size
         )
 
     def refine(
@@ -244,8 +234,9 @@ class SuperResolutionAPI:
         region = (slice(None), *(slice(margin, margin + n) for n in shape))
         if not probabilities:
             return labels_from_channels(clean.squeeze(0)[region])
-        probs = owned_clean_to_probs_(clean).squeeze(0).cpu()
-        return probs[region].contiguous()
+        # Convert and copy only the output, not the margin.
+        probs = owned_clean_to_probs_(clean[(slice(None), *region)])
+        return probs.squeeze(0).cpu().contiguous()
 
     def _refine_tiled(
         self,
@@ -305,7 +296,6 @@ class SuperResolutionAPI:
             tiles,
             plan,
             base=known,
-            vf=None,
             domain=self.generator.prepare_domain(domain),
             probabilities=probabilities,
             guidance=guidance,

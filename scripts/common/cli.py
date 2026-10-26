@@ -43,7 +43,7 @@ def add_device_argument(parser):
     )
 
 
-def add_sample_arguments(parser):
+def add_domain_seed_arguments(parser):
     parser.add_argument(
         "--domain", type=int, default=0, help="Numeric domain ID (default: 0)."
     )
@@ -60,7 +60,7 @@ def add_generation_arguments(parser, *, anchors: bool = False, origin_default=0.
         required=True,
         help="LR generator.pt or its run directory.",
     )
-    add_sample_arguments(parser)
+    add_domain_seed_arguments(parser)
     parser.add_argument(
         "--guidance",
         type=float,

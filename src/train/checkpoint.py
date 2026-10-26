@@ -5,6 +5,17 @@ from pathlib import Path
 _NAME = re.compile(r"step_(\d+)\.pt")
 
 
+def checkpoint_paths(root: Path, step: int) -> tuple[Path, Path]:
+    """Return a new step's training and generator files under root/checkpoints."""
+    folder = root / "checkpoints"
+    path = folder / f"step_{step:08d}.pt"
+    generator = folder / f"generator_{step:08d}.pt"
+    for target in (path, generator, path.with_suffix(".complete")):
+        if target.exists():
+            raise FileExistsError(target)
+    return path, generator
+
+
 def complete_checkpoint(path: Path) -> None:
     """Publish completion only after the checkpoint has been flushed and closed."""
     with path.with_suffix(".complete").open("x", encoding="ascii") as file:

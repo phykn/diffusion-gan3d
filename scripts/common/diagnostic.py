@@ -40,12 +40,13 @@ def anchor_accuracy(
 def generate_with_baseline(generator, anchors, anchor_strength, **options):
     """Generate with anchors, then without them from the same noise."""
     # The conditioned sample runs first inside preserved_rng, so the baseline
-    # replays its RNG stream.
+    # replays its RNG stream. Zero-strength anchors condition nothing but keep
+    # the same default depth-profile decision as the conditioned sample.
     with preserved_rng(generator.device):
         conditioned = generator.generate(
             anchors=anchors, anchor_strength=anchor_strength, **options
         )
-    baseline = generator.generate(anchors=(), anchor_strength=0.0, **options)
+    baseline = generator.generate(anchors=anchors, anchor_strength=0.0, **options)
     return conditioned, baseline
 
 

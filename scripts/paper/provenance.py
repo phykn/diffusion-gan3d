@@ -98,7 +98,6 @@ def validate_manifest(
     *,
     label: str,
     cached_paths: Sequence[str | Path] | None = None,
-    output_paths: Sequence[str | Path] | None = None,
 ) -> dict[str, object]:
     manifest = Path(path)
     if not manifest.is_file():
@@ -117,8 +116,6 @@ def validate_manifest(
             raise ValueError(f"{label} manifest '{key}' does not match current inputs.")
     if cached_paths is not None:
         validate_cached_files(data.get("cached_outputs"), cached_paths, label=label)
-    if output_paths is not None:
-        validate_cached_files(data.get("outputs"), output_paths, label=label)
     return data
 
 

@@ -35,7 +35,7 @@ from src.evaluate.anchor import (
     measure_slice_smoothness,
 )
 from src.evaluate.label import voxel_accuracy
-from src.prepare.resize import resize_crop
+from src.prepare.resize import resize_anchor
 from src.random import seeded_rng
 
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
@@ -168,7 +168,7 @@ def load_anchor_image(
         values[top : top + crop_size, left : left + crop_size],
         copy=True,
     )
-    labels = resize_crop(torch.from_numpy(crop), input_size, num_phases)
+    labels = resize_anchor(torch.from_numpy(crop), input_size, num_phases)
     return labels, (top, left, crop_size, crop_size), height
 
 

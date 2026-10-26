@@ -9,7 +9,7 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.cli import add_sample_arguments, result_directory
+from scripts.common.cli import add_domain_seed_arguments, result_directory
 from scripts.common.diagnostic import show_labels
 from src.build.data import build_datasets
 from src.build.predict import resolve_weights
@@ -47,7 +47,7 @@ def main() -> None:
         type=Path,
         help="Preview PNG (default: a new directory under checks/).",
     )
-    add_sample_arguments(parser)
+    add_domain_seed_arguments(parser)
     parser.add_argument(
         "--no-view", action="store_true", help="Save results without a viewer."
     )
@@ -56,7 +56,7 @@ def main() -> None:
         plt.switch_backend("Agg")
     if args.weight:
         config = find_saved_config(resolve_weights(args.weight))
-        stage = load_yaml(config).get("stage", "low_res")
+        stage = load_yaml(config)["stage"]
         cfg = load_train_config(config, stage)
     else:
         config, stage = find_sample(args.sample), args.stage

@@ -158,6 +158,10 @@ def test_continuation_anchor_keeps_indexed_phases_and_fractional_resize(
     Image.fromarray(source).save(path)
     fractions, _, _ = module.load_anchor_image(path, 4, 2, 3)
     torch.testing.assert_close(fractions[:, 0, 0], torch.tensor([0.25, 0.75, 0.0]))
+    # 105 -> 64 area resizing rounds full cells above one before clamping.
+    Image.fromarray(np.zeros((105, 105), dtype=np.uint8)).save(path)
+    fractions, _, _ = module.load_anchor_image(path, 105, 64, 3)
+    assert fractions.max() <= 1.0
 
 
 def test_continuation_strip_renders_every_distance(monkeypatch):
@@ -383,8 +387,8 @@ def test_anchor_check_uses_generated_reference_and_same_rng_baseline(
         default_margin = 8
         device = torch.device("cpu")
 
-        def generate(self, *, anchors, **_kwargs):
-            calls.append((anchors, float(torch.rand(()))))
+        def generate(self, *, anchors, anchor_strength=1.0, **_kwargs):
+            calls.append((anchors, anchor_strength, float(torch.rand(()))))
             return reference.clone() if len(calls) == 1 else torch.zeros_like(reference)
 
     monkeypatch.setattr(module, "load_generator", lambda _path, device: FakeGenerator())
@@ -421,8 +425,8 @@ def test_anchor_check_uses_generated_reference_and_same_rng_baseline(
     assert anchor.axis == 1
     assert anchor.index == 2
     assert torch.equal(anchor.image, reference.movedim(1, 0)[2])
-    assert calls[2][0] == ()
-    assert calls[1][1] == calls[2][1]
+    assert calls[2][:2] == (calls[1][0], 0.0)
+    assert calls[1][2] == calls[2][2]
 
 
 @pytest.mark.parametrize(

@@ -20,6 +20,18 @@ class TripletBatch:
         return self.values.shape[0]
 
 
+def empty_triplets(volume: torch.Tensor) -> TripletBatch:
+    """No triplets, shaped like those sampled from this (B, C, D, H, W) volume."""
+    return TripletBatch(
+        values=volume.new_empty(
+            (0, 3, volume.shape[1], volume.shape[-2], volume.shape[-1])
+        ),
+        axes=torch.empty(0, device=volume.device, dtype=torch.long),
+        gaps=torch.empty(0, device=volume.device, dtype=torch.long),
+        center_slots=torch.empty(0, device=volume.device, dtype=torch.long),
+    )
+
+
 @dataclass(frozen=True)
 class LocatedTriplets:
     triplets: TripletBatch
@@ -129,7 +141,7 @@ class AnchorTripletSampler:
         located: LocatedTriplets,
     ) -> TripletBatch:
         if not len(located.triplets):
-            return self._empty_triplets(volume)
+            return empty_triplets(volume)
         values = []
         for (batch, axis, _), slice_indices, region in zip(
             located.locations,
@@ -235,7 +247,7 @@ class AnchorTripletSampler:
 
         if not triplets:
             return LocatedTriplets(
-                self._empty_triplets(volume),
+                empty_triplets(volume),
                 (),
             )
         return LocatedTriplets(
@@ -268,16 +280,6 @@ class AnchorTripletSampler:
         if not gaps:
             raise ValueError("no valid connectivity gap is available.")
         return gaps[self._random_index(len(gaps), generator)]
-
-    def _empty_triplets(self, volume: torch.Tensor) -> TripletBatch:
-        return TripletBatch(
-            values=volume.new_empty(
-                (0, 3, volume.shape[1], volume.shape[-2], volume.shape[-1])
-            ),
-            axes=torch.empty(0, device=volume.device, dtype=torch.long),
-            gaps=torch.empty(0, device=volume.device, dtype=torch.long),
-            center_slots=torch.empty(0, device=volume.device, dtype=torch.long),
-        )
 
     @staticmethod
     def _random_index(

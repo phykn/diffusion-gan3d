@@ -95,6 +95,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     sr_config = tmp_path / "sr.yaml"
     save_yaml(sr_config, sr_cfg)
     monkeypatch.setattr("src.train.run.sr.PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr("src.config.files.PROJECT_ROOT", tmp_path)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
@@ -236,7 +237,7 @@ def test_bank_refresh_saves_new_bank_without_overwriting_resume_source(
         "volumes": {0: torch.full((2, 2, 8, 8, 8), 0.5)},
         "height_origins": None,
         "height_extents": None,
-        "conditions": None,
+        "conditions": {0: [{}, {}]},
     }
     monkeypatch.setattr(
         "src.train.run.bank.build_generator",

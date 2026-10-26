@@ -262,23 +262,20 @@ def profile_loss(batch, settings):
     # Profiles require height conditioning. The real crop profile is still the
     # target for samples whose vf/profile was dropped for CFG: the height field
     # alone must carry the depth gradient at inference.
-    supervised = torch.ones_like(batch.vf_present, dtype=torch.bool)
     loss = compute_profile_loss(
         batch.clean_probs,
         batch.profile,
-        supervised,
+        torch.ones_like(batch.vf_present, dtype=torch.bool),
         settings.profile_bins,
         settings.profile_gradient_weight,
         settings.profile_weight,
     )
     soft = batch.clean_probs.detach().mean((-1, -2))
     labels = phase_profile(batch.clean_probs.detach().argmax(1), settings.num_phases)
-    active = supervised.to(soft).reshape(-1, 1, 1)
-    denom = active.sum().clamp_min(1) * soft.shape[1] * soft.shape[2]
     return loss, {
         "profile/loss": loss.detach(),
-        "profile/soft_mae": ((soft - batch.profile).abs() * active).sum() / denom,
-        "profile/label_mae": ((labels - batch.profile).abs() * active).sum() / denom,
+        "profile/soft_mae": (soft - batch.profile).abs().mean(),
+        "profile/label_mae": (labels - batch.profile).abs().mean(),
     }
 
 

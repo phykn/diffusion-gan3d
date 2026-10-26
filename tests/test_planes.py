@@ -3,7 +3,6 @@ import pytest
 import torch
 from PIL import Image
 
-import src.build.trainer as trainer_module
 from src.build.trainer import build_trainer
 from src.config.data import get_domains
 from src.config.train import load_train_config
@@ -71,7 +70,7 @@ def test_initial_weights_load_by_plane(tmp_path, monkeypatch, relative):
     cfg["train"]["initial_weights"] = str(weights)
     if relative:
         # Like other config paths, relative weights follow the project root.
-        monkeypatch.setattr(trainer_module, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("src.config.files.PROJECT_ROOT", tmp_path)
         monkeypatch.chdir(images)
         cfg["train"]["initial_weights"] = "weights"
     restored = build_trainer(cfg, torch.device("cpu"))

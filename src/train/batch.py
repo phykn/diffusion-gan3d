@@ -24,6 +24,14 @@ class SampledPairs:
     heights: dict[int, torch.Tensor] = field(default_factory=dict)
     profiles: dict[int, torch.Tensor] = field(default_factory=dict)
 
+    def add(self, axis: int, pairs: tuple[torch.Tensor, ...], has_profile: bool):
+        """Store one axis's slice pairs; condition channel 0 is height, then profile."""
+        self.pairs[axis] = pairs[:2]
+        if len(pairs) == 3:
+            self.heights[axis] = pairs[2][:, :1]
+            if has_profile:
+                self.profiles[axis] = pairs[2][:, 1:]
+
     def conditions(self, axis: int) -> dict[str, torch.Tensor]:
         """Critic height and profile inputs for one axis."""
         values = {}

@@ -160,16 +160,25 @@ def graphite_shapes(radius, aspect, tilt, spread, min_section, rng):
         major = radius * rng.lognormal(0.0, spread)
         axes = np.array((major * aspect, major, major * rng.uniform(*FLAKE_WIDTH)))
         shapes.append(make_shape(axes, flake_rotation(tilt, rng), min_section))
-    return shapes
+    return nonempty(shapes, "graphite")
 
 
 def silicon_shapes(radius, spread, min_section, rng):
-    return [
+    shapes = [
         make_shape(
             np.full(3, radius * rng.lognormal(0.0, spread)), np.eye(3), min_section
         )
         for _ in range(SHAPE_LIBRARY)
     ]
+    return nonempty(shapes, "silicon")
+
+
+def nonempty(shapes, name):
+    """Drop shapes min_section trimmed away; placement needs at least one voxel."""
+    kept = [shape for shape in shapes if len(shape[0])]
+    if not kept:
+        raise ValueError(f"min_section removes every {name} particle; lower it.")
+    return kept
 
 
 def flake_rotation(tilt: float, rng: np.random.Generator) -> np.ndarray:

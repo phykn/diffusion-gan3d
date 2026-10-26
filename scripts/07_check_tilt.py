@@ -10,8 +10,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
     add_device_argument,
+    add_domain_seed_arguments,
     add_height_arguments,
-    add_sample_arguments,
     height_options,
     non_negative_int,
     positive_int,
@@ -53,7 +53,7 @@ def main() -> None:
         default=6,
         help="Volumes to generate with --weight (default: 6).",
     )
-    add_sample_arguments(parser)
+    add_domain_seed_arguments(parser)
     parser.add_argument(
         "--guidance", type=float, help="Guidance scale (default: config/gen.yaml)."
     )

@@ -12,6 +12,7 @@ from src.data.slice import (
     AnchorTripletSampler,
     BandBatch,
     TripletBatch,
+    empty_triplets,
     sample_pairs,
     sample_seam_bands,
 )
@@ -191,10 +192,9 @@ class Trainer:
 
     def _use_critic_groups(self, groups: dict[str, tuple[int, ...]]) -> None:
         self.critic_groups = groups
-        self.axis_critics = {
-            axis: group for group, axes in groups.items() for axis in axes
-        }
-        self.active_axes = tuple(sorted(self.axis_critics))
+        self.active_axes = tuple(
+            sorted(axis for axes in groups.values() for axis in axes)
+        )
 
     def step(
         self,
@@ -451,11 +451,7 @@ class Trainer:
             )
             if not self.critic_augment.real_only:
                 pairs = self.critic_augment.apply_together(pairs, plane=axis)
-            result.pairs[axis] = pairs[:2]
-            if len(pairs) == 3:
-                result.heights[axis] = pairs[2][:, :1]
-                if has_profile:
-                    result.profiles[axis] = pairs[2][:, 1:]
+            result.add(axis, pairs, has_profile)
         return result
 
     def _sample_real_pairs(
@@ -483,12 +479,11 @@ class Trainer:
             inputs = (
                 (previous, current) if height is None else (previous, current, height)
             )
-            pairs = self.critic_augment.apply_together(inputs, plane=axis)
-            result.pairs[axis] = pairs[:2]
-            if len(pairs) == 3:
-                result.heights[axis] = pairs[2][:, :1]
-                if has_profile:
-                    result.profiles[axis] = pairs[2][:, 1:]
+            result.add(
+                axis,
+                self.critic_augment.apply_together(inputs, plane=axis),
+                has_profile,
+            )
         return result
 
     def _anchor_visibility(self, presence) -> torch.Tensor:
@@ -653,20 +648,6 @@ class Trainer:
         height: torch.Tensor | None = None,
         has_profile: bool = False,
     ) -> tuple[TripletBatch, TripletBatch]:
-        empty = TripletBatch(
-            values=prediction.new_empty(
-                (
-                    0,
-                    3,
-                    self.settings.num_phases,
-                    prediction.shape[-2],
-                    prediction.shape[-1],
-                )
-            ),
-            axes=torch.empty(0, device=self.device, dtype=torch.long),
-            gaps=torch.empty(0, device=self.device, dtype=torch.long),
-            center_slots=torch.empty(0, device=self.device, dtype=torch.long),
-        )
         if (
             self.settings.loss.connectivity_weight <= 0.0
             or transition != 0
@@ -674,6 +655,7 @@ class Trainer:
             or source != "multi"
             or reference_prediction is None
         ):
+            empty = empty_triplets(prediction)
             return empty, empty
         anchor = anchor.visible(visible)
         real, fake = self.anchor_triplets.sample(
@@ -728,13 +710,13 @@ class Trainer:
             dtype=torch.long,
         )[axes]
 
-    def regularization(self, name: str) -> tuple[bool, bool, bool]:
-        """Lazy R1/R2 schedule for one critic's next update."""
+    def regularization(self, name: str) -> tuple[bool, float, float]:
+        """Lazy R1/R2 schedule and weights for one critic's next update."""
         regularize = (self.updates[name] + 1) % self.settings.r1_interval == 0
         return (
             regularize,
-            self.settings.r1_gamma > 0.0 and regularize,
-            self.settings.r2_gamma > 0.0 and regularize,
+            self.settings.r1_gamma if regularize else 0.0,
+            self.settings.r2_gamma if regularize else 0.0,
         )
 
     def update_critics(
@@ -749,7 +731,7 @@ class Trainer:
         r1_sum = 0.0
         groups = active_groups(fake.pairs, self.critic_groups)
         for group, axes in groups.items():
-            regularize, apply_r1, apply_r2 = self.regularization(group)
+            regularize, r1_weight, r2_weight = self.regularization(group)
             weight = 1.0 / (len(axes) * len(groups))
             critic = self.critics[group]
             optimizer = self.critic_optims[group]
@@ -762,7 +744,7 @@ class Trainer:
                 )
                 real_time = self.make_time(transition, real_prev.shape[0])
                 fake_prev, fake_curr = fake.pairs[axis]
-                fake_prev = fake_prev.detach().float().requires_grad_(apply_r2)
+                fake_prev = fake_prev.detach().float().requires_grad_(r2_weight > 0)
                 fake_curr = fake_curr.detach().float()
                 fake_time = self.make_time(transition, fake_prev.shape[0])
                 real_domain = self.conditions.make_domain(
@@ -798,8 +780,8 @@ class Trainer:
                         fake_score,
                         (real_prev,),
                         (fake_prev,),
-                        r1_weight=self.settings.r1_gamma if apply_r1 else 0.0,
-                        r2_weight=self.settings.r2_gamma if apply_r2 else 0.0,
+                        r1_weight=r1_weight,
+                        r2_weight=r2_weight,
                         interval=self.settings.r1_interval,
                     )
                 self.diagnostics[f"score/{group}/{axis}/real"] = (
@@ -816,7 +798,7 @@ class Trainer:
                     for name, norm in zip(("previous", "current"), norms):
                         self.diagnostics[f"input_gradient/{group}/{axis}/{name}"] = norm
                 r1_sum += losses.r1.detach() * weight
-                if apply_r2:
+                if r2_weight > 0:
                     self.diagnostics[f"r2/{group}/{axis}"] = losses.r2.detach()
                 loss = validate_loss(losses.total, f"critic {group}/{axis}")
                 self.scaler.scale(loss * weight).backward()
@@ -833,10 +815,10 @@ class Trainer:
     ) -> tuple[float, float, float, float]:
         if not len(fake):
             return 0.0, 0.0, 0.0, 0.0
-        regularize, apply_r1, apply_r2 = self.regularization("connectivity")
+        regularize, r1_weight, r2_weight = self.regularization("connectivity")
         self.connectivity_optim.zero_grad(set_to_none=True)
-        real_values = real.values.detach().float().requires_grad_(apply_r1)
-        fake_values = fake.values.detach().float().requires_grad_(apply_r2)
+        real_values = real.values.detach().float().requires_grad_(r1_weight > 0)
+        fake_values = fake.values.detach().float().requires_grad_(r2_weight > 0)
         autocast = self.autocast(self.settings.amp_enabled and not regularize)
         with autocast:
             real_score = score_triplets(
@@ -852,14 +834,14 @@ class Trainer:
                 (real_values,),
                 (fake_values,),
                 local_weight=self.settings.loss.connectivity_local_weight,
-                r1_weight=self.settings.r1_gamma if apply_r1 else 0.0,
-                r2_weight=self.settings.r2_gamma if apply_r2 else 0.0,
+                r1_weight=r1_weight,
+                r2_weight=r2_weight,
                 interval=self.settings.r1_interval,
             )
         adversarial = losses.adversarial.combine(
             self.settings.loss.connectivity_local_weight
         ).detach()
-        if apply_r2:
+        if r2_weight > 0:
             self.diagnostics["r2/connectivity"] = losses.r2.detach()
         self.diagnostics["regularization/connectivity"] = int(regularize)
         loss = validate_loss(losses.total, "connectivity")
@@ -884,10 +866,10 @@ class Trainer:
     ) -> None:
         if not len(fake):
             return
-        regularize, apply_r1, apply_r2 = self.regularization("seam")
+        regularize, r1_weight, r2_weight = self.regularization("seam")
         self.seam_optim.zero_grad(set_to_none=True)
-        real_values = real.values.detach().float().requires_grad_(apply_r1)
-        fake_values = fake.values.detach().float().requires_grad_(apply_r2)
+        real_values = real.values.detach().float().requires_grad_(r1_weight > 0)
+        fake_values = fake.values.detach().float().requires_grad_(r2_weight > 0)
         with self.autocast(self.settings.amp_enabled and not regularize):
             real_score = self.seam_critic(
                 real_values,
@@ -907,8 +889,8 @@ class Trainer:
                 fake_score,
                 (real_values,),
                 (fake_values,),
-                r1_weight=self.settings.r1_gamma if apply_r1 else 0.0,
-                r2_weight=self.settings.r2_gamma if apply_r2 else 0.0,
+                r1_weight=r1_weight,
+                r2_weight=r2_weight,
                 interval=self.settings.r1_interval,
             )
         self.diagnostics["loss/critic_anchor_seam"] = (
@@ -921,7 +903,7 @@ class Trainer:
             fake_score.logits_global.detach().mean()
         )
         self.diagnostics["anchor_seam/r1"] = losses.r1.detach()
-        if apply_r2:
+        if r2_weight > 0:
             self.diagnostics["r2/anchor_seam"] = losses.r2.detach()
         loss = validate_loss(losses.total, "anchor seam")
         self.scaler.scale(loss).backward()

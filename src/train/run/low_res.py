@@ -35,6 +35,11 @@ def run_low_res_train(
     else:
         source = load_source(config)
         cfg = load_train_config(source)
+        # Prediction reads train.yaml; keep the conditions measured from the
+        # images so it needs neither the images nor their current contents.
+        for key in ("height_extents", "depth_profiles"):
+            if key in cfg["data"]:
+                source["data"][key] = cfg["data"][key]
     set_total_steps(cfg, source, steps, payload)
     build_cfg = copy.deepcopy(cfg)
     if payload:
@@ -50,7 +55,7 @@ def run_low_res_train(
         save_every=cfg["train"]["weights_every_steps"],
         run_dir=run_dir,
         checkpoint_every=cfg["train"]["archive_every_steps"],
-        start_step=0 if payload is None else payload["step"],
+        start_step=trainer.completed_steps,
         config=source,
     )
     return run_dir

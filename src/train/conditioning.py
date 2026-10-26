@@ -119,7 +119,13 @@ class ConditionSampler:
         batches: RealBatch,
         transition: int | None,
     ) -> StepPreparation:
-        own_batches = {axis: batches.images[axis] for axis in self.streams[domain]}
+        owned = tuple(self.streams[domain])
+        # Height, profile and vf of an unanchored volume share one side crop.
+        side = (
+            None
+            if self.settings.height_data is None
+            else next(axis for axis in owned if axis in batches.origins)
+        )
         ramp = self.schedule_ramp(
             step, self.settings.anchor_start_step, self.settings.anchor_ramp_steps
         )
@@ -129,12 +135,12 @@ class ConditionSampler:
             else self.sample_anchor(
                 batches,
                 self.settings.patch_size,
-                owned_axes=tuple(own_batches),
+                owned_axes=owned,
                 domain=domain,
             )
         )
         anchor = None if selection is None else selection.condition
-        target_vf = self.sample_vf(batches, selection, tuple(own_batches))
+        target_vf = self.sample_vf(batches, selection, owned, side)
         presence = self.sample_condition_presence(selection is not None)
         model_conditions = self.make_model_conditions(
             anchor,
@@ -145,18 +151,16 @@ class ConditionSampler:
         if self.settings.height_data is not None:
             height = None if selection is None else selection.height
             if height is None:
-                axis = next(a for a in self.streams[domain] if a in batches.origins)
                 height = self.volume_height(
-                    batches.origins[axis][: self.settings.volume_batch_size],
+                    batches.origins[side][: self.settings.volume_batch_size],
                     domain,
-                    batches.extents[axis][: self.settings.volume_batch_size],
+                    batches.extents[side][: self.settings.volume_batch_size],
                 )
             model_conditions["height"] = height
         if self.settings.profile_settings["enabled"]:
             profile = None if selection is None else selection.profile
             if profile is None:
-                axis = next(a for a in own_batches if a in batches.profiles)
-                profile = batches.profiles[axis][: self.settings.volume_batch_size]
+                profile = batches.profiles[side][: self.settings.volume_batch_size]
             target_vf = profile.mean(-1)
             model_conditions.update(
                 profile=profile,
@@ -299,6 +303,7 @@ class ConditionSampler:
         batches: RealBatch,
         selection: AnchorSelection | None,
         owned_axes: tuple[int, ...],
+        side: int | None = None,
     ) -> torch.Tensor:
         if selection is not None:
             measured = selection.measured
@@ -306,8 +311,8 @@ class ConditionSampler:
             sums = torch.einsum("bcdhw,bdhw->bc", measured.image.float(), mask)
             counts = mask.sum(dim=(1, 2, 3)).unsqueeze(1)
             return (sums / counts + 1.0) * 0.5
-        if self.settings.height_data is not None:
-            axis = next(axis for axis in owned_axes if axis in batches.origins)
+        if side is not None:
+            axis = side
         else:
             axis = owned_axes[int(torch.randint(len(owned_axes), ()).item())]
         fractions = batches.images[axis].float().mean((2, 3))

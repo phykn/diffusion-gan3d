@@ -361,7 +361,7 @@ def test_embedded_data_folders_resolve_against_the_project_root(tmp_path, monkey
         "lo_res_size": 64,
     }
     save_yaml(preset, {"stage": "low_res", "data": data})
-    monkeypatch.setattr(config_module, "PROJECT_ROOT", root)
+    monkeypatch.setattr("src.config.files.PROJECT_ROOT", root)
     monkeypatch.chdir(tmp_path)
     cfg = load_train_config(preset)
     assert cfg["data"]["domains"][0]["xy"] == [str((root / "images").resolve())]

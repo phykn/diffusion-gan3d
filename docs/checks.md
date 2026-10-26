@@ -24,8 +24,9 @@ python scripts/05_check_continuation.py --weight "run/my-run-lr" --anchor data/s
 - `--device`, `--seed`, `--domain`, and `--napari` work in `02–06`; `--help` lists the rest.
 - `--height-origin` and `--height-extent` (`02–07`) are in source pixels along the xz/yz row direction.
 - `02 --vf-profile simul/config_anode.yaml --guidance 1.5` fixes the depth fractions to
-  that simulation's targets (a profile YAML/JSON also works); height alone flattens a
-  strong gradient.
+  that simulation's targets (a profile YAML/JSON also works). Without it, a
+  profile-conditioned model follows its training depth profile, since height alone
+  flattens a strong gradient.
 - `02–05` save `volume.tiff/png/json`; `06` saves LR/HR volumes, `comparison.png`, and `report.json`.
 - `07` counts particles tilted each way (`dz/dy`, `dz/dx`, `dy/dx`); generated volumes
   should match `--real` (use `--real-stride 2` for 128-pixel crops at 64 voxels). Training

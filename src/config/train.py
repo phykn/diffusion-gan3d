@@ -10,7 +10,7 @@ from src.config.data import (
     resolve_split,
 )
 from src.config.defaults import INACTIVE_DEFAULTS, STAGE_DEFAULTS, TRAIN_DEFAULTS
-from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml
+from src.config.files import PROJECT_ROOT, load_yaml, prepare_yaml, project_path
 from src.config.schema import validate_config_keys
 from src.config.values import (
     check_boolean,
@@ -58,10 +58,7 @@ def normalize_loaded_train_config(cfg: dict, stage: str = "low_res") -> dict:
     # Relative folders follow the project root, like every other config path.
     cfg["data"]["domains"] = {
         domain: {
-            plane: [
-                str((PROJECT_ROOT / Path(path).expanduser()).resolve())
-                for path in paths
-            ]
+            plane: [str(project_path(path)) for path in paths]
             for plane, paths in planes.items()
         }
         for domain, planes in cfg["data"]["domains"].items()

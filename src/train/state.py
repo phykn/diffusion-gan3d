@@ -34,13 +34,7 @@ def save_training(trainer, path: str | Path) -> None:
 
 
 def resume_training(trainer, payload: dict) -> None:
-    _require_saved_config(
-        normalize_train_config(payload["config"]),
-        normalize_train_config(trainer.cfg),
-        "LR resume must use saved settings; only total_steps may change.",
-    )
-    if payload["data_fingerprint"] != trainer.data_fingerprint:
-        raise ValueError("LR source images changed since the checkpoint.")
+    _check_resume(trainer, payload, "low_res")
     missing = {"connectivity", "connectivity_optim", "seam", "seam_optim"}
     missing -= payload.keys()
     if missing:
@@ -61,14 +55,19 @@ def save_sr_training(trainer, path: str | Path) -> None:
 
 
 def resume_sr_training(trainer, payload: dict) -> None:
-    if payload["data_fingerprint"] != trainer.data_fingerprint:
-        raise ValueError("SR source images changed since the checkpoint.")
-    _require_saved_config(
-        normalize_train_config(payload["config"], "sr"),
-        trainer.cfg,
-        "SR resume must use its saved resolved configuration.",
-    )
+    _check_resume(trainer, payload, "sr")
     _restore_state(trainer, payload)
+
+
+def _check_resume(trainer, payload: dict, stage: str) -> None:
+    label = "SR" if stage == "sr" else "LR"
+    _require_saved_config(
+        normalize_train_config(payload["config"], stage),
+        normalize_train_config(trainer.cfg, stage),
+        f"{label} resume must use saved settings; only total_steps may change.",
+    )
+    if payload["data_fingerprint"] != trainer.data_fingerprint:
+        raise ValueError(f"{label} source images changed since the checkpoint.")
 
 
 def _require_saved_config(saved: dict, actual: dict, message: str) -> None:

@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from src.config.files import save_yaml
 from src.storage import save_model, torch_save
-from src.train.checkpoint import complete_checkpoint
+from src.train.checkpoint import checkpoint_paths, complete_checkpoint
 from src.train.metrics import write_metrics
 from src.train.state import export_sr, save_sr_training, save_training
 from src.train.trainer import Trainer
@@ -62,13 +62,8 @@ def save_generator(trainer, path, stage, overwrite=True):
 
 
 def save_checkpoint(trainer, root, stage):
-    folder = root / "checkpoints"
-    path = folder / f"step_{trainer.completed_steps:08d}.pt"
-    generator = folder / f"generator_{trainer.completed_steps:08d}.pt"
-    for target in (path, generator, path.with_suffix(".complete")):
-        if target.exists():
-            raise FileExistsError(target)
-    folder.mkdir(parents=True, exist_ok=True)
+    path, generator = checkpoint_paths(root, trainer.completed_steps)
+    path.parent.mkdir(parents=True, exist_ok=True)
     if stage == "sr":
         save_sr_training(trainer, path)
     else:

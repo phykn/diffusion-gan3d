@@ -202,10 +202,9 @@ def test_seeded_export_is_repeatable_and_records_measured_fractions(tmp_path):
 
 
 def test_relative_data_dir_resolves_from_project_root(tmp_path, monkeypatch):
-    import simul.src.export as export
 
     project = tmp_path / "project"
-    monkeypatch.setattr(export, "PROJECT_ROOT", project)
+    monkeypatch.setattr("src.config.files.PROJECT_ROOT", project)
     monkeypatch.chdir(tmp_path)
     result = generate(_config(Path("data/generated/relative"), 1))
     assert result.volumes[0].parent == project / "data/generated/relative/volumes"
@@ -283,3 +282,12 @@ def test_anode_shape_sections_have_no_specks():
             labels, count = ndimage.label(layer)
             assert count <= 1
             assert count == 0 or layer.sum() >= 12
+
+
+def test_anode_drops_trimmed_particles_and_rejects_an_empty_library():
+    from simul.src.anode import silicon_shapes
+
+    shapes = silicon_shapes(2.0, 0.5, 9, np.random.default_rng(0))
+    assert shapes and all(len(offsets) for offsets, _ in shapes)
+    with pytest.raises(ValueError, match="min_section removes every silicon"):
+        silicon_shapes(1.0, 0.0, 100, np.random.default_rng(0))

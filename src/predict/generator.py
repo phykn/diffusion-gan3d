@@ -62,18 +62,21 @@ class Generator:
             name: value for name, value in conditions.items() if value is not None
         }
         partial_anchor = "anchor_mask" in conditions and 0.0 < anchor_strength < 1.0
-        if guidance == 1.0 and not partial_anchor:
-            return self.model(current, time, latent, domain=domain, **conditions)
-        logits = self.model.apply_guidance_logits(
-            current,
-            time,
-            latent,
-            guidance,
-            **({"anchor_strength": anchor_strength} if partial_anchor else {}),
-            domain=domain,
-            **conditions,
-        )
-        return Denoiser3D.decode(logits).to(current.dtype)
+        with torch.autocast(
+            device_type=self.device.type, dtype=torch.float16, enabled=self.use_amp
+        ):
+            if guidance == 1.0 and not partial_anchor:
+                return self.model(current, time, latent, domain=domain, **conditions)
+            logits = self.model.apply_guidance_logits(
+                current,
+                time,
+                latent,
+                guidance,
+                **({"anchor_strength": anchor_strength} if partial_anchor else {}),
+                domain=domain,
+                **conditions,
+            )
+            return Denoiser3D.decode(logits).to(current.dtype)
 
     def resolve_domain(self, domain: int | None) -> int:
         if domain is None:
@@ -147,6 +150,8 @@ class Generator:
         height_extent = self.validate_height(
             (size,) * 3, domain, height_origin, height_extent
         )
+        # Anchors at any strength skip the default profile, so a strength sweep
+        # stays continuous at zero, where only the plain logits remain.
         if vf_profile is None and vf is None and not anchors:
             vf_profile = self.default_profile(domain)
         self.validate_profile_request(
@@ -220,12 +225,9 @@ class Generator:
         model = partial(
             self.predict, guidance=guidance, anchor_strength=anchor_strength
         )
-        with torch.autocast(
-            device_type=self.device.type, dtype=torch.float16, enabled=self.use_amp
-        ):
-            return self.diffusion.sample(
-                model, noise, self.latent_channels, conditions=conditions
-            )
+        return self.diffusion.sample(
+            model, noise, self.latent_channels, conditions=conditions
+        )
 
     def height_condition(self, shape, domain, origin, offset=0, extent=None):
         """Height field over this model's output voxels, offset in those voxels."""

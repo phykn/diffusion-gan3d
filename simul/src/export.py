@@ -9,7 +9,7 @@ from PIL import Image
 
 from simul.src.anode import GRAPHITE, SILICON, check_anode, pack_anode
 from simul.src.geometry import check_geometry, pack
-from src.config.files import PROJECT_ROOT
+from src.config.files import project_path
 from src.plane import AXES
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253
@@ -54,7 +54,7 @@ def generate(cfg: dict) -> Export:
     if seed is not None and (type(seed) is not int or seed < 0):
         raise ValueError("output seed must be a non-negative integer or null.")
     rng = np.random.default_rng(seed)
-    root = PROJECT_ROOT / output["data_dir"]
+    root = project_path(output["data_dir"])
     vol_dir, slice_dirs = make_dirs(root)
     volumes: list[Path] = []
     slices: dict[int, list[Path]] = {axis: [] for axis in AXES}
