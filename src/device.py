@@ -23,6 +23,11 @@ def check_device(device: str | torch.device) -> torch.device:
     return device
 
 
+def inference_amp(mixed_precision: bool, device: torch.device) -> bool:
+    # Training keeps AMP on CUDA only; MPS fp16 sampling is faster at equal labels.
+    return mixed_precision and device.type in {"cuda", "mps"}
+
+
 def assert_all(valid: torch.Tensor, message: str) -> None:
     # CUDA checks asynchronously to avoid a host sync on every call.
     if valid.device.type == "cuda":

@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from src.build.model import build_denoiser, build_diffusion
 from src.build.predict import resolve_weights
 from src.config.train import get_sr_resolution, normalize_train_config
-from src.device import check_device, default_device
+from src.device import check_device, default_device, inference_amp
 from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 from src.predict.generator import Generator
 from src.predict.sr.memory import check_sr_memory, estimate_sr_memory
@@ -66,7 +66,7 @@ class SuperResolutionAPI:
             self.hi_res_size,
             self.num_phases,
             self.config["model"]["generator"]["latent_channels"],
-            self.config["train"]["mixed_precision"] and self.device.type == "cuda",
+            inference_amp(self.config["train"]["mixed_precision"], self.device),
             height_data=self.config["data"]
             if self.config["conditioning"]["height_enabled"]
             else None,

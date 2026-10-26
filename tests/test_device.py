@@ -8,7 +8,13 @@ from PIL import Image
 import run_train
 from src.build.trainer import build_trainer
 from src.config.train import load_train_config
-from src.device import check_device, default_device, empty_cache, wide_dtype
+from src.device import (
+    check_device,
+    default_device,
+    empty_cache,
+    inference_amp,
+    wide_dtype,
+)
 from src.evaluate.connectivity import transition_counts, transition_tv
 from src.evaluate.label import phase_fractions, voxel_accuracy
 from src.predict import memory
@@ -52,6 +58,20 @@ def test_wide_dtype_uses_single_precision_only_on_apple_gpu():
     assert wide_dtype(torch.device("cpu")) == torch.float64
     assert wide_dtype(torch.device("cuda")) == torch.float64
     assert wide_dtype(torch.device("mps")) == torch.float32
+
+
+@pytest.mark.parametrize(
+    "mixed_precision,device,expected",
+    [
+        (True, "cuda", True),
+        (True, "mps", True),
+        (True, "cpu", False),
+        (False, "cuda", False),
+        (False, "mps", False),
+    ],
+)
+def test_prediction_amp_runs_on_cuda_and_apple_gpu(mixed_precision, device, expected):
+    assert inference_amp(mixed_precision, torch.device(device)) is expected
 
 
 def test_empty_cache_releases_the_selected_gpu(monkeypatch):

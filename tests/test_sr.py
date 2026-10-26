@@ -961,6 +961,33 @@ def test_sr_cuda_amp_checkpointing_and_cfg_inference(tmp_path):
     torch.testing.assert_close(tiled.sum(0), torch.ones(16, 16, 16), atol=2e-6, rtol=0)
 
 
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS unavailable")
+def test_sr_prediction_uses_mixed_precision_on_apple_gpu(tmp_path):
+    cfg = sr_config(tmp_path, scale=2)
+    cfg["train"]["mixed_precision"] = True
+    path = tmp_path / "sr.pt"
+    export_model(path, cfg)
+    api = SuperResolutionAPI(path, "mps")
+    assert api.generator.use_amp
+
+    low = torch.rand(3, 8, 8, 8).softmax(0)
+    results = {}
+    for use_amp in (True, False):
+        api.generator.use_amp = use_amp
+        results[use_amp] = (
+            api.refine_probs(low, seed=0, guidance=1.7, margin=0),
+            api.refine_probs(
+                low, seed=0, guidance=1.7, tile_size=12, overlap=2, margin=2
+            ),
+        )
+    for half, single in zip(results[True], results[False]):
+        assert torch.isfinite(half).all()
+        torch.testing.assert_close(
+            half.sum(0), torch.ones(16, 16, 16), atol=2e-6, rtol=0
+        )
+        torch.testing.assert_close(half, single, atol=1e-2, rtol=0)
+
+
 def test_consistency_ignores_masked_low_resolution_voxels():
     low = phase_channels(torch.randint(3, (2, 4, 4, 4)), 3)
     high = torch.nn.functional.interpolate(low, scale_factor=2).requires_grad_()

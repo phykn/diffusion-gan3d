@@ -504,6 +504,34 @@ def test_profile_public_api_responds_to_equal_mean_profiles_with_same_seed(tmp_p
     assert not torch.allclose(a, b)
 
 
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS unavailable")
+def test_lr_prediction_uses_mixed_precision_on_apple_gpu(tmp_path):
+    cfg = configuration(tmp_path)
+    cfg["train"]["mixed_precision"] = True
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    save_yaml(tmp_path / "train.yaml", trainer.cfg)
+    torch.save(trainer.denoiser.state_dict(), tmp_path / "generator.pt")
+    generator = load_generator(tmp_path / "generator.pt", torch.device("mps"))
+    assert generator.use_amp
+
+    results = {}
+    for use_amp in (True, False):
+        generator.use_amp = use_amp
+        torch.manual_seed(0)
+        whole = generator.generate_probs(size=8, guidance=1.7, margin=0)
+        torch.manual_seed(0)
+        tiled = TiledGenerator(generator).generate_probs(
+            shape=(12, 8, 8), overlap=1, margin=0, guidance=1.7, progress=False
+        )
+        results[use_amp] = whole, tiled
+    for half, single in zip(results[True], results[False]):
+        assert torch.isfinite(half).all()
+        torch.testing.assert_close(
+            half.sum(0), torch.ones(half.shape[1:]), atol=2e-6, rtol=0
+        )
+        torch.testing.assert_close(half, single, atol=1e-2, rtol=0)
+
+
 def test_profile_tiles_use_global_coordinates_and_local_means(tmp_path):
     cfg = configuration(tmp_path, height=True)
     cfg["conditioning"]["spatial_profile"]["enabled"] = True

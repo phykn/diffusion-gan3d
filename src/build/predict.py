@@ -6,6 +6,7 @@ from src.build.model import build_denoiser, build_diffusion
 from src.config.data import get_resolution
 from src.config.files import find_saved_config
 from src.config.train import load_train_config
+from src.device import inference_amp
 from src.predict.generator import Generator
 from src.storage import load_model
 
@@ -45,7 +46,7 @@ def build_generator(
     data = cfg["data"]
     model = cfg["model"]
     train = cfg["train"]
-    use_amp = train["mixed_precision"] and device.type == "cuda"
+    use_amp = inference_amp(train["mixed_precision"], device)
     return Generator(
         denoiser,
         build_diffusion(cfg).to(device),
