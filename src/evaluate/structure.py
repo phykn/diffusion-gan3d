@@ -40,6 +40,26 @@ def chord_distribution(labels, phases):
     return result
 
 
+def section_errors(real, fake):
+    """Two-point MAE and chord-length TV between real and generated sections."""
+    phases = real.shape[1]
+    first, second = two_point(real), two_point(fake)
+    two_point_mae = float(
+        torch.cat([(a - b).abs().flatten() for a, b in zip(first, second)]).mean()
+    )
+    first_chords = chord_distribution(real.argmax(1).numpy(), phases)
+    second_chords = chord_distribution(fake.argmax(1).numpy(), phases)
+    chord_tv = float(
+        np.mean(
+            [
+                np.abs(a - b).sum(-1).mean() * 0.5
+                for a, b in zip(first_chords, second_chords)
+            ]
+        )
+    )
+    return two_point_mae, chord_tv
+
+
 @torch.no_grad()
 def structure_metrics(probs, real, groups):
     # One scheduled transfer; never called from a diffusion or critic inner loop.
@@ -88,21 +108,10 @@ def structure_metrics(probs, real, groups):
         indices = torch.linspace(0, len(planes) - 1, len(images)).long()
         fake = planes[indices]
         fake = fake[..., : images.shape[-2], : images.shape[-1]]
-        first, second = two_point(images), two_point(fake)
-        metrics[f"structure/{PLANES[axis]}/two_point_mae"] = float(
-            torch.cat([(a - b).abs().flatten() for a, b in zip(first, second)]).mean()
-        )
-        first_chords = chord_distribution(images.argmax(1).numpy(), phases)
-        second_chords = chord_distribution(fake.argmax(1).numpy(), phases)
-        metrics[f"structure/{PLANES[axis]}/chord_tv"] = float(
-            np.mean(
-                [
-                    np.abs(a - b).sum(-1).mean() * 0.5
-                    for a, b in zip(first_chords, second_chords)
-                ]
-            )
-        )
-        generated_curves[axis] = second
+        two_point_mae, chord_tv = section_errors(images, fake)
+        metrics[f"structure/{PLANES[axis]}/two_point_mae"] = two_point_mae
+        metrics[f"structure/{PLANES[axis]}/chord_tv"] = chord_tv
+        generated_curves[axis] = two_point(fake)
     for group, axes in groups.items():
         pairs = list(combinations([a for a in axes if a in generated_curves], 2))
         if pairs:

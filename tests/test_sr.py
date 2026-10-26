@@ -704,16 +704,12 @@ def test_sr_cfg_keeps_coarse_and_height_in_both_branches(tmp_path, guidance, cou
     )
 
 
-@pytest.mark.parametrize(
-    "condition", ["vf", "vf_present", "anchor_image", "anchor_mask"]
-)
-def test_sr_rejects_untrained_anchor_and_vf_conditions(tmp_path, condition):
+@pytest.mark.parametrize("condition", ["vf", "vf_present"])
+def test_sr_rejects_untrained_vf_conditions(tmp_path, condition):
     model = build_denoiser(sr_config(tmp_path))
     current = torch.zeros(1, 3, 12, 12, 12)
     for guidance in (0, 1, 2):
-        with pytest.raises(
-            ValueError, match="do not accept anchors or volume fractions"
-        ):
+        with pytest.raises(ValueError, match="do not accept volume fractions"):
             model.apply_guidance_logits(
                 current,
                 torch.tensor([1]),
@@ -814,7 +810,6 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
 
     def predict(values, time, latent, **conditions):
         assert conditions.get("vf") is None
-        assert conditions.get("anchor_image") is None
         assert conditions["corruption_level"].eq(0).all()
         assert conditions["guidance"] == guidance
         calls.append(
@@ -879,15 +874,12 @@ def test_sr_runs_full_reverse_chain_and_training_uses_matching_hr_slices(tmp_pat
         call.kwargs["coarse"].shape == (1, 3, 12, 12, 12)
         for call in forward.call_args_list
     )
-    assert all(
-        call.kwargs.get("vf") is None and call.kwargs.get("anchor_image") is None
-        for call in forward.call_args_list
-    )
+    assert all(call.kwargs.get("vf") is None for call in forward.call_args_list)
     assert all(
         stream.next()["image"].shape[-2:] == (12, 12)
         for stream in trainer.streams[0].values()
     )
-    assert not metrics.vf_active and metrics.anchor_planes == 0
+    assert not metrics.vf_active
     assert trainer.denoiser.coarse_input.weight.grad.abs().sum() > 0
     path = tmp_path / "sr.pt"
     export_sr(trainer, path)

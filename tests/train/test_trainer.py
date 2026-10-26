@@ -10,199 +10,25 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 from torch import nn
-from torch.utils.tensorboard import SummaryWriter
 
-from scripts.common.metrics import read_metrics
-from src.anchor import PlaneAnchor, encode_anchors
 from src.build.model import build_models
 from src.build.trainer import build_optimizers
 from src.data.augment import CriticAugment
-from src.data.slice import TripletBatch
-from src.data.slice import sample_pairs as sample_volume_pairs
 from src.model.diffusion import Diffusion
 from src.model.layers import NULL_DOMAIN
 from src.plane import PLANE_DIRECTIONS, PLANES
 from src.prepare.resize import phase_channels
-from src.train.anchor_bank import AnchorBank
-from src.train.batch import ConditionPresence, RealBatch
+from src.train.batch import RealBatch
 from src.train.ema import build_ema
 from src.train.loss.denoiser import DenoiserLossSettings
 from src.train.loss.gan import get_gradient_penalty
-from src.train.metrics import Metrics, write_metrics
+from src.train.metrics import Metrics
 from src.train.run.loop import run_train
 from src.train.trainer import (
     Trainer,
     TrainerComponents,
     TrainerSettings,
 )
-
-
-def sample_pairs(
-    previous,
-    current,
-    axis,
-    count,
-    patch_size,
-    axis_masks=None,
-    crop_shape=None,
-):
-    condition = None
-    if axis_masks is not None:
-        planes = []
-        for normal in range(3):
-            for _, z, y, x in axis_masks[:, normal].nonzero().tolist():
-                coords = [z, y, x]
-                planes.append(
-                    PlaneAnchor(
-                        torch.zeros(1, 1, dtype=torch.long),
-                        normal,
-                        coords[normal],
-                        tuple(c for a, c in enumerate(coords) if a != normal),
-                    )
-                )
-        condition = encode_anchors(
-            planes,
-            previous.shape[0],
-            2,
-            previous.shape[-3:],
-            previous.device,
-            previous.dtype,
-        )
-    return sample_volume_pairs(
-        previous,
-        current,
-        axis,
-        count,
-        patch_size if crop_shape is None else crop_shape,
-        anchor=condition,
-    )
-
-
-@pytest.mark.parametrize("weight", [0.0, 0.25])
-def test_connectivity_weight_controls_triplets_and_preserves_center_slots(weight):
-    trainer = object.__new__(Trainer)
-    trainer.settings = SimpleNamespace(
-        profile_settings={"enabled": False},
-        num_phases=2,
-        patch_size=1,
-        loss=SimpleNamespace(connectivity_weight=weight),
-    )
-    trainer.device = torch.device("cpu")
-    trainer.diagnostics = {}
-    real_centers = torch.tensor((1, 1))
-    fake_centers = torch.tensor((0, 2))
-    axes = torch.tensor((0, 0))
-    real = TripletBatch(
-        values=torch.zeros(2, 3, 2, 1, 1),
-        axes=axes,
-        gaps=torch.ones(2, dtype=torch.long),
-        center_slots=real_centers,
-    )
-    fake = TripletBatch(
-        values=torch.ones(2, 3, 2, 1, 1),
-        axes=axes,
-        gaps=torch.ones(2, dtype=torch.long),
-        center_slots=fake_centers,
-    )
-    anchor = encode_anchors(
-        (PlaneAnchor(torch.zeros(3, 3, dtype=torch.uint8), axis=0, index=1),),
-        batch_size=1,
-        num_phases=2,
-        volume_size=3,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-        reconcile=False,
-    )
-    assert anchor is not None
-    trainer.anchor_triplets = Mock()
-    trainer.anchor_triplets.sample.return_value = (real, fake)
-    trainer.critic_augment = Mock()
-    trainer.critic_augment.apply_together.return_value = (
-        real.values + 2.0,
-        fake.values + 3.0,
-    )
-
-    augmented_real, augmented_fake = trainer.make_connectivity_triplets(
-        torch.zeros(1, 2, 3, 3, 3),
-        torch.zeros(1, 2, 3, 3, 3),
-        anchor,
-        transition=0,
-        source="multi",
-    )
-
-    if weight == 0:
-        assert len(augmented_real) == len(augmented_fake) == 0
-        trainer.anchor_triplets.sample.assert_not_called()
-        trainer.critic_augment.apply_together.assert_not_called()
-        return
-    assert len(augmented_real) == len(augmented_fake) == 2
-    trainer.anchor_triplets.sample.assert_called_once()
-    trainer.critic_augment.apply_together.assert_called_once()
-    assert augmented_real.center_slots.tolist() == [1, 1]
-    assert augmented_fake.center_slots.tolist() == [0, 2]
-    assert torch.equal(augmented_real.values, real.values + 2.0)
-    assert torch.equal(augmented_fake.values, fake.values + 3.0)
-
-
-def test_sample_pairs_centers_half_the_patches_on_focus() -> None:
-    previous = torch.zeros(1, 1, 8, 8, 8)
-    previous[0, 0, 2, 5, 6] = 1.0
-    current = previous.clone()
-    axis_masks = torch.zeros(1, 3, 8, 8, 8, dtype=torch.bool)
-    axis_masks[0, 1, 2, 5, 6] = True
-
-    selected, _ = sample_pairs(
-        previous,
-        current,
-        axis=0,
-        count=4,
-        patch_size=4,
-        axis_masks=axis_masks,
-    )
-
-    assert torch.equal(selected[:2].amax(dim=(1, 2, 3)), torch.ones(2))
-
-
-def test_sample_pairs_centers_rectangular_patches_on_focus() -> None:
-    previous = torch.zeros(1, 1, 8, 8, 8)
-    previous[0, 0, 2, 5, 6] = 1.0
-    current = previous.clone()
-    axis_masks = torch.zeros(1, 3, 8, 8, 8, dtype=torch.bool)
-    axis_masks[0, 1, 2, 5, 6] = True
-
-    selected, _ = sample_pairs(
-        previous,
-        current,
-        axis=0,
-        count=4,
-        patch_size=8,
-        axis_masks=axis_masks,
-        crop_shape=(2, 4),
-    )
-
-    assert selected.shape[-2:] == (2, 4)
-    assert torch.equal(selected[:2].amax(dim=(1, 2, 3)), torch.ones(2))
-
-
-def test_sample_pairs_ignores_anchors_parallel_to_the_critic() -> None:
-    previous = torch.zeros(1, 1, 8, 8, 8)
-    previous[0, 0, 2, 5, 6] = 2.0
-    previous[0, 0, 7, 1, 1] = 1.0
-    current = previous.clone()
-    axis_masks = torch.zeros(1, 3, 8, 8, 8, dtype=torch.bool)
-    axis_masks[0, 1, 2, 5, 6] = True
-    axis_masks[0, 0, 7, 1, 1] = True
-
-    selected, _ = sample_pairs(
-        previous,
-        current,
-        axis=0,
-        count=2,
-        patch_size=1,
-        axis_masks=axis_masks,
-    )
-
-    assert float(selected[0, 0, 0, 0]) == 2.0
 
 
 class _ConstantStream:
@@ -215,37 +41,15 @@ class _ConstantStream:
         return {"image": self.images.clone()}
 
 
-def test_connectivity_uses_axis_critic_domain_for_shared_context() -> None:
-    triplets = TripletBatch(
-        values=torch.zeros(3, 3, 2, 4, 4),
-        axes=torch.tensor((0, 1, 2)),
-        gaps=torch.ones(3, dtype=torch.long),
-        center_slots=torch.ones(3, dtype=torch.long),
-    )
-
-    domains = Trainer.get_axis_domains(
-        critic_domains={0: 0, 1: NULL_DOMAIN, 2: NULL_DOMAIN},
-        axes=triplets.axes,
-    )
-
-    assert domains.tolist() == [0, NULL_DOMAIN, NULL_DOMAIN]
-
-
 def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
     cfg = _config(
         domains={0: {"xy": ["."]}, 1: {plane: ["."] for plane in PLANES}},
         data={"num_phases": 2},
-        conditioning={
-            "anchor": {"probability": 1.0, "borrowed_plane_probability": 1.0},
-            "domain_keep_probability": 1.0,
-        },
     )
     phases = cfg["data"]["num_phases"]
-    denoiser, critics, connectivity_critic = build_models(cfg)
+    denoiser, critics = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
-        denoiser, critics, connectivity_critic, None, cfg
-    )
+    denoiser_optim, critic_optims = build_optimizers(denoiser, critics, cfg)
     images = (
         torch.arange(64, dtype=torch.long)
         .remainder(phases)
@@ -264,13 +68,11 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
         denoiser=denoiser,
         ema_denoiser=ema,
         critics=critics,
-        connectivity_critic=connectivity_critic,
         streams=streams,
         streams_by_domain=True,
         diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
         denoiser_optim=denoiser_optim,
         critic_optims=critic_optims,
-        connectivity_optim=connectivity_optim,
         device=torch.device("cpu"),
     )
     observed_domains = {axis: [] for axis in (0, 1, 2)}
@@ -290,7 +92,6 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
             hook.remove()
 
     assert metrics.domain == 0
-    assert metrics.anchor_shared
     assert streams[0][0].calls == 1
     assert streams[1][0].calls == 0
     assert streams[1][1].calls == 1
@@ -304,11 +105,9 @@ def test_training_step_uses_null_critics_for_borrowed_axes() -> None:
 def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
     cfg = _config(loss={"r1_weight": 0.01, "r1_every_steps": 1})
     phases = cfg["data"]["num_phases"]
-    denoiser, critics, connectivity_critic = build_models(cfg)
+    denoiser, critics = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
-        denoiser, critics, connectivity_critic, None, cfg
-    )
+    denoiser_optim, critic_optims = build_optimizers(denoiser, critics, cfg)
     images = torch.randint(0, phases, (cfg["train"]["real_batch_size"], 8, 8))
     streams = {
         axis: _ConstantStream(phase_channels(images, phases)) for axis in (0, 1, 2)
@@ -318,12 +117,10 @@ def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
         denoiser=denoiser,
         ema_denoiser=ema,
         critics=critics,
-        connectivity_critic=connectivity_critic,
         streams=streams,
         diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
         denoiser_optim=denoiser_optim,
         critic_optims=critic_optims,
-        connectivity_optim=connectivity_optim,
         device=torch.device("cpu"),
     )
     trainer.critic_augment = Mock(
@@ -353,8 +150,6 @@ def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
     assert math.isfinite(metrics.generator)
     assert math.isfinite(metrics.critic)
     assert math.isfinite(metrics.r1)
-    assert metrics.generator_connectivity == 0.0
-    assert metrics.critic_connectivity == 0.0
     assert len(r1_values) == 3
     # Real slices of three planes, plus fake slices unless reals only.
     assert trainer.critic_augment.apply_together.call_count == (3 if real_only else 6)
@@ -370,10 +165,7 @@ def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
 
 @pytest.mark.parametrize("axis", (0, 2))
 def test_training_step_with_one_axis_updates_only_that_critic(axis: int) -> None:
-    trainer, denoiser, streams = _conditioning_trainer(
-        anchored=False,
-        axes=(axis,),
-    )
+    trainer, denoiser, streams = _conditioning_trainer(axes=(axis,))
     denoiser_before = _parameters(denoiser)
     critic_before = _parameters(trainer.critics[PLANES[axis]])
 
@@ -391,80 +183,18 @@ def test_training_step_with_one_axis_updates_only_that_critic(axis: int) -> None
     assert _changed(critic_before, trainer.critics[PLANES[axis]])
 
 
-def test_anchor_training_uses_real_plane_and_updates_adapter() -> None:
-    cfg = _config(conditioning={"anchor": {"probability": 1.0}})
-    phases = cfg["data"]["num_phases"]
-    denoiser, critics, connectivity_critic = build_models(cfg)
-    ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
-        denoiser, critics, connectivity_critic, None, cfg
-    )
-    images = torch.randint(0, phases, (cfg["train"]["real_batch_size"], 8, 8))
-    trainer = _make_trainer(
-        cfg,
-        denoiser=denoiser,
-        ema_denoiser=ema,
-        critics=critics,
-        connectivity_critic=connectivity_critic,
-        streams={
-            axis: _ConstantStream(phase_channels(images, phases)) for axis in (0, 1, 2)
-        },
-        diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
-        denoiser_optim=denoiser_optim,
-        critic_optims=critic_optims,
-        connectivity_optim=connectivity_optim,
-        device=torch.device("cpu"),
-    )
-    adapter_before = denoiser.anchor_input.weight.detach().clone()
-    with (
-        patch.object(
-            denoiser,
-            "forward",
-            wraps=denoiser.forward,
-        ) as forward,
-        patch.object(
-            denoiser,
-            "compute_logits",
-            wraps=denoiser.compute_logits,
-        ) as compute_logits,
-    ):
-        metrics = trainer.step(0, transition=0)
-
-    assert metrics.anchor_planes == 1
-    assert metrics.anchor_conflict_rate == 0.0
-    assert forward.call_count == 1
-    assert compute_logits.call_count == 2
-    assert all(
-        call.kwargs["anchor_image"] is not None
-        and call.kwargs["anchor_mask"] is not None
-        for call in compute_logits.call_args_list
-    )
-    assert math.isfinite(metrics.anchor_loss)
-    assert metrics.generator_connectivity == 0.0
-    assert metrics.critic_connectivity == 0.0
-    assert 0.0 <= metrics.anchor_accuracy <= 1.0
-    assert math.isclose(
-        metrics.generator_total,
-        metrics.generator + metrics.anchor_loss + metrics.vf_loss,
-        rel_tol=1e-5,
-    )
-    assert not torch.equal(adapter_before, denoiser.anchor_input.weight.detach())
-
-
 def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None:
-    trainer, denoiser, streams = _conditioning_trainer(
-        anchored=True,
-    )
+    trainer, denoiser, streams = _conditioning_trainer()
     vf_batch_ids = []
     critic_batch_ids = []
     original_sample_vf = trainer.conditions.sample_vf
     original_sample_real_pairs = trainer._sample_real_pairs
-    measured = []
+    targets = []
 
-    def track_vfs(batches, selection, *args):
+    def track_vfs(batches, *args):
         vf_batch_ids.extend(id(batches.images[axis]) for axis in (0, 1, 2))
-        measured.append(selection.measured)
-        return original_sample_vf(batches, selection, *args)
+        targets.append(original_sample_vf(batches, *args))
+        return targets[-1]
 
     def track_critics(transition, batches, *args):
         critic_batch_ids.extend(id(batches.images[axis]) for axis in (0, 1, 2))
@@ -488,14 +218,10 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
 
     calls = [*forward.call_args_list, *compute_logits.call_args_list]
     vfs = [call.kwargs["vf"] for call in calls]
-    assert len(forward.call_args_list) == 1
+    assert len(forward.call_args_list) == 2
     assert len(compute_logits.call_args_list) == 2
-    assert all(vf is vfs[0] for vf in vfs)
+    assert all(vf is targets[0] for vf in vfs)
     assert vfs[0].shape == (1, 3)
-    region = measured[0].regions[0]
-    image = (measured[0].image.select(region.axis + 2, region.index) + 1) * 0.5
-    expected_vf = image.sum((0, 2, 3)) / image[:, 0].numel()
-    assert torch.allclose(vfs[0][0], expected_vf)
     assert vf_batch_ids == critic_batch_ids
 
     gradient = denoiser.vf_mlp[-1].weight.grad
@@ -504,9 +230,8 @@ def test_step_reuses_each_real_batch_and_conditions_every_reverse_step() -> None
     assert float(gradient.abs().sum()) > 0.0
 
 
-@pytest.mark.parametrize("anchored", (False, True))
-def test_vf_conditions_follow_individual_fractional_crops(anchored):
-    trainer, _, streams = _conditioning_trainer(anchored=anchored)
+def test_vf_conditions_follow_individual_fractional_crops():
+    trainer, _, streams = _conditioning_trainer()
     trainer.settings = replace(trainer.settings, volume_batch_size=2)
     trainer.conditions.settings = trainer.settings
     fractions = torch.tensor([[0.8, 0.2, 0.0], [0.1, 0.3, 0.6]])
@@ -519,43 +244,10 @@ def test_vf_conditions_follow_individual_fractional_crops(anchored):
     observed = prepared.target_vf[prepared.target_vf[:, 0].argsort()]
     torch.testing.assert_close(observed, expected)
     assert prepared.model_conditions["vf"] is prepared.target_vf
-    if anchored:
-        measured = prepared.selection.measured
-        region = measured.regions[0]
-        image = measured.image.select(region.axis + 2, region.index)
-        crop = image[..., region.row : region.row + 4, region.col : region.col + 8]
-        torch.testing.assert_close(prepared.target_vf, ((crop + 1) * 0.5).mean((2, 3)))
 
 
-def test_replay_vf_uses_only_its_measured_root():
-    trainer, _, streams = _conditioning_trainer(anchored=True)
-    trainer.settings = replace(trainer.settings, volume_batch_size=2)
-    trainer.conditions.settings = trainer.settings
-    fractions = torch.tensor([0.2, 0.3, 0.5])
-    measured = encode_anchors(
-        [PlaneAnchor(fractions[:, None, None].expand(-1, 4, 4), 0, 2)],
-        1,
-        3,
-        8,
-        torch.device("cpu"),
-        torch.float32,
-    )
-    prediction = torch.full((1, 3, 8, 8, 8), -1.0)
-    prediction[:, 0] = 1.0
-    trainer.conditions.anchor_bank.add(0, prediction, measured, torch.tensor([True]))
-    trainer.conditions.use_multi_anchor_next = True
-    for stream in streams.values():
-        stream.images.zero_()
-        stream.images[:, 1] = 1.0
-
-    prepared = trainer.prepare_step(0, 0)
-
-    assert prepared.selection.source == "multi"
-    torch.testing.assert_close(prepared.target_vf, fractions.expand(2, -1))
-
-
-def test_unanchored_vf_supports_more_volumes_than_real_crops():
-    trainer, _, streams = _conditioning_trainer(anchored=False)
+def test_vf_supports_more_volumes_than_real_crops():
+    trainer, _, streams = _conditioning_trainer()
     trainer.settings = replace(trainer.settings, volume_batch_size=5)
     trainer.conditions.settings = trainer.settings
     fractions = torch.tensor([[0.8, 0.2, 0.0], [0.1, 0.3, 0.6]])
@@ -570,8 +262,8 @@ def test_unanchored_vf_supports_more_volumes_than_real_crops():
     torch.testing.assert_close(prepared.target_vf[:2], fractions)
 
 
-def test_unanchored_vf_and_height_use_the_same_owned_crops():
-    trainer, _, _ = _conditioning_trainer(anchored=False)
+def test_vf_and_height_use_the_same_owned_crops():
+    trainer, _, _ = _conditioning_trainer()
     trainer.settings = replace(
         trainer.settings,
         volume_batch_size=2,
@@ -599,7 +291,7 @@ def test_unanchored_vf_and_height_use_the_same_owned_crops():
 
 
 def test_profile_keeps_priority_over_crop_vf():
-    trainer, _, _ = _conditioning_trainer(anchored=False)
+    trainer, _, _ = _conditioning_trainer()
     # Profiles require height conditioning, so the side crop carries both.
     trainer.settings = replace(
         trainer.settings,
@@ -620,58 +312,26 @@ def test_profile_keeps_priority_over_crop_vf():
     assert prepared.model_conditions["vf"] is prepared.target_vf
 
 
-def test_generate_pair_keeps_initial_noise_and_posterior_unprojected() -> None:
-    trainer, _, _ = _conditioning_trainer(
-        anchored=True,
-    )
-    batches = trainer.conditions.get_batches(0)
-    selection = trainer.conditions.sample_real_anchor(batches, volume_size=8)
-    presence = ConditionPresence(
-        anchor=torch.tensor((False,)),
-        vf=torch.tensor((False,)),
-    )
-    model_conditions = trainer.conditions.make_model_conditions(
-        selection.condition,
-        torch.tensor(((0.3, 0.3, 0.4),)),
-        presence,
-        trainer.conditions.make_domain(0, 1),
-    )
+def test_generate_pair_keeps_initial_noise_and_returns_the_final_prediction() -> None:
+    trainer, _, _ = _conditioning_trainer()
+    conditions = trainer.prepare_step(0, 0).model_conditions
     trainer.diffusion = Diffusion(1)
-
-    initial = torch.linspace(
-        -0.9,
-        0.9,
-        selection.condition.image.numel(),
-        device=trainer.device,
-    ).reshape_as(selection.condition.image)
-    latent = torch.zeros(
-        trainer.settings.volume_batch_size,
-        trainer.settings.latent_channels,
-        device=trainer.device,
-    )
+    initial = torch.linspace(-0.9, 0.9, 3 * 8**3).reshape(1, 3, 8, 8, 8)
+    latent = torch.zeros(1, trainer.settings.latent_channels)
     with (
         patch("src.train.trainer.torch.randn", return_value=initial.clone()),
         patch.object(trainer, "sample_latent", return_value=latent),
     ):
-        previous, current, _, prediction = trainer.generate_pair(
-            transition=0,
-            model_conditions=model_conditions,
-            volume_size=8,
+        previous, current, prediction = trainer.generate_pair(
+            transition=0, model_conditions=conditions, volume_size=8
         )
 
-    mask = selection.condition.mask.expand_as(previous)
-    clean = selection.condition.image
-    assert not bool(model_conditions["anchor_mask"].any())
-    assert not bool(model_conditions["vf_present"].any())
     assert torch.equal(current, initial)
     assert torch.equal(previous, prediction)
-    assert not torch.equal(previous[mask], clean[mask])
-    assert not torch.equal(prediction[mask], clean[mask])
 
 
 def test_training_volume_and_critic_use_patch_size() -> None:
     trainer, denoiser, streams = _conditioning_trainer(
-        anchored=True,
         data={"crop_size": 8, "lo_res_size": 8},
     )
     shapes = []
@@ -682,12 +342,7 @@ def test_training_volume_and_critic_use_patch_size() -> None:
         for critic in trainer.critics.values()
     ]
     try:
-        with patch.object(
-            denoiser,
-            "compute_logits",
-            wraps=denoiser.compute_logits,
-        ) as compute_logits:
-            metrics = trainer.step(0, transition=0)
+        metrics = trainer.step(0, transition=0)
     finally:
         for hook in hooks:
             hook.remove()
@@ -696,20 +351,16 @@ def test_training_volume_and_critic_use_patch_size() -> None:
     assert all(stream.calls == 1 for stream in streams.values())
     assert shapes
     assert all(shape[-2:] == (8, 8) for shape in shapes)
-    assert all(
-        call.kwargs["anchor_image"].shape[-3:] == (8, 8, 8)
-        for call in compute_logits.call_args_list
-    )
 
 
 def test_training_critics_match_each_axis_rectangular_real_shape() -> None:
-    trainer, _, streams = _conditioning_trainer(anchored=True)
+    trainer, _, streams = _conditioning_trainer()
     shapes = {
         0: (8, 8),
         1: (4, 8),
         2: (8, 6),
     }
-    trainer.settings = replace(trainer.settings, r1_gamma=0.01, r1_interval=1)
+    trainer.settings = replace(trainer.settings, r1_weight=0.01, r1_every_steps=1)
     trainer.conditions.settings = trainer.settings
     for axis, shape in shapes.items():
         streams[axis].images = phase_channels(torch.randint(0, 3, (2, *shape)), 3)
@@ -736,36 +387,14 @@ def test_training_critics_match_each_axis_rectangular_real_shape() -> None:
     )
 
 
-def test_real_anchor_preserves_a_rectangular_observation() -> None:
-    trainer, _, _ = _conditioning_trainer(anchored=True)
-    batches = RealBatch({axis: torch.randint(0, 3, (2, 4, 8)) for axis in (0, 1, 2)})
-
-    selection = trainer.conditions.sample_real_anchor(batches, volume_size=8)
-
-    condition = selection.condition
-    coords = condition.mask[0, 0].nonzero()
-    spans = tuple(
-        int(coords[:, dim].max() - coords[:, dim].min() + 1) for dim in range(3)
-    )
-    assert condition.image.shape == (1, 3, 8, 8, 8)
-    assert sorted(spans) == [1, 4, 8]
-    assert int(condition.mask.sum()) == 4 * 8
-
-
 def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
     trainer, denoiser, streams = _conditioning_trainer(
-        anchored=False,
-        conditioning={"dropout_probability_per_case": 0.1},
+        conditioning={"cfg_dropout_probability": 0.1},
     )
-    hidden = ConditionPresence(
-        anchor=torch.zeros(1, dtype=torch.bool),
-        vf=torch.zeros(1, dtype=torch.bool),
-    )
+    hidden = torch.zeros(1, dtype=torch.bool)
 
     with (
-        patch.object(
-            trainer.conditions, "sample_condition_presence", return_value=hidden
-        ),
+        patch.object(trainer.conditions, "sample_vf_presence", return_value=hidden),
         patch.object(denoiser, "forward", wraps=denoiser.forward) as forward,
         patch.object(
             denoiser,
@@ -779,7 +408,7 @@ def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
     assert not metrics.vf_active
     assert metrics.vf_loss == 0.0
     calls = [*forward.call_args_list, *compute_logits.call_args_list]
-    assert len(forward.call_args_list) == 1
+    assert len(forward.call_args_list) == 2
     assert len(compute_logits.call_args_list) == 2
     assert all(call.kwargs["vf"] is not None for call in calls)
     assert all(not bool(call.kwargs["vf_present"].any()) for call in calls)
@@ -787,243 +416,6 @@ def test_single_vf_condition_can_be_dropped_for_the_whole_batch() -> None:
         parameter.grad is None or not bool(parameter.grad.any())
         for parameter in denoiser.vf_mlp.parameters()
     )
-
-
-def test_anchor_specific_losses_stop_when_cfg_hides_the_anchor() -> None:
-    trainer, _, _ = _conditioning_trainer(
-        anchored=True,
-        loss={"connectivity": {"adversarial_weight": 0.25}},
-    )
-    trainer.settings = replace(
-        trainer.settings,
-        loss=replace(trainer.settings.loss, anchor_continuity_weight=0.1),
-    )
-    trainer.conditions.settings = trainer.settings
-    observed = encode_anchors(
-        (PlaneAnchor(torch.zeros(8, 8, dtype=torch.uint8), axis=0, index=4),),
-        batch_size=1,
-        num_phases=3,
-        volume_size=8,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-    )
-    assert observed is not None
-    dropped = ConditionPresence(
-        anchor=torch.tensor((False,)),
-        vf=torch.tensor((True,)),
-    )
-    generated = {}
-    original_generate_pair = trainer.generate_pair
-
-    def capture_generate_pair(*args, **kwargs):
-        result = original_generate_pair(*args, **kwargs)
-        generated["conditions"] = args[1]
-        generated["previous"] = result[0]
-        generated["prediction"] = result[3]
-        return result
-
-    with (
-        patch.object(
-            trainer.conditions, "sample_condition_presence", return_value=dropped
-        ),
-        patch.object(trainer, "generate_pair", side_effect=capture_generate_pair),
-    ):
-        metrics = trainer.step(0, transition=0)
-
-    conditions = generated["conditions"]
-    assert not bool(conditions["anchor_mask"].any())
-    anchor_image = conditions["anchor_image"]
-    mask = anchor_image.abs().sum(dim=1, keepdim=True).bool()
-    mask = mask.expand_as(generated["previous"])
-    assert torch.equal(generated["previous"], generated["prediction"])
-    assert not torch.equal(generated["previous"][mask], anchor_image[mask])
-    assert not torch.equal(generated["prediction"][mask], anchor_image[mask])
-    assert metrics.anchor_input_active_fraction == 0.0
-    assert metrics.anchor_loss == 0.0
-    assert metrics.anchor_coarse_loss == 0.0
-    assert metrics.anchor_pixel_loss == 0.0
-    assert metrics.generator_connectivity == 0.0
-    assert metrics.diagnostics["loss/anchor_continuity"] == 0
-    assert metrics.diagnostics["anchor_continuity/gap1/pairs"] == 0
-
-
-@pytest.mark.parametrize("transition", (0, 1))
-@pytest.mark.parametrize("replay", (False, True))
-def test_anchor_continuity_updates_x0_at_every_transition_and_records_metrics(
-    tmp_path, transition, replay
-):
-    torch.manual_seed(17)
-    trainer, _, _ = _conditioning_trainer(anchored=True)
-    trainer.settings = replace(
-        trainer.settings,
-        loss=replace(
-            trainer.settings.loss,
-            anchor_continuity_weight=0.1,
-            real_transition_weight=0.2,
-        ),
-    )
-    trainer.conditions.settings = trainer.settings
-    if replay:
-        trainer.step(0, transition=0)
-    original_update = trainer.update_denoiser
-
-    def check_gradient(batch):
-        assert batch.anchor_continuity_loss is not None
-        (gradient,) = torch.autograd.grad(
-            batch.anchor_continuity_loss, batch.logits, retain_graph=True
-        )
-        assert gradient.abs().sum() > 0
-        assert gradient[batch.anchor.mask.expand_as(gradient)].abs().sum() == 0
-        return original_update(batch)
-
-    original_generate = trainer.generate_pair
-
-    def check_chain(*args, **kwargs):
-        result = original_generate(*args, **kwargs)
-        assert not result[1].requires_grad
-        assert result[2].requires_grad and result[3].requires_grad
-        return result
-
-    with (
-        patch.object(trainer, "update_denoiser", side_effect=check_gradient),
-        patch.object(trainer, "generate_pair", side_effect=check_chain),
-        patch.object(
-            trainer, "_transition_statistics", wraps=trainer._transition_statistics
-        ) as statistics,
-    ):
-        metrics = trainer.step(int(replay), transition=transition)
-    assert statistics.call_count == 1
-    assert (metrics.anchor_planes > 1) == replay
-    assert metrics.diagnostics["loss/anchor_continuity"] > 0
-    assert ("loss/real_transition" in metrics.diagnostics) == (transition == 0)
-    assert metrics.diagnostics["anchor_continuity/contribution"] == pytest.approx(
-        0.1 * metrics.anchor_ramp * metrics.diagnostics["loss/anchor_continuity"]
-    )
-    with SummaryWriter(tmp_path) as writer:
-        write_metrics(writer, 2, metrics)
-    (record,) = read_metrics(tmp_path)
-    for key in (
-        "loss/anchor_continuity",
-        "anchor_continuity/gap1/loss",
-        "anchor_continuity/gap1/sharpness",
-        "anchor_continuity/sharpness_near",
-        "anchor_continuity/sharpness_far",
-    ):
-        assert record[key] == pytest.approx(metrics.diagnostics[key])
-
-
-@pytest.mark.parametrize("transition", (0, 1))
-@pytest.mark.parametrize("replay", (False, True))
-@pytest.mark.parametrize("weight", (0.0, 0.2))
-def test_anchor_neighborhood_covers_all_transitions_and_logs_with_zero_weight(
-    tmp_path, monkeypatch, transition, replay, weight
-):
-    # An untrained model has no outlier pairs; penalize every deviation instead.
-    monkeypatch.setattr("src.train.loss.anchor_neighborhood.OUTLIER_SCALE", 0.0)
-    torch.manual_seed(17)
-    trainer, _, _ = _conditioning_trainer(anchored=True)
-    trainer.settings = replace(
-        trainer.settings,
-        loss=replace(trainer.settings.loss, anchor_neighborhood_weight=weight),
-    )
-    trainer.conditions.settings = trainer.settings
-    if replay:
-        trainer.step(0, transition=0)
-    original_update = trainer.update_denoiser
-
-    def check_gradient(batch):
-        assert batch.anchor_neighborhood_loss is not None
-        assert batch.anchor_neighborhood_loss.requires_grad == (weight > 0)
-        if weight > 0:
-            (gradient,) = torch.autograd.grad(
-                batch.anchor_neighborhood_loss, batch.logits, retain_graph=True
-            )
-            assert gradient.abs().sum() > 0
-            assert gradient[batch.anchor.mask.expand_as(gradient)].abs().sum() == 0
-        return original_update(batch)
-
-    with patch.object(trainer, "update_denoiser", side_effect=check_gradient):
-        metrics = trainer.step(int(replay), transition=transition)
-    assert (metrics.anchor_planes > 1) == replay
-    assert metrics.diagnostics["loss/anchor_neighborhood"] > 0
-    assert metrics.diagnostics["anchor_neighborhood/contribution"] == pytest.approx(
-        weight * metrics.anchor_ramp * metrics.diagnostics["loss/anchor_neighborhood"]
-    )
-    with SummaryWriter(tmp_path) as writer:
-        write_metrics(writer, 2, metrics)
-    (record,) = read_metrics(tmp_path)
-    for key in (
-        "loss/anchor_neighborhood",
-        "anchor_neighborhood/contribution",
-        "anchor_neighborhood/deviation",
-        "anchor_neighborhood/tolerance",
-        "anchor_neighborhood/pairs",
-        "anchor_neighborhood/peak_deviation",
-        "anchor_neighborhood/peak_distance",
-    ):
-        assert record[key] == pytest.approx(metrics.diagnostics[key])
-
-
-def test_zero_neighborhood_weight_preserves_training_and_generated_samples():
-    torch.manual_seed(29)
-    baseline, _, _ = _conditioning_trainer(anchored=True)
-    trainer = copy.deepcopy(baseline)
-    assert trainer.settings.loss.anchor_neighborhood_weight == 0
-    torch.manual_seed(31)
-    with patch.object(baseline, "_anchor_neighborhood_loss", return_value=None):
-        expected = baseline.step(0, transition=1)
-    torch.manual_seed(31)
-    actual = trainer.step(0, transition=1)
-    assert actual.generator == expected.generator
-    for name, value in baseline.denoiser.state_dict().items():
-        assert torch.equal(trainer.denoiser.state_dict()[name], value)
-    for name, value in baseline.ema_denoiser.state_dict().items():
-        assert torch.equal(trainer.ema_denoiser.state_dict()[name], value)
-    torch.manual_seed(37)
-    prepared = baseline.prepare_step(1, transition=0)
-    torch.manual_seed(41)
-    expected_pair = baseline.generate_pair(0, prepared.model_conditions, 8)
-    torch.manual_seed(41)
-    actual_pair = trainer.generate_pair(0, prepared.model_conditions, 8)
-    assert all(
-        torch.equal(left, right) for left, right in zip(expected_pair, actual_pair)
-    )
-
-
-def test_vf_total_variation_uses_raw_prediction() -> None:
-    trainer, _, _ = _conditioning_trainer(anchored=True)
-    batches = trainer.conditions.get_batches(0)
-    selection = trainer.conditions.sample_real_anchor(batches, volume_size=8)
-    condition = selection.condition
-    prediction = torch.full((1, 3, 8, 8, 8), -1.0)
-    prediction[:, 0] = 1.0
-    prediction.requires_grad_()
-    prediction = prediction + 0.0 * next(trainer.denoiser.parameters()).sum()
-    raw_probs = (prediction.detach() + 1.0) * 0.5
-    target = raw_probs.mean(dim=(2, 3, 4))
-    projected = torch.where(
-        condition.mask,
-        condition.image,
-        prediction.detach(),
-    )
-    projected_vf = ((projected + 1.0) * 0.5).mean(dim=(2, 3, 4))
-    logits = torch.zeros_like(prediction, requires_grad=True)
-
-    with (
-        patch.object(trainer.conditions, "sample_anchor", return_value=selection),
-        patch.object(trainer.conditions, "sample_vf", return_value=target),
-        patch.object(
-            trainer,
-            "generate_pair",
-            return_value=(prediction, prediction, logits, prediction),
-        ),
-    ):
-        metrics = trainer.step(0, transition=0)
-
-    projected_tv = 0.5 * (projected_vf - target).abs().sum()
-    assert float(projected_tv) > 0.0
-    assert metrics.vf_active
-    assert math.isclose(metrics.vf_loss, 0.0, abs_tol=1e-7)
 
 
 def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) -> None:
@@ -1034,13 +426,11 @@ def test_exception_inside_step_does_not_publish_partial_weights(tmp_path: Path) 
     trainer.cfg = {"stage": "low_res", "data": {}}
     trainer.streams = {}
     trainer.data_fingerprint = {}
+    trainer.selection = None
     trainer.ema_denoiser = nn.Linear(2, 2)
     trainer.critics = nn.ModuleDict(
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
     )
-    trainer.connectivity_critic = nn.Linear(2, 1)
-    trainer.seam_critic = nn.Linear(2, 1)
-    trainer.settings.loss.connectivity_weight = 0.0
     trainer.settings.loss.real_transition_weight = 0.0
     trainer.step = Mock(side_effect=KeyboardInterrupt)
     checkpoint = tmp_path / "checkpoints" / "last.pt"
@@ -1088,13 +478,11 @@ def test_fit_separates_weight_updates_and_checkpoint_archives(
     trainer.cfg = {"stage": "low_res", "data": {}}
     trainer.streams = {}
     trainer.data_fingerprint = {}
+    trainer.selection = None
     trainer.ema_denoiser = nn.Linear(2, 2)
     trainer.critics = nn.ModuleDict(
         {PLANES[axis]: nn.Linear(2, 1) for axis in range(3)}
     )
-    trainer.connectivity_critic = nn.Linear(2, 1)
-    trainer.seam_critic = nn.Linear(2, 1)
-    trainer.settings.loss.connectivity_weight = 0.0
     trainer.settings.loss.real_transition_weight = 0.0
     trainer.completed_steps = 0
 
@@ -1109,14 +497,6 @@ def test_fit_separates_weight_updates_and_checkpoint_archives(
             volume_size=8,
             domain=0,
             critic_axes=(1.0, 1.0, 1.0),
-            anchor_planes=0,
-            anchor_conflict_rate=0.0,
-            anchor_loss=0.0,
-            anchor_accuracy=0.0,
-            generator_connectivity=0.0,
-            critic_connectivity=0.0,
-            connectivity_r1=0.0,
-            anchor_ramp=0.0,
         )
 
     trainer.step = step
@@ -1163,19 +543,15 @@ def _changed(before: tuple[torch.Tensor, ...], model: nn.Module) -> bool:
 
 def _conditioning_trainer(
     *,
-    anchored: bool,
     axes: tuple[int, ...] = (0, 1, 2),
     **overrides,
 ) -> tuple[Trainer, nn.Module, dict[int, _ConstantStream]]:
     cfg = _config(domains={0: {PLANES[axis]: ["."] for axis in axes}})
-    cfg["conditioning"]["anchor"]["probability"] = 1.0 if anchored else 0.0
     cfg["model"]["critic"]["input_mode"] = "single"
     _merge(cfg, overrides)
-    denoiser, critics, connectivity_critic = build_models(cfg)
+    denoiser, critics = build_models(cfg)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
-        denoiser, critics, connectivity_critic, None, cfg
-    )
+    denoiser_optim, critic_optims = build_optimizers(denoiser, critics, cfg)
     size = cfg["data"]["crop_size"]
     base = torch.arange(2 * size * size).reshape(2, size, size)
     streams = {
@@ -1187,12 +563,10 @@ def _conditioning_trainer(
         denoiser=denoiser,
         ema_denoiser=ema,
         critics=critics,
-        connectivity_critic=connectivity_critic,
         streams=streams,
         diffusion=Diffusion(2, beta_min=0.1, beta_max=2.0),
         denoiser_optim=denoiser_optim,
         critic_optims=critic_optims,
-        connectivity_optim=connectivity_optim,
         device=torch.device("cpu"),
     )
     return trainer, denoiser, streams
@@ -1204,30 +578,25 @@ def _make_trainer(
     denoiser,
     ema_denoiser,
     critics,
-    connectivity_critic,
     streams,
     streams_by_domain=False,
     diffusion,
     denoiser_optim,
     critic_optims,
-    connectivity_optim,
     device,
 ) -> Trainer:
     data, train, loss = cfg["data"], cfg["train"], cfg["loss"]
     conditioning = cfg["conditioning"]
-    anchor = conditioning["anchor"]
     use_amp = train["mixed_precision"] and device.type == "cuda"
     return Trainer(
         components=TrainerComponents(
             denoiser=denoiser,
             ema_denoiser=ema_denoiser,
             critics=critics,
-            connectivity_critic=connectivity_critic,
             streams=streams if streams_by_domain else {0: streams},
             diffusion=diffusion,
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,
-            connectivity_optim=connectivity_optim,
             scaler=torch.amp.GradScaler("cuda", enabled=use_amp),
             device=device,
         ),
@@ -1235,13 +604,11 @@ def _make_trainer(
             volume_batch_size=train["volume_batch_size"],
             num_phases=data["num_phases"],
             patch_size=data["lo_res_size"],
-            slice_pairs_per_axis=train["slice_pairs_per_plane"],
+            slice_pairs_per_plane=train["slice_pairs_per_plane"],
             ema_decay=cfg["optim"]["ema_decay"],
-            r1_gamma=loss["r1_weight"],
-            r1_interval=loss["r1_every_steps"],
+            r1_weight=loss["r1_weight"],
+            r1_every_steps=loss["r1_every_steps"],
             loss=DenoiserLossSettings(
-                connectivity_local_weight=loss["connectivity"]["local_weight"],
-                connectivity_weight=loss["connectivity"]["adversarial_weight"],
                 vf_weight=loss["volume_fraction_weight"],
                 real_transition_weight=0.0,
                 profile_bins=16,
@@ -1250,19 +617,36 @@ def _make_trainer(
                 consistency_weight=0.0,
                 consistency_tolerance=0.0,
                 num_phases=data["num_phases"],
+                group_statistics_weight=0.0,
+                group_statistics_max_gap=8,
+                group_statistics_tolerance=0.01,
+                preserve_height=False,
+                mirror_balance_weight=0.0,
+                mirror_balance_max_gap=4,
+                mirror_balance_tolerance=0.02,
             ),
-            anchor_training_probability=anchor["probability"],
-            anchor_start_step=anchor["start_step"],
-            anchor_ramp_steps=anchor["ramp_steps"],
-            anchor_shared_axis_probability=anchor["borrowed_plane_probability"],
-            anchor_pixel_loss_weight=loss["anchor_pixel_weight"],
-            domain_dropout=1.0 - conditioning["domain_keep_probability"],
-            cfg_drop_each_probability=conditioning["dropout_probability_per_case"],
+            domain_keep_probability=conditioning["domain_keep_probability"],
+            cfg_dropout_probability=conditioning["cfg_dropout_probability"],
             latent_channels=cfg["model"]["generator"]["latent_channels"],
             amp_enabled=use_amp,
             rollout_amp=use_amp,
-            connectivity_ramp_steps=0,
-            connectivity_windows_per_plane=1,
+            r2_weight=0.0,
+            group_statistics_start_step=0,
+            group_statistics_ramp_steps=5000,
+            real_transition_max_gap=1,
+            real_transition_start_step=0,
+            real_transition_ramp_steps=0,
+            structure_every_steps=100,
+            coarse_corruption_probability=0.0,
+            coarse_corruption_strength=0.0,
+            height_data=None,
+            profile_settings={
+                "enabled": False,
+                "num_bins": 16,
+                "critic_enabled": False,
+            },
+            volume_permute_z=True,
+            volume_flip_z=True,
         ),
     )
 
@@ -1283,7 +667,6 @@ def _config(domains=None, **overrides) -> dict:
                 "channels": [4, 8],
                 "embedding_channels": 8,
                 "latent_channels": 4,
-                "anchor_multiscale_input": False,
             },
             "critic": {
                 "channels": (4, 8),
@@ -1296,21 +679,13 @@ def _config(domains=None, **overrides) -> dict:
             "diffusion": {"num_steps": 2, "beta_min": 0.1, "beta_max": 2.0},
         },
         "conditioning": {
-            "anchor": {
-                "probability": 0.0,
-                "start_step": 0,
-                "ramp_steps": 0,
-                "borrowed_plane_probability": 0.0,
-            },
             "domain_keep_probability": 1.0,
-            "dropout_probability_per_case": 0.0,
+            "cfg_dropout_probability": 0.0,
         },
         "loss": {
             "r1_weight": 0.0,
             "r1_every_steps": 2,
-            "anchor_pixel_weight": 0.05,
             "volume_fraction_weight": 1.0,
-            "connectivity": {"adversarial_weight": 0.0, "local_weight": 0.5},
         },
         "optim": {
             "generator_lr": 1e-3,
@@ -1342,64 +717,16 @@ def _merge(cfg: dict, overrides: dict) -> None:
             cfg[key] = value
 
 
-@pytest.mark.parametrize("size,count", [(8, 4), (16, 8)])
-def test_replay_keeps_measurement_and_plane_density(size, count):
-    bank = AnchorBank(capacity=1, plane_spacing=2)
-    image = torch.stack((torch.full((size, size), 0.2), torch.full((size, size), 0.8)))
-    measured = encode_anchors(
-        [PlaneAnchor(image, 0, 2)], 1, 2, size, torch.device("cpu"), torch.float32
-    )
-    prediction = torch.zeros(1, 2, size, size, size)
-    bank.add(0, prediction, measured, torch.tensor([True]))
-    replay = bank.sample(0, 2, torch.device("cpu"))
-    condition, target, reference = replay.condition, replay.measured, replay.reference
-    assert condition.planes == count
-    torch.testing.assert_close(
-        condition.image[:, :, 2], measured.image[:, :, 2].expand(2, -1, -1, -1)
-    )
-    torch.testing.assert_close(reference, prediction.expand(2, -1, -1, -1, -1))
-    assert not torch.equal(reference[:, :, 2], target.image[:, :, 2])
-    assert target.regions == measured.regions
-    assert bank.sample(1, 1, torch.device("cpu")) is None
-
-
-def test_replay_connectivity_reference_excludes_pasted_measurement_jump():
-    from src.data.slice import AnchorTripletSampler
-    from src.model.critic import ConnectivityCritic2D
-
-    size = 5
-    prediction = torch.empty(1, 2, size, size, size)
-    prediction[:, 0], prediction[:, 1] = -0.6, 0.6
-    image = torch.stack((torch.full((size, size), 0.8), torch.full((size, size), 0.2)))
-    measured = encode_anchors(
-        [PlaneAnchor(image, 0, 2)], 1, 2, size, torch.device("cpu"), torch.float32
-    )
-    bank = AnchorBank(capacity=1)
-    bank.add(0, prediction, measured, torch.tensor([True]))
-    replay = bank.sample(0, 1, torch.device("cpu"))
-    condition, target, reference = replay.condition, replay.measured, replay.reference
-    torch.testing.assert_close(reference, prediction)
-    torch.testing.assert_close(condition.image[:, :, 2], measured.image[:, :, 2])
-    sampler = AnchorTripletSampler(max_gap=1, windows_per_plane=1)
-    adapted = -prediction
-    real, fake = sampler.sample(adapted, reference, target)
-    images = ConnectivityCritic2D.connectivity_images
-    torch.testing.assert_close(images(real.values), images(fake.values))
-    pasted = torch.where(target.mask, target.image, reference)
-    real, fake = sampler.sample(pasted, reference, target)
-    assert not torch.equal(images(real.values), images(fake.values))
-
-
 @pytest.mark.parametrize("mode", ["single", "pair"])
 def test_generator_input_diagnostics_preserve_training_updates_and_rng(mode):
     trainer, _, _ = _conditioning_trainer(
-        anchored=False, axes=(0,), model={"critic": {"input_mode": mode}}
+        axes=(0,), model={"critic": {"input_mode": mode}}
     )
-    trainer.settings = replace(trainer.settings, r1_interval=1)
+    trainer.settings = replace(trainer.settings, r1_every_steps=1)
     trainer.conditions.settings = trainer.settings
     control = copy.deepcopy(trainer)
     control.settings = replace(
-        control.settings, r1_interval=3
+        control.settings, r1_every_steps=3
     )  # R1/R2 weights are zero; only diagnostics differ.
     control.conditions.settings = control.settings
     with torch.random.fork_rng(devices=[]):
@@ -1426,7 +753,7 @@ def test_generator_input_diagnostics_preserve_training_updates_and_rng(mode):
         torch.testing.assert_close(
             model.state_dict(), baseline.state_dict(), rtol=0, atol=0
         )
-    trainer.settings = replace(trainer.settings, r1_interval=3)
+    trainer.settings = replace(trainer.settings, r1_every_steps=3)
     trainer.conditions.settings = trainer.settings
     metrics = trainer.step(1, transition=1)
     assert not any(

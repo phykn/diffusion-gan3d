@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import torch
 
@@ -15,43 +15,11 @@ class PlaneAnchor:
 
 
 @dataclass(frozen=True)
-class AnchorRegion:
-    axis: int
-    index: int
-    row: int
-    col: int
-    height: int
-    width: int
+class AnchorTarget:
+    """Anchor phase values in [-1, 1] and the voxels they cover."""
 
-
-@dataclass(frozen=True)
-class AnchorCondition:
     image: torch.Tensor
     mask: torch.Tensor
-    axis_masks: torch.Tensor
-    target: torch.Tensor
-    planes: int
-    conflicts: int
-    source_voxels: int
-    regions: tuple[AnchorRegion, ...]
-    active_batches: tuple[int, ...]
-
-    @property
-    def conflict_rate(self) -> float:
-        return self.conflicts / self.source_voxels
-
-    def visible(self, visible: torch.Tensor | None) -> "AnchorCondition":
-        """Hide the anchor in batch items where visible is False."""
-        if visible is None:
-            return self
-        mask = visible.to(self.mask.device).reshape(-1, 1, 1, 1, 1)
-        return replace(
-            self,
-            image=self.image * mask,
-            mask=self.mask & mask,
-            axis_masks=self.axis_masks & mask,
-            active_batches=tuple(visible.nonzero().flatten().tolist()),
-        )
 
 
 def anchor_origin(
@@ -85,9 +53,8 @@ def encode_anchors(
     volume_size: int | tuple[int, int, int],
     device: torch.device,
     dtype: torch.dtype,
-    reconcile: bool = False,
     validate: bool = True,
-) -> AnchorCondition | None:
+) -> AnchorTarget | None:
     if not anchors:
         return None
     shape = (volume_size,) * 3 if isinstance(volume_size, int) else volume_size
@@ -103,12 +70,6 @@ def encode_anchors(
             "anchor volume shape, batch size and phase count must be positive integers."
         )
 
-    target = torch.zeros(
-        batch_size,
-        *shape,
-        dtype=torch.long,
-        device=device,
-    )
     mask = torch.zeros(
         batch_size,
         1,
@@ -116,19 +77,7 @@ def encode_anchors(
         dtype=torch.bool,
         device=device,
     )
-    axis_masks = torch.zeros(
-        batch_size,
-        3,
-        *shape,
-        dtype=torch.bool,
-        device=device,
-    )
-    conflicts = 0
-    source_voxels = 0
-    regions = []
-    condition_image = torch.zeros(
-        (batch_size, num_phases, *shape), dtype=dtype, device=device
-    )
+    values = torch.zeros((batch_size, num_phases, *shape), dtype=dtype, device=device)
 
     for anchor in anchors:
         if type(anchor.axis) is not int or anchor.axis not in (0, 1, 2):
@@ -145,42 +94,21 @@ def encode_anchors(
         )
         row, col = anchor_origin(anchor, (height, width), plane_shape)
 
-        image = probs.argmax(1)
-
-        target_plane = target.select(anchor.axis + 1, anchor.index)
         mask_plane = mask.select(anchor.axis + 2, anchor.index).squeeze(1)
-        axis_plane = axis_masks[:, anchor.axis].select(anchor.axis + 1, anchor.index)
-        target_patch = target_plane[:, row : row + height, col : col + width]
         mask_patch = mask_plane[:, row : row + height, col : col + width]
-        axis_patch = axis_plane[:, row : row + height, col : col + width]
-        value_patch = condition_image.select(anchor.axis + 2, anchor.index)[
+        value_patch = values.select(anchor.axis + 2, anchor.index)[
             :, :, row : row + height, col : col + width
         ]
         encoded = probs.mul(2).sub(1)
 
-        conflict = mask_patch & ((value_patch - encoded).abs().amax(1) > 1e-5)
-        conflict_count = int(conflict.sum()) if validate else 0
-        if conflict_count and not reconcile:
-            raise ValueError("anchor planes contain conflicting intersections.")
-        conflicts += conflict_count
-        source_voxels += image.numel()
-        target_patch.copy_(torch.where(mask_patch, target_patch, image))
+        if validate:
+            conflict = mask_patch & ((value_patch - encoded).abs().amax(1) > 1e-5)
+            if bool(conflict.any()):
+                raise ValueError("anchor planes contain conflicting intersections.")
         value_patch.copy_(torch.where(mask_patch.unsqueeze(1), value_patch, encoded))
         mask_patch.fill_(True)
-        axis_patch.fill_(True)
-        regions.append(AnchorRegion(anchor.axis, anchor.index, row, col, height, width))
 
-    return AnchorCondition(
-        image=condition_image,
-        mask=mask,
-        axis_masks=axis_masks,
-        target=target,
-        planes=len(anchors),
-        conflicts=conflicts,
-        source_voxels=source_voxels,
-        regions=tuple(regions),
-        active_batches=tuple(range(batch_size)),
-    )
+    return AnchorTarget(image=values, mask=mask)
 
 
 def anchor_probabilities(image, batch_size, num_phases, device, dtype, validate):
@@ -210,3 +138,44 @@ def anchor_probabilities(image, batch_size, num_phases, device, dtype, validate)
             raise ValueError("anchor.image must have shape [H, W] or [B, H, W].")
         probs = phase_channels(image, num_phases).to(device=device, dtype=dtype)
     return probs
+
+
+def _owned(value):
+    # Tensors made under inference_mode cannot be saved for backward.
+    if isinstance(value, torch.Tensor) and value.is_inference():
+        return value.clone()
+    return value
+
+
+@dataclass(frozen=True)
+class AnchorGuidance:
+    """Steer the reverse chain toward anchor planes by posterior sampling.
+
+    The denoiser stays unconditional. Each step moves the whole noisy state
+    down the gradient of the clean prediction's squared error on the anchor
+    voxels, so nearby slices follow the anchor instead of meeting it at a seam
+    (Chung et al., Diffusion Posterior Sampling, 2023).
+    """
+
+    image: torch.Tensor
+    mask: torch.Tensor
+    strength: float
+
+    def __call__(self, model, current, time, latent, **conditions):
+        """Clean prediction and the step to subtract from the next noisy state."""
+        with torch.inference_mode(False), torch.enable_grad():
+            state = current.clone().requires_grad_(True)
+            conditions = {name: _owned(value) for name, value in conditions.items()}
+            pred = model(state, _owned(time), _owned(latent), **conditions)
+            mask = _owned(self.mask)
+            error = (pred.float() - _owned(self.image)).square().mul(mask).sum()
+            gradient = None
+            if error.requires_grad:
+                (gradient,) = torch.autograd.grad(error, state, allow_unused=True)
+        if gradient is None:
+            # A prediction that ignores the noisy state leaves nothing to steer.
+            gradient = torch.zeros_like(state)
+        # The RMS anchor error, not its norm, keeps the per-voxel step
+        # independent of how much anchor area a volume or tile holds.
+        rms = (error.detach() / mask.sum().clamp_min(1)).sqrt().clamp_min(1e-8)
+        return pred.detach(), gradient * (self.strength / rms)

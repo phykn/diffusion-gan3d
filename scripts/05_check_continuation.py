@@ -24,7 +24,6 @@ from scripts.common.diagnostic import (
     print_anchor_effect,
     show_napari,
 )
-from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.config.files import find_saved_config
 from src.config.train import load_train_config
@@ -35,6 +34,7 @@ from src.evaluate.anchor import (
     measure_slice_smoothness,
 )
 from src.evaluate.label import voxel_accuracy
+from src.predict.anchor import PlaneAnchor
 from src.prepare.resize import resize_anchor
 from src.random import seeded_rng
 
@@ -48,7 +48,7 @@ def main() -> None:
     parser.add_argument(
         "--anchor",
         type=Path,
-        help="Real 2D label image (default: a plane of an unconditioned sample).",
+        help="Real 2D label image (default: a plane of an unanchored sample).",
     )
     parser.add_argument(
         "--axis",
@@ -82,8 +82,8 @@ def main() -> None:
     print(f"Strength: {args.anchor_strength:.2f}")
     with seeded_rng(args.seed, device):
         if args.anchor is None:
-            print("Anchor  : unconditioned reference boundary")
-            print("Generating unconditioned reference...", flush=True)
+            print("Anchor  : unanchored reference boundary")
+            print("Generating unanchored reference...", flush=True)
             reference = generator.generate(
                 anchors=(),
                 anchor_strength=0.0,
@@ -114,7 +114,7 @@ def main() -> None:
             )
         anchor = PlaneAnchor(anchor_image, args.axis, index)
 
-        print("Generating boundary-conditioned volume...", flush=True)
+        print("Generating boundary-anchored volume...", flush=True)
 
         generated, baseline = generate_with_baseline(
             generator,

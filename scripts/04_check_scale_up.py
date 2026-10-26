@@ -31,11 +31,11 @@ from scripts.common.diagnostic import (
     show_napari,
     show_slices,
 )
-from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.device import check_device
 from src.evaluate.label import phase_fractions, voxel_accuracy
 from src.evaluate.seam import SeamQuality, measure_seams
+from src.predict.anchor import PlaneAnchor
 from src.predict.tiling.generator import TiledGenerator
 from src.predict.tiling.layout import TilePlan
 from src.predict.volume_condition import resolve_offset

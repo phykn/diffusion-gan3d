@@ -1,5 +1,4 @@
-from dataclasses import fields, replace
-from types import SimpleNamespace
+from dataclasses import replace
 
 import pytest
 import torch
@@ -7,7 +6,6 @@ from PIL import Image
 
 from src.build.trainer import build_trainer
 from src.config.train import load_train_config
-from src.data.slice import TripletBatch
 from src.prepare.resize import phase_channels, resize_phases
 from src.train.batch import DenoiserBatch, SampledPairs
 from src.train.loss.denoiser import DenoiserLossSettings, denoiser_objective
@@ -76,24 +74,13 @@ def test_isotropic_geometry_and_axis_reversal_have_the_expected_losses():
     torch.testing.assert_close(original, flipped)
 
 
-def test_tolerance_and_inactive_anchors_have_zero_gradient():
+def test_tolerance_has_zero_gradient():
     probs = lamella(2).requires_grad_()
-    for tolerance, active in [(1, None), (0, torch.tensor([False]))]:
-        loss, logs = compute_group_statistics_loss(
-            probs, ALL, 3, tolerance, active=active
-        )
-        assert loss == 0
-        loss.backward()
-        assert torch.equal(probs.grad, torch.zeros_like(probs))
-        probs.grad = None
-        assert all(not value.requires_grad for value in logs.values())
-    active = torch.tensor([True, False])
-    batch = torch.cat((lamella(0), probs.detach())).requires_grad_()
-    loss, _ = compute_group_statistics_loss(batch, ALL, 3, 0, active=active)
-    expected, _ = compute_group_statistics_loss(batch[:1], ALL, 3, 0)
-    torch.testing.assert_close(loss, expected)
+    loss, logs = compute_group_statistics_loss(probs, ALL, 3, 1)
+    assert loss == 0
     loss.backward()
-    assert batch.grad[0].abs().sum() > 0 and batch.grad[1].abs().sum() == 0
+    assert torch.equal(probs.grad, torch.zeros_like(probs))
+    assert all(not value.requires_grad for value in logs.values())
 
 
 @pytest.mark.parametrize("preserve_height", [False, True])
@@ -198,15 +185,8 @@ def test_pair_gradients_do_not_retain_volume_copies_for_each_gap():
 
 def objective_batch():
     probs = lamella(2).requires_grad_()
-    empty = TripletBatch(
-        torch.empty(0, 3, 2, 8, 8),
-        torch.empty(0, dtype=torch.long),
-        torch.empty(0, dtype=torch.long),
-        torch.empty(0, dtype=torch.long),
-    )
     batch = DenoiserBatch(
         transition=0,
-        connectivity_domains=torch.empty(0, dtype=torch.long),
         critic_domains={},
         fake=SampledPairs(
             {
@@ -215,21 +195,13 @@ def objective_batch():
             }
         ),
         real=SampledPairs({}),
-        connectivity_fake=empty,
-        logits=probs,
         clean_probs=probs,
-        anchor=None,
-        anchor_measured=None,
-        anchor_present=torch.tensor([False]),
-        anchor_ramp=1,
         target_vf=torch.tensor([[0.5, 0.5]]),
         vf_present=torch.tensor([True]),
         observed_axes=(0, 1, 2),
         group_statistics_ramp=0.5,
     )
     settings = DenoiserLossSettings(
-        connectivity_local_weight=0,
-        connectivity_weight=0,
         vf_weight=0,
         real_transition_weight=0,
         profile_bins=4,
@@ -241,6 +213,10 @@ def objective_batch():
         group_statistics_weight=0.2,
         group_statistics_max_gap=3,
         group_statistics_tolerance=0,
+        preserve_height=False,
+        mirror_balance_weight=0.0,
+        mirror_balance_max_gap=4,
+        mirror_balance_tolerance=0.02,
     )
     return batch, settings
 
@@ -248,9 +224,9 @@ def objective_batch():
 def test_objective_adds_the_ramped_prior_and_preserves_the_real_loss():
     batch, settings = objective_batch()
     real_loss = batch.clean_probs.sum() * 0 + 0.7
-    batch = replace(batch, real_transition_loss=real_loss, connectivity_ramp=0.25)
+    batch = replace(batch, real_transition_loss=real_loss, real_transition_ramp=0.25)
     settings = replace(settings, real_transition_weight=0.4)
-    update, logs = denoiser_objective(batch, {}, None, None, ALL, None, settings)
+    update, logs = denoiser_objective(batch, {}, ALL, settings)
     prior, _ = compute_group_statistics_loss(batch.clean_probs, ALL, 3, 0)
     torch.testing.assert_close(update.total, 0.1 * prior + 0.1 * real_loss)
     assert logs["loss/group_statistics"] > 0
@@ -258,63 +234,20 @@ def test_objective_adds_the_ramped_prior_and_preserves_the_real_loss():
     assert batch.clean_probs.grad.abs().sum() > 0
 
 
-@pytest.mark.parametrize("transition", (0, 1))
-def test_continuity_is_additive_at_every_transition_and_leaves_existing_losses(
-    transition,
-):
-    batch, settings = objective_batch()
-    batch = replace(batch, transition=transition, anchor_ramp=0.5)
-    original, logs = denoiser_objective(batch, {}, None, None, ALL, None, settings)
-    value = batch.clean_probs.sum() * 0 + 0.7
-    batch = replace(batch, anchor_continuity_loss=value)
-    disabled, _ = denoiser_objective(batch, {}, None, None, ALL, None, settings)
-    torch.testing.assert_close(disabled.total, original.total, rtol=0, atol=0)
-    settings = replace(settings, anchor_continuity_weight=0.2)
-    updated, updated_logs = denoiser_objective(
-        batch, {}, None, None, ALL, None, settings
-    )
-    for item in fields(original):
-        if item.name != "total":
-            torch.testing.assert_close(
-                getattr(updated, item.name),
-                getattr(original, item.name),
-                rtol=0,
-                atol=0,
-            )
-    torch.testing.assert_close(updated.total, original.total + 0.1 * value)
-    for key in logs:
-        torch.testing.assert_close(logs[key], updated_logs[key], rtol=0, atol=0)
-
-
 @pytest.mark.parametrize("change", [{"transition": 1}, {"group_statistics_ramp": 0}])
 def test_objective_skips_nonfinal_transitions_and_inactive_schedule(change):
     batch, settings = objective_batch()
     batch = replace(batch, **change)
-    update, logs = denoiser_objective(batch, {}, None, None, ALL, None, settings)
+    update, logs = denoiser_objective(batch, {}, ALL, settings)
     assert update.total == 0 and "loss/group_statistics" not in logs
 
 
-def test_objective_excludes_borrowed_domains_and_active_anchor_cases():
+def test_objective_excludes_borrowed_domains():
     batch, settings = objective_batch()
     update, _ = denoiser_objective(
-        replace(batch, observed_axes=(2,)), {}, None, None, ALL, None, settings
+        replace(batch, observed_axes=(2,)), {}, ALL, settings
     )
     assert update.total == 0
-    anchor = SimpleNamespace(mask=None, axis_masks=None)
-    batch = replace(
-        batch,
-        anchor=anchor,
-        anchor_measured=anchor,
-        anchor_present=torch.tensor([True]),
-    )
-
-    def anchor_loss(*args):
-        zero = batch.clean_probs.sum() * 0
-        return SimpleNamespace(total=zero, coarse=zero, pixel=zero, accuracy=zero)
-
-    update, logs = denoiser_objective(batch, {}, None, None, ALL, anchor_loss, settings)
-    assert update.total == 0 and logs["loss/group_statistics"] == 0
-    assert logs["group_statistics/active_fraction"] == 0
 
 
 def small_trainer(tmp_path, stage, start=0, ramp=0):
@@ -346,23 +279,17 @@ def small_trainer(tmp_path, stage, start=0, ramp=0):
         slice_pairs_per_plane=2,
         mixed_precision=False,
     )
-    if stage == "low_res":
-        cfg["conditioning"]["anchor"]["probability"] = 0
-        cfg["loss"]["connectivity"].update(adversarial_weight=0)
     bank = None if stage == "low_res" else {0: torch.rand(2, 2, 8, 8, 8).softmax(1)}
     return build_trainer(cfg, torch.device("cpu"), bank=bank), cfg, bank
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
-def test_trainer_schedule_is_independent_of_replay_and_roundtrips_checkpoints(
-    tmp_path, stage
-):
+def test_trainer_schedule_roundtrips_checkpoints(tmp_path, stage):
     torch.set_num_threads(1)
     trainer, cfg, bank = small_trainer(tmp_path, stage)
     metrics = trainer.step(0, transition=0)
     assert "loss/group_statistics" in metrics.diagnostics
     assert metrics.diagnostics["group_statistics/ramp"] == 1
-    assert metrics.diagnostics["group_statistics/active_fraction"] == 1
     assert torch.isfinite(torch.tensor(metrics.generator_total))
     path = tmp_path / "training.pt"
     if stage == "low_res":
@@ -397,10 +324,10 @@ def test_objective_adds_mirror_balance_at_every_transition(transition):
     sheared = sheared[None]
     settings = replace(settings, group_statistics_weight=0)
     batch = replace(batch, transition=transition, clean_probs=sheared)
-    update, logs = denoiser_objective(batch, {}, None, None, ALL, None, settings)
+    update, logs = denoiser_objective(batch, {}, ALL, settings)
     assert update.total == 0 and "loss/mirror_balance" not in logs
     settings = replace(settings, mirror_balance_weight=2.0, mirror_balance_tolerance=0)
-    update, logs = denoiser_objective(batch, {}, None, None, ALL, None, settings)
+    update, logs = denoiser_objective(batch, {}, ALL, settings)
     expected, _ = compute_mirror_balance_loss(sheared, 4, 0)
     torch.testing.assert_close(update.total, 2.0 * expected)
     assert logs["loss/mirror_balance"] > 0

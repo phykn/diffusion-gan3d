@@ -13,20 +13,15 @@ model:
 augmentation:
   auto_planes: true
 
-conditioning:
-  anchor:
-    probability: 0.8
-
 loss:
   r1_weight: 0.5
   r2_weight: 0.1
   r1_every_steps: 8
 
-  anchor_pixel_weight: 0.05
   volume_fraction_weight: 1.0
 
-  connectivity:
-    max_slice_gap: 8
+  real_transition:
+    max_gap: 8
     ramp_steps: 5000
 
 optim:

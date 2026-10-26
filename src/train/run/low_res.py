@@ -8,6 +8,7 @@ from src.build.trainer import build_trainer
 from src.config.files import PROJECT_ROOT
 from src.config.train import load_train_config
 from src.device import check_device
+from src.train.checkpoint import resolve_checkpoint
 from src.train.run.loop import check_run_dir, make_run_dir, run_train
 from src.train.run.resume import (
     check_resume_args,
@@ -49,6 +50,10 @@ def run_low_res_train(
     if payload:
         resume_training(trainer, payload)
     run_dir = make_run_dir(PROJECT_ROOT / "run", "low_res", run_dir, cfg["nickname"])
+    if payload and trainer.selection is not None:
+        # Candidate weights sit beside the resumed checkpoint's run folder.
+        source_run = resolve_checkpoint(resume).parent.parent
+        trainer.selection.import_candidates(source_run, run_dir)
     run_train(
         trainer,
         steps=cfg["train"]["total_steps"],

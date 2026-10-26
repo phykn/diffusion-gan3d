@@ -235,8 +235,8 @@ def test_sample_preserves_shape_and_refreshes_latent() -> None:
     assert not torch.equal(model.latents[0], model.latents[1])
 
 
-def test_sample_forwards_fixed_anchor_at_every_step() -> None:
-    class AnchorRecorder(torch.nn.Module):
+def test_sample_forwards_fixed_conditions_at_every_step() -> None:
+    class ConditionRecorder(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.calls: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -247,32 +247,24 @@ def test_sample_forwards_fixed_anchor_at_every_step() -> None:
             timestep: torch.Tensor,
             latent: torch.Tensor,
             *,
-            anchor_image: torch.Tensor,
-            anchor_mask: torch.Tensor,
+            domain: torch.Tensor,
+            vf: torch.Tensor,
         ) -> torch.Tensor:
             del timestep, latent
-            self.calls.append((anchor_image, anchor_mask))
+            self.calls.append((domain, vf))
             return current.tanh()
 
     process = Diffusion(3)
-    model = AnchorRecorder()
+    model = ConditionRecorder()
     initial_noise = torch.randn(1, 2, 4, 4, 4)
-    anchor_image = torch.zeros_like(initial_noise)
-    anchor_mask = torch.zeros(1, 1, 4, 4, 4, dtype=torch.bool)
+    domain = torch.zeros(1, dtype=torch.long)
+    vf = torch.full((1, 2), 0.5)
 
-    process.sample(
-        model,
-        initial_noise,
-        4,
-        conditions={
-            "anchor_image": anchor_image,
-            "anchor_mask": anchor_mask,
-        },
-    )
+    process.sample(model, initial_noise, 4, conditions={"domain": domain, "vf": vf})
 
     assert len(model.calls) == process.timesteps
-    assert all(image is anchor_image for image, _ in model.calls)
-    assert all(mask is anchor_mask for _, mask in model.calls)
+    assert all(value is domain for value, _ in model.calls)
+    assert all(value is vf for _, value in model.calls)
 
 
 def test_invalid_state_and_transition_ranges_are_rejected() -> None:

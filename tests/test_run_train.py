@@ -37,16 +37,8 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
         volume_size=8,
         domain=0,
         critic_axes=(2.0, 2.0, 2.0),
-        anchor_planes=0,
-        anchor_conflict_rate=0.0,
-        anchor_loss=0.0,
-        anchor_accuracy=0.0,
-        generator_connectivity=0.0,
-        critic_connectivity=0.0,
-        connectivity_r1=0.0,
-        anchor_ramp=0.0,
     )
-    trainer = SimpleNamespace(cfg={"stage": stage}, completed_steps=1)
+    trainer = SimpleNamespace(cfg={"stage": stage}, completed_steps=1, selection=None)
     prepared, trained, exports, checkpoints = [], [], [], []
 
     def step(index):
@@ -152,7 +144,7 @@ def test_explicit_run_directory_is_preserved_and_never_reused(tmp_path):
         make_run_dir(tmp_path / "unused", "sr", target)
 
 
-def test_metrics_separate_multi_plane_anchor_quality() -> None:
+def test_metrics_write_loss_conditioning_and_plane_tags() -> None:
     writer = Mock()
     metrics = Metrics(
         generator=1.0,
@@ -163,14 +155,7 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         volume_size=8,
         domain=2,
         critic_axes=(0.5, 0.7, 0.8),
-        anchor_planes=3,
-        anchor_conflict_rate=0.02,
-        anchor_loss=0.2,
-        anchor_accuracy=0.95,
-        generator_connectivity=0.3,
-        critic_connectivity=0.4,
-        connectivity_r1=0.05,
-        anchor_ramp=0.5,
+        real_transition_ramp=0.5,
         vf_loss=0.15,
         vf_active=True,
     )
@@ -183,17 +168,9 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
         "loss/generator_total",
         "loss/critic",
         "loss/r1",
-        "loss/generator_connectivity",
-        "loss/critic_connectivity",
-        "loss/connectivity_r1",
-        "loss/anchor",
         "loss/vf",
-        "conditioning/anchor_fraction",
         "conditioning/vf_fraction",
-        "conditioning/anchor_ramp",
-        "conditioning/connectivity_ramp",
-        "conditioning/anchor_planes",
-        "conditioning/anchor_accuracy",
+        "loss/real_transition_ramp",
         "sampling/transition",
         "timestep/1/generator",
         "timestep/1/critic",
@@ -205,7 +182,7 @@ def test_metrics_separate_multi_plane_anchor_quality() -> None:
 
 
 @pytest.mark.parametrize("axes", ((0, 1, 2), (0,)))
-def test_cpu_entrypoint_saves_complete_anchor_run(
+def test_cpu_entrypoint_saves_complete_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     axes: tuple[int, ...],
@@ -246,7 +223,6 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
                     "channels": [4, 8],
                     "latent_channels": 4,
                     "embedding_channels": 8,
-                    "anchor_multiscale_input": False,
                 },
                 "critic": {
                     "channels": [4, 8],
@@ -278,13 +254,7 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
             },
             "conditioning": {
                 "domain_keep_probability": 1.0,
-                "anchor": {
-                    "probability": 1.0,
-                    "start_step": 0,
-                    "ramp_steps": 0,
-                    "borrowed_plane_probability": 0.0,
-                },
-                "dropout_probability_per_case": 0.0,
+                "cfg_dropout_probability": 0.0,
             },
             "augmentation": {
                 "probability": 1.0,
@@ -295,11 +265,7 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
                 },
             },
             "loss": {
-                "anchor_pixel_weight": 0.05,
-                "connectivity": {
-                    "adversarial_weight": 0.25,
-                    "local_weight": 0.5,
-                },
+                "real_transition": {"weight": 0.25, "ramp_steps": 0},
                 "volume_fraction_weight": 1.0,
                 "r1_weight": 0.0,
                 "r1_every_steps": 2,
@@ -316,9 +282,7 @@ def test_cpu_entrypoint_saves_complete_anchor_run(
     assert stage == "low_res_coarse"
     weights = run_dirs[0] / "generator.pt"
     assert weights.is_file()
-    expected_critics = ("critic_c.pt", "critic_s.pt") + tuple(
-        f"critic_{PLANES[axis]}.pt" for axis in axes
-    )
+    expected_critics = tuple(f"critic_{PLANES[axis]}.pt" for axis in axes)
     assert (
         tuple(path.name for path in sorted(run_dirs[0].glob("critic_*.pt")))
         == expected_critics
@@ -446,7 +410,9 @@ def test_second_interrupt_stops_the_step_at_once(capsys):
 
 
 def test_interrupt_while_saving_stops_without_saving_again(tmp_path, monkeypatch):
-    trainer = SimpleNamespace(cfg={"stage": "low_res"}, completed_steps=0)
+    trainer = SimpleNamespace(
+        cfg={"stage": "low_res"}, completed_steps=0, selection=None
+    )
 
     def step(index):
         trainer.completed_steps = index + 1

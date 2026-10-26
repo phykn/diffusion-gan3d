@@ -23,39 +23,10 @@ from src.train.run.sr import run_sr_train
     [
         (
             "low_res",
-            "conditioning.anchor.probability",
-            "anchor_training_probability",
-            0.0,
-        ),
-        ("low_res", "conditioning.anchor.bank_capacity", "anchor_bank_capacity", 4),
-        ("low_res", "conditioning.anchor.plane_spacing", "anchor_plane_spacing", 16),
-        (
-            "low_res",
-            "conditioning.anchor.borrowed_plane_probability",
-            "anchor_shared_axis_probability",
-            0.2,
-        ),
-        (
-            "low_res",
-            "conditioning.dropout_probability_per_case",
-            "cfg_drop_each_probability",
-            0.05,
-        ),
-        ("low_res", "loss.anchor_pixel_weight", "anchor_pixel_loss_weight", 0.0),
-        (
-            "low_res",
-            "loss.anchor_continuity_weight",
-            "loss.anchor_continuity_weight",
+            "conditioning.cfg_dropout_probability",
+            "cfg_dropout_probability",
             0.1,
         ),
-        (
-            "low_res",
-            "loss.anchor_neighborhood_weight",
-            "loss.anchor_neighborhood_weight",
-            0.1,
-        ),
-        ("low_res", "loss.anchor_seam_weight", "loss.anchor_seam_weight", 0.0),
-        ("low_res", "loss.anchor_seam_rows", "loss.anchor_seam_rows", 4),
         ("low_res", "loss.volume_fraction_weight", "loss.vf_weight", 0.0),
         ("low_res", "loss.spatial_profile_weight", "loss.profile_weight", 1.0),
         (
@@ -64,16 +35,10 @@ from src.train.run.sr import run_sr_train
             "loss.profile_bins",
             16,
         ),
-        ("low_res", "loss.connectivity.max_slice_gap", "connectivity_max_gap", 1),
+        ("low_res", "loss.real_transition.max_gap", "real_transition_max_gap", 1),
         (
             "low_res",
-            "loss.connectivity.windows_per_plane",
-            "connectivity_windows_per_plane",
-            4,
-        ),
-        (
-            "low_res",
-            "loss.connectivity.real_transition_weight",
+            "loss.real_transition.weight",
             "loss.real_transition_weight",
             0.1,
         ),
@@ -132,13 +97,18 @@ def test_runtime_inactive_sections_do_not_mutate_or_broaden_saved_config(stage):
     assert cfg == before
     assert normalize_train_config(cfg, stage) == cfg
     if stage == "sr":
-        assert "anchor" not in cfg["conditioning"]
-        assert "anchor_neighborhood_weight" not in cfg["loss"]
-        assert settings.loss.anchor_neighborhood_weight == 0
-        assert settings.anchor_training_probability == 0
-        assert settings.connectivity_start_step == settings.connectivity_ramp_steps == 0
-        conditioning["anchor"]["probability"] = 0.9
-        assert config_module.get_trainer_sections(cfg)[0]["anchor"]["probability"] == 0
+        assert "cfg_dropout_probability" not in cfg["conditioning"]
+        assert "real_transition" not in cfg["loss"]
+        assert settings.cfg_dropout_probability == 0
+        assert settings.loss.real_transition_weight == 0
+        assert (
+            settings.real_transition_start_step
+            == settings.real_transition_ramp_steps
+            == 0
+        )
+        conditioning["cfg_dropout_probability"] = 0.9
+        sections = config_module.get_trainer_sections(cfg)
+        assert sections[0]["cfg_dropout_probability"] == 0
     else:
         assert "downsample_consistency_weight" not in cfg["loss"]
         assert settings.loss.consistency_weight == 0
@@ -154,8 +124,8 @@ def test_runtime_inactive_sections_do_not_mutate_or_broaden_saved_config(stage):
 @pytest.mark.parametrize(
     "stage,path",
     [
-        ("low_res", "loss.anchor_neighborhood_weight"),
-        ("low_res", "conditioning.anchor.bank_capacity"),
+        ("low_res", "conditioning.cfg_dropout_probability"),
+        ("low_res", "loss.real_transition.weight"),
         ("sr", "conditioning.coarse_corruption_probability"),
     ],
 )
@@ -212,99 +182,32 @@ def test_group_statistics_settings_are_validated(stage, key, value):
         normalize_train_config({"loss": {"group_statistics": {key: value}}}, stage)
 
 
-@pytest.mark.parametrize("weight", (-1, float("nan"), float("inf"), True))
-def test_anchor_continuity_weight_is_validated(weight):
-    with pytest.raises(ValueError, match="anchor_continuity_weight"):
-        normalize_train_config({"loss": {"anchor_continuity_weight": weight}})
-
-
-@pytest.mark.parametrize("weight", (0, 0.37))
-def test_anchor_continuity_is_lr_only_and_preserves_explicit_settings(weight):
-    cfg = normalize_train_config({"loss": {"anchor_continuity_weight": weight}})
-    assert cfg["loss"]["anchor_continuity_weight"] == weight
-    assert normalize_train_config(cfg) == cfg
-    with pytest.raises(ValueError, match="anchor_continuity_weight"):
-        normalize_train_config({"loss": {"anchor_continuity_weight": weight}}, "sr")
-    assert "anchor_continuity_weight" not in normalize_train_config({}, "sr")["loss"]
-
-
 @pytest.mark.parametrize("gap", (0, -1, 0.5, True))
 def test_transition_gap_is_validated(gap):
-    with pytest.raises(ValueError, match="max_slice_gap"):
-        normalize_train_config({"loss": {"connectivity": {"max_slice_gap": gap}}})
-
-
-@pytest.mark.parametrize("value", (-1, float("nan"), float("inf"), True))
-def test_anchor_neighborhood_weight_is_validated(value):
-    with pytest.raises(ValueError, match="anchor_neighborhood_weight"):
-        normalize_train_config({"loss": {"anchor_neighborhood_weight": value}})
-
-
-@pytest.mark.parametrize("value", (0, -1, 0.5, True, None))
-def test_anchor_seam_rows_must_be_a_positive_integer(value):
-    with pytest.raises(ValueError, match="anchor_seam_rows"):
-        normalize_train_config({"loss": {"anchor_seam_rows": value}})
-
-
-@pytest.mark.parametrize("value", (-0.1, float("nan"), True))
-def test_anchor_seam_weight_must_be_finite_and_non_negative(value):
-    with pytest.raises(ValueError, match="anchor_seam_weight"):
-        normalize_train_config({"loss": {"anchor_seam_weight": value}})
-
-
-@pytest.mark.parametrize("weight", (0, 0.37))
-def test_anchor_seam_settings_are_explicit_and_lr_only(weight):
-    defaults = normalize_train_config({})["loss"]
-    assert (defaults["anchor_seam_weight"], defaults["anchor_seam_rows"]) == (0, 4)
-    settings = {"anchor_seam_weight": weight, "anchor_seam_rows": 2}
-    cfg = normalize_train_config({"loss": settings})
-    assert all(cfg["loss"][key] == value for key, value in settings.items())
-    assert normalize_train_config(cfg) == cfg
-    for key, value in settings.items():
-        with pytest.raises(ValueError, match=key):
-            normalize_train_config({"loss": {key: value}}, "sr")
-        assert key not in normalize_train_config({}, "sr")["loss"]
-    sr = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
-    assert _build_settings(sr, torch.device("cpu")).loss.anchor_seam_weight == 0
-
-
-@pytest.mark.parametrize("weight", (0, 0.37))
-def test_anchor_neighborhood_settings_are_explicit_and_lr_only(weight):
-    settings = {"anchor_neighborhood_weight": weight}
-    cfg = normalize_train_config({"loss": settings})
-    assert all(cfg["loss"][key] == value for key, value in settings.items())
-    assert normalize_train_config(cfg) == cfg
-    for key, value in settings.items():
-        with pytest.raises(ValueError, match=key):
-            normalize_train_config({"loss": {key: value}}, "sr")
-        assert key not in normalize_train_config({}, "sr")["loss"]
+    with pytest.raises(ValueError, match="real_transition.max_gap"):
+        normalize_train_config({"loss": {"real_transition": {"max_gap": gap}}})
 
 
 @pytest.mark.parametrize(
     "key,value",
-    [
-        ("adversarial_weight", 0.25),
-        ("real_transition_weight", 0.47),
-        ("windows_per_plane", 4),
-    ],
+    [("weight", 0.47), ("max_gap", 2)],
 )
 def test_lr_transition_settings_are_selectable_and_sr_rejects_them(key, value):
-    raw = {"loss": {"connectivity": {key: value}}}
-    assert normalize_train_config(raw)["loss"]["connectivity"][key] == value
-    with pytest.raises(ValueError, match="connectivity"):
+    raw = {"loss": {"real_transition": {key: value}}}
+    assert normalize_train_config(raw)["loss"]["real_transition"][key] == value
+    with pytest.raises(ValueError, match="real_transition"):
         normalize_train_config(raw, "sr")
 
 
-@pytest.mark.parametrize("key", ["adversarial_weight", "real_transition_weight"])
 @pytest.mark.parametrize("value", [-1, True, float("nan")])
-def test_replay_weights_are_validated(key, value):
-    with pytest.raises(ValueError, match=key):
-        normalize_train_config({"loss": {"connectivity": {key: value}}})
+def test_real_transition_weight_is_validated(value):
+    with pytest.raises(ValueError, match="real_transition.weight"):
+        normalize_train_config({"loss": {"real_transition": {"weight": value}}})
 
 
-def test_unknown_connectivity_setting_is_rejected():
-    with pytest.raises(ValueError, match="loss.connectivity.unused_weight"):
-        normalize_train_config({"loss": {"connectivity": {"unused_weight": 0}}})
+def test_unknown_real_transition_setting_is_rejected():
+    with pytest.raises(ValueError, match="loss.real_transition.unused_weight"):
+        normalize_train_config({"loss": {"real_transition": {"unused_weight": 0}}})
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
@@ -368,14 +271,14 @@ def test_embedded_data_folders_resolve_against_the_project_root(tmp_path, monkey
 
 
 @pytest.mark.parametrize(
-    "old",
-    [{"anchor": {}}, {"data": {"num_phase": 3}}, {"model": {"grad_checkpoint": True}}],
+    "unknown",
+    [{"unused": {}}, {"data": {"num_phase": 3}}, {"model": {"grad_checkpoint": True}}],
 )
-def test_old_keys_are_rejected_without_mutating_input(old):
-    before = copy.deepcopy(old)
+def test_unknown_keys_are_rejected_without_mutating_input(unknown):
+    before = copy.deepcopy(unknown)
     with pytest.raises(ValueError, match="unknown training setting"):
-        normalize_train_config(old)
-    assert old == before
+        normalize_train_config(unknown)
+    assert unknown == before
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
@@ -417,7 +320,7 @@ def test_explicit_disabled_options_are_preserved_without_sharing_input():
     raw = {
         "model": {"gradient_checkpointing": False},
         "train": {"mixed_precision": False},
-        "conditioning": {"anchor": {"ramp_steps": 0}},
+        "loss": {"real_transition": {"ramp_steps": 0}},
         "optim": {"ema_decay": 0.0, "adam_betas": [0.12, 0.78]},
     }
     before = copy.deepcopy(raw)
@@ -425,18 +328,11 @@ def test_explicit_disabled_options_are_preserved_without_sharing_input():
     other = normalize_train_config(raw)
     assert cfg["model"]["gradient_checkpointing"] is False
     assert cfg["train"]["mixed_precision"] is False
-    assert cfg["conditioning"]["anchor"]["ramp_steps"] == 0
+    assert cfg["loss"]["real_transition"]["ramp_steps"] == 0
     assert cfg["optim"]["ema_decay"] == 0.0
     cfg["optim"]["adam_betas"][0] += 0.1
     assert raw == before
     assert other["optim"]["adam_betas"] == raw["optim"]["adam_betas"]
-
-
-def test_conflicting_old_and_new_keys_fail_instead_of_overriding():
-    with pytest.raises(ValueError, match="unknown training setting"):
-        normalize_train_config(
-            {"data": {"batch_size": 8}, "train": {"real_batch_size": 4}}
-        )
 
 
 @pytest.mark.parametrize(
@@ -644,18 +540,13 @@ def test_shared_training_values_fail_during_normalization(stage, path, value):
     "cfg,message",
     [
         ({"loss": {"volume_fraction_weight": -1}}, "volume_fraction_weight"),
-        ({"loss": {"anchor_pixel_weight": float("nan")}}, "anchor_pixel_weight"),
         (
-            {"loss": {"connectivity": {"adversarial_weight": -1}}},
-            "adversarial_weight",
+            {"loss": {"real_transition": {"weight": -1}}},
+            "real_transition.weight",
         ),
         (
-            {"conditioning": {"dropout_probability_per_case": 0.5}},
-            "dropout_probability_per_case",
-        ),
-        (
-            {"conditioning": {"anchor": {"borrowed_plane_probability": 2}}},
-            "borrowed_plane_probability",
+            {"conditioning": {"cfg_dropout_probability": 1.5}},
+            "cfg_dropout_probability",
         ),
     ],
 )
@@ -672,8 +563,7 @@ def test_supported_phase_and_probability_boundaries(phases):
             "optim": {"ema_decay": 0, "generator_lr": 0},
             "conditioning": {
                 "domain_keep_probability": 1,
-                "dropout_probability_per_case": 1 / 3,
-                "anchor": {"probability": 0, "borrowed_plane_probability": 1},
+                "cfg_dropout_probability": 1,
             },
             "loss": {"volume_fraction_weight": 0},
             "train": {"num_workers": 0, "archive_every_steps": None},
@@ -721,16 +611,6 @@ def test_numbers_read_as_text_explain_the_yaml_spelling():
 
 
 @pytest.mark.parametrize(
-    "path", ["conditioning.anchor.bank_capacity", "loss.connectivity.windows_per_plane"]
-)
-def test_lr_sampler_sizes_fail_during_normalization(path):
-    section, *rest = path.split(".")
-    cfg = {section: {rest[0]: {rest[1]: 0}}}
-    with pytest.raises(ValueError, match=rest[1]):
-        normalize_train_config(cfg)
-
-
-@pytest.mark.parametrize(
     "section, key",
     [
         ("train", "mixed_precision"),
@@ -755,14 +635,6 @@ def test_critic_channels_must_list_positive_integers(channels):
     }
     with pytest.raises(ValueError, match="model.critic.channels"):
         normalize_train_config(raw, "low_res")
-
-
-def test_connectivity_local_weight_is_an_lr_setting():
-    raw = {"loss": {"connectivity": {"local_weight": -1}}}
-    with pytest.raises(ValueError, match="local_weight"):
-        normalize_train_config(raw, "low_res")
-    with pytest.raises(ValueError, match="loss.connectivity"):
-        normalize_train_config({"loss": {"connectivity": {"local_weight": 0.5}}}, "sr")
 
 
 @pytest.mark.parametrize(

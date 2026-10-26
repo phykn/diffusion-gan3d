@@ -131,8 +131,8 @@ def test_transition_targets_exclude_borrowed_domain_planes():
     trainer = object.__new__(Trainer)
     trainer.settings = SimpleNamespace(
         loss=SimpleNamespace(real_transition_weight=1.0),
-        connectivity_max_gap=1,
-        slice_pairs_per_axis=2,
+        real_transition_max_gap=1,
+        slice_pairs_per_plane=2,
     )
     trainer.streams = {0: {0: None}, 1: {1: None}}
     trainer.diagnostics = {}
@@ -255,8 +255,8 @@ def test_trainer_transition_targets_use_rotating_augmentation_planes():
     trainer = object.__new__(Trainer)
     trainer.settings = SimpleNamespace(
         loss=SimpleNamespace(real_transition_weight=1.0),
-        connectivity_max_gap=1,
-        slice_pairs_per_axis=4,
+        real_transition_max_gap=1,
+        slice_pairs_per_plane=4,
     )
     trainer.streams = {0: {0: None}}
     trainer.diagnostics = {}

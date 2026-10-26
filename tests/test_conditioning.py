@@ -1,6 +1,5 @@
 import copy
 import shutil
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -10,7 +9,6 @@ import torch
 from PIL import Image
 
 from scripts.common.diagnostic import generate_with_baseline
-from src.anchor import PlaneAnchor, encode_anchors
 from src.build.data import build_datasets, build_stream
 from src.build.predict import load_generator
 from src.build.sr import build_sr_trainer
@@ -19,13 +17,13 @@ from src.config.files import save_yaml
 from src.config.train import load_train_config
 from src.data.source import infer_height_extents
 from src.model.diffusion import Diffusion
+from src.predict.anchor import AnchorGuidance, PlaneAnchor, encode_anchors
 from src.predict.generator import Generator
 from src.predict.sr.inference import SuperResolutionAPI
 from src.predict.tiling.generator import TiledGenerator
 from src.prepare.resize import resize_crop
 from src.storage import file_hash
 from src.train.checkpoint import resolve_checkpoint
-from src.train.loss.anchor import SoftAnchorLoss
 from src.train.run.bank import refresh_bank
 from src.train.run.low_res import run_low_res_train
 from src.train.run.sr import run_sr_train
@@ -88,22 +86,16 @@ def test_single_critic_trains_with_regularization_and_resumes(tmp_path, stage, h
         resume(build(incompatible), payload)
 
 
-def test_subpixel_phase_fraction_reaches_anchor_and_soft_loss():
+def test_subpixel_phase_fraction_reaches_the_anchor():
     labels = torch.zeros(4, 4, dtype=torch.long)
     labels[:, 0] = 1
     fractions = resize_crop(labels, 2, 2)
     torch.testing.assert_close(fractions[1], torch.tensor([[0.5, 0], [0.5, 0]]))
     assert fractions[1].mean() == 0.25
-    condition = encode_anchors(
+    target = encode_anchors(
         (PlaneAnchor(fractions, 0, 0),), 1, 2, 2, torch.device("cpu"), torch.float32
     )
-    torch.testing.assert_close((condition.image[0, :, 0] + 1) / 2, fractions)
-    logits = torch.zeros(1, 2, 2, 2, 2, requires_grad=True)
-    result = SoftAnchorLoss(1, 1)(logits, condition, torch.tensor([True]))
-    result.total.backward()
-    assert logits.grad[0, 0, 0, 0, 0] == 0
-    assert logits.grad[0, 1, 0, 0, 0] == 0
-    assert logits.grad[0, 1, 0, 0, 1] > 0
+    torch.testing.assert_close((target.image[0, :, 0] + 1) / 2, fractions)
 
 
 class AnchorModel(torch.nn.Module):
@@ -114,21 +106,10 @@ class AnchorModel(torch.nn.Module):
         super().__init__()
         self.calls = []
 
-    def forward(
-        self,
-        current,
-        time,
-        latent,
-        domain,
-        vf=None,
-        anchor_image=None,
-        anchor_mask=None,
-    ):
-        self.calls.append((time.clone(), anchor_mask))
+    def forward(self, current, time, latent, domain, vf=None):
+        self.calls.append(time.clone())
         result = torch.full_like(current, -1)
         result[:, 0] = 1
-        if anchor_mask is not None:
-            result = torch.lerp(result, anchor_image, anchor_mask.float())
         return result
 
 
@@ -136,21 +117,52 @@ def generator(model):
     return Generator(model, Diffusion(3), torch.device("cpu"), 8, 2, 4, False)
 
 
-def test_full_strength_anchor_uses_one_model_evaluation_per_transition():
+def test_anchor_uses_one_plain_model_evaluation_per_transition():
     model = AnchorModel()
     gen = generator(model)
     anchor = PlaneAnchor(torch.ones(8, 8, dtype=torch.long), 0, 5)
     vol = gen.generate(anchors=(anchor,), margin=0)
     assert len(model.calls) == 3
-    assert all(mask is not None for _, mask in model.calls)
-    assert torch.equal(vol[5], anchor.image.to(torch.uint8))
+    # Guidance steers the noisy state; it never pastes over the prediction.
+    assert torch.all(vol == 0)
 
 
 @pytest.mark.parametrize("axis", [0, 1, 2])
 @pytest.mark.parametrize("partial", [False, True])
-def test_global_anchor_crosses_tiles_and_keeps_rectangular_coordinates(axis, partial):
+def test_global_anchor_crosses_tiles_and_keeps_rectangular_coordinates(
+    axis, partial, monkeypatch
+):
     model = AnchorModel()
     scaled = TiledGenerator(generator(model))
+    canvas = {}
+    tile_shapes = []
+    original = AnchorGuidance.__call__
+
+    def record(self, model_fn, current, *args, **kwargs):
+        tile_shapes.append(current.shape[-3:])
+        return original(self, model_fn, current, *args, **kwargs)
+
+    original_prepare = TiledGenerator.prepare_anchors
+
+    def prepare(self, anchors, tiles, plan):
+        local = original_prepare(self, anchors, tiles, plan)
+        for tile, planes in zip(tiles, local, strict=True):
+            if planes:
+                shape = tuple(part.stop - part.start for part in tile.source)
+                encoded = encode_anchors(
+                    planes, 1, 2, shape, torch.device("cpu"), torch.float32
+                )
+                for local_voxel in encoded.mask[0, 0].nonzero().tolist():
+                    voxel = tuple(
+                        v + part.start - plan.margin
+                        for v, part in zip(local_voxel, tile.source)
+                    )
+                    phases = encoded.image[(0, slice(None), *local_voxel)]
+                    canvas[voxel] = int(phases.argmax())
+        return local
+
+    monkeypatch.setattr(AnchorGuidance, "__call__", record)
+    monkeypatch.setattr(TiledGenerator, "prepare_anchors", prepare)
     shape = (10, 12, 14)
     plane_shape = tuple(n for i, n in enumerate(shape) if i != axis)
     image_shape = (7, 9) if partial else plane_shape
@@ -169,11 +181,20 @@ def test_global_anchor_crosses_tiles_and_keeps_rectangular_coordinates(axis, par
         progress=False,
     )
     assert result.shape == shape
-    assert torch.equal(result.select(axis, index), expected)
-    assert sum(mask is not None for _, mask in model.calls) > 3
+    placed = torch.zeros(plane_shape, dtype=torch.uint8)
+    covered = torch.zeros(plane_shape, dtype=torch.bool)
+    for voxel, value in canvas.items():
+        assert voxel[axis] == index
+        cell = tuple(v for i, v in enumerate(voxel) if i != axis)
+        placed[cell] = value
+        covered[cell] = True
+    rows, cols = (slice(p, p + n) for p, n in zip(position or (0, 0), image_shape))
+    assert covered.sum() == np.prod(image_shape) and covered[rows, cols].all()
+    assert torch.equal(placed, expected)
+    assert len(tile_shapes) > 3
 
 
-def test_nonfinal_real_anchor_does_not_generate_unused_reference(tmp_path):
+def test_nonfinal_step_generates_one_pair_and_ramps_the_transition_loss(tmp_path):
     torch.set_num_threads(1)
     Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(tmp_path / "image.png")
     cfg = load_train_config("tests/fixtures/config/train/low_res.yaml")
@@ -191,16 +212,14 @@ def test_nonfinal_real_anchor_does_not_generate_unused_reference(tmp_path):
     cfg["train"].update(
         real_batch_size=1, slice_pairs_per_plane=2, mixed_precision=False
     )
-    cfg["conditioning"]["anchor"].update(probability=1, ramp_steps=2)
-    cfg["loss"]["connectivity"]["ramp_steps"] = 20
+    cfg["loss"]["real_transition"]["ramp_steps"] = 20
     trainer = build_trainer(cfg, torch.device("cpu"))
     with patch.object(
         trainer, "generate_pair", wraps=trainer.generate_pair
     ) as generate:
         metrics = trainer.step(0, transition=1)
     assert generate.call_count == 1
-    assert metrics.anchor_ramp == 0.5
-    assert metrics.connectivity_ramp == 0.05
+    assert metrics.real_transition_ramp == 0.05
 
 
 def configuration(tmp_path, stage="low_res", height=False):
@@ -237,13 +256,10 @@ def configuration(tmp_path, stage="low_res", height=False):
         )
         cfg["model"]["diffusion"]["num_steps"] = 2
         cfg["model"]["gradient_checkpointing"] = False
-        cfg["conditioning"]["anchor"].update(
-            probability=1, ramp_steps=0, plane_spacing=2
-        )
-        cfg["conditioning"]["dropout_probability_per_case"] = 0
+        cfg["conditioning"]["cfg_dropout_probability"] = 0
         cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2, num_workers=0)
         cfg["loss"]["r1_weight"] = 0
-        cfg["loss"]["connectivity"].update(adversarial_weight=0.1, ramp_steps=0)
+        cfg["loss"]["real_transition"]["ramp_steps"] = 0
     else:
         cfg["model"]["generator"].update(
             channels=[4, 8], embedding_channels=8, latent_channels=4
@@ -352,7 +368,7 @@ def test_height_conditioned_sr_refresh_survives_repeated_directory_moves(tmp_pat
         run_sr_train(resume=checkpoint, steps=4, run_dir=original / "invalid_bank")
 
 
-def test_profile_training_replay_and_conditional_critics(tmp_path):
+def test_profile_training_conditions_the_plane_critics_and_resumes(tmp_path):
     cfg = configuration(tmp_path, height=True)
     cfg["conditioning"]["spatial_profile"].update(
         enabled=True, num_bins=4, critic_enabled=True
@@ -362,27 +378,19 @@ def test_profile_training_replay_and_conditional_critics(tmp_path):
     )
     trainer = build_trainer(cfg, torch.device("cpu"))
     assert trainer.cfg["data"]["height_extents"] == {0: None}
-    first = trainer.step(0, transition=0)
-    assert np.isfinite(first.generator_total)
+    metrics = trainer.step(0, transition=0)
+    assert np.isfinite(metrics.generator_total)
     assert trainer.denoiser.profile_input.weight.grad.abs().sum() > 0
-    original = trainer.conditions.anchor_bank.entries[0][0]
-    assert original["profile"] is not None
-    assert original["geometry"]["height_extent"] in (24, 32)
-    assert Path(original["geometry"]["image_id"]).is_file()
-    second = trainer.step(1, transition=0)
-    assert second.generator_connectivity > 0
-    assert trainer.connectivity_critic.height_input.weight.grad.abs().sum() > 0
-    assert trainer.connectivity_critic.profile_input.weight.grad.abs().sum() > 0
-    assert "profile/label_mae" in second.diagnostics
+    # Only side sections carry height, and so the profile beside it.
+    assert trainer.critics["xz_yz"].profile_input.weight.grad.abs().sum() > 0
+    assert "profile/label_mae" in metrics.diagnostics
     save_training(trainer, tmp_path / "training.pt")
     restored = build_trainer(cfg, torch.device("cpu"))
     resume_training(restored, torch.load(tmp_path / "training.pt", weights_only=True))
-    torch.testing.assert_close(
-        restored.conditions.anchor_bank.entries[0][0]["profile"], original["profile"]
-    )
+    assert restored.completed_steps == 1
 
 
-def test_real_batch_keeps_geometry_after_loading_another_batch(tmp_path):
+def test_real_batches_keep_their_own_height_and_profile(tmp_path):
     cfg = configuration(tmp_path, height=True)
     cfg["conditioning"]["spatial_profile"].update(enabled=True, num_bins=4)
     trainer = build_trainer(cfg, torch.device("cpu"))
@@ -407,13 +415,10 @@ def test_real_batch_keeps_geometry_after_loading_another_batch(tmp_path):
         second = trainer.conditions.get_batches(0)
 
     for batch, origin, phase in ((first, 0, 0), (second, 8, 1)):
-        selected = trainer.conditions.sample_real_anchor(batch, volume_size=8)
-        assert selected.geometry[0]["image_id"] == f"source-{origin}.png"
-        assert selected.geometry[0]["crop_origin"] == [origin, 0]
         expected = 2 * (torch.arange(8) + origin + 0.5) / 24 - 1
-        torch.testing.assert_close(selected.height[0, 0, :, 0, 0], expected)
-        assert selected.profile[0, phase].eq(1).all()
-        assert selected.profile[0, 1 - phase].eq(0).all()
+        torch.testing.assert_close(batch.heights[1][0, 0, :, 0], expected)
+        assert batch.profiles[1][0, phase].eq(1).all()
+        assert batch.profiles[1][0, 1 - phase].eq(0).all()
 
 
 def test_failed_bank_generation_preserves_volume_and_its_conditions(tmp_path):
@@ -593,9 +598,6 @@ def test_anchor_baseline_keeps_the_conditioned_profile_decision(tmp_path):
             generator, (anchor,), 0.7, guidance=1.0, domain=0, margin=0
         )
     calls = predict.call_args_list
-    conditioned, baseline = calls[: len(calls) // 2], calls[len(calls) // 2 :]
-    assert all("anchor_image" in call.kwargs for call in conditioned)
-    assert all(call.kwargs.get("anchor_image") is None for call in baseline)
     assert {call.kwargs.get("profile") is None for call in calls} == {True}
 
 
@@ -620,7 +622,7 @@ def test_height_only_generation_defaults_to_training_depth_profile(tmp_path):
     assert predict.call_args.kwargs.get("profile") is None
 
 
-def test_profile_rejects_impossible_anchor_and_preserved_base(tmp_path):
+def test_profile_rejects_impossible_preserved_base_but_not_soft_anchors(tmp_path):
     cfg = configuration(tmp_path, height=True)
     cfg["conditioning"]["spatial_profile"]["enabled"] = True
     trainer = build_trainer(cfg, torch.device("cpu"))
@@ -633,8 +635,7 @@ def test_profile_rejects_impossible_anchor_and_preserved_base(tmp_path):
         "interpolation": "constant",
     }
     anchor = PlaneAnchor(torch.ones(8, 8, dtype=torch.long), 1, 2)
-    with pytest.raises(ValueError, match="profile conflicts"):
-        generator.generate(anchors=[anchor], vf_profile=spec)
+    assert generator.generate(anchors=[anchor], vf_profile=spec).shape == (8, 8, 8)
     with pytest.raises(ValueError, match="profile conflicts"):
         TiledGenerator(generator).generate(
             shape=(12, 8, 8),
@@ -774,121 +775,21 @@ def test_profile_sr_training_refresh_and_geometry_artifacts(tmp_path):
     assert payload["data_fingerprint"]
 
 
-def test_replay_training_never_generates_reference_and_survives_resume(tmp_path):
-    cfg = configuration(tmp_path)
-    trainer = build_trainer(cfg, torch.device("cpu"))
-    with patch.object(
-        trainer, "generate_pair", wraps=trainer.generate_pair
-    ) as generate:
-        first = trainer.step(0, transition=0)
-        second = trainer.step(1, transition=0)
-    assert generate.call_count == 2
-    assert first.anchor_planes == 1 and second.anchor_planes == 4
-    assert second.anchor_loss > 0 and second.generator_connectivity > 0
-    assert first.diagnostics["anchor/neighbor_agreement"] is not None
-    assert any("two_point_mae" in key for key in second.diagnostics)
-    save_training(trainer, tmp_path / "training.pt")
-    restored = build_trainer(cfg, torch.device("cpu"))
-    payload = torch.load(tmp_path / "training.pt", weights_only=True)
-    resume_training(restored, payload)
-    assert len(restored.conditions.anchor_bank.entries[0]) == len(
-        trainer.conditions.anchor_bank.entries[0]
-    )
-    assert not any("rng" in key for key in payload)
-
-
-@pytest.mark.parametrize(
-    "height,seed,has_matches",
-    ((False, 0, True), (True, 0, True), (True, 1, False)),
-)
-def test_measured_transition_training_keeps_replay_but_never_scores_it(
-    tmp_path, height, seed, has_matches
-):
+@pytest.mark.parametrize("height", [False, True])
+def test_measured_transition_loss_trains_only_at_the_final_step(tmp_path, height):
     cfg = configuration(tmp_path, height=height)
-    cfg["loss"]["connectivity"].update(
-        adversarial_weight=0,
-        real_transition_weight=1,
-    )
-    numpy_state = np.random.get_state()
-    try:
-        with torch.random.fork_rng():
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-            trainer = build_trainer(cfg, torch.device("cpu"))
-            with patch.object(
-                trainer.anchor_triplets,
-                "sample",
-                side_effect=AssertionError("replay target used"),
-            ):
-                first = trainer.step(0, transition=0)
-                second = trainer.step(1, transition=0)
-    finally:
-        np.random.set_state(numpy_state)
-    assert first.anchor_planes == 1 and second.anchor_planes > 1
-    assert first.diagnostics["loss/real_transition"] > 0
-    matches = sum(
-        int(value)
-        for key, value in second.diagnostics.items()
-        if key.startswith("real_transition/") and key.endswith("/matches")
-    )
-    assert bool(matches) is has_matches
-    if has_matches:
-        assert second.diagnostics["loss/real_transition"] > 0
-    else:
-        assert second.diagnostics["loss/real_transition"] == 0
-    assert second.generator_connectivity == 0
-    assert trainer.updates["connectivity"] == 0
-    assert all(p.grad is None for p in trainer.connectivity_critic.parameters())
+    cfg["loss"]["real_transition"]["weight"] = 1
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    final = trainer.step(0, transition=0)
+    assert np.isfinite(final.diagnostics["loss/real_transition"])
+    if not height:
+        assert final.diagnostics["loss/real_transition"] > 0
+    intermediate = trainer.step(1, transition=1)
+    assert "loss/real_transition" not in intermediate.diagnostics
     save_training(trainer, tmp_path / "training.pt")
     restored = build_trainer(cfg, torch.device("cpu"))
     resume_training(restored, torch.load(tmp_path / "training.pt", weights_only=True))
     assert restored.settings.loss.real_transition_weight == 1
-    assert len(restored.conditions.anchor_bank.entries[0]) == len(
-        trainer.conditions.anchor_bank.entries[0]
-    )
-
-
-def test_real_transition_loss_is_independent_of_replay_volume(tmp_path):
-    cfg = configuration(tmp_path)
-    cfg["loss"]["connectivity"].update(
-        adversarial_weight=0,
-        real_transition_weight=1,
-    )
-    trainer = build_trainer(cfg, torch.device("cpu"))
-    trainer.step(0, transition=0)
-    prepared = trainer.prepare_step(1, transition=0)
-    assert prepared.selection.source == "multi"
-    changed = replace(
-        prepared,
-        selection=replace(
-            prepared.selection,
-            reference=-prepared.selection.reference,
-        ),
-    )
-    probs = torch.randn(1, 2, 8, 8, 8, requires_grad=True).softmax(1)
-    with torch.random.fork_rng():
-        torch.manual_seed(2)
-        first = trainer._real_transition_loss(prepared, probs)
-        torch.manual_seed(2)
-        second = trainer._real_transition_loss(changed, probs)
-    torch.testing.assert_close(first, second)
-
-
-def test_measured_transition_loss_trains_without_anchor_and_only_at_final_step(
-    tmp_path,
-):
-    cfg = configuration(tmp_path)
-    cfg["conditioning"]["anchor"]["probability"] = 0
-    cfg["loss"]["connectivity"].update(
-        adversarial_weight=0,
-        real_transition_weight=1,
-    )
-    trainer = build_trainer(cfg, torch.device("cpu"))
-    final = trainer.step(0, transition=0)
-    assert final.anchor_planes == 0
-    assert final.diagnostics["loss/real_transition"] > 0
-    intermediate = trainer.step(1, transition=1)
-    assert "loss/real_transition" not in intermediate.diagnostics
 
 
 def test_height_origin_survives_loader_training_export_and_tiles(tmp_path):
@@ -905,10 +806,6 @@ def test_height_origin_survives_loader_training_export_and_tiles(tmp_path):
     trainer = build_trainer(cfg, torch.device("cpu"))
     trainer.step(0, transition=0)
     assert trainer.denoiser.height_input.weight.grad.abs().sum() > 0
-    batches = trainer.conditions.get_batches(0)
-    with patch("src.train.conditioning.torch.randint", return_value=torch.tensor(0)):
-        selected = trainer.conditions.sample_real_anchor(batches, volume_size=8)
-    assert selected.condition.regions[0].axis != 0
     save_yaml(tmp_path / "train.yaml", trainer.cfg)
     torch.save(trainer.denoiser.state_dict(), tmp_path / "generator.pt")
     generator = load_generator(tmp_path / "generator.pt", torch.device("cpu"))
@@ -1022,7 +919,7 @@ def test_height_conditioned_sr_uses_fractional_bank_and_zero_level_at_inference(
     )
 
 
-def test_partial_anchor_with_cfg_uses_two_forwards_per_transition(tmp_path):
+def test_anchor_guidance_with_cfg_adds_no_anchored_forward(tmp_path):
     trainer = build_trainer(configuration(tmp_path), torch.device("cpu"))
     generator = Generator(
         trainer.denoiser.eval(), trainer.diffusion, trainer.device, 8, 2, 4, False
@@ -1034,11 +931,5 @@ def test_partial_anchor_with_cfg_uses_two_forwards_per_transition(tmp_path):
         generator.generate_probs(
             anchors=[anchor], guidance=1.5, anchor_strength=0.8, margin=0
         )
-    assert logits.call_count == 2 * trainer.diffusion.timesteps
-    masks = [
-        call.kwargs["anchor_mask"]
-        for call in logits.call_args_list
-        if call.kwargs.get("anchor_mask") is not None
-    ]
-    assert masks
-    assert all(mask.max() == 1 for mask in masks)
+    # Anchors are no model condition, so guidance has nothing to drop.
+    assert logits.call_count == trainer.diffusion.timesteps

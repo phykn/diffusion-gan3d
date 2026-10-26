@@ -36,7 +36,6 @@ def test_relocation_maps_path_fields_without_copying_tensors_or_changing_hashes(
         "data_fingerprint": {image: "image hash"},
         "path_maps": [],
         "model": {"weight": tensor},
-        "anchor_bank": {0: [{"volume": tensor, "geometry": {"image_id": image}}]},
     }
     moved = relocate_checkpoint(payload, [(old, str(tmp_path))])
     cfg = moved["config"]
@@ -55,10 +54,6 @@ def test_relocation_maps_path_fields_without_copying_tensors_or_changing_hashes(
         assert cfg["source"][key] == payload["config"]["source"][key]
     assert moved["data_fingerprint"] == {str(tmp_path / "images/a.png"): "image hash"}
     assert moved["model"] is payload["model"]
-    entry = moved["anchor_bank"][0][0]
-    assert entry["volume"] is tensor
-    assert entry["geometry"]["image_id"] == str(tmp_path / "images/a.png")
-    assert payload["anchor_bank"][0][0]["geometry"]["image_id"] == image
     assert payload["config"]["data"]["domains"][0]["xz"] == [f"{old}/images"]
     assert payload["data_fingerprint"] == {image: "image hash"}
 

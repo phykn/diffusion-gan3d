@@ -49,7 +49,7 @@ def test_pair_shares_one_transform_and_preserves_gradients() -> None:
     assert torch.equal(previous.grad, torch.ones_like(previous))
 
 
-def test_triplet_real_and_fake_share_the_same_transform() -> None:
+def test_stacked_real_and_fake_share_the_same_transform() -> None:
     real = torch.arange(54, dtype=torch.float32).reshape(2, 3, 1, 3, 3)
     fake = real + 1000.0
     augment = CriticAugment(planes={"xy": {"flip_axes": ["x", "y"], "rotate_90": True}})
@@ -156,7 +156,7 @@ def test_physical_horizontal_flips_preserve_rows_and_transform_conditions_togeth
     assert torch.equal(inputs.grad, torch.ones_like(inputs))
 
 
-def test_mixed_plane_triplets_use_each_planes_physical_axes():
+def test_mixed_plane_stacks_use_each_planes_physical_axes():
     data = torch.arange(3 * 3 * 2 * 4 * 4).reshape(3, 3, 2, 4, 4).float()
     aug = CriticAugment(
         planes={

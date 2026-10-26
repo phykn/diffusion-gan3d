@@ -47,24 +47,12 @@ def wide_dtype(device: torch.device) -> torch.dtype:
     return torch.float32 if device.type == "mps" else torch.float64
 
 
-def adaptive_pool(
-    values: torch.Tensor, size: Sequence[int], maximum: bool = False
-) -> torch.Tensor:
+def adaptive_pool(values: torch.Tensor, size: Sequence[int]) -> torch.Tensor:
     size = tuple(size)
     spatial = values.ndim - 4
     if values.device.type == "mps":
         kernel = tuple(n // s for n, s in zip(values.shape[2:], size, strict=True))
         if all(k * s == n for k, s, n in zip(kernel, size, values.shape[2:])):
-            pools = (
-                (F.max_pool2d, F.max_pool3d)
-                if maximum
-                else (F.avg_pool2d, F.avg_pool3d)
-            )
-            return pools[spatial](values, kernel)
-        return adaptive_pool(values.cpu(), size, maximum).to(values.device)
-    pools = (
-        (F.adaptive_max_pool2d, F.adaptive_max_pool3d)
-        if maximum
-        else (F.adaptive_avg_pool2d, F.adaptive_avg_pool3d)
-    )
-    return pools[spatial](values, size)
+            return (F.avg_pool2d, F.avg_pool3d)[spatial](values, kernel)
+        return adaptive_pool(values.cpu(), size).to(values.device)
+    return (F.adaptive_avg_pool2d, F.adaptive_avg_pool3d)[spatial](values, size)

@@ -24,7 +24,7 @@ def load_generation_settings() -> GenerationSettings:
     if type(guidance) not in (int, float) or not math.isfinite(guidance):
         raise ValueError("guidance must be a finite number.")
     anchor_strength = section.get("anchor_strength", defaults.anchor_strength)
-    check_number(anchor_strength, "anchor_strength", 1)
+    check_number(anchor_strength, "anchor_strength")
     overlap = section.get("overlap", defaults.overlap)
     check_integer(overlap, "overlap", 0)
     return GenerationSettings(

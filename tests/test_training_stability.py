@@ -2,7 +2,6 @@ import copy
 import json
 import subprocess
 import sys
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -17,8 +16,6 @@ from src.build.model import build_models
 from src.build.trainer import build_trainer
 from src.config.files import save_yaml
 from src.config.train import load_train_config
-from src.data.slice import TripletBatch
-from src.model.critic import ConnectivityCritic2D
 from src.train.checkpoint import resolve_checkpoint
 from src.train.run.low_res import run_low_res_train
 from src.train.state import resume_training, save_training
@@ -44,7 +41,6 @@ def small_config(tmp_path):
     cfg["model"]["critic"].update(channels=[4, 8], plane_groups=[["xy"], ["xz", "yz"]])
     cfg["model"]["gradient_checkpointing"] = False
     cfg["model"]["diffusion"].update(num_steps=2, time_embedding="scaled")
-    cfg["conditioning"]["anchor"].update(probability=1.0, ramp_steps=0)
     cfg["loss"].update(r1_weight=0.01, r2_weight=0.01, r1_every_steps=2)
     cfg["train"].update(
         total_steps=5, real_batch_size=2, slice_pairs_per_plane=2, mixed_precision=False
@@ -82,24 +78,14 @@ def test_lr_checkpoint_restores_training_state_without_rng(
     torch.set_num_threads(1)
     cfg = small_config(tmp_path)
     cfg["model"]["critic"]["input_mode"] = mode
-    cfg["conditioning"]["dropout_probability_per_case"] = 0
-    cfg["loss"]["connectivity"].update(adversarial_weight=0.25, ramp_steps=0)
-    cfg["loss"].update(anchor_seam_weight=0.25, anchor_seam_rows=1)
+    cfg["conditioning"]["cfg_dropout_probability"] = 0
     trainer = build_trainer(cfg, torch.device("cpu"))
     trainer.step(0, transition=0)
     path = tmp_path / "training.pt"
     save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     assert payload["format"] == "diffusion-gan3d.lr.train"
-    assert {"connectivity", "connectivity_optim", "seam", "seam_optim"} <= (
-        payload.keys()
-    )
-    assert set(payload["updates"]) == {
-        *trainer.critics,
-        "generator",
-        "connectivity",
-        "seam",
-    }
+    assert set(payload["updates"]) == {*trainer.critics, "generator"}
     assert (
         not {"streams", "torch_rng", "cuda_rng", "numpy_rng", "python_rng"}
         & payload.keys()
@@ -121,20 +107,6 @@ def test_lr_checkpoint_restores_training_state_without_rng(
             restored.critic_optims[group].state_dict(),
             trainer.critic_optims[group].state_dict(),
         )
-    torch.testing.assert_close(
-        restored.connectivity_critic.state_dict(),
-        trainer.connectivity_critic.state_dict(),
-    )
-    torch.testing.assert_close(
-        restored.connectivity_optim.state_dict(),
-        trainer.connectivity_optim.state_dict(),
-    )
-    torch.testing.assert_close(
-        restored.seam_critic.state_dict(), trainer.seam_critic.state_dict()
-    )
-    torch.testing.assert_close(
-        restored.seam_optim.state_dict(), trainer.seam_optim.state_dict()
-    )
     for name, value in weights.items():
         torch.testing.assert_close(
             restored.denoiser.state_dict()[name], value, rtol=0, atol=0
@@ -150,46 +122,7 @@ def test_lr_checkpoint_restores_training_state_without_rng(
     assert any(
         key.startswith("input_gradient/") for row in metrics for key in row.diagnostics
     )
-    assert restored.updates["connectivity"] > 0
-    assert restored.updates["seam"] > trainer.updates["seam"]
-    assert any(row.generator_connectivity > 0 for row in metrics)
-    assert any(row.critic_connectivity > 0 for row in metrics)
-    for row in metrics:
-        for name in ("generator", "critic"):
-            total = getattr(row, f"{name}_connectivity")
-            global_loss = getattr(row, f"{name}_connectivity_global")
-            local_loss = getattr(row, f"{name}_connectivity_local")
-            if total > 0:
-                assert global_loss > 0 and local_loss > 0
-            else:
-                assert global_loss == local_loss == 0
-            assert total == pytest.approx(
-                global_loss + cfg["loss"]["connectivity"]["local_weight"] * local_loss
-            )
-
-
-@pytest.mark.parametrize("active", [False, True])
-@pytest.mark.parametrize(
-    "missing", ["connectivity", "connectivity_optim", "counter", "all"]
-)
-def test_lr_resume_rejects_incomplete_connectivity_state(tmp_path, active, missing):
-    cfg = small_config(tmp_path)
-    cfg["loss"]["connectivity"].update(adversarial_weight=float(active))
-    trainer = build_trainer(cfg, torch.device("cpu"))
-    path = tmp_path / "training.pt"
-    save_training(trainer, path)
-    payload = torch.load(path, weights_only=True)
-    if missing in ("connectivity", "all"):
-        payload.pop("connectivity")
-    if missing in ("connectivity_optim", "all"):
-        payload.pop("connectivity_optim")
-    if missing in ("counter", "all"):
-        payload["updates"].pop("connectivity")
-    restored = build_trainer(cfg, torch.device("cpu"))
-    before = copy.deepcopy(restored.denoiser.state_dict())
-    with pytest.raises(ValueError, match="is missing|update counters"):
-        resume_training(restored, payload)
-    torch.testing.assert_close(restored.denoiser.state_dict(), before, rtol=0, atol=0)
+    assert restored.updates["generator"] == trainer.updates["generator"] + 3
 
 
 def test_lr_resume_requires_path_map_history_before_loading_weights(tmp_path):
@@ -326,34 +259,15 @@ def test_lr_resume_after_moving_files_preserves_holdouts_and_hash_checks(tmp_pat
         )
 
 
-def test_connectivity_preserves_height_order():
-    torch.manual_seed(3)
-    old = ConnectivityCritic2D(2, [4, 8], 8, 1)
-    directed = ConnectivityCritic2D(2, [4, 8], 8, 1, directed_axis=0)
-    directed.load_state_dict(old.state_dict(), strict=True)
-    x = torch.randn(3, 3, 2, 8, 8)
-    axes = torch.tensor([0, 1, 2])
-    gaps, domains = torch.ones(3, dtype=torch.long), torch.zeros(3, dtype=torch.long)
-    a, b = directed(x, axes, gaps, domains), directed(x.flip(1), axes, gaps, domains)
-    assert a.logits_local.shape == (3, 4, 4)
-    assert not torch.equal(a.logits_local[0], b.logits_local[0])
-    assert torch.equal(a.logits_local[1:], b.logits_local[1:])
-    assert torch.equal(
-        old(x, axes, gaps, domains).logits_local,
-        old(x.flip(1), axes, gaps, domains).logits_local,
-    )
-
-
 @pytest.mark.parametrize("height", [False, True])
 def test_time_scaling_is_shared_without_changing_weight_shapes(tmp_path, height):
     cfg = small_config(tmp_path)
     cfg["conditioning"]["height_enabled"] = height
-    generator, critics, connectivity = build_models(cfg)
+    generator, critics = build_models(cfg)
     assert generator.time_scale == 500
     assert all(critic.time_scale == 500 for critic in critics.values())
-    assert connectivity.directed_axis == (0 if height else None)
     cfg["model"]["diffusion"]["time_embedding"] = "index"
-    unscaled, _, _ = build_models(cfg)
+    unscaled, _ = build_models(cfg)
     unscaled.load_state_dict(generator.state_dict(), strict=True)
     assert unscaled.time_scale == 1
 
@@ -369,24 +283,6 @@ def test_nonfinite_gradient_does_not_update_fp32_parameters():
         )
     assert parameter.item() == 1
     assert diagnostics["skipped/generator"] == 1
-
-
-def test_connectivity_regularization_counts_its_own_updates(tmp_path):
-    trainer = build_trainer(small_config(tmp_path), torch.device("cpu"))
-    values = torch.randn(2, 3, 3, 8, 8)
-    fake = TripletBatch(
-        values,
-        torch.tensor([0, 1]),
-        torch.ones(2, dtype=torch.long),
-        torch.ones(2, dtype=torch.long),
-    )
-    domains = torch.zeros(2, dtype=torch.long)
-    real = replace(fake, values=values + 0.1)
-    trainer.update_connectivity_critic(real, fake, domains)
-    assert trainer.diagnostics["regularization/connectivity"] == 0
-    trainer.update_connectivity_critic(real, fake, domains)
-    assert trainer.diagnostics["regularization/connectivity"] == 1
-    assert trainer.updates["connectivity"] == 2
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

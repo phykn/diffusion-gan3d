@@ -25,7 +25,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
     device = torch.device("cuda")
     cfg = {
         "data": {
-            "domains": {0: {"xy": ".", "xz": ".", "yz": "."}},
+            "domains": {0: {"xy": ["."], "xz": ["."], "yz": ["."]}},
             "crop_size": 64,
             "num_phases": 3,
             "lo_res_size": 64,
@@ -35,7 +35,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
                 "channels": (16, 32, 64, 64),
                 "latent_channels": 64,
                 "embedding_channels": 128,
-                "anchor_multiscale_input": False,
             },
             "critic": {
                 "channels": (32, 64, 128, 256),
@@ -46,7 +45,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
                         (
                             plane in planes
                             for planes in {
-                                0: {"xy": ".", "xz": ".", "yz": "."}
+                                0: {"xy": ["."], "xz": ["."], "yz": ["."]}
                             }.values()
                         )
                     )
@@ -71,19 +70,9 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
         },
         "conditioning": {
             "domain_keep_probability": 1.0,
-            "anchor": {
-                "probability": 1.0,
-                "start_step": 0,
-                "ramp_steps": 0,
-                "borrowed_plane_probability": 0.0,
-            },
+            "cfg_dropout_probability": 0.1,
         },
         "loss": {
-            "anchor_pixel_weight": 0.05,
-            "connectivity": {
-                "adversarial_weight": 0.0,
-                "local_weight": 0.5,
-            },
             "volume_fraction_weight": 1.0,
             "r1_weight": 0.05,
             "r1_every_steps": 16,
@@ -93,14 +82,11 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
     model = cfg["model"]
     optim = cfg["optim"]
     train = cfg["train"]
-    denoiser, critics, connectivity_critic = build_models(cfg)
+    denoiser, critics = build_models(cfg)
     denoiser = denoiser.to(device)
     critics = critics.to(device)
-    connectivity_critic = connectivity_critic.to(device)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim, _ = build_optimizers(
-        denoiser, critics, connectivity_critic, None, cfg
-    )
+    denoiser_optim, critic_optims = build_optimizers(denoiser, critics, cfg)
     images = torch.randint(
         0,
         data["num_phases"],
@@ -111,7 +97,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             denoiser=denoiser,
             ema_denoiser=ema,
             critics=critics,
-            connectivity_critic=connectivity_critic,
             streams={
                 0: {
                     axis: CudaStream(phase_channels(images, data["num_phases"]))
@@ -121,7 +106,6 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             diffusion=Diffusion(11, beta_min=0.1, beta_max=20.0).to(device),
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,
-            connectivity_optim=connectivity_optim,
             scaler=torch.amp.GradScaler("cuda", enabled=True),
             device=device,
         ),
@@ -129,13 +113,11 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             volume_batch_size=train["volume_batch_size"],
             num_phases=data["num_phases"],
             patch_size=data["lo_res_size"],
-            slice_pairs_per_axis=train["slice_pairs_per_plane"],
+            slice_pairs_per_plane=train["slice_pairs_per_plane"],
             ema_decay=optim["ema_decay"],
-            r1_gamma=cfg["loss"]["r1_weight"],
-            r1_interval=cfg["loss"]["r1_every_steps"],
+            r1_weight=cfg["loss"]["r1_weight"],
+            r1_every_steps=cfg["loss"]["r1_every_steps"],
             loss=DenoiserLossSettings(
-                connectivity_local_weight=cfg["loss"]["connectivity"]["local_weight"],
-                connectivity_weight=cfg["loss"]["connectivity"]["adversarial_weight"],
                 vf_weight=cfg["loss"]["volume_fraction_weight"],
                 real_transition_weight=0.0,
                 profile_bins=16,
@@ -144,19 +126,36 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
                 consistency_weight=0.0,
                 consistency_tolerance=0.0,
                 num_phases=data["num_phases"],
+                group_statistics_weight=0.0,
+                group_statistics_max_gap=8,
+                group_statistics_tolerance=0.01,
+                preserve_height=False,
+                mirror_balance_weight=0.0,
+                mirror_balance_max_gap=4,
+                mirror_balance_tolerance=0.02,
             ),
-            anchor_training_probability=cfg["conditioning"]["anchor"]["probability"],
-            anchor_start_step=cfg["conditioning"]["anchor"]["start_step"],
-            anchor_ramp_steps=cfg["conditioning"]["anchor"]["ramp_steps"],
-            anchor_pixel_loss_weight=cfg["loss"]["anchor_pixel_weight"],
-            anchor_shared_axis_probability=cfg["conditioning"]["anchor"][
-                "borrowed_plane_probability"
-            ],
-            domain_dropout=1.0 - cfg["conditioning"]["domain_keep_probability"],
-            cfg_drop_each_probability=0.0,
+            domain_keep_probability=cfg["conditioning"]["domain_keep_probability"],
+            cfg_dropout_probability=cfg["conditioning"]["cfg_dropout_probability"],
             latent_channels=model["generator"]["latent_channels"],
             amp_enabled=True,
             rollout_amp=True,
+            r2_weight=0.0,
+            group_statistics_start_step=0,
+            group_statistics_ramp_steps=5000,
+            real_transition_max_gap=1,
+            real_transition_start_step=0,
+            real_transition_ramp_steps=20000,
+            structure_every_steps=100,
+            coarse_corruption_probability=0.0,
+            coarse_corruption_strength=0.0,
+            height_data=None,
+            profile_settings={
+                "enabled": False,
+                "num_bins": 16,
+                "critic_enabled": False,
+            },
+            volume_permute_z=True,
+            volume_flip_z=True,
         ),
     )
 

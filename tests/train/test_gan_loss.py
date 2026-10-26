@@ -5,78 +5,9 @@ import torch.nn.functional as F
 from src.model.critic import CriticScores, PairCritic2D
 from src.train.loss.gan import (
     critic_objective,
-    get_critic_loss,
-    get_generator_loss,
     get_gradient_penalty,
     get_relativistic_loss,
 )
-
-
-def test_logistic_losses_average_each_head_before_weighting() -> None:
-    real = CriticScores(
-        logits_global=torch.tensor([-1.0, 2.0]),
-        logits_local=torch.tensor(
-            [
-                [[-2.0, 0.0], [1.0, 3.0]],
-                [[-1.0, 2.0], [0.5, 1.5]],
-            ]
-        ),
-    )
-    fake = CriticScores(
-        logits_global=torch.tensor([0.5, -0.5]),
-        logits_local=torch.tensor(
-            [
-                [[1.0, -1.0], [2.0, 0.0]],
-                [[-2.0, 0.5], [1.5, -0.5]],
-            ]
-        ),
-    )
-
-    critic = get_critic_loss(real, fake)
-    generator = get_generator_loss(fake)
-
-    want_d_global = (
-        F.softplus(-real.logits_global).mean() + F.softplus(fake.logits_global).mean()
-    )
-    want_d_local = (
-        F.softplus(-real.logits_local).mean() + F.softplus(fake.logits_local).mean()
-    )
-    want_g_global = F.softplus(-fake.logits_global).mean()
-    want_g_local = F.softplus(-fake.logits_local).mean()
-    assert torch.allclose(critic.global_loss, want_d_global)
-    assert torch.allclose(critic.local_loss, want_d_local)
-    assert torch.allclose(
-        critic.combine(0.5),
-        want_d_global + 0.5 * want_d_local,
-    )
-    assert torch.allclose(generator.global_loss, want_g_global)
-    assert torch.allclose(generator.local_loss, want_g_local)
-    assert torch.allclose(
-        generator.combine(0.5),
-        want_g_global + 0.5 * want_g_local,
-    )
-
-
-def test_critic_loss_allows_different_real_and_fake_batch_sizes() -> None:
-    real = CriticScores(
-        logits_global=torch.linspace(-1.0, 1.0, 8),
-        logits_local=torch.linspace(-2.0, 2.0, 32).reshape(8, 2, 2),
-    )
-    fake = CriticScores(
-        logits_global=torch.linspace(-1.5, 1.5, 16),
-        logits_local=torch.linspace(-3.0, 3.0, 64).reshape(16, 2, 2),
-    )
-
-    loss = get_critic_loss(real, fake)
-
-    assert torch.allclose(
-        loss.global_loss,
-        F.softplus(-real.logits_global).mean() + F.softplus(fake.logits_global).mean(),
-    )
-    assert torch.allclose(
-        loss.local_loss,
-        F.softplus(-real.logits_local).mean() + F.softplus(fake.logits_local).mean(),
-    )
 
 
 def test_relativistic_loss_pairs_samples_and_reuses_the_smaller_batch() -> None:
@@ -89,12 +20,10 @@ def test_relativistic_loss_pairs_samples_and_reuses_the_smaller_batch() -> None:
     margins = torch.tensor([0.5 - 1.0, 0.0 + 2.0, 3.0 - 1.0])
     torch.testing.assert_close(critic.global_loss, F.softplus(margins).mean())
     torch.testing.assert_close(generator.global_loss, F.softplus(-margins).mean())
-    assert critic.local_loss is None
 
 
 def test_relativistic_loss_depends_only_on_score_differences() -> None:
-    # An offset shared by both sides of every pair cannot change the loss; the
-    # logistic loss moves with it.
+    # An offset shared by both sides of every pair cannot change the loss.
     real = CriticScores(torch.tensor([0.3, -0.4]))
     fake = CriticScores(torch.tensor([-0.2, 0.1]))
     shifted_real = CriticScores(real.logits_global + 5.0)
@@ -104,93 +33,6 @@ def test_relativistic_loss_depends_only_on_score_differences() -> None:
         get_relativistic_loss(shifted_real, shifted_fake).global_loss,
         get_relativistic_loss(real, fake).global_loss,
     )
-    assert not torch.allclose(
-        get_critic_loss(shifted_real, shifted_fake).global_loss,
-        get_critic_loss(real, fake).global_loss,
-    )
-
-
-def test_r1_aggregation_is_independent_of_patch_count() -> None:
-    small = _r1_penalty(2)
-    large = _r1_penalty(16)
-
-    assert torch.allclose(small, large)
-    assert torch.allclose(small, torch.tensor(8.5))
-
-
-def test_r1_heads_do_not_cancel_opposite_gradients() -> None:
-    inputs = torch.tensor([[1.0], [2.0]], requires_grad=True)
-    base = inputs[:, 0]
-    scores = CriticScores(
-        logits_global=2.0 * base,
-        logits_local=(-4.0 * base[:, None, None]).expand(-1, 2, 2),
-    )
-
-    penalties = get_gradient_penalty(scores, (inputs,))
-
-    assert torch.allclose(penalties.global_loss, torch.tensor(4.0))
-    assert torch.allclose(penalties.local_loss, torch.tensor(16.0))
-    assert torch.allclose(penalties.combine(0.5), torch.tensor(12.0))
-
-
-def _r1_penalty(size: int) -> torch.Tensor:
-    inputs = torch.tensor([[1.0], [2.0]], requires_grad=True)
-    base = inputs[:, 0]
-    scores = CriticScores(
-        logits_global=2.0 * base,
-        logits_local=(3.0 * base[:, None, None]).expand(-1, size, size),
-    )
-    return get_gradient_penalty(scores, (inputs,)).combine(0.5)
-
-
-@pytest.mark.parametrize(
-    "r1_weight,r2_weight", [(0.0, 0.0), (0.3, 0.0), (0.0, 0.2), (0.3, 0.2)]
-)
-def test_critic_objective_preserves_penalty_weights_and_parameter_gradients(
-    r1_weight, r2_weight
-):
-    real = torch.tensor([[1.0], [2.0]], requires_grad=True)
-    fake = torch.tensor([[-1.0], [0.0], [1.0]], requires_grad=True)
-    weight = torch.nn.Parameter(torch.tensor(2.0))
-    real_scores = CriticScores(
-        2 * real[:, 0] * weight, (3 * real[:, 0] * weight)[:, None, None]
-    )
-    fake_scores = CriticScores(
-        4 * fake[:, 0] * weight, (-5 * fake[:, 0] * weight)[:, None, None]
-    )
-    result = critic_objective(
-        get_critic_loss(real_scores, fake_scores),
-        real_scores,
-        fake_scores,
-        (real,),
-        (fake,),
-        r1_weight,
-        r2_weight,
-        4,
-        local_weight=0.5,
-    )
-    expected_r1 = (4 + 0.5 * 9) * weight.square() if r1_weight else weight.new_zeros(())
-    expected_r2 = (
-        (16 + 0.5 * 25) * weight.square() if r2_weight else weight.new_zeros(())
-    )
-    expected = (
-        F.softplus(-real_scores.logits_global).mean()
-        + F.softplus(fake_scores.logits_global).mean()
-        + 0.5
-        * (
-            F.softplus(-real_scores.logits_local).mean()
-            + F.softplus(fake_scores.logits_local).mean()
-        )
-        + 2 * r1_weight * expected_r1
-        + 2 * r2_weight * expected_r2
-    )
-    expected_grad = torch.autograd.grad(expected, weight, retain_graph=True)[0]
-
-    torch.testing.assert_close(result.r1, expected_r1)
-    torch.testing.assert_close(result.r2, expected_r2)
-    torch.testing.assert_close(result.total, expected)
-    result.total.backward()
-    torch.testing.assert_close(weight.grad, expected_grad)
 
 
 def test_pyramid_averages_losses_after_nonlinearity():
@@ -204,13 +46,15 @@ def test_pyramid_averages_losses_after_nonlinearity():
         torch.zeros(2, dtype=torch.long),
     )
     assert len(scores.levels) == 3
-    assert all(s.logits_local is None for s in scores.levels)
-    loss = get_generator_loss(scores)
+    zero = CriticScores(
+        torch.zeros(2), tuple(CriticScores(torch.zeros(2)) for _ in scores.levels)
+    )
+    loss = get_relativistic_loss(scores, zero)
     expected = torch.stack(
-        [get_generator_loss(s).global_loss for s in scores.levels]
+        [F.softplus(-s.logits_global).mean() for s in scores.levels]
     ).mean()
     torch.testing.assert_close(loss.global_loss, expected)
-    get_critic_loss(scores, scores).global_loss.backward()
+    loss.global_loss.backward()
     assert torch.isfinite(previous.grad).all()
 
 
@@ -218,9 +62,7 @@ def test_pyramid_averages_losses_after_nonlinearity():
 @pytest.mark.parametrize(
     "r1_weight,r2_weight", [(0, 0), (0.3, 0), (0, 0.2), (0.3, 0.2)]
 )
-def test_global_only_objective_and_penalties_preserve_gradients(
-    levels, r1_weight, r2_weight
-):
+def test_objective_and_penalties_preserve_gradients(levels, r1_weight, r2_weight):
     real = torch.tensor([[1.0], [2.0]], requires_grad=True)
     fake = torch.tensor([[-1.0], [0.0], [1.0]], requires_grad=True)
     weight = torch.nn.Parameter(torch.tensor(2.0))
@@ -254,13 +96,8 @@ def test_global_only_objective_and_penalties_preserve_gradients(
     ).mean()
     expected = adversarial + 2 * r1_weight * expected_r1 + 2 * r2_weight * expected_r2
     expected_grad = torch.autograd.grad(expected, weight, retain_graph=True)[0]
-    assert result.adversarial.local_loss is None
-    assert get_gradient_penalty(real_scores, (real,)).local_loss is None
-    generator = get_generator_loss(fake_scores)
-    assert generator.local_loss is None
     torch.testing.assert_close(
-        generator.global_loss,
-        torch.stack([F.softplus(-s.logits_global).mean() for s in fake_levels]).mean(),
+        get_gradient_penalty(real_scores, (real,)).global_loss, penalty
     )
     torch.testing.assert_close(result.total, expected)
     torch.testing.assert_close(result.r1, expected_r1)

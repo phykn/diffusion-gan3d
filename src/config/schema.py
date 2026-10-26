@@ -65,7 +65,6 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
     }
     common["data"]["split"] = dict.fromkeys(("validation_files", "validation_regions"))
     if stage == "low_res":
-        common["model"]["generator"]["anchor_multiscale_input"] = None
         schema = common | {
             "conditioning": {
                 "height_enabled": None,
@@ -73,47 +72,25 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                     ("enabled", "num_bins", "critic_enabled")
                 ),
                 "domain_keep_probability": None,
-                "dropout_probability_per_case": None,
-                "anchor": dict.fromkeys(
-                    (
-                        "probability",
-                        "start_step",
-                        "ramp_steps",
-                        "borrowed_plane_probability",
-                        "bank_capacity",
-                        "plane_spacing",
-                    )
-                ),
+                "cfg_dropout_probability": None,
             },
             "loss": common["loss"]
             | (
                 dict.fromkeys(
                     (
-                        "anchor_pixel_weight",
-                        "anchor_continuity_weight",
-                        "anchor_neighborhood_weight",
-                        "anchor_seam_weight",
-                        "anchor_seam_rows",
                         "volume_fraction_weight",
                         "spatial_profile_weight",
                         "spatial_profile_gradient_weight",
                     )
                 )
                 | {
-                    "connectivity": dict.fromkeys(
-                        (
-                            "max_slice_gap",
-                            "adversarial_weight",
-                            "local_weight",
-                            "real_transition_weight",
-                            "start_step",
-                            "ramp_steps",
-                            "windows_per_plane",
-                        )
+                    "real_transition": dict.fromkeys(
+                        ("weight", "max_gap", "start_step", "ramp_steps")
                     )
                 }
             ),
             "train": common["train"] | {"initial_weights": None},
+            "selection": dict.fromkeys(("enabled", "samples", "structure_tolerance")),
         }
     else:
         schema = common | {

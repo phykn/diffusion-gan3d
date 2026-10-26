@@ -30,9 +30,9 @@ from scripts.paper.provenance import (
     file_record,
     validate_output_paths,
 )
-from src.anchor import PlaneAnchor
 from src.build.predict import load_generator, resolve_weights
 from src.config.generation import load_generation_settings
+from src.predict.anchor import PlaneAnchor
 
 AXIS = 0
 SEED = 0

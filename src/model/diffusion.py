@@ -149,7 +149,10 @@ class Diffusion(nn.Module):
         initial_noise: torch.Tensor,
         latent_channels: int,
         conditions: dict[str, object] | None = None,
+        guide=None,
     ) -> torch.Tensor:
+        """guide(model, current, time, latent, **conditions) returns the clean
+        prediction and a step to subtract from each later noisy state."""
         current = initial_noise
         cond = {} if conditions is None else conditions
 
@@ -166,17 +169,17 @@ class Diffusion(nn.Module):
                 device=current.device,
                 dtype=current.dtype,
             )
-            pred = model(
-                current,
-                time,
-                latent,
-                **cond,
-            )
+            if guide is None:
+                pred = model(current, time, latent, **cond)
+            else:
+                pred, step = guide(model, current, time, latent, **cond)
             current = self.sample_posterior(
                 current,
                 pred,
                 transition,
             )
+            if guide is not None and transition:
+                current = current - step
         return current
 
     def mix_noise(

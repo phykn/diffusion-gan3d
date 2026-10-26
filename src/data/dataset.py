@@ -72,10 +72,14 @@ class RealDataset(Dataset[dict]):
         return sum(len(group) for group in self.path_groups)
 
     def __getitem__(self, path: str | Path) -> dict:
+        return self.sample(path)
+
+    def sample(self, path: str | Path, rng=np.random) -> dict:
+        """One crop of path; a seeded RandomState picks the same crop every time."""
         path = Path(path).resolve()
         source = self.decode(path)
         excluded = self.validation_regions.get(str(path))
-        crop, origin = self.crop_with_origin(source, excluded)
+        crop, origin = self.crop_with_origin(source, excluded, rng)
         labels = torch.from_numpy(crop.copy()).long()
         image = resize_crop(labels, self.patch_size, self.num_phases)
         return {
@@ -101,15 +105,15 @@ class RealDataset(Dataset[dict]):
         return image
 
     def crop_with_origin(
-        self, img: np.ndarray, excluded: Sequence[int] | None = None
+        self, img: np.ndarray, excluded: Sequence[int] | None = None, rng=np.random
     ) -> tuple[np.ndarray, tuple[int, int]]:
         height, width = img.shape
         size = self.crop_size
         if size > min(height, width):
             raise ValueError("crop size must fit inside the image.")
         if excluded is None:
-            top = int(np.random.randint(0, height - size + 1))
-            left = int(np.random.randint(0, width - size + 1))
+            top = int(rng.randint(0, height - size + 1))
+            left = int(rng.randint(0, width - size + 1))
         else:
-            top, left = training_origin(img.shape, size, excluded)
+            top, left = training_origin(img.shape, size, excluded, rng)
         return img[top : top + size, left : left + size], (top, left)

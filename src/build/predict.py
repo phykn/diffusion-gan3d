@@ -42,7 +42,8 @@ def build_generator(
         raise ValueError(
             f"weights file is not compatible with the configured denoiser: {path}"
         ) from exc
-    denoiser.eval()
+    # Anchor guidance differentiates only the noisy state, never the weights.
+    denoiser.eval().requires_grad_(False)
     return make_generator(
         denoiser, cfg, device, get_resolution(cfg["data"]).lo_res_size
     )

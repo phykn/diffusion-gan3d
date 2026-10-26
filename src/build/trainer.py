@@ -6,7 +6,7 @@ from src.build.data import (
     build_datasets,
     build_stream,
 )
-from src.build.model import build_diffusion, build_models, build_seam_critic
+from src.build.model import build_diffusion, build_models
 from src.config.data import get_resolution, get_sr_plane_groups
 from src.config.files import project_path
 from src.config.train import (
@@ -23,21 +23,15 @@ from src.plane import PLANE_DIRECTIONS
 from src.storage import load_model
 from src.train.ema import build_ema
 from src.train.loss.denoiser import DenoiserLossSettings
+from src.train.selection import CheckpointSelection, build_reference
 from src.train.trainer import Trainer, TrainerComponents, TrainerSettings
 
 
 def build_optimizers(
     denoiser: nn.Module,
     critics: nn.ModuleDict,
-    connectivity_critic: nn.Module | None,
-    seam_critic: nn.Module | None,
     cfg: dict,
-) -> tuple[
-    torch.optim.Optimizer,
-    dict[str, torch.optim.Optimizer],
-    torch.optim.Optimizer | None,
-    torch.optim.Optimizer | None,
-]:
+) -> tuple[torch.optim.Optimizer, dict[str, torch.optim.Optimizer]]:
     optim = cfg["optim"]
     betas = tuple(optim["adam_betas"])
 
@@ -45,16 +39,9 @@ def build_optimizers(
         # Fused Adam runs one kernel per step instead of several per tensor.
         return torch.optim.Adam(module.parameters(), lr=lr, betas=betas, fused=True)
 
-    def critic_adam(module):
-        if module is None:
-            return None
-        return adam(module, optim["critic_lr"])
-
     return (
         adam(denoiser, optim["generator_lr"]),
-        {plane: critic_adam(critics[plane]) for plane in critics},
-        critic_adam(connectivity_critic),
-        critic_adam(seam_critic),
+        {plane: adam(critics[plane], optim["critic_lr"]) for plane in critics},
     )
 
 
@@ -71,25 +58,16 @@ def build_trainer(
     fill_height_extents(cfg)
     settings = _build_settings(cfg, device)
     critic_augment = build_augmentation(cfg)
-    denoiser, critics, connectivity_critic = build_models(cfg)
-    seam_critic = build_seam_critic(cfg)
+    denoiser, critics = build_models(cfg)
     initial_weights = None if sr else train["initial_weights"]
     if initial_weights is not None:
         root = project_path(initial_weights)
         load_model(root / "generator.pt", denoiser)
         for plane, critic_model in critics.items():
             load_model(root / f"critic_{plane}.pt", critic_model)
-        load_model(root / "critic_c.pt", connectivity_critic)
-        load_model(root / "critic_s.pt", seam_critic)
     denoiser, critics = denoiser.to(device), critics.to(device)
-    if connectivity_critic is not None:
-        connectivity_critic = connectivity_critic.to(device)
-    if seam_critic is not None:
-        seam_critic = seam_critic.to(device)
     ema = build_ema(denoiser)
-    denoiser_optim, critic_optims, connectivity_optim, seam_optim = build_optimizers(
-        denoiser, critics, connectivity_critic, seam_critic, cfg
-    )
+    denoiser_optim, critic_optims = build_optimizers(denoiser, critics, cfg)
     datasets = build_datasets(cfg, high_resolution=sr)
     streams = {
         domain_id: {
@@ -103,20 +81,25 @@ def build_trainer(
         }
         for domain_id, axes in datasets.items()
     }
+    selection = None
+    if not sr and cfg["selection"]["enabled"]:
+        samples = cfg["selection"]["samples"]
+        selection = CheckpointSelection(
+            build_reference(datasets, samples),
+            samples,
+            cfg["selection"]["structure_tolerance"],
+            cfg["conditioning"]["height_enabled"],
+        )
 
     return Trainer(
         components=TrainerComponents(
             denoiser=denoiser,
             ema_denoiser=ema,
             critics=critics,
-            connectivity_critic=connectivity_critic,
             streams=streams,
             diffusion=build_diffusion(cfg).to(device),
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,
-            connectivity_optim=connectivity_optim,
-            seam_critic=seam_critic,
-            seam_optim=seam_optim,
             scaler=torch.amp.GradScaler("cuda", enabled=settings.amp_enabled),
             device=device,
             critic_augment=critic_augment,
@@ -125,6 +108,7 @@ def build_trainer(
             bank_extents=bank_extents,
             data_fingerprint=fingerprint_data(streams),
             critic_groups_by_domain=get_sr_plane_groups(cfg) if sr else None,
+            selection=selection,
             cfg=cfg,
         ),
         settings=settings,
@@ -138,16 +122,12 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
     generator = cfg["model"]["generator"]
     conditioning, loss = get_trainer_sections(cfg)
     profile = conditioning["spatial_profile"]
-    anchor = conditioning["anchor"]
-    connectivity = loss["connectivity"]
+    transition = loss["real_transition"]
     statistics = loss["group_statistics"]
     mirror = loss["mirror_balance"]
     optim = cfg["optim"]
-    anchor_start_step, anchor_ramp_steps = get_schedule_steps(
-        anchor, "conditioning.anchor"
-    )
-    connectivity_start, connectivity_ramp = get_schedule_steps(
-        connectivity, "loss.connectivity"
+    transition_start, transition_ramp = get_schedule_steps(
+        transition, "loss.real_transition"
     )
     z_policies = [
         policy
@@ -169,13 +149,7 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         volume_flip_z=flip_z,
         profile_settings=profile,
         loss=DenoiserLossSettings(
-            connectivity_local_weight=connectivity["local_weight"],
-            connectivity_weight=connectivity["adversarial_weight"],
-            real_transition_weight=connectivity["real_transition_weight"],
-            anchor_continuity_weight=loss["anchor_continuity_weight"],
-            anchor_neighborhood_weight=loss["anchor_neighborhood_weight"],
-            anchor_seam_weight=loss["anchor_seam_weight"],
-            anchor_seam_rows=loss["anchor_seam_rows"],
+            real_transition_weight=transition["weight"],
             vf_weight=loss["volume_fraction_weight"],
             profile_bins=profile["num_bins"],
             profile_weight=loss["spatial_profile_weight"],
@@ -196,30 +170,22 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         patch_size=get_sr_resolution(cfg).hi_res_size
         if sr
         else get_resolution(data).lo_res_size,
-        slice_pairs_per_axis=train["slice_pairs_per_plane"],
+        slice_pairs_per_plane=train["slice_pairs_per_plane"],
         ema_decay=optim["ema_decay"],
-        r1_gamma=loss["r1_weight"],
-        r1_interval=loss["r1_every_steps"],
-        anchor_training_probability=anchor["probability"],
-        anchor_start_step=anchor_start_step,
-        anchor_ramp_steps=anchor_ramp_steps,
-        anchor_pixel_loss_weight=loss["anchor_pixel_weight"],
-        anchor_shared_axis_probability=anchor["borrowed_plane_probability"],
-        anchor_bank_capacity=anchor["bank_capacity"],
-        anchor_plane_spacing=anchor["plane_spacing"],
+        r1_weight=loss["r1_weight"],
+        r1_every_steps=loss["r1_every_steps"],
         structure_every_steps=train["structure_every_steps"],
         group_statistics_start_step=statistics["start_step"],
         group_statistics_ramp_steps=statistics["ramp_steps"],
-        connectivity_max_gap=connectivity["max_slice_gap"],
-        connectivity_start_step=connectivity_start,
-        connectivity_ramp_steps=connectivity_ramp,
-        connectivity_windows_per_plane=connectivity["windows_per_plane"],
-        domain_dropout=1.0 - conditioning["domain_keep_probability"],
-        cfg_drop_each_probability=conditioning["dropout_probability_per_case"],
+        real_transition_max_gap=transition["max_gap"],
+        real_transition_start_step=transition_start,
+        real_transition_ramp_steps=transition_ramp,
+        domain_keep_probability=conditioning["domain_keep_probability"],
+        cfg_dropout_probability=conditioning["cfg_dropout_probability"],
         latent_channels=generator["latent_channels"],
         amp_enabled=train["mixed_precision"] and device.type == "cuda",
         rollout_amp=inference_amp(train["mixed_precision"], device),
-        r2_gamma=loss["r2_weight"],
+        r2_weight=loss["r2_weight"],
         coarse_corruption_probability=conditioning["coarse_corruption_probability"],
         coarse_corruption_strength=conditioning["coarse_corruption_strength"],
     )

@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def training_origin(shape, crop, excluded):
+def training_origin(shape, crop, excluded, rng=np.random):
     height, width = shape
     top, left, rows, cols = excluded
     if top + rows > height or left + cols > width:
@@ -18,7 +18,7 @@ def training_origin(shape, crop, excluded):
     areas = [max(0, b - a) * max(0, d - c) for a, b, c, d in boxes]
     if sum(areas) == 0:
         raise ValueError("no training crop fits outside the validation region.")
-    choice = int(np.random.randint(sum(areas)))
+    choice = int(rng.randint(sum(areas)))
     for (a, b, c, d), area in zip(boxes, areas, strict=True):
         if choice < area:
             return a + choice // (d - c), c + choice % (d - c)

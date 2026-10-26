@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from src.device import adaptive_pool
 from src.model.conv import Conv3d
 from src.model.layers import (
     INV_SQRT_THREE,
@@ -79,7 +78,6 @@ class Denoiser3D(nn.Module):
         latent_channels: int,
         num_domains: int,
         gradient_checkpointing: bool = False,
-        anchor_multiscale: bool = False,
         time_scale: float = 1.0,
         height_enabled: bool = False,
         profile_enabled: bool = False,
@@ -96,7 +94,6 @@ class Denoiser3D(nn.Module):
         levels = len(channels)
         self.downsample_factor = 2 ** (levels - 1)
         self.gradient_checkpointing = gradient_checkpointing
-        self.anchor_multiscale = anchor_multiscale
         self.coarse_enabled = coarse_enabled
 
         self.time_emb = SinusoidalEmbedding(embedding_channels)
@@ -114,20 +111,6 @@ class Denoiser3D(nn.Module):
         self.height_input = (
             Conv3d(1, channels[0], 3, padding=1, bias=False) if height_enabled else None
         )
-        self.anchor_input = (
-            None
-            if coarse_enabled
-            else Conv3d(
-                num_phases + 1,
-                channels[0],
-                3,
-                padding=1,
-                bias=False,
-            )
-        )
-        # Zero initialization preserves unconditioned behavior at training start.
-        if self.anchor_input is not None:
-            nn.init.zeros_(self.anchor_input.weight)
 
         block = partial(AdaptiveResBlock, ChannelNorm3D, Conv3d)
         self.encoder = nn.ModuleList()
@@ -167,17 +150,6 @@ class Denoiser3D(nn.Module):
             nn.init.zeros_(vf_out.bias)
 
         # Build optional weights last so the shared backbone keeps identical RNG init.
-        self.anchor_pyramid = nn.ModuleList()
-        if anchor_multiscale:
-            for channel in channels[1:]:
-                projection = Conv3d(
-                    num_phases + 1,
-                    channel,
-                    1,
-                    bias=False,
-                )
-                nn.init.zeros_(projection.weight)
-                self.anchor_pyramid.append(projection)
         self.coarse_input = (
             Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
             if coarse_enabled
@@ -208,8 +180,6 @@ class Denoiser3D(nn.Module):
         domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         vf_present: torch.Tensor | None = None,
-        anchor_image: torch.Tensor | None = None,
-        anchor_mask: torch.Tensor | None = None,
         height: torch.Tensor | None = None,
         profile: torch.Tensor | None = None,
         profile_present: torch.Tensor | None = None,
@@ -219,18 +189,9 @@ class Denoiser3D(nn.Module):
         if self.coarse_enabled:
             if any(
                 value is not None
-                for value in (
-                    vf,
-                    vf_present,
-                    anchor_image,
-                    anchor_mask,
-                    profile,
-                    profile_present,
-                )
+                for value in (vf, vf_present, profile, profile_present)
             ):
-                raise ValueError(
-                    "SR denoisers do not accept anchors or volume fractions."
-                )
+                raise ValueError("SR denoisers do not accept volume fractions.")
             if coarse is None or coarse.shape != x_current.shape:
                 raise ValueError(
                     "SR requires coarse phase fractions on the output grid."
@@ -257,13 +218,6 @@ class Denoiser3D(nn.Module):
             if profile_present is not None:
                 field = field * profile_present.to(field).reshape(-1, 1, 1, 1, 1)
             x = x + self.profile_input(field)
-        anchor = self._prepare_anchor(
-            x_current,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
-        )
-        if anchor is not None:
-            x = x + self.anchor_input(torch.cat(anchor, dim=1))
         checkpointing = self.gradient_checkpointing and self.training
         skips = []
         for idx, block in enumerate(self.encoder):
@@ -271,12 +225,6 @@ class Denoiser3D(nn.Module):
             if idx < len(self.downsample):
                 skips.append(x)
                 x = self.downsample[idx](x)
-                if anchor is not None and idx < len(self.anchor_pyramid):
-                    anchor_at_scale = self._pool_anchor(
-                        *anchor,
-                        output_size=x.shape[-3:],
-                    )
-                    x = x + self.anchor_pyramid[idx](anchor_at_scale)
 
         for block in self.middle:
             x = run_block(block, x, emb, checkpointing)
@@ -305,22 +253,15 @@ class Denoiser3D(nn.Module):
         domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         vf_present: torch.Tensor | None = None,
-        anchor_image: torch.Tensor | None = None,
-        anchor_mask: torch.Tensor | None = None,
         height: torch.Tensor | None = None,
         profile: torch.Tensor | None = None,
         profile_present: torch.Tensor | None = None,
         coarse: torch.Tensor | None = None,
         corruption_level: torch.Tensor | None = None,
-        anchor_strength: float = 1.0,
     ) -> torch.Tensor:
-        if anchor_strength == 0.0:
-            anchor_image = anchor_mask = None
         conditions = dict(
             vf=vf,
             vf_present=vf_present,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
             height=height,
             profile=profile,
             profile_present=profile_present,
@@ -334,7 +275,7 @@ class Denoiser3D(nn.Module):
         else:
             if coarse is not None or corruption_level is not None:
                 raise ValueError("coarse conditioning requires an SR denoiser.")
-            if all(value is None for value in (vf, anchor_image, anchor_mask, profile)):
+            if vf is None and profile is None:
                 return self.compute_logits(
                     x_current, time, latent, domain, height=height
                 )
@@ -342,38 +283,18 @@ class Denoiser3D(nn.Module):
             unconditional_domain = domain
             unconditional_conditions = dict(height=height)
 
-        partial_anchor = anchor_mask is not None and 0.0 < anchor_strength < 1.0
-        if guidance == 1.0 and not partial_anchor:
+        if guidance == 1.0:
             return self.compute_logits(x_current, time, latent, domain, **conditions)
-        unconditional = None
-        if guidance != 1.0:
-            unconditional = self.compute_logits(
-                x_current,
-                time,
-                latent,
-                unconditional_domain,
-                **unconditional_conditions,
-            )
+        unconditional = self.compute_logits(
+            x_current,
+            time,
+            latent,
+            unconditional_domain,
+            **unconditional_conditions,
+        )
         if guidance == 0.0:
             return unconditional
         conditional = self.compute_logits(x_current, time, latent, domain, **conditions)
-        if partial_anchor:
-            if unconditional is not None and vf is None and profile is None:
-                plain = unconditional
-            else:
-                plain = self.compute_logits(
-                    x_current,
-                    time,
-                    latent,
-                    domain,
-                    **dict(conditions, anchor_image=None, anchor_mask=None),
-                )
-            # Interpolate trained binary-anchor paths, never the input mask.
-            conditional = torch.lerp(
-                plain.float(), conditional.float(), anchor_strength
-            )
-        if guidance == 1.0:
-            return conditional
         baseline = unconditional.float()
         return baseline + guidance * (conditional.float() - baseline)
 
@@ -411,32 +332,3 @@ class Denoiser3D(nn.Module):
                 vf_present = vf_present.to(device=inputs.device)
                 emb = torch.where(vf_present[:, None], emb + vf_emb, emb)
         return emb
-
-    def _prepare_anchor(
-        self,
-        inputs: torch.Tensor,
-        anchor_image: torch.Tensor | None,
-        anchor_mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        if anchor_image is None and anchor_mask is None:
-            return None
-        if anchor_image is None or anchor_mask is None:
-            raise ValueError("anchor_image and anchor_mask must be provided together.")
-        mask = anchor_mask.to(device=inputs.device, dtype=inputs.dtype)
-        values = anchor_image.to(device=inputs.device, dtype=inputs.dtype)
-        return values * mask, mask
-
-    @staticmethod
-    def _pool_anchor(
-        values: torch.Tensor,
-        mask: torch.Tensor,
-        output_size: Sequence[int],
-    ) -> torch.Tensor:
-        coverage = adaptive_pool(mask, output_size)
-        pooled_values = adaptive_pool(values, output_size)
-        # Keep input strength in both the values and coverage at every scale.
-        strength = adaptive_pool(mask, output_size, maximum=True)
-        pooled_values = (
-            pooled_values / coverage.clamp_min(torch.finfo(values.dtype).eps) * strength
-        )
-        return torch.cat((pooled_values, coverage), dim=1)

@@ -143,7 +143,6 @@ def main():
     reference["model"]["critic"].update(
         channels=[8, 16, 32], plane_groups=[["xy", "xz", "yz"]]
     )
-    reference["conditioning"]["anchor"]["ramp_steps"] = 20
     reference["optim"]["ema_decay"] = 0.95
     reference["train"].update(
         total_steps=args.steps,

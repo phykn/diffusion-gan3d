@@ -12,6 +12,7 @@ class Fusion:
     axis_windows: dict[tuple[int, int, int], torch.Tensor]
     weight_sum: torch.Tensor
     pred_sum: torch.Tensor
+    step_sum: torch.Tensor | None = None
 
     def regions(self, region: tuple[slice, slice, slice]):
         depth = self.pred_sum.shape[2]
@@ -30,10 +31,11 @@ def make_fusion(
     plan: TilePlan,
     num_phases: int,
     device: torch.device,
+    guided: bool = False,
 ) -> Fusion:
     # Tiles are traversed in z/y/x order. Once the next z layer starts, no
     # future prediction can affect earlier voxels, so a single tile-depth
-    # circular slab suffices for both weighted sums.
+    # circular slab suffices for every weighted sum.
     axis_windows: dict[tuple[int, int, int], torch.Tensor] = {}
     shape = (min(plan.tile_size, plan.shape[0]), *plan.shape[1:])
     weight_sum = torch.zeros(
@@ -50,6 +52,7 @@ def make_fusion(
         axis_windows=axis_windows,
         weight_sum=weight_sum,
         pred_sum=pred_sum,
+        step_sum=torch.zeros_like(pred_sum) if guided else None,
     )
 
 
@@ -104,27 +107,34 @@ def add_prediction(
     pred: torch.Tensor,
     tile_buffer: TileBuffer,
     overlap: int,
+    step: torch.Tensor | None = None,
 ) -> None:
-    weighted = pred.float().clone()
+    """Blend a tile's prediction, and its anchor guidance step if any."""
     axes = get_axis_windows(
         tile,
         overlap,
         pred.device,
         fusion.axis_windows,
     )
-    for spatial_axis, axis in enumerate(axes, 2):
-        shape = [1, 1, 1, 1, 1]
-        shape[spatial_axis] = axis.numel()
-        weighted.mul_(axis.view(shape))
-    staged = tile_buffer.stage(weighted, fusion.pred_sum.device)
     window = (
         axes[0].view(1, 1, -1, 1, 1)
         * axes[1].view(1, 1, 1, -1, 1)
         * axes[2].view(1, 1, 1, 1, -1)
-    ).to(fusion.weight_sum.device)
+    )
+    sums = [(fusion.pred_sum, pred)]
+    if step is not None:
+        sums.append((fusion.step_sum, step))
+    for total, values in sums:
+        # The staging buffer is shared, so each staged copy is added at once.
+        staged = tile_buffer.stage(values.float() * window, total.device)
+        for global_region, local_region in fusion.regions(tile.source):
+            start = global_region[0].start - tile.source[0].start
+            stop = global_region[0].stop - tile.source[0].start
+            target = (slice(None), slice(None), *local_region)
+            total[target].add_(staged[:, :, start:stop])
+    window = window.to(fusion.weight_sum.device)
     for global_region, local_region in fusion.regions(tile.source):
         start = global_region[0].start - tile.source[0].start
         stop = global_region[0].stop - tile.source[0].start
         target = (slice(None), slice(None), *local_region)
-        fusion.pred_sum[target].add_(staged[:, :, start:stop])
         fusion.weight_sum[target].add_(window[:, :, start:stop])

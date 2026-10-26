@@ -6,10 +6,8 @@ from src.evaluate.profile import phase_profile
 from src.train.batch import DenoiserBatch, DenoiserUpdate
 from src.train.loss.gan import (
     active_groups,
-    get_generator_loss,
     get_relativistic_loss,
     score_plane,
-    score_triplets,
 )
 from src.train.loss.group_statistics import compute_group_statistics_loss
 from src.train.loss.mirror_balance import compute_mirror_balance_loss
@@ -21,8 +19,6 @@ from src.train.step import input_gradient_norms
 
 @dataclass(frozen=True)
 class DenoiserLossSettings:
-    connectivity_local_weight: float
-    connectivity_weight: float
     vf_weight: float
     real_transition_weight: float
     profile_bins: int
@@ -31,112 +27,33 @@ class DenoiserLossSettings:
     consistency_weight: float
     consistency_tolerance: float
     num_phases: int
-    group_statistics_weight: float = 0.0
-    group_statistics_max_gap: int = 8
-    group_statistics_tolerance: float = 0.01
-    preserve_height: bool = False
-    mirror_balance_weight: float = 0.0
-    mirror_balance_max_gap: int = 4
-    mirror_balance_tolerance: float = 0.02
-    anchor_continuity_weight: float = 0.0
-    anchor_neighborhood_weight: float = 0.0
-    anchor_seam_weight: float = 0.0
-    anchor_seam_rows: int = 4
+    group_statistics_weight: float
+    group_statistics_max_gap: int
+    group_statistics_tolerance: float
+    preserve_height: bool
+    mirror_balance_weight: float
+    mirror_balance_max_gap: int
+    mirror_balance_tolerance: float
 
 
 def denoiser_objective(
     batch: DenoiserBatch,
     critics,
-    connectivity_critic,
-    seam_critic,
     groups: dict[str, tuple[int, ...]],
-    anchor_loss,
     settings: DenoiserLossSettings,
     diagnose: bool = False,
 ) -> tuple[DenoiserUpdate, dict[str, torch.Tensor]]:
     """Compute the differentiable objective without updating training state."""
     adversarial, diagnostics = adversarial_loss(batch, critics, groups, diagnose)
-    connectivity = adversarial.new_zeros(())
-    connectivity_global = adversarial.new_zeros(())
-    connectivity_local = adversarial.new_zeros(())
-    # Triplets are sampled only while the connectivity loss is enabled.
-    if len(batch.connectivity_fake):
-        fake = batch.connectivity_fake
-        scores = score_triplets(
-            connectivity_critic, fake, fake.values, batch.connectivity_domains
-        )
-        head = get_generator_loss(scores)
-        connectivity_global, connectivity_local = head.global_loss, head.local_loss
-        connectivity = head.combine(settings.connectivity_local_weight)
-    anchor = adversarial.new_zeros(())
-    anchor_coarse = adversarial.new_zeros(())
-    anchor_pixel = adversarial.new_zeros(())
-    anchor_accuracy = adversarial.new_zeros(())
-    if batch.anchor is not None:
-        result = anchor_loss(
-            batch.logits,
-            batch.anchor,
-            batch.anchor_present,
-            batch.anchor_measured.mask,
-            batch.anchor_measured.axis_masks,
-        )
-        anchor = result.total
-        anchor_coarse = result.coarse
-        anchor_pixel = result.pixel
-        anchor_accuracy = result.accuracy
     vf = compute_vf_loss(batch.clean_probs, batch.target_vf, batch.vf_present)
-    total = (
-        adversarial
-        + batch.anchor_ramp * anchor
-        + batch.connectivity_ramp * (settings.connectivity_weight * connectivity)
-        + settings.vf_weight * vf
-    )
+    total = adversarial + settings.vf_weight * vf
     if batch.real_transition_loss is not None:
         total = total + (
-            batch.connectivity_ramp
+            batch.real_transition_ramp
             * settings.real_transition_weight
             * batch.real_transition_loss
         )
         diagnostics["loss/real_transition"] = batch.real_transition_loss.detach()
-    if batch.anchor_continuity_loss is not None:
-        contribution = (
-            batch.anchor_ramp
-            * settings.anchor_continuity_weight
-            * batch.anchor_continuity_loss
-        )
-        total = total + contribution
-        diagnostics["loss/anchor_continuity"] = batch.anchor_continuity_loss.detach()
-        diagnostics["anchor_continuity/contribution"] = contribution.detach()
-    if batch.anchor_neighborhood_loss is not None:
-        contribution = (
-            batch.anchor_ramp
-            * settings.anchor_neighborhood_weight
-            * batch.anchor_neighborhood_loss
-        )
-        total = total + contribution
-        diagnostics["loss/anchor_neighborhood"] = (
-            batch.anchor_neighborhood_loss.detach()
-        )
-        diagnostics["anchor_neighborhood/contribution"] = contribution.detach()
-    if (
-        batch.seam_fake is not None
-        and len(batch.seam_fake)
-        and settings.anchor_seam_weight > 0.0
-    ):
-        fake = batch.seam_fake
-        time = torch.full(
-            (len(fake),),
-            batch.transition,
-            device=fake.values.device,
-            dtype=torch.long,
-        )
-        seam = get_generator_loss(
-            seam_critic(fake.values, fake.axes, time, batch.seam_domains)
-        ).global_loss
-        contribution = batch.anchor_ramp * settings.anchor_seam_weight * seam
-        total = total + contribution
-        diagnostics["loss/anchor_seam"] = seam.detach()
-        diagnostics["anchor_seam/contribution"] = contribution.detach()
     if (
         settings.group_statistics_weight > 0
         and batch.transition == 0
@@ -150,14 +67,12 @@ def denoiser_objective(
                 for name, axes in groups.items()
             }
         )
-        active = None if batch.anchor is None else ~batch.anchor_present.bool()
         statistics, values = compute_group_statistics_loss(
             batch.clean_probs,
             observed,
             settings.group_statistics_max_gap,
             settings.group_statistics_tolerance,
             settings.preserve_height,
-            active,
             batch.coarse_target,
         )
         total = total + (
@@ -167,11 +82,6 @@ def denoiser_objective(
         diagnostics["loss/group_statistics"] = statistics.detach()
         diagnostics["group_statistics/ramp"] = statistics.new_tensor(
             batch.group_statistics_ramp
-        )
-        diagnostics["group_statistics/active_fraction"] = (
-            statistics.new_tensor(1)
-            if active is None
-            else active.float().mean().to(statistics)
         )
     if settings.mirror_balance_weight > 0:
         # The x0 prediction of every transition must keep the mirror symmetry.
@@ -191,18 +101,7 @@ def denoiser_objective(
         consistency, values = coarse_loss(batch, settings)
         total = total + settings.consistency_weight * consistency
         diagnostics.update(values)
-    return DenoiserUpdate(
-        adversarial=adversarial,
-        total=total,
-        connectivity=connectivity,
-        connectivity_global=connectivity_global,
-        connectivity_local=connectivity_local,
-        anchor=anchor,
-        anchor_coarse=anchor_coarse,
-        anchor_pixel=anchor_pixel,
-        anchor_accuracy=anchor_accuracy,
-        vf=vf,
-    ), diagnostics
+    return DenoiserUpdate(adversarial=adversarial, total=total, vf=vf), diagnostics
 
 
 def adversarial_loss(batch, critics, groups, diagnose):
@@ -254,7 +153,7 @@ def adversarial_loss(batch, critics, groups, diagnose):
                 diagnostics[f"{prefix}/{name}"] = norm
         count = len(groups[axis_critics[axis]]) * len(groups)
         losses.append(loss / count)
-    loss = torch.stack(losses).sum() if losses else batch.logits.sum() * 0
+    loss = torch.stack(losses).sum() if losses else batch.clean_probs.sum() * 0
     return loss, diagnostics
 
 

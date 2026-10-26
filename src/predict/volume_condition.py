@@ -5,7 +5,7 @@ from itertools import product
 
 import torch
 
-from src.anchor import anchor_origin, anchor_probabilities
+from src.predict.anchor import anchor_origin, anchor_probabilities
 from src.prepare.resize import phase_channels
 
 

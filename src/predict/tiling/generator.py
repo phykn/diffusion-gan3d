@@ -3,7 +3,12 @@ from dataclasses import replace
 
 import torch
 
-from src.anchor import PlaneAnchor, anchor_origin, encode_anchors
+from src.predict.anchor import (
+    AnchorGuidance,
+    PlaneAnchor,
+    anchor_origin,
+    encode_anchors,
+)
 from src.predict.generator import Generator, profile_feasible
 from src.predict.memory import estimate_memory, select_storage
 from src.predict.tiling.layout import (
@@ -136,32 +141,30 @@ class TiledGenerator:
             output_shape,
             plan,
             tiles,
-            tile_anchors if anchor_strength == 1 else ((),) * len(tiles),
             base,
             domain,
             height_origin,
             height_extent,
         )
 
+        def guidance_for(tile, index):
+            if not tile_anchors[index]:
+                return None
+            anchor = encode_anchors(
+                tile_anchors[index],
+                1,
+                self.generator.num_phases,
+                tuple(part.stop - part.start for part in tile.source),
+                self.generator.device,
+                torch.float32,
+                validate=False,
+            )
+            return AnchorGuidance(anchor.image, anchor.mask, anchor_strength)
+
         def conditions(tile, index):
             generator = self.generator
             shape = tuple(part.stop - part.start for part in tile.source)
             result = {"vf": vf}
-            if tile_anchors[index]:
-                anchor = encode_anchors(
-                    tile_anchors[index],
-                    1,
-                    generator.num_phases,
-                    shape,
-                    generator.device,
-                    torch.float32,
-                    validate=False,
-                )
-                result.update(
-                    anchor_image=anchor.image,
-                    anchor_mask=anchor.mask,
-                    anchor_strength=anchor_strength,
-                )
             offset = tile.source[0].start - plan.margin
             result["height"] = generator.height_condition(
                 shape, domain, height_origin, offset, height_extent
@@ -188,14 +191,15 @@ class TiledGenerator:
             progress=progress,
             guidance=guidance,
             tile_conditions=conditions,
+            tile_guidance=guidance_for if any(tile_anchors) else None,
         )
         self.stats = output_plan(plan, output_shape)
         return output
 
     def validate_profile_constraints(
-        self, spec, shape, plan, tiles, anchors, base, domain, origin, extent
+        self, spec, shape, plan, tiles, base, domain, origin, extent
     ):
-        if spec is None or (not any(anchors) and (base is None or not base.preserve)):
+        if spec is None or base is None or not base.preserve:
             return
         generator = self.generator
         target = generator.profile_condition(
@@ -203,7 +207,7 @@ class TiledGenerator:
         ).cpu() * (shape[1] * shape[2])
         known = torch.zeros_like(target)
         count = torch.zeros(1, 1, shape[0])
-        for tile, planes in zip(tiles, anchors, strict=True):
+        for tile in tiles:
             region = tuple(
                 slice(max(p.start, plan.margin), min(p.stop, plan.margin + n))
                 for p, n in zip(tile.target, shape)
@@ -213,22 +217,7 @@ class TiledGenerator:
             tile_shape = tuple(p.stop - p.start for p in tile.source)
             values = torch.zeros(1, generator.num_phases, *tile_shape)
             mask = torch.zeros(1, 1, *tile_shape, dtype=torch.bool)
-            if planes:
-                condition = encode_anchors(
-                    tuple(replace(p, image=p.image.cpu()) for p in planes),
-                    1,
-                    generator.num_phases,
-                    tile_shape,
-                    torch.device("cpu"),
-                    torch.float32,
-                )
-                values = (condition.image + 1) * 0.5
-                mask = condition.mask.bool()
-            if (
-                base is not None
-                and base.preserve
-                and (parts := base.intersection(tile.source)) is not None
-            ):
+            if (parts := base.intersection(tile.source)) is not None:
                 source, local = parts
                 values[(..., *local)] = (base.clean[(..., *source)].cpu() + 1) * 0.5
                 mask[(..., *local)] = True
@@ -242,7 +231,7 @@ class TiledGenerator:
             count[..., depth] += mask.sum((-1, -2))
         free = shape[1] * shape[2] - count
         if not profile_feasible(target, known, free):
-            raise ValueError("profile conflicts with fixed anchors or preserved base.")
+            raise ValueError("profile conflicts with the preserved base.")
 
     def prepare_anchors(self, anchors, tiles, plan):
         shape = tuple(size - 2 * plan.margin for size in plan.shape)

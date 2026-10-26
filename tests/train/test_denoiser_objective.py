@@ -56,13 +56,13 @@ def test_grouped_objective_preserves_weighting_and_generator_gradient(diagnose):
 
 
 def test_empty_adversarial_batch_returns_differentiable_zero():
-    logits = torch.ones(1, 2, 3, 3, 3, requires_grad=True)
+    probs = torch.ones(1, 2, 3, 3, 3, requires_grad=True)
     empty = torch.empty(0, 2, 3, 3)
-    batch = SimpleNamespace(fake=SampledPairs({0: (empty, empty)}), logits=logits)
+    batch = SimpleNamespace(fake=SampledPairs({0: (empty, empty)}), clean_probs=probs)
     loss, diagnostics = adversarial_loss(batch, {}, {"xy": (0,)}, True)
     assert loss == 0
     loss.backward()
-    assert torch.equal(logits.grad, torch.zeros_like(logits))
+    assert torch.equal(probs.grad, torch.zeros_like(probs))
     assert diagnostics == {}
 
 

@@ -108,6 +108,14 @@ def test_sample_rejects_unknown_or_invalid_settings(tmp_path, sample, match):
         build_train_config(load_sample(write_sample(tmp_path, **sample)), "low_res")
 
 
+@pytest.mark.parametrize("stage", ["lr", "sr"])
+def test_tune_typos_fail_before_any_stage_trains(tmp_path, capsys, stage):
+    path = write_sample(tmp_path, tune={stage: {"train": {"total_step": 10}}})
+    with pytest.raises(ValueError, match="unknown training setting: train.total_step"):
+        run_train.main([str(path), "--show"])
+    assert capsys.readouterr().out == ""
+
+
 def test_missing_sample_lists_available_names():
     with pytest.raises(FileNotFoundError, match="available: .*default"):
         load_sample("missing")
@@ -167,7 +175,6 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
             "tune": {
                 "lr": {
                     "model": model,
-                    "conditioning": {"anchor": {"probability": 0.0}},
                     "loss": {"r1_weight": 0.0},
                     "train": train,
                 },

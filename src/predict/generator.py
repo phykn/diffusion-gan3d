@@ -5,11 +5,16 @@ from functools import partial
 
 import torch
 
-from src.anchor import PlaneAnchor, anchor_origin, encode_anchors
 from src.device import wide_dtype
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.phase import validate_num_phases
+from src.predict.anchor import (
+    AnchorGuidance,
+    PlaneAnchor,
+    anchor_origin,
+    encode_anchors,
+)
 from src.predict.convert import labels_from_channels, owned_clean_to_probs_
 from src.predict.memory import estimate_memory, select_storage
 from src.prepare.height import height_field, resolve_extent
@@ -53,28 +58,18 @@ class Generator:
         latent: torch.Tensor,
         domain: torch.Tensor,
         guidance: float = 1.0,
-        anchor_strength: float = 1.0,
         **conditions,
     ) -> torch.Tensor:
-        if anchor_strength == 0:
-            conditions.update(anchor_image=None, anchor_mask=None)
         conditions = {
             name: value for name, value in conditions.items() if value is not None
         }
-        partial_anchor = "anchor_mask" in conditions and 0.0 < anchor_strength < 1.0
         with torch.autocast(
             device_type=self.device.type, dtype=torch.float16, enabled=self.use_amp
         ):
-            if guidance == 1.0 and not partial_anchor:
+            if guidance == 1.0:
                 return self.model(current, time, latent, domain=domain, **conditions)
             logits = self.model.apply_guidance_logits(
-                current,
-                time,
-                latent,
-                guidance,
-                **({"anchor_strength": anchor_strength} if partial_anchor else {}),
-                domain=domain,
-                **conditions,
+                current, time, latent, guidance, domain=domain, **conditions
             )
             return Denoiser3D.decode(logits).to(current.dtype)
 
@@ -150,8 +145,8 @@ class Generator:
         height_extent = self.validate_height(
             (size,) * 3, domain, height_origin, height_extent
         )
-        # Anchors at any strength skip the default profile, so a strength sweep
-        # stays continuous at zero, where only the plain logits remain.
+        # Anchors at any strength skip the default profile, so a zero-strength
+        # baseline keeps the same conditions as its anchored sample.
         if vf_profile is None and vf is None and not anchors:
             vf_profile = self.default_profile(domain)
         self.validate_profile_request(
@@ -202,31 +197,20 @@ class Generator:
                 height_extent,
             )
             conditions.update(profile=profile, vf=profile.mean(-1))
-            if anchor is not None and anchor_strength == 1:
-                region = (..., *(slice(margin, margin + size),) * 3)
-                mask = anchor.mask[region]
-                known = ((anchor.image[region] + 1) * 0.5 * mask).sum((-1, -2))
-                area = size * size
-                target = profile[..., margin : margin + size] * area
-                if not profile_feasible(target, known, area - mask.sum((-1, -2))):
-                    raise ValueError(
-                        "profile conflicts with fixed anchor phase fractions."
-                    )
+        guide = None
         if anchor is not None:
-            conditions.update(anchor_image=anchor.image, anchor_mask=anchor.mask)
-        clean = self.sample(initial_noise, conditions, guidance, anchor_strength)
+            guide = AnchorGuidance(anchor.image, anchor.mask, anchor_strength)
+        clean = self.sample(initial_noise, conditions, guidance, guide)
         if margin:
             region = slice(margin, margin + size)
             clean = clean[:, :, region, region, region].clone()
         return clean
 
-    def sample(self, noise, conditions, guidance, anchor_strength=1.0):
+    def sample(self, noise, conditions, guidance, guide=None):
         """Run the full reverse diffusion from noise to clean phase values."""
-        model = partial(
-            self.predict, guidance=guidance, anchor_strength=anchor_strength
-        )
+        model = partial(self.predict, guidance=guidance)
         return self.diffusion.sample(
-            model, noise, self.latent_channels, conditions=conditions
+            model, noise, self.latent_channels, conditions=conditions, guide=guide
         )
 
     def height_condition(self, shape, domain, origin, offset=0, extent=None):
@@ -300,9 +284,9 @@ class Generator:
             isinstance(strength, bool)
             or not isinstance(strength, (int, float))
             or not math.isfinite(strength)
-            or not 0 <= strength <= 1
+            or strength < 0
         ):
-            raise ValueError("anchor_strength must be between zero and one.")
+            raise ValueError("anchor_strength must be finite and non-negative.")
         return float(strength)
 
     @staticmethod

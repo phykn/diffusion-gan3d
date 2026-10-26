@@ -94,7 +94,7 @@ def test_partial_generation_settings_preserve_supplied_options(monkeypatch, key,
         ({"guidance": float("nan")}, "guidance"),
         ({"guidance": True}, "guidance"),
         ({"anchor_strength": -0.1}, "anchor_strength"),
-        ({"anchor_strength": 1.1}, "anchor_strength"),
+        ({"anchor_strength": float("inf")}, "anchor_strength"),
         ({"margin": 0}, "unknown generation setting: margin"),
     ),
 )

@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from src.config.files import PROJECT_ROOT, load_yaml, project_path
+from src.config.train import normalize_train_config
 from src.data.source import infer_num_phases
 from src.plane import PLANES
 
@@ -80,6 +81,8 @@ def build_train_config(sample: Mapping, stage: str) -> dict:
     cfg = {"stage": stage, "nickname": sample["name"], "data": data} | base
     merge(cfg, get_structure_settings(sample["structure"], list(images), stage))
     merge(cfg, copy.deepcopy(sample["tune"].get(STAGE_NAMES[stage]) or {}))
+    # A bad tune.sr fails here, not after the LR stage has trained.
+    normalize_train_config(cfg, stage)
     return cfg
 
 

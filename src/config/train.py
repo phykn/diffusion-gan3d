@@ -94,9 +94,9 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     ]
     if stage == "low_res":
         flags += [
-            "model.generator.anchor_multiscale_input",
             "conditioning.spatial_profile.enabled",
             "conditioning.spatial_profile.critic_enabled",
+            "selection.enabled",
         ]
     for name in flags:
         check_boolean(_setting(cfg, name), name)
@@ -110,9 +110,9 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     ]
     if stage == "low_res":
         integers += [
-            ("loss.anchor_seam_rows", 1),
-            ("loss.connectivity.max_slice_gap", 1),
+            ("loss.real_transition.max_gap", 1),
             ("conditioning.spatial_profile.num_bins", 1),
+            ("selection.samples", 1),
         ]
     for name, minimum in integers:
         check_integer(_setting(cfg, name), name, minimum)
@@ -184,18 +184,13 @@ def validate_training_settings(cfg: Mapping) -> None:
     _require_settings(cfg, TRAINING_SETTINGS)
     train = cfg["train"]
     conditioning, _ = get_trainer_sections(cfg)
-    anchor = conditioning["anchor"]
-    start, _ = get_schedule_steps(anchor, "conditioning.anchor")
-    if train["volume_batch_size"] > train["real_batch_size"]:
-        if anchor["probability"] > 0.0 and start < train["total_steps"]:
-            raise ValueError(
-                "train.volume_batch_size must not exceed train.real_batch_size when "
-                "anchor training is enabled."
-            )
-        if conditioning["height_enabled"]:
-            raise ValueError(
-                "height conditioning requires real_batch_size >= volume_batch_size."
-            )
+    if (
+        train["volume_batch_size"] > train["real_batch_size"]
+        and conditioning["height_enabled"]
+    ):
+        raise ValueError(
+            "height conditioning requires real_batch_size >= volume_batch_size."
+        )
 
 
 def _require_settings(cfg: Mapping, paths: Sequence[str]) -> None:

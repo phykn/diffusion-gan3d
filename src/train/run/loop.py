@@ -45,13 +45,11 @@ def make_run_dir(
 
 def save_weights(trainer: Trainer, root: Path, stage: str = "low_res") -> None:
     root.mkdir(parents=True, exist_ok=True)
-    save_generator(trainer, root / "generator.pt", stage)
+    # With selection, generator.pt is the best scored step, not the latest.
+    if trainer.selection is None or not trainer.selection.export(root):
+        save_generator(trainer, root / "generator.pt", stage)
     for group, critic in trainer.critics.items():
         save_model(root / f"critic_{group}.pt", critic)
-    if trainer.connectivity_critic is not None:
-        save_model(root / "critic_c.pt", trainer.connectivity_critic)
-    if trainer.seam_critic is not None:
-        save_model(root / "critic_s.pt", trainer.seam_critic)
 
 
 def save_generator(trainer, path, stage, overwrite=True):
@@ -59,6 +57,18 @@ def save_generator(trainer, path, stage, overwrite=True):
         export_sr(trainer, path, overwrite=overwrite)
     else:
         torch_save(trainer.ema_denoiser.state_dict(), path, overwrite=overwrite)
+
+
+def select_step(trainer, root, writer):
+    entry = trainer.selection.update(trainer, root)
+    best = trainer.selection.best()
+    for name in ("coverage", "two_point_mae", "chord_tv", "structure"):
+        writer.add_scalar(f"selection/{name}", entry[name], entry["step"])
+    writer.add_scalar("selection/best_step", best["step"], entry["step"])
+    tqdm.write(
+        f"Step {entry['step']}: coverage {entry['coverage']:.3f}, "
+        f"structure {entry['structure']:.2f}; best step {best['step']}"
+    )
 
 
 def save_checkpoint(trainer, root, stage):
@@ -148,12 +158,17 @@ def run_train(
                 # An interrupt while saving leaves that save incomplete; saving
                 # again would collide with its files, so stop without it.
                 at_boundary = False
+                save_now = done % save_every == 0 or done == steps
+                # Score before the checkpoint so a resume keeps this step's score.
+                if save_now and trainer.selection is not None:
+                    select_step(trainer, root, writer)
+                    writer.flush()
                 if done == steps or (
                     checkpoint_every is not None and done % checkpoint_every == 0
                 ):
                     save_checkpoint(trainer, root, stage)
                     checkpoint_step = trainer.completed_steps
-                if done % save_every == 0 or done == steps:
+                if save_now:
                     save_weights(trainer, root, stage)
                 at_boundary = True
                 if stop.is_set():

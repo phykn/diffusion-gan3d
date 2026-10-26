@@ -7,14 +7,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.anchor import PlaneAnchor
 from src.build.model import build_models
 from src.build.predict import load_generator
-from src.build.trainer import build_trainer
 from src.config.files import save_yaml
 from src.evaluate.seam import measure_seams
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
+from src.predict.anchor import AnchorGuidance, PlaneAnchor
 from src.predict.generator import Generator
 from src.predict.tiling.fusion import get_axis_windows, make_fusion
 from src.predict.tiling.generator import TiledGenerator
@@ -28,6 +27,19 @@ _SCALED_GENERATE = TiledGenerator.generate
 _SCALED_GENERATE_PROBS = TiledGenerator.generate_probs
 _GENERATOR_GENERATE = Generator.generate
 _GENERATOR_GENERATE_PROBS = Generator.generate_probs
+
+
+@pytest.fixture
+def guidance_calls(monkeypatch: pytest.MonkeyPatch) -> list[AnchorGuidance]:
+    calls = []
+    original = AnchorGuidance.__call__
+
+    def record(self, *args, **kwargs):
+        calls.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(AnchorGuidance, "__call__", record)
+    return calls
 
 
 @pytest.fixture(autouse=True)
@@ -54,21 +66,6 @@ def preserve_generation_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Generator, "generate_probs", direct_generate_probs)
 
 
-def test_build_models_uses_boolean_anchor_multiscale(
-    tmp_path: Path,
-) -> None:
-    cfg = _config(tmp_path)
-
-    single, _, _ = build_models(cfg)
-    cfg["model"]["generator"]["anchor_multiscale_input"] = True
-    multiscale, _, _ = build_models(cfg)
-
-    assert not single.anchor_multiscale
-    assert len(single.anchor_pyramid) == 0
-    assert multiscale.anchor_multiscale
-    assert len(multiscale.anchor_pyramid) == 1
-
-
 def test_build_models_rejects_non_multiple_generator_channels(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     cfg["model"]["generator"]["channels"] = [4, 7]
@@ -84,7 +81,7 @@ def test_ema_weights_generate_categorical_volume(
     run_dir = tmp_path / "run" / "sample"
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
-    denoiser, _, _ = build_models(cfg)
+    denoiser, _ = build_models(cfg)
     ema = build_ema(denoiser)
     weights = save_model(run_dir / "generator.pt", ema)
 
@@ -113,7 +110,7 @@ def test_generator_loads_numbered_checkpoint_with_run_config(tmp_path: Path) -> 
     run_dir = tmp_path / "run" / "sample"
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
-    denoiser, _, _ = build_models(cfg)
+    denoiser, _ = build_models(cfg)
     weights = save_model(
         run_dir / "checkpoints" / "generator_00000010.pt",
         build_ema(denoiser),
@@ -124,22 +121,15 @@ def test_generator_loads_numbered_checkpoint_with_run_config(tmp_path: Path) -> 
     assert generator.generate().shape == (8, 8, 8)
 
 
-def test_anchor_aware_weights_accept_soft_plane_condition(
+def test_saved_weights_generate_with_anchor_planes(
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
-    cfg["model"]["generator"]["anchor_multiscale_input"] = True
-    cfg["conditioning"]["anchor"]["probability"] = 0.5
     run_dir = tmp_path / "run" / "anchored"
     run_dir.mkdir(parents=True)
     save_yaml(run_dir / "train.yaml", cfg)
-    denoiser, _, _ = build_models(cfg)
-    ema = build_ema(denoiser)
-    with torch.no_grad():
-        ema.anchor_input.weight.fill_(0.01)
-        for projection in ema.anchor_pyramid:
-            projection.weight.fill_(0.01)
-    weights = save_model(run_dir / "generator.pt", ema)
+    denoiser, _ = build_models(cfg)
+    weights = save_model(run_dir / "generator.pt", build_ema(denoiser))
     generator = load_generator(weights, device=torch.device("cpu"))
     anchor = PlaneAnchor(
         image=torch.randint(
@@ -159,42 +149,6 @@ def test_anchor_aware_weights_accept_soft_plane_condition(
     assert vol.shape == (8, 8, 8)
     assert vol.dtype == torch.uint8
     assert int(vol.max()) < cfg["data"]["num_phases"]
-
-
-def test_generator_accepts_anchors_when_training_never_reaches_start(
-    tmp_path: Path,
-) -> None:
-    cfg = _config(tmp_path)
-    cfg["conditioning"]["anchor"]["start_step"] = cfg["train"]["total_steps"]
-    run_dir = tmp_path / "run" / "unanchored"
-    run_dir.mkdir(parents=True)
-    save_yaml(run_dir / "train.yaml", cfg)
-    denoiser, _, _ = build_models(cfg)
-    weights = save_model(run_dir / "generator.pt", build_ema(denoiser))
-
-    generator = load_generator(weights, device=torch.device("cpu"))
-    anchor = PlaneAnchor(
-        image=torch.zeros(8, 8, dtype=torch.uint8),
-        axis=0,
-        index=4,
-    )
-
-    volume = generator.generate(anchors=(anchor,))
-
-    assert volume.shape == (8, 8, 8)
-    assert volume.dtype == torch.uint8
-    assert int(volume.max()) < cfg["data"]["num_phases"]
-
-
-def test_build_trainer_rejects_anchor_batch_larger_than_real_batch(
-    tmp_path: Path,
-) -> None:
-    cfg = _config(tmp_path)
-    cfg["conditioning"]["anchor"]["probability"] = 1.0
-    cfg["train"]["volume_batch_size"] = 3
-
-    with pytest.raises(ValueError, match="volume_batch.*train.real_batch_size"):
-        build_trainer(cfg, torch.device("cpu"))
 
 
 def test_generator_prepares_vf_on_its_device() -> None:
@@ -326,7 +280,7 @@ def test_direct_generation_uses_the_model_downsample_factor_as_margin() -> None:
     assert model.calls[0].current.shape == (1, 3, 20, 20, 20)
 
 
-def test_direct_anchor_coordinates_survive_margin_crop() -> None:
+def test_direct_anchor_coordinates_survive_margin_crop(guidance_calls) -> None:
     model = _AnchorTraceModel()
     model.downsample_factor = 8
     generator = _generator(model, Diffusion(1))
@@ -341,9 +295,8 @@ def test_direct_anchor_coordinates_survive_margin_crop() -> None:
 
     assert volume.shape == (4, 4, 4)
     assert len(model.calls) == 1
-    anchor_mask = model.calls[0].anchor_mask
-    assert anchor_mask is not None
-    mask = anchor_mask[0, 0]
+    assert model.calls[0].anchor_mask is None
+    mask = guidance_calls[0].mask[0, 0]
     assert mask.shape == (20, 20, 20)
     assert int(mask.sum()) == 16
     assert torch.all(mask[9, 8:12, 8:12])
@@ -462,7 +415,7 @@ def test_amp_guidance_runs_direct_and_scaled_with_float32_diffusion_state() -> N
     assert direct.dtype == scaled.dtype == torch.uint8
 
 
-def test_guided_sampling_uses_anchor_as_a_condition() -> None:
+def test_guided_sampling_keeps_anchors_out_of_the_model(guidance_calls) -> None:
     model = _GuidanceTraceModel()
     generator = _generator(model, Diffusion(2))
     anchor = PlaneAnchor(
@@ -484,8 +437,9 @@ def test_guided_sampling_uses_anchor_as_a_condition() -> None:
     assert volume.shape == (4, 4, 4)
     assert model.guidances == [1.5] * 2
     for call in apply_guidance_logits.call_args_list:
-        assert call.kwargs["anchor_image"] is not None
-        assert int(call.kwargs["anchor_mask"].sum()) == 16
+        assert "anchor_image" not in call.kwargs
+        assert "anchor_mask" not in call.kwargs
+    assert [int(guide.mask.sum()) for guide in guidance_calls] == [16] * 2
 
 
 def test_tiled_unit_guidance_uses_one_conditioned_prediction_per_tile_and_transition() -> (
@@ -595,7 +549,9 @@ def test_scaled_generation_shares_time_and_latent_before_each_state_update() -> 
 
 
 @pytest.mark.parametrize("tiled", (False, True))
-def test_partial_anchor_strength_uses_binary_paths_on_one_state(tiled) -> None:
+def test_anchor_guidance_runs_one_plain_forward_per_tile_and_transition(
+    tiled, guidance_calls
+) -> None:
     model = Denoiser3D(
         num_phases=3,
         base_channels=4,
@@ -618,13 +574,10 @@ def test_partial_anchor_strength_uses_binary_paths_on_one_state(tiled) -> None:
         else:
             gen.generate_probs(**kwargs)
 
-    assert logits.call_count > 0
-    for anchored, plain in zip(
-        logits.call_args_list[::2], logits.call_args_list[1::2], strict=True
-    ):
-        assert anchored.kwargs["anchor_mask"].max() == 1
-        assert plain.kwargs.get("anchor_mask") is None
-        assert all(a is b for a, b in zip(anchored.args[:3], plain.args[:3]))
+    tiles = 2 if tiled else 1
+    assert logits.call_count == len(guidance_calls) == 2 * tiles
+    assert all(call.kwargs.get("anchor_mask") is None for call in logits.call_args_list)
+    assert all(guide.strength == 0.5 for guide in guidance_calls)
 
 
 def test_anchor_never_overwrites_a_different_model_prediction() -> None:
@@ -665,7 +618,7 @@ def test_zero_anchor_strength_matches_unconditioned_rng_path() -> None:
     assert torch.equal(conditioned, baseline)
 
 
-@pytest.mark.parametrize("strength", (-0.1, 1.1, float("nan"), True))
+@pytest.mark.parametrize("strength", (-0.1, float("inf"), float("nan"), True))
 def test_anchor_strength_rejects_invalid_values(strength: object) -> None:
     generator = _generator(_AnchorTraceModel(), Diffusion(1))
 
@@ -673,7 +626,7 @@ def test_anchor_strength_rejects_invalid_values(strength: object) -> None:
         generator.generate_probs(anchor_strength=strength)
 
 
-def test_mixed_axis_anchors_use_one_joint_conditioned_state() -> None:
+def test_mixed_axis_anchors_use_one_joint_guided_state(guidance_calls) -> None:
     model = _AnchorTraceModel()
     diffusion = _TraceDiffusion(timesteps=2)
     generator = _generator(model, diffusion)
@@ -695,9 +648,8 @@ def test_mixed_axis_anchors_use_one_joint_conditioned_state() -> None:
     assert diffusion.sample_calls == 1
     assert len(diffusion.calls) == 2
     assert len(model.calls) == 2
-    for call in model.calls:
-        assert call.anchor_mask is not None
-        assert int(call.anchor_mask.sum()) == 28
+    assert all(call.anchor_mask is None for call in model.calls)
+    assert [int(guide.mask.sum()) for guide in guidance_calls] == [28] * 2
 
 
 def test_scaled_generation_reuses_vf_for_every_tile_and_transition() -> None:
@@ -1590,7 +1542,9 @@ def test_scaled_generation_rejects_invalid_base(
         scaled.generate(shape=6, overlap=0, base=base, progress=False)
 
 
-def test_repeated_extension_preserves_arbitrary_base_and_accepts_new_anchor():
+def test_repeated_extension_preserves_arbitrary_base_and_accepts_new_anchor(
+    guidance_calls,
+):
     model = _AnchorTraceModel()
     scaled = TiledGenerator(_generator(model, Diffusion(2)))
     base = torch.ones(5, 4, 4, dtype=torch.uint8)
@@ -1607,9 +1561,7 @@ def test_repeated_extension_preserves_arbitrary_base_and_accepts_new_anchor():
         progress=False,
     )
     assert torch.equal(first[:5], base)
-    assert any(
-        call.anchor_mask is not None and call.anchor_mask.any() for call in model.calls
-    )
+    assert any(guide.mask.any() for guide in guidance_calls)
     assert all(call.vf is not None for call in model.calls)
     again = scaled.generate(
         shape=(10, 4, 4),
@@ -2118,6 +2070,7 @@ class _TraceDiffusion(Diffusion):
         latent_channels: int,
         *,
         conditions: dict[str, object] | None = None,
+        guide=None,
     ) -> torch.Tensor:
         self.sample_calls += 1
         return super().sample(
@@ -2125,6 +2078,7 @@ class _TraceDiffusion(Diffusion):
             initial_noise,
             latent_channels,
             conditions=conditions,
+            guide=guide,
         )
 
     def sample_posterior(
@@ -2218,7 +2172,6 @@ def _config(root: Path) -> dict:
                 "channels": [4, 8],
                 "latent_channels": 4,
                 "embedding_channels": 8,
-                "anchor_multiscale_input": False,
             },
             "critic": {
                 "channels": [4, 8],
@@ -2260,13 +2213,7 @@ def _config(root: Path) -> dict:
         },
         "conditioning": {
             "domain_keep_probability": 1.0,
-            "anchor": {
-                "probability": 0.0,
-                "start_step": 0,
-                "ramp_steps": 0,
-                "borrowed_plane_probability": 0.0,
-            },
-            "dropout_probability_per_case": 0.0,
+            "cfg_dropout_probability": 0.0,
         },
         "augmentation": {
             "probability": 0.0,
@@ -2277,11 +2224,6 @@ def _config(root: Path) -> dict:
             },
         },
         "loss": {
-            "anchor_pixel_weight": 0.05,
-            "connectivity": {
-                "adversarial_weight": 0.0,
-                "local_weight": 0.5,
-            },
             "volume_fraction_weight": 1.0,
             "r1_weight": 0.0,
             "r1_every_steps": 2,

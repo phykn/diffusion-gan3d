@@ -21,31 +21,13 @@ def load_training(path: str | Path, stage: str) -> dict:
 
 def save_training(trainer, path: str | Path) -> None:
     payload = _capture_state(trainer)
-    payload.update(
-        format=TRAIN_FORMATS["low_res"],
-        connectivity=trainer.connectivity_critic.state_dict(),
-        connectivity_optim=trainer.connectivity_optim.state_dict(),
-        seam=trainer.seam_critic.state_dict(),
-        seam_optim=trainer.seam_optim.state_dict(),
-        use_multi_anchor_next=trainer.conditions.use_multi_anchor_next,
-        anchor_bank=trainer.conditions.anchor_bank.entries,
-    )
+    payload["format"] = TRAIN_FORMATS["low_res"]
     torch_save(payload, path, overwrite=False)
 
 
 def resume_training(trainer, payload: dict) -> None:
     _check_resume(trainer, payload, "low_res")
-    missing = {"connectivity", "connectivity_optim", "seam", "seam_optim"}
-    missing -= payload.keys()
-    if missing:
-        raise ValueError(f"LR training checkpoint is missing {sorted(missing)}.")
     _restore_state(trainer, payload)
-    trainer.connectivity_critic.load_state_dict(payload["connectivity"])
-    trainer.connectivity_optim.load_state_dict(payload["connectivity_optim"])
-    trainer.seam_critic.load_state_dict(payload["seam"])
-    trainer.seam_optim.load_state_dict(payload["seam_optim"])
-    trainer.conditions.use_multi_anchor_next = payload["use_multi_anchor_next"]
-    trainer.conditions.anchor_bank.entries = payload["anchor_bank"]
 
 
 def save_sr_training(trainer, path: str | Path) -> None:
@@ -96,6 +78,9 @@ def _capture_state(trainer) -> dict:
             name: optim.state_dict() for name, optim in trainer.critic_optims.items()
         },
         "scaler": trainer.scaler.state_dict(),
+        "selection": None
+        if trainer.selection is None
+        else trainer.selection.state_dict(),
     }
 
 
@@ -115,6 +100,8 @@ def _restore_state(trainer, payload: dict) -> None:
     # starts from its initial scale.
     if payload["scaler"]:
         trainer.scaler.load_state_dict(payload["scaler"])
+    if trainer.selection is not None:
+        trainer.selection.load_state_dict(payload["selection"])
     trainer.updates = dict(payload["updates"])
     trainer.completed_steps = payload["step"]
     trainer.path_maps = path_maps

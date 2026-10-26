@@ -26,7 +26,6 @@ def test_channel_norm_preserves_large_half_precision_features():
 def _denoiser(
     *,
     checkpointing: bool = False,
-    anchor_multiscale: bool = False,
 ) -> Denoiser3D:
     return Denoiser3D(
         num_phases=3,
@@ -36,7 +35,6 @@ def _denoiser(
         latent_channels=4,
         num_domains=2,
         gradient_checkpointing=checkpointing,
-        anchor_multiscale=anchor_multiscale,
     )
 
 
@@ -211,194 +209,6 @@ class Denoiser3DTest(unittest.TestCase):
 
         self.assertEqual(output.shape, torch.Size([1, 3, 8, 8, 8]))
 
-    def test_soft_anchor_adapter_preserves_null_path_and_receives_gradients(self):
-        model = _denoiser()
-        inputs = torch.randn(1, 3, 4, 4, 4)
-        time = torch.zeros(1)
-        latent = torch.randn(1, 4)
-        domain = _domain(inputs)
-        anchor_image = torch.zeros_like(inputs)
-        anchor_image[:, 0, 2] = 1.0
-        anchor_image[:, 1:, 2] = -1.0
-        anchor_mask = torch.zeros(1, 1, 4, 4, 4, dtype=torch.bool)
-        anchor_mask[:, :, 2] = True
-
-        plain = model(inputs, time, latent, domain)
-        anchored = model(
-            inputs,
-            time,
-            latent,
-            domain,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
-        )
-        empty = model(
-            inputs,
-            time,
-            latent,
-            domain,
-            anchor_image=torch.zeros_like(inputs),
-            anchor_mask=torch.zeros_like(anchor_mask),
-        )
-
-        self.assertTrue(torch.equal(plain, anchored))
-        self.assertTrue(torch.equal(plain, empty))
-        anchored.square().mean().backward()
-        self.assertIsNotNone(model.anchor_input.weight.grad)
-        self.assertGreater(float(model.anchor_input.weight.grad.abs().sum()), 0.0)
-
-        with torch.no_grad():
-            model.anchor_input.weight.zero_()
-            model.anchor_input.weight[:, -1].fill_(0.5)
-        learned_plain = model(inputs, time, latent, domain)
-        learned_empty = model(
-            inputs,
-            time,
-            latent,
-            domain,
-            anchor_image=torch.zeros_like(inputs),
-            anchor_mask=torch.zeros_like(anchor_mask),
-        )
-        self.assertTrue(torch.equal(learned_plain, learned_empty))
-        learned_anchor = model(
-            inputs,
-            time,
-            latent,
-            domain,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
-        )
-        self.assertFalse(torch.equal(learned_plain, learned_anchor))
-
-    def test_multiscale_anchor_adapter_starts_null_and_all_levels_learn(self):
-        torch.manual_seed(0)
-        model = Denoiser3D(
-            num_phases=3,
-            base_channels=4,
-            channel_multipliers=(1, 2, 4, 4),
-            embedding_channels=8,
-            latent_channels=4,
-            num_domains=2,
-            anchor_multiscale=True,
-        )
-        inputs = torch.randn(1, 3, 8, 8, 8)
-        time = torch.zeros(1)
-        latent = torch.randn(1, 4)
-        domain = _domain(inputs)
-        anchor_image = torch.full_like(inputs, -1.0)
-        anchor_mask = torch.zeros(1, 1, 8, 8, 8, dtype=torch.bool)
-        anchor_mask[:, :, 4, 1:7, 2:6] = True
-        anchor_mask[:, :, 1:7, 3, 1:7] = True
-        anchor_image[:, 0].masked_fill_(anchor_mask[:, 0], 1.0)
-
-        plain = model.compute_logits(inputs, time, latent, domain)
-        anchored = model.compute_logits(
-            inputs,
-            time,
-            latent,
-            domain,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
-        )
-
-        self.assertEqual(len(model.anchor_pyramid), 3)
-        self.assertTrue(torch.equal(plain, anchored))
-        self.assertTrue(
-            all(
-                int(torch.count_nonzero(projection.weight)) == 0
-                for projection in model.anchor_pyramid
-            )
-        )
-
-        anchored.square().mean().backward()
-
-        for projection in model.anchor_pyramid:
-            self.assertIsNotNone(projection.weight.grad)
-            self.assertGreater(float(projection.weight.grad.abs().sum()), 0.0)
-
-        with torch.no_grad():
-            model.anchor_input.weight.fill_(0.1)
-            for projection in model.anchor_pyramid:
-                projection.weight.fill_(0.1)
-        learned_plain = model.compute_logits(inputs, time, latent, domain)
-        learned_empty = model.compute_logits(
-            inputs,
-            time,
-            latent,
-            domain,
-            anchor_image=torch.zeros_like(inputs),
-            anchor_mask=torch.zeros_like(anchor_mask),
-        )
-        learned_anchor = model.compute_logits(
-            inputs,
-            time,
-            latent,
-            domain,
-            anchor_image=anchor_image,
-            anchor_mask=anchor_mask,
-        )
-
-        self.assertTrue(torch.equal(learned_plain, learned_empty))
-        self.assertFalse(torch.equal(learned_plain, learned_anchor))
-
-    def test_multiscale_adapter_preserves_shared_seed_initialization(self):
-        torch.manual_seed(7)
-        single = _denoiser()
-        torch.manual_seed(7)
-        multiscale = _denoiser(anchor_multiscale=True)
-
-        multiscale_state = multiscale.state_dict()
-        for name, value in single.state_dict().items():
-            self.assertTrue(torch.equal(value, multiscale_state[name]), name)
-
-        inputs = torch.randn(1, 3, 4, 4, 4)
-        time = torch.zeros(1)
-        latent = torch.randn(1, 4)
-        domain = _domain(inputs)
-        self.assertTrue(
-            torch.equal(
-                single.compute_logits(inputs, time, latent, domain),
-                multiscale.compute_logits(inputs, time, latent, domain),
-            )
-        )
-
-    def test_multiscale_pool_normalizes_partial_anchor_and_keeps_coverage(self):
-        values = torch.zeros(1, 2, 4, 4, 4)
-        mask = torch.zeros(1, 1, 4, 4, 4)
-        mask[:, :, 0, 0, 0] = 1.0
-        values[:, :, 0, 0, 0] = -1.0
-        values[:, 0, 0, 0, 0] = 1.0
-        mask[:, :, :2, :2, 2:] = 1.0
-        values[:, :, :2, :2, 2:] = -1.0
-        values[:, 0, :2, :2, 2:] = 1.0
-
-        pooled = Denoiser3D._pool_anchor(values, mask, (2, 2, 2))
-
-        self.assertTrue(bool(torch.isfinite(pooled).all()))
-        torch.testing.assert_close(pooled[0, 0, 0, 0, 0], torch.tensor(1.0))
-        torch.testing.assert_close(pooled[0, 0, 0, 0, 1], torch.tensor(1.0))
-        torch.testing.assert_close(pooled[0, 1, 0, 0, 0], torch.tensor(-1.0))
-        torch.testing.assert_close(pooled[0, 1, 0, 0, 1], torch.tensor(-1.0))
-        torch.testing.assert_close(pooled[0, -1, 0, 0, 0], torch.tensor(0.125))
-        torch.testing.assert_close(pooled[0, -1, 0, 0, 1], torch.tensor(1.0))
-        self.assertEqual(float(pooled[0, :, 1, 1, 1].abs().sum()), 0.0)
-
-    def test_anchor_adapter_requires_paired_inputs(self):
-        model = _denoiser()
-        inputs = torch.randn(1, 3, 4, 4, 4)
-        time = torch.zeros(1)
-        latent = torch.randn(1, 4)
-        domain = _domain(inputs)
-
-        with self.assertRaisesRegex(ValueError, "provided together"):
-            model(
-                inputs,
-                time,
-                latent,
-                domain,
-                anchor_image=torch.zeros_like(inputs),
-            )
-
     def test_logit_guidance_preserves_default_and_combines_conditions(self):
         model = _denoiser()
         inputs = torch.randn(1, 3, 4, 4, 4)
@@ -478,8 +288,6 @@ class Denoiser3DTest(unittest.TestCase):
             domain: torch.Tensor,
             vf: torch.Tensor | None = None,
             vf_present: torch.Tensor | None = None,
-            anchor_image: torch.Tensor | None = None,
-            anchor_mask: torch.Tensor | None = None,
             height: torch.Tensor | None = None,
             profile: torch.Tensor | None = None,
             profile_present: torch.Tensor | None = None,
@@ -494,8 +302,6 @@ class Denoiser3DTest(unittest.TestCase):
                 domain,
                 vf=vf,
                 vf_present=vf_present,
-                anchor_image=anchor_image,
-                anchor_mask=anchor_mask,
                 height=height,
                 profile=profile,
                 profile_present=profile_present,
@@ -649,7 +455,6 @@ class PairCritic2DTest(unittest.TestCase):
 
         self.assertIsInstance(model.blocks[0].norm1, AdaptiveNorm)
         self.assertIsInstance(model.blocks[0].norm1.norm, GroupNorm)
-        self.assertIsNone(model.local_norm)
         self.assertIsInstance(model.output_norm, torch.nn.GroupNorm)
 
     def test_pair_and_time_conditioning_return_global_logits(self):
@@ -664,7 +469,6 @@ class PairCritic2DTest(unittest.TestCase):
 
         self.assertIsInstance(scores, CriticScores)
         self.assertEqual(scores.logits_global.shape, torch.Size([2]))
-        self.assertIsNone(scores.logits_local)
         self.assertFalse(torch.equal(first.logits_global, scores.logits_global))
         self.assertFalse(torch.equal(first.logits_global, other.logits_global))
 
@@ -673,7 +477,6 @@ class PairCritic2DTest(unittest.TestCase):
         self.assertIsNotNone(previous.grad)
         self.assertIsNotNone(current.grad)
         self.assertIsNotNone(model.output.weight.grad)
-        self.assertIsNone(model.local_output)
         self.assertTrue(bool(torch.isfinite(previous.grad).all()))
         self.assertTrue(bool(torch.isfinite(current.grad).all()))
         self.assertGreater(float(previous.grad.abs().sum()), 0.0)
@@ -710,11 +513,9 @@ class GradientCheckpointingTest(unittest.TestCase):
         loss.backward()
 
         self.assertEqual(scores.logits_global.shape, torch.Size([1]))
-        self.assertIsNone(scores.logits_local)
         self.assertGreater(float(previous.grad.abs().sum()), 0.0)
         self.assertGreater(float(current.grad.abs().sum()), 0.0)
         self.assertGreater(float(critic.output.weight.grad.abs().sum()), 0.0)
-        self.assertIsNone(critic.local_output)
 
 
 if __name__ == "__main__":

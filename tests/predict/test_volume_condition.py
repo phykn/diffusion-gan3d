@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.anchor import PlaneAnchor
+from src.predict.anchor import PlaneAnchor
 from src.predict.volume_condition import prepare_base, validate_base_anchors
 
 

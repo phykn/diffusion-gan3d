@@ -25,17 +25,10 @@ def trainer():
         denoiser=model,
         ema_denoiser=ema,
         critics=torch.nn.ModuleDict({"xy": model}),
-        connectivity_critic=model,
-        seam_critic=model,
         denoiser_optim=optim,
         critic_optims={"xy": optim},
-        connectivity_optim=optim,
-        seam_optim=optim,
         scaler=optim,
-        conditions=SimpleNamespace(
-            use_multi_anchor_next=False,
-            anchor_bank=SimpleNamespace(entries=[]),
-        ),
+        selection=None,
     )
 
 

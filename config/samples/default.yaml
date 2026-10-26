@@ -19,7 +19,8 @@ tune:
     # One image is the only real data, so the critic memorizes it late in
     # training and SR surfaces turn into 1-voxel pits. Isotropic, mirror-
     # symmetric data makes every flip/rotation a true symmetry, so always apply
-    # them; R2 matches R1 as in R3GAN. Archive often to pick the best step.
+    # them; R2 matches R1 as in R3GAN. SR exports its latest step, so archive
+    # often to pick the best one by hand.
     augmentation:
       probability: 1.0
     loss:

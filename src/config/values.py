@@ -51,42 +51,26 @@ def validate_training_values(cfg):
     conditioning = cfg["conditioning"]
     for name in (
         "domain_keep_probability",
+        "cfg_dropout_probability",
         "coarse_corruption_probability",
         "coarse_corruption_strength",
     ):
         if name in conditioning:
             check_number(conditioning[name], f"conditioning.{name}", 1)
-    if "dropout_probability_per_case" in conditioning:
-        # The sampler reserves three disjoint intervals of this probability.
-        check_number(
-            conditioning["dropout_probability_per_case"],
-            "conditioning.dropout_probability_per_case",
-            1 / 3,
-        )
-    anchor = conditioning.get("anchor", {})
-    for name in ("probability", "borrowed_plane_probability"):
-        if name in anchor:
-            check_number(anchor[name], f"conditioning.anchor.{name}", 1)
     check_number(cfg["augmentation"]["probability"], "augmentation.probability", 1)
+    if "selection" in cfg:
+        check_number(
+            cfg["selection"]["structure_tolerance"], "selection.structure_tolerance"
+        )
 
-    connectivity = cfg["loss"].get("connectivity", {})
-    for section, values in (
-        ("loss", cfg["loss"]),
-        ("loss.connectivity", connectivity),
-    ):
-        for name, value in values.items():
-            if name.endswith("_weight") or name == "downsample_mse_tolerance":
-                check_number(value, f"{section}.{name}")
+    for name, value in cfg["loss"].items():
+        if name.endswith("_weight") or name == "downsample_mse_tolerance":
+            check_number(value, f"loss.{name}")
+    if "real_transition" in cfg["loss"]:
+        check_number(
+            cfg["loss"]["real_transition"]["weight"], "loss.real_transition.weight"
+        )
     check_integer(cfg["loss"]["r1_every_steps"], "loss.r1_every_steps")
-    for name, value in (
-        ("conditioning.anchor.bank_capacity", anchor.get("bank_capacity", 1)),
-        ("conditioning.anchor.plane_spacing", anchor.get("plane_spacing", 1)),
-        (
-            "loss.connectivity.windows_per_plane",
-            connectivity.get("windows_per_plane", 1),
-        ),
-    ):
-        check_integer(value, name)
     diffusion = cfg["model"]["diffusion"]
     beta_min, beta_max = diffusion["beta_min"], diffusion["beta_max"]
     check_number(beta_min, "model.diffusion.beta_min")

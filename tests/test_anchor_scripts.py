@@ -42,7 +42,7 @@ def test_boundary_continuation_defaults_to_an_unconditioned_reference(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
-    model, _, _ = build_models(cfg)
+    model, _ = build_models(cfg)
     weights = save_model(run_dir / "generator.pt", model)
     output_path = tmp_path / "continuation.tiff"
 
@@ -66,8 +66,8 @@ def test_boundary_continuation_defaults_to_an_unconditioned_reference(
 
     assert tifffile.imread(output_path).shape == (8, 8, 8)
     output = capsys.readouterr().out
-    assert "Anchor  : unconditioned reference boundary" in output
-    assert "Generating unconditioned reference" in output
+    assert "Anchor  : unanchored reference boundary" in output
+    assert "Generating unanchored reference" in output
 
 
 @pytest.mark.parametrize("height", [False, True])
@@ -84,7 +84,7 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
-    model, _, _ = build_models(cfg)
+    model, _ = build_models(cfg)
     weights = save_model(run_dir / "generator.pt", model)
     source = np.indices((18, 20)).sum(axis=0) % cfg["data"]["num_phases"]
     anchor_path = tmp_path / "anchor.png"
@@ -223,9 +223,7 @@ def test_anchor_check_script_runs_with_generated_reference(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
-    model, _, _ = build_models(cfg)
-    with torch.no_grad():
-        model.anchor_input.weight.fill_(0.01)
+    model, _ = build_models(cfg)
     weights = save_model(run_dir / "generator.pt", model)
 
     filename = "03_check_anchor.py"
@@ -297,7 +295,7 @@ def test_anchor_effect_profile_reports_parameter_free_distances() -> None:
     )
 
 
-def test_zero_strength_is_unanchored_for_anchor_disabled_weights(
+def test_zero_strength_is_unanchored(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -585,7 +583,6 @@ def _config(root: Path) -> dict:
                 "channels": [4, 8],
                 "latent_channels": 4,
                 "embedding_channels": 8,
-                "anchor_multiscale_input": False,
             },
             "critic": {
                 "channels": [4, 8],
@@ -627,13 +624,7 @@ def _config(root: Path) -> dict:
         },
         "conditioning": {
             "domain_keep_probability": 1.0,
-            "anchor": {
-                "probability": 1.0,
-                "start_step": 0,
-                "ramp_steps": 0,
-                "borrowed_plane_probability": 0.0,
-            },
-            "dropout_probability_per_case": 0.05,
+            "cfg_dropout_probability": 0.1,
         },
         "augmentation": {
             "probability": 1.0,
@@ -644,11 +635,6 @@ def _config(root: Path) -> dict:
             },
         },
         "loss": {
-            "anchor_pixel_weight": 0.05,
-            "connectivity": {
-                "adversarial_weight": 0.0,
-                "local_weight": 0.5,
-            },
             "volume_fraction_weight": 1.0,
             "r1_weight": 0.0,
             "r1_every_steps": 2,
@@ -673,7 +659,7 @@ def test_weight_directory_alone_saves_manual_check_results(
     run_dir = tmp_path / "trained"
     run_dir.mkdir()
     save_yaml(run_dir / "train.yaml", cfg)
-    model, _, _ = build_models(cfg)
+    model, _ = build_models(cfg)
     save_model(run_dir / "generator.pt", model)
     module = _load_script(filename)
     monkeypatch.setattr(
@@ -723,7 +709,7 @@ def test_inspection_scripts_support_mixed_source_heights(
     run = tmp_path / "run"
     run.mkdir()
     save_yaml(run / "train.yaml", cfg)
-    model, _, _ = build_models(cfg)
+    model, _ = build_models(cfg)
     weights = save_model(run / "generator.pt", model)
     output = tmp_path / "volume.tiff"
     module = _load_script(filename)

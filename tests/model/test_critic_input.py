@@ -3,8 +3,16 @@ import torch
 
 from src.build.model import build_models
 from src.config.train import load_train_config, normalize_train_config
-from src.model.critic import PairCritic2D, PlaneCritic2D
-from src.train.loss.gan import get_generator_loss, score_plane
+from src.model.critic import CriticScores, PairCritic2D, PlaneCritic2D
+from src.train.loss.gan import get_relativistic_loss, score_plane
+
+
+def _generator_loss(scores):
+    zero = CriticScores(
+        torch.zeros_like(scores.logits_global),
+        tuple(CriticScores(torch.zeros_like(s.logits_global)) for s in scores.levels),
+    )
+    return get_relativistic_loss(scores, zero).global_loss
 
 
 @pytest.mark.parametrize("mode,channels", [("pair", 4), ("single", 2)])
@@ -23,13 +31,12 @@ def test_critic_input_mode_controls_current_dependency(mode, channels):
         changed = model(previous, current + 10, time, domain)
     assert model.input.in_channels == channels
     grads = torch.autograd.grad(
-        get_generator_loss(score).global_loss, (previous, current), allow_unused=True
+        _generator_loss(score), (previous, current), allow_unused=True
     )
     assert grads[0].isfinite().all() and grads[0].abs().sum() > 0
     if mode == "single":
         assert grads[1] is None
         torch.testing.assert_close(score.logits_global, changed.logits_global)
-        assert score.logits_local is changed.logits_local is None
     else:
         assert grads[1].abs().sum() > 0
         assert not torch.equal(score.logits_global, changed.logits_global)
@@ -45,9 +52,8 @@ def test_selected_critic_mode_controls_built_model_gradients(stage, mode):
     )
     cfg["model"]["gradient_checkpointing"] = False
     cfg["conditioning"]["height_enabled"] = False
-    _, critics, _ = build_models(cfg)
+    _, critics = build_models(cfg)
     for critic in critics.values():
-        assert not any(name.startswith("local_") for name in critic.state_dict())
         previous = torch.randn(2, 2, 8, 8, requires_grad=True)
         current = torch.randn_like(previous, requires_grad=True)
         scores = score_plane(
@@ -57,9 +63,8 @@ def test_selected_critic_mode_controls_built_model_gradients(stage, mode):
             torch.tensor([0, 1]),
             torch.zeros(2, dtype=torch.long),
         )
-        assert scores.logits_local is None
         gradients = torch.autograd.grad(
-            get_generator_loss(scores).global_loss,
+            _generator_loss(scores),
             (previous, current),
             allow_unused=True,
         )

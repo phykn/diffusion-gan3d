@@ -71,7 +71,7 @@ def test_refresh_bank_remaps_source_data_paths(tmp_path, monkeypatch):
         "validation_files": [f"{old_root}/heldout.png"],
         "validation_regions": {},
     }
-    train_config["conditioning"]["height_enabled"] = True
+    train_config.setdefault("conditioning", {})["height_enabled"] = True
     config_file = source_dir / "train.yaml"
     save_yaml(config_file, train_config)
     cfg = {

@@ -42,7 +42,6 @@ def config(tmp_path, stage, groups):
         )
         cfg["model"]["gradient_checkpointing"] = False
         cfg["model"]["diffusion"]["num_steps"] = 2
-        cfg["conditioning"]["anchor"]["probability"] = 0.0
         cfg["loss"].update(r1_weight=0.01, r1_every_steps=1)
         cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2, num_workers=0)
     else:
@@ -57,29 +56,6 @@ def config(tmp_path, stage, groups):
         )
         cfg["lr_bank"]["samples_per_domain"] = 2
     return cfg
-
-
-def test_isotropic_shared_connectivity_critic_receives_axis_ids(tmp_path):
-    trainer = build_trainer(config(tmp_path, "low_res", GROUPS[0]), torch.device("cpu"))
-    critic = trainer.connectivity_critic
-    assert critic.directed_axis is None
-    axes = torch.arange(3)
-    received = []
-    hook = critic.axis_embedding.register_forward_pre_hook(
-        lambda module, args: received.append(args[0].clone())
-    )
-    try:
-        critic(
-            torch.rand(3, 3, 2, 8, 8),
-            axes,
-            torch.ones(3),
-            torch.zeros(3, dtype=torch.long),
-        )
-    finally:
-        hook.remove()
-    # Forward and reversed triplets are scored together and both keep axis IDs.
-    assert len(received) == 1
-    torch.testing.assert_close(received[0], axes.repeat(2))
 
 
 @pytest.mark.parametrize("groups", GROUPS)
@@ -126,7 +102,7 @@ class ScalarCritic(nn.Module):
 def test_lr_shared_update_averages_plane_gradients(tmp_path, groups):
     cfg = config(tmp_path, "low_res", groups)
     trainer = build_trainer(cfg, torch.device("cpu"))
-    trainer.settings = replace(trainer.settings, r1_gamma=0)
+    trainer.settings = replace(trainer.settings, r1_weight=0)
     trainer.conditions.settings = trainer.settings
     trainer.critics = nn.ModuleDict(
         {name: ScalarCritic() for name in trainer.critic_groups}
@@ -198,37 +174,6 @@ def test_sr_groups_step_once_per_critic_update_and_restore_state(tmp_path, group
             build_sr_trainer(other, bank, torch.device("cpu")),
             torch.load(path, weights_only=True),
         )
-
-
-def test_plane_training_is_independent_of_connectivity_local_weight(tmp_path):
-    torch.set_num_threads(1)
-    stage = "low_res"
-    cfg = config(tmp_path, stage, GROUPS[0])
-    bank = None
-    trained = []
-    for weight in (0.0, 50.0):
-        torch.manual_seed(43)
-        cfg["loss"]["connectivity"]["local_weight"] = weight
-        trainer = build_trainer(cfg, torch.device("cpu"), bank=bank)
-        metrics = trainer.step(0)
-        assert (
-            metrics.generator_connectivity_global
-            == metrics.generator_connectivity_local
-            == 0
-        )
-        assert (
-            metrics.critic_connectivity_global == metrics.critic_connectivity_local == 0
-        )
-        trained.append(trainer)
-    torch.testing.assert_close(
-        trained[0].critics.state_dict(), trained[1].critics.state_dict(), rtol=0, atol=0
-    )
-    torch.testing.assert_close(
-        trained[0].denoiser.state_dict(),
-        trained[1].denoiser.state_dict(),
-        rtol=0,
-        atol=0,
-    )
 
 
 def test_sr_groups_are_per_domain_and_use_only_observed_members(tmp_path):

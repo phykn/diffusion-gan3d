@@ -24,7 +24,6 @@ from scripts.paper.provenance import (
     validate_output_paths,
 )
 from scripts.paper.summary import summarize
-from src.anchor import PlaneAnchor
 from src.build.predict import load_generator, resolve_weights
 from src.config.generation import load_generation_settings
 from src.evaluate.anchor import (
@@ -33,6 +32,7 @@ from src.evaluate.anchor import (
     measure_slice_smoothness,
 )
 from src.evaluate.label import voxel_accuracy
+from src.predict.anchor import PlaneAnchor
 
 SEEDS = (0, 1, 2, 3)
 INTERNAL_AXES = (0, 1, 2)

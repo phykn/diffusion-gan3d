@@ -13,7 +13,7 @@ and build larger or higher-resolution volumes.
 Examples from the [recorded experiments](PAPER.md); their settings differ from current defaults.
 
 - **2D → 3D:** train from categorical sections in the `xy`, `xz`, and `yz` planes.
-- **Plane conditions:** guide generation with known sections, called anchors.
+- **Plane anchors:** steer generation toward known sections by posterior sampling.
 - **Larger outputs:** combine overlapping tiles; refine with a separate super-resolution model.
 
 ## Install
@@ -47,6 +47,8 @@ high-resolution sections. `--run-dir NAME` writes `NAME-lr` and `NAME-sr`, and r
 the command skips a finished stage; without it, each stage gets a new timestamped folder in
 `run/`. `--lr-only` stops after LR, so a later run with the same `--run-dir` trains only SR.
 `--resume` continues one interrupted stage ([Save and resume](docs/checks.md#save-and-resume)).
+The LR `generator.pt` is the best scored step, not the last one
+([Best LR step](docs/checks.md#best-lr-step)).
 The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
 in training on CUDA (on MPS only for the gradient-free sampling of each step), and in LR
 and SR prediction on CUDA and MPS.

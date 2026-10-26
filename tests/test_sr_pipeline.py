@@ -51,8 +51,6 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     cfg["loss"]["r1_weight"] = 0.0
     cfg["model"]["gradient_checkpointing"] = False
     cfg["model"]["diffusion"]["num_steps"] = 2
-    cfg["conditioning"]["anchor"].update(probability=0.0, start_step=0)
-    cfg["loss"]["connectivity"]["adversarial_weight"] = 0.0
     cfg["train"].update(
         total_steps=1, mixed_precision=False, slice_pairs_per_plane=2, real_batch_size=2
     )

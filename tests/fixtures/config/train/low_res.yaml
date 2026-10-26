@@ -35,24 +35,16 @@ augmentation:
       flip_axes: [y, z]
       rotate_90: true
 
-conditioning:
-  anchor:
-    probability: 0.8
-    ramp_steps: 500
-
 loss:
   r1_weight: 0.5
   r2_weight: 0.1
   r1_every_steps: 8
-  anchor_pixel_weight: 0.05
-  anchor_continuity_weight: 0.1
   volume_fraction_weight: 1.0
   group_statistics:
     weight: 0.0
-  connectivity:
-    max_slice_gap: 8
-    adversarial_weight: 0.0
-    real_transition_weight: 0.1
+  real_transition:
+    weight: 0.1
+    max_gap: 8
     ramp_steps: 5000
 
 optim:

@@ -13,10 +13,10 @@ from src.device import default_device
 from src.storage import save_volume
 
 
-def parse_unit_interval(value: str) -> float:
+def non_negative_float(value: str) -> float:
     parsed = float(value)
-    if not 0.0 <= parsed <= 1.0:
-        raise argparse.ArgumentTypeError("value must be between zero and one")
+    if not 0.0 <= parsed < float("inf"):
+        raise argparse.ArgumentTypeError("value must be finite and non-negative")
     return parsed
 
 
@@ -69,8 +69,8 @@ def add_generation_arguments(parser, *, anchors: bool = False, origin_default=0.
     if anchors:
         parser.add_argument(
             "--anchor-strength",
-            type=parse_unit_interval,
-            help="Normalized anchor prediction strength (default: config/gen.yaml).",
+            type=non_negative_float,
+            help="Anchor guidance step scale; 0 ignores anchors (default: config/gen.yaml).",
         )
     parser.add_argument(
         "--out", type=Path, help="TIFF path (default: a new directory under checks/)."

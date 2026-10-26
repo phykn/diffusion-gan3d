@@ -6,12 +6,7 @@ from src.config.train import (
     get_trainer_sections,
     normalize_train_config,
 )
-from src.model.critic import (
-    ConnectivityCritic2D,
-    PairCritic2D,
-    PlaneCritic2D,
-    SeamCritic2D,
-)
+from src.model.critic import PairCritic2D, PlaneCritic2D
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 
@@ -41,7 +36,6 @@ def build_denoiser(cfg: dict) -> Denoiser3D:
         latent_channels=generator["latent_channels"],
         num_domains=len(get_domains(data)),
         gradient_checkpointing=model["gradient_checkpointing"],
-        anchor_multiscale=generator.get("anchor_multiscale_input", False),
         time_scale=get_time_scale(cfg),
         height_enabled=conditioning["height_enabled"],
         coarse_enabled=sr,
@@ -49,9 +43,7 @@ def build_denoiser(cfg: dict) -> Denoiser3D:
     )
 
 
-def build_models(
-    cfg: dict,
-) -> tuple[Denoiser3D, nn.ModuleDict, ConnectivityCritic2D | None]:
+def build_models(cfg: dict) -> tuple[Denoiser3D, nn.ModuleDict]:
     cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
     data = cfg["data"]
     model = cfg["model"]
@@ -92,34 +84,7 @@ def build_models(
             for group in groups
         }
     )
-    # Connectivity triplets stack three slices, so their conditions do too.
-    connectivity_critic = (
-        None
-        if cfg["stage"] == "sr"
-        else ConnectivityCritic2D(
-            **shared,
-            directed_axis=0 if height else None,
-            height_channels=3 if height else 0,
-            profile_channels=3 * phases if profile else 0,
-        )
-    )
-    return denoiser, critics, connectivity_critic
-
-
-def build_seam_critic(cfg: dict) -> SeamCritic2D | None:
-    cfg = normalize_train_config(cfg, cfg.get("stage", "low_res"))
-    if cfg["stage"] == "sr":
-        return None
-    critic = cfg["model"]["critic"]
-    return SeamCritic2D(
-        num_phases=cfg["data"]["num_phases"],
-        channels=critic["channels"],
-        embedding_channels=cfg["model"]["generator"]["embedding_channels"],
-        num_domains=len(get_domains(cfg["data"])),
-        gradient_checkpointing=cfg["model"]["gradient_checkpointing"],
-        time_scale=get_time_scale(cfg),
-        pyramid_min_size=critic["pyramid_min_size"],
-    )
+    return denoiser, critics
 
 
 def build_diffusion(cfg: dict) -> Diffusion:

@@ -5,7 +5,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.src.config import ServerConfig
-from src.anchor import PlaneAnchor
+from src.predict.anchor import PlaneAnchor
 
 Dimension = Annotated[int, Field(ge=1, strict=True)]
 Index = Annotated[int, Field(ge=0, strict=True)]
@@ -71,7 +71,7 @@ class GenerateRequest(Request):
     domain: Index | None = None
     seed: int | None = Field(default=None, ge=0, le=2**64 - 1, strict=True)
     guidance: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-    anchor_strength: Probability | None = None
+    anchor_strength: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     height_origin: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     height_extent: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     vf_profile: ProfileRequest | None = None

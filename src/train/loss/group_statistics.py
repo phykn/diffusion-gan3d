@@ -27,15 +27,10 @@ def compute_group_statistics_loss(
     max_gap: int,
     tolerance: float,
     preserve_height: bool = False,
-    active: torch.Tensor | None = None,
     coarse: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Penalize excess per-volume phase-pair differences between plane normals."""
     zero = probs.sum(dtype=torch.float32) * 0.0
-    if active is None:
-        active = probs.new_ones(probs.shape[0])
-    active = active.to(device=probs.device, dtype=torch.float32)
-    count = active.sum().clamp_min(1)
     diagnostics = {}
     losses = []
     with torch.autocast(device_type=probs.device.type, enabled=False):
@@ -76,12 +71,8 @@ def compute_group_statistics_loss(
                         )
                     # ReLU has zero gradient at the allowance boundary as well.
                     penalty = (error - allowance).relu()
-                    errors.append(
-                        (error.reshape(len(probs), -1).mean(1) * active).sum() / count
-                    )
-                    penalties.append(
-                        (penalty.reshape(len(probs), -1).mean(1) * active).sum() / count
-                    )
+                    errors.append(error.mean())
+                    penalties.append(penalty.mean())
                 if penalties:
                     value = torch.stack(penalties).mean()
                     group_losses.append(value)

@@ -4,37 +4,18 @@ from unittest.mock import Mock, patch
 import torch
 
 from src.model.layers import NULL_DOMAIN
-from src.train.anchor_bank import AnchorBank
-from src.train.batch import RealBatch
 from src.train.conditioning import ConditionSampler
 
 
-def test_anchor_transitions_prioritize_the_final_step() -> None:
+def test_transitions_are_uniform() -> None:
     sampler = object.__new__(ConditionSampler)
-    sampler.settings = SimpleNamespace(profile_settings={"enabled": False})
     sampler.timesteps = 11
-
-    with (
-        patch("src.train.conditioning.torch.rand", return_value=torch.tensor(0.1)),
-        patch("src.train.conditioning.torch.randint") as randint,
-    ):
-        assert sampler.sample_transition(anchored=True) == 0
-        randint.assert_not_called()
-
-    with (
-        patch("src.train.conditioning.torch.rand", return_value=torch.tensor(0.5)),
-        patch(
-            "src.train.conditioning.torch.randint", return_value=torch.tensor(7)
-        ) as randint,
-    ):
-        assert sampler.sample_transition(anchored=True) == 7
-        randint.assert_called_once_with(1, 11, ())
 
     with patch(
         "src.train.conditioning.torch.randint",
         return_value=torch.tensor(6),
     ) as randint:
-        assert sampler.sample_transition(anchored=False) == 6
+        assert sampler.sample_transition() == 6
         randint.assert_called_once_with(11, ())
 
 
@@ -93,81 +74,28 @@ def test_domain_dropout_masks_every_axis_critic() -> None:
     assert critic_domains == {axis: NULL_DOMAIN for axis in (0, 1, 2)}
 
 
-def test_domain_dropout_probability_controls_the_model_condition() -> None:
+def test_domain_keep_probability_controls_the_model_condition() -> None:
     sampler = object.__new__(ConditionSampler)
     sampler.settings = SimpleNamespace(
-        profile_settings={"enabled": False}, domain_dropout=0.0
+        profile_settings={"enabled": False}, domain_keep_probability=1.0
     )
     assert sampler.sample_domain_condition(2) == 2
 
-    sampler.settings.domain_dropout = 1.0
+    sampler.settings.domain_keep_probability = 0.0
     assert sampler.sample_domain_condition(2) == NULL_DOMAIN
 
 
-def test_anchor_training_alternates_external_and_multi_anchor_modes() -> None:
+def test_cfg_dropout_hides_vf_with_the_configured_probability() -> None:
     sampler = object.__new__(ConditionSampler)
-    sampler.settings = SimpleNamespace(
-        profile_settings={"enabled": False},
-        anchor_training_probability=0.5,
-        volume_batch_size=1,
-    )
-    sampler.use_multi_anchor_next = False
-    sampler.anchor_bank = AnchorBank()
-    sampler.device = torch.device("cpu")
-    sampler.sample_real_anchor = Mock(return_value=Mock(source="real"))
-
-    with patch("src.train.conditioning.torch.rand", return_value=torch.tensor(0.9)):
-        assert sampler.sample_anchor(RealBatch({}), 2, owned_axes=()) is None
-    assert not sampler.use_multi_anchor_next
-
-    sampler.settings.anchor_training_probability = 1.0
-    sources = [
-        sampler.sample_anchor(RealBatch({}), 2, owned_axes=()).source for _ in range(3)
-    ]
-
-    assert sources == [
-        "real",
-        "real",
-        "real",
-    ]  # Replay waits for a measured-conditioned sample.
-
-
-def test_joint_cfg_dropout_uses_four_categorical_anchor_vf_states() -> None:
-    sampler = object.__new__(ConditionSampler)
-    sampler.settings = SimpleNamespace(
-        profile_settings={"enabled": False},
-        volume_batch_size=4,
-        cfg_drop_each_probability=0.1,
-    )
-    sampler.device = torch.device("cpu")
-
-    with patch(
-        "src.train.conditioning.torch.rand",
-        return_value=torch.tensor((0.05, 0.15, 0.25, 0.35)),
-    ):
-        presence = sampler.sample_condition_presence(has_anchor=True)
-
-    assert presence.anchor.tolist() == [False, False, True, True]
-    assert presence.vf.tolist() == [False, True, False, True]
-
-
-def test_single_condition_dropout_matches_joint_marginal_visibility() -> None:
-    sampler = object.__new__(ConditionSampler)
-    sampler.settings = SimpleNamespace(
-        profile_settings={"enabled": False},
-        volume_batch_size=2,
-        cfg_drop_each_probability=0.1,
-    )
-    sampler.device = torch.device("cpu")
+    sampler.settings = SimpleNamespace(volume_batch_size=2, cfg_dropout_probability=0.2)
 
     with patch(
         "src.train.conditioning.torch.rand",
         return_value=torch.tensor((0.19, 0.21)),
     ):
-        presence = sampler.sample_condition_presence(has_anchor=False)
+        present = sampler.sample_vf_presence()
 
-    assert presence.anchor.tolist() == [False, False]
-    assert presence.vf.tolist() == [False, True]
+    assert present.tolist() == [False, True]
 
 
 def _stream(images):

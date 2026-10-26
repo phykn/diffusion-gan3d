@@ -3,12 +3,12 @@ from pathlib import Path
 
 import torch
 
-from src.anchor import PlaneAnchor
 from src.build.predict import build_generator, resolve_weights
 from src.config.files import find_saved_config
 from src.config.generation import load_generation_settings
 from src.config.train import load_train_config
 from src.device import check_device, default_device
+from src.predict.anchor import PlaneAnchor
 from src.predict.memory import estimate_memory, select_storage
 from src.predict.tiling.generator import TiledGenerator
 from src.predict.tiling.layout import parse_shape

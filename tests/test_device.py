@@ -243,8 +243,8 @@ def test_lr_training_step_runs_on_apple_gpu(tmp_path):
     cfg["model"]["critic"].update(channels=[4, 8])
     cfg["model"]["gradient_checkpointing"] = False
     cfg["model"]["diffusion"]["num_steps"] = 2
-    cfg["conditioning"]["anchor"].update(probability=1.0, ramp_steps=0)
-    cfg["loss"].update(r1_weight=0.01, r1_every_steps=1, anchor_seam_weight=0.1)
+    cfg["conditioning"]["cfg_dropout_probability"] = 0.5
+    cfg["loss"].update(r1_weight=0.01, r1_every_steps=1)
     cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2)
     trainer = build_trainer(cfg, torch.device("mps"))
     assert not trainer.settings.amp_enabled

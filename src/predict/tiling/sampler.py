@@ -1,3 +1,5 @@
+from functools import partial
+
 import torch
 from tqdm import tqdm
 
@@ -25,7 +27,9 @@ class TileSampler:
         progress: bool = False,
         guidance: float = 1.0,
         tile_conditions=None,
+        tile_guidance=None,
     ) -> torch.Tensor:
+        """tile_guidance(tile, index) returns the tile's AnchorGuidance or None."""
         generator = self.generator
         device = generator.device if storage == "cuda" else torch.device("cpu")
         current = VolumeState(generator.num_phases, plan.shape, device)
@@ -41,7 +45,12 @@ class TileSampler:
             tuple(min(plan.tile_size, size) for size in plan.shape),
             current.values.device.type == "cpu" and generator.device.type == "cuda",
         )
-        fusion = make_fusion(plan, generator.num_phases, current.values.device)
+        fusion = make_fusion(
+            plan,
+            generator.num_phases,
+            current.values.device,
+            guided=tile_guidance is not None,
+        )
         with tqdm(
             total=generator.diffusion.timesteps,
             desc="Scale up",
@@ -79,6 +88,7 @@ class TileSampler:
                     tile_buffer,
                     guidance=guidance,
                     tile_conditions=tile_conditions,
+                    tile_guidance=tile_guidance,
                     base=base,
                 )
                 if final_output is None:
@@ -120,9 +130,11 @@ class TileSampler:
         tile_buffer: TileBuffer,
         guidance: float = 1.0,
         tile_conditions=None,
+        tile_guidance=None,
         base: VolumeCondition | None = None,
     ) -> None:
         generator = self.generator
+        model = partial(generator.predict, guidance=guidance)
         layer_start = 0
         for index, tile in enumerate(tiles):
             values = tile_buffer.read(
@@ -133,22 +145,22 @@ class TileSampler:
             pred = (
                 None if base is None else base.prediction(tile.source, generator.device)
             )
+            step = None
             if pred is None:
                 conditions = (
                     {} if tile_conditions is None else tile_conditions(tile, index)
                 )
-                pred = generator.predict(
-                    values,
-                    time,
-                    latent,
-                    guidance=guidance,
-                    domain=domain,
-                    **conditions,
-                )
+                guide = None if tile_guidance is None else tile_guidance(tile, index)
+                if guide is None:
+                    pred = model(values, time, latent, domain=domain, **conditions)
+                else:
+                    pred, step = guide(
+                        model, values, time, latent, domain=domain, **conditions
+                    )
             expected = (1, generator.num_phases, *values.shape[-3:])
             if pred.shape != expected:
                 raise ValueError(f"model prediction must have shape {expected}.")
-            add_prediction(fusion, tile, pred, tile_buffer, plan.overlap)
+            add_prediction(fusion, tile, pred, tile_buffer, plan.overlap, step)
             next_z = (
                 tiles[index + 1].source[0].start
                 if index + 1 < len(tiles)
@@ -202,6 +214,8 @@ class TileSampler:
                         transition,
                         noise=noise.to(previous.device),
                     )
+                    if fusion.step_sum is not None:
+                        updated = updated - fusion.step_sum[region] / weights
                     if base is not None:
                         base.constrain(
                             updated, global_region, generator.diffusion, transition
@@ -210,4 +224,6 @@ class TileSampler:
                 else:
                     write_output(output, global_region, clean, margin)
                 fusion.pred_sum[region].zero_()
+                if fusion.step_sum is not None:
+                    fusion.step_sum[region].zero_()
                 weights.zero_()

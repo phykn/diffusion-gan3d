@@ -27,11 +27,11 @@ from scripts.common.diagnostic import (
     show_labels,
     show_napari,
 )
-from src.anchor import PlaneAnchor
 from src.build.predict import load_generator
 from src.device import check_device
 from src.evaluate.anchor import measure_distance_divergence, measure_slice_smoothness
 from src.evaluate.label import voxel_accuracy
+from src.predict.anchor import PlaneAnchor
 from src.random import seeded_rng
 
 
@@ -83,7 +83,7 @@ def main() -> None:
         print(f"Anchors : {len(indices)} planes on axis {args.axis}")
         if indices:
             print(f"Strength: {args.anchor_strength:.2f}")
-        print("Generating conditioned sample...", flush=True)
+        print("Generating anchored sample...", flush=True)
 
         gen, baseline = generate_with_baseline(
             generator,
@@ -125,7 +125,7 @@ def show_result(
 
     reference = "1. Input anchor" if indices else "1. Reference center"
     show_labels(panels[0, 0], target_plane, num_phases, reference)
-    show_labels(panels[0, 1], gen_plane, num_phases, "2. Anchor-conditioned output")
+    show_labels(panels[0, 1], gen_plane, num_phases, "2. Anchor-guided output")
     show_difference(
         panels[0, 2], gen_plane != target_plane, "3. Difference (red = mismatch)"
     )
@@ -162,9 +162,7 @@ def show_result(
     anchor_map.set_title("9. Anchor positions (red)")
     anchor_map.axis("off")
 
-    mode = (
-        "Distributed learned conditional anchors" if indices else "Unanchored baseline"
-    )
+    mode = "Distributed anchors" if indices else "Unanchored baseline"
     score_label = "anchor" if indices else "reference center"
     fig.suptitle(
         f"{mode} · {score_label} {100 * accuracy:.1f}% matched\n"

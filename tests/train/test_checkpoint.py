@@ -19,7 +19,7 @@ class _BufferedModel(nn.Module):
         self.register_buffer("counter", torch.tensor(3))
 
 
-def _multiscale_denoiser() -> Denoiser3D:
+def _denoiser() -> Denoiser3D:
     return Denoiser3D(
         num_phases=2,
         base_channels=4,
@@ -27,7 +27,6 @@ def _multiscale_denoiser() -> Denoiser3D:
         embedding_channels=8,
         latent_channels=4,
         num_domains=1,
-        anchor_multiscale=True,
     )
 
 
@@ -43,14 +42,15 @@ def test_model_save_and_load(tmp_path: Path) -> None:
     _assert_same_state(restored, source)
 
 
-def test_multiscale_model_loads_strictly(tmp_path: Path) -> None:
-    source = _multiscale_denoiser()
+def test_denoiser_loads_strictly(tmp_path: Path) -> None:
+    torch.manual_seed(0)
+    source = _denoiser()
     with torch.no_grad():
-        for index, projection in enumerate(source.anchor_pyramid, start=1):
-            projection.weight.fill_(float(index))
+        for parameter in source.parameters():
+            parameter.normal_()
 
     path = save_model(tmp_path / "generator.pt", source)
-    restored = _multiscale_denoiser()
+    restored = _denoiser()
     load_model(path, restored)
 
     _assert_same_state(restored, source)
