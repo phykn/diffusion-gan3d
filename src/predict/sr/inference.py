@@ -105,8 +105,8 @@ class SuperResolutionAPI:
             probabilities=probabilities,
         )
 
-    def check_memory(self, estimate: SRMemoryEstimate, input_device=None) -> None:
-        check_sr_memory(estimate, self.generator, input_device=input_device)
+    def check_memory(self, estimate: SRMemoryEstimate) -> None:
+        check_sr_memory(estimate, self.generator)
 
     def refine(
         self,

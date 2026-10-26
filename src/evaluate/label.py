@@ -36,10 +36,10 @@ def phase_labels(values, num_phases: int | None = None) -> torch.Tensor:
     return labels
 
 
-def check_labels(values, num_phases: int | None = None) -> torch.Tensor:
+def check_labels(values) -> torch.Tensor:
     """Validate labels chunk by chunk and return them without an int64 copy."""
     values = torch.as_tensor(values)
-    for _ in _label_chunks(values, num_phases):
+    for _ in _label_chunks(values):
         pass
     return values
 
