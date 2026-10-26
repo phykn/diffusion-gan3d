@@ -113,6 +113,8 @@ class TrainerSettings:
     height_data: dict | None = None
     volume_permute_z: bool = True
     volume_flip_z: bool = True
+    # The no-grad rollout needs no GradScaler, so it also takes fp16 on MPS.
+    rollout_amp: bool = False
     profile_settings: dict = field(
         default_factory=lambda: {
             "enabled": False,
@@ -385,7 +387,7 @@ class Trainer:
         )
         current = torch.randn(shape, device=self.device, dtype=torch.float32)
 
-        with torch.no_grad(), self.autocast():
+        with torch.no_grad(), self.autocast(self.settings.rollout_amp):
             for index in reversed(range(transition + 1, self.diffusion.timesteps)):
                 time = self.make_time(index, current.shape[0])
                 latent = self.sample_latent(current.shape[0], current.dtype)

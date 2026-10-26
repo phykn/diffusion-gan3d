@@ -1253,6 +1253,7 @@ def _make_trainer(
             cfg_drop_each_probability=conditioning["dropout_probability_per_case"],
             latent_channels=cfg["model"]["generator"]["latent_channels"],
             amp_enabled=use_amp,
+            rollout_amp=use_amp,
             connectivity_ramp_steps=0,
             connectivity_windows_per_plane=1,
         ),

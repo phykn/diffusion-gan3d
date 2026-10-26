@@ -248,6 +248,9 @@ def test_lr_training_step_runs_on_apple_gpu(tmp_path):
     cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2)
     trainer = build_trainer(cfg, torch.device("mps"))
     assert not trainer.settings.amp_enabled
+    assert trainer.settings.rollout_amp
+    optimizers = [trainer.denoiser_optim, *trainer.critic_optims.values()]
+    assert all(optimizer.defaults["fused"] for optimizer in optimizers)
     for step in range(2):
         metrics = trainer.step(step, transition=0)
         assert np.isfinite(metrics.generator_total)

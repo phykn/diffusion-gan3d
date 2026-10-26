@@ -20,6 +20,7 @@ from src.config.train import (
 )
 from src.data.provenance import fingerprint_data
 from src.data.source import fill_height_extents
+from src.device import inference_amp
 from src.plane import PLANE_DIRECTIONS
 from src.storage import load_model
 from src.train.ema import build_ema
@@ -42,13 +43,17 @@ def build_optimizers(
     optim = cfg["optim"]
     betas = tuple(optim["adam_betas"])
 
+    def adam(module, lr):
+        # Fused Adam runs one kernel per step instead of several per tensor.
+        return torch.optim.Adam(module.parameters(), lr=lr, betas=betas, fused=True)
+
     def critic_adam(module):
         if module is None:
             return None
-        return torch.optim.Adam(module.parameters(), lr=optim["critic_lr"], betas=betas)
+        return adam(module, optim["critic_lr"])
 
     return (
-        torch.optim.Adam(denoiser.parameters(), lr=optim["generator_lr"], betas=betas),
+        adam(denoiser, optim["generator_lr"]),
         {plane: critic_adam(critics[plane]) for plane in critics},
         critic_adam(connectivity_critic),
         critic_adam(seam_critic),
@@ -215,6 +220,7 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         cfg_drop_each_probability=conditioning["dropout_probability_per_case"],
         latent_channels=generator["latent_channels"],
         amp_enabled=train["mixed_precision"] and device.type == "cuda",
+        rollout_amp=inference_amp(train["mixed_precision"], device),
         r2_gamma=loss["r2_weight"],
         coarse_corruption_probability=conditioning["coarse_corruption_probability"],
         coarse_corruption_strength=conditioning["coarse_corruption_strength"],

@@ -48,7 +48,8 @@ the command skips a finished stage; without it, each stage gets a new timestampe
 `run/`. `--lr-only` stops after LR, so a later run with the same `--run-dir` trains only SR.
 `--resume` continues one interrupted stage ([Save and resume](docs/checks.md#save-and-resume)).
 The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
-in training only on CUDA, and in LR and SR prediction on CUDA and MPS.
+in training on CUDA (on MPS only for the gradient-free sampling of each step), and in LR
+and SR prediction on CUDA and MPS.
 
 ### Samples
 

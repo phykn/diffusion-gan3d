@@ -156,6 +156,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             cfg_drop_each_probability=0.0,
             latent_channels=model["generator"]["latent_channels"],
             amp_enabled=True,
+            rollout_amp=True,
         ),
     )
 

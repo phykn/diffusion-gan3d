@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from src.device import adaptive_pool
+from src.model.conv import Conv3d
 from src.model.layers import (
     INV_SQRT_THREE,
     INV_SQRT_TWO,
@@ -57,7 +58,7 @@ class ChannelNorm3D(nn.Module):
 class Upsample3D(nn.Module):
     def __init__(self, in_channels: int, out_channels: int) -> None:
         super().__init__()
-        self.conv = nn.Conv3d(in_channels, out_channels, 3, padding=1)
+        self.conv = Conv3d(in_channels, out_channels, 3, padding=1)
 
     def forward(
         self,
@@ -104,21 +105,19 @@ class Denoiser3D(nn.Module):
         self.latent_mlp = embedding_mlp(latent_channels, embedding_channels)
         self.num_domains = num_domains
         self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
-        self.input = nn.Conv3d(num_phases, channels[0], 3, padding=1)
+        self.input = Conv3d(num_phases, channels[0], 3, padding=1)
         self.profile_input = (
-            nn.Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
+            Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
             if profile_enabled
             else None
         )
         self.height_input = (
-            nn.Conv3d(1, channels[0], 3, padding=1, bias=False)
-            if height_enabled
-            else None
+            Conv3d(1, channels[0], 3, padding=1, bias=False) if height_enabled else None
         )
         self.anchor_input = (
             None
             if coarse_enabled
-            else nn.Conv3d(
+            else Conv3d(
                 num_phases + 1,
                 channels[0],
                 3,
@@ -130,7 +129,7 @@ class Denoiser3D(nn.Module):
         if self.anchor_input is not None:
             nn.init.zeros_(self.anchor_input.weight)
 
-        block = partial(AdaptiveResBlock, ChannelNorm3D, nn.Conv3d)
+        block = partial(AdaptiveResBlock, ChannelNorm3D, Conv3d)
         self.encoder = nn.ModuleList()
         self.downsample = nn.ModuleList()
         for idx, ch in enumerate(channels):
@@ -138,8 +137,8 @@ class Denoiser3D(nn.Module):
             if idx + 1 < len(channels):
                 self.downsample.append(
                     nn.Sequential(
-                        nn.Conv3d(ch, ch, 3, stride=2, padding=1),
-                        nn.Conv3d(ch, channels[idx + 1], 1),
+                        Conv3d(ch, ch, 3, stride=2, padding=1),
+                        Conv3d(ch, channels[idx + 1], 1),
                     )
                 )
 
@@ -156,7 +155,7 @@ class Denoiser3D(nn.Module):
             ch = skip_ch
 
         self.output_norm = ChannelNorm3D(channels[0])
-        self.output = nn.Conv3d(channels[0], num_phases, 3, padding=1)
+        self.output = Conv3d(channels[0], num_phases, 3, padding=1)
 
         self.vf_mlp = None
         if not coarse_enabled:
@@ -171,7 +170,7 @@ class Denoiser3D(nn.Module):
         self.anchor_pyramid = nn.ModuleList()
         if anchor_multiscale:
             for channel in channels[1:]:
-                projection = nn.Conv3d(
+                projection = Conv3d(
                     num_phases + 1,
                     channel,
                     1,
@@ -180,7 +179,7 @@ class Denoiser3D(nn.Module):
                 nn.init.zeros_(projection.weight)
                 self.anchor_pyramid.append(projection)
         self.coarse_input = (
-            nn.Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
+            Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
             if coarse_enabled
             else None
         )
