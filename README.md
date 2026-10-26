@@ -81,11 +81,15 @@ stages without the code defaults.
 
 ## Web interface
 
-Start the backend with an LR run, then the frontend in another terminal (Node.js 20.19+ or 22.12+):
+Start the backend with an SR run, then the frontend in another terminal (Node.js 20.19+ or 22.12+):
 
 ```bash
-python backend/run.py --weight "run/my-run-lr"
+python backend/run.py --weight "run/my-run-sr"
 ```
+
+Each request generates the LR volume with the LR run the SR run was trained from
+(`--lr-weight` picks another), then refines it; the viewer, porosity and tortuosity are
+on the HR volume. Blocks count LR crops, so one block is `hi_res_size` voxels per edge.
 
 ```bash
 cd frontend

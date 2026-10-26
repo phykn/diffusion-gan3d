@@ -20,7 +20,7 @@ from scripts.common.cli import (
 )
 from src.build.predict import resolve_weights
 from src.config.data import validate_sr_source
-from src.config.files import load_yaml, project_path
+from src.config.files import load_yaml
 from src.device import check_device, empty_cache
 from src.evaluate.label import phase_fractions
 from src.plane import PLANES
@@ -28,7 +28,7 @@ from src.predict.inference import LowResolutionAPI
 from src.predict.sr.inference import SuperResolutionAPI, load_sr_export
 from src.prepare.resize import downsample, phase_channels
 from src.storage import load_probabilities, load_volume, save_probabilities, save_volume
-from src.train.run.source import load_frozen_source
+from src.train.run.source import frozen_source_weights
 
 
 def latest_sr():
@@ -156,16 +156,11 @@ def main(argv=None):
             else load_volume(args.input)
         )
     else:
-        stored_source = cfg.get("source", {}).get("weights")
-        if args.lr_weight:
-            lr_weight = resolve_weights(args.lr_weight)
-        elif stored_source:
-            lr_weight = project_path(stored_source)
-            load_frozen_source({**cfg["source"], "weights": str(lr_weight)})
-        else:
-            raise ValueError(
-                "SR export has no LR source. Supply --lr-weight or --input."
-            )
+        lr_weight = (
+            resolve_weights(args.lr_weight)
+            if args.lr_weight
+            else frozen_source_weights(cfg.get("source", {}))
+        )
         print(f"LR weights: {lr_weight}\nGenerating LR...", flush=True)
         lr = LowResolutionAPI(lr_weight, device)
         validate_sr_source(cfg["data"], lr.data)
@@ -177,18 +172,9 @@ def main(argv=None):
         empty_cache(device)
     print(f"SR weights: {weight}\nRefining LR {tuple(low.shape[-3:])}...", flush=True)
     sr = SuperResolutionAPI(weight, device)
-    tile_size = args.tile_size
-    if tile_size is None and sr.scale_factor.is_integer():
-        scale = int(sr.scale_factor)
-        tile_size = max(scale, min(64, sr.hi_res_size) // scale * scale)
-    overlap = args.overlap
-    if overlap is None:
-        scale = int(sr.scale_factor) if sr.scale_factor.is_integer() else 1
-        overlap = (
-            0
-            if tile_size is None
-            else min(8 // scale, (tile_size - 1) // (2 * scale)) * scale
-        )
+    tile_size, overlap = sr.default_tiling(args.tile_size)
+    if args.overlap is not None:
+        overlap = args.overlap
     high = sr.refine(
         low,
         tile_size=tile_size,

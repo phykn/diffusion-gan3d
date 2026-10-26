@@ -17,7 +17,12 @@ def parse_args() -> argparse.Namespace:
         "--weight",
         type=Path,
         required=True,
-        help="generator.pt or its run directory",
+        help="SR generator.pt or its run directory",
+    )
+    parser.add_argument(
+        "--lr-weight",
+        type=Path,
+        help="LR generator.pt or run directory (default: the SR run's LR source)",
     )
     parser.add_argument(
         "--device",
@@ -42,7 +47,9 @@ def main() -> None:
                 "max_inflight_downloads": args.max_inflight_downloads,
             }
         )
-    app = create_app(args.weight, device=args.device, config=config)
+    app = create_app(
+        args.weight, device=args.device, lr_weights=args.lr_weight, config=config
+    )
     uvicorn.run(app, host=args.host, port=args.port)
 
 

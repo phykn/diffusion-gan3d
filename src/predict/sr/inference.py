@@ -10,12 +10,17 @@ from src.build.predict import make_generator, resolve_weights
 from src.config.train import get_sr_resolution, normalize_train_config
 from src.device import check_device, default_device
 from src.predict.convert import labels_from_channels, owned_clean_to_probs_
-from src.predict.sr.memory import check_sr_memory, estimate_sr_memory
+from src.predict.sr.memory import (
+    SRMemoryEstimate,
+    check_sr_memory,
+    estimate_sr_memory,
+)
 from src.predict.tiling.layout import (
     DEFAULT_OVERLAP,
     check_overlap,
     make_plan,
     make_tiles,
+    parse_shape,
 )
 from src.predict.tiling.sampler import TileSampler
 from src.predict.volume_condition import (
@@ -61,6 +66,47 @@ class SuperResolutionAPI:
         self.generator = make_generator(
             self.model, self.config, self.device, self.hi_res_size
         )
+
+    def default_tiling(self, tile_size: int | None = None) -> tuple[int | None, int]:
+        """HR tile edge (default up to 64) and its scale-aligned overlap up to 8.
+
+        A fractional scale refines in one block unless tile_size is given.
+        """
+        integer = self.scale_factor.is_integer()
+        scale = int(self.scale_factor) if integer else 1
+        if tile_size is None and integer:
+            tile_size = max(scale, min(64, self.hi_res_size) // scale * scale)
+        if tile_size is None:
+            return None, 0
+        return tile_size, min(8 // scale, (tile_size - 1) // (2 * scale)) * scale
+
+    def estimate_memory(
+        self,
+        low_shape,
+        *,
+        tile_size: int | None = None,
+        overlap: int = DEFAULT_OVERLAP,
+        margin: int | None = None,
+        label_input: bool = True,
+        input_element_size: int = 8,
+        probabilities: bool = False,
+    ) -> SRMemoryEstimate:
+        """Bytes to refine a CPU LR volume of low_shape; options are refine's."""
+        low_shape = parse_shape(low_shape)
+        shape, margin, _ = self._layout(low_shape, tile_size, overlap, margin)
+        return estimate_sr_memory(
+            low_shape,
+            shape,
+            self.num_phases,
+            tile_size=tile_size,
+            margin=margin,
+            label_input=label_input,
+            input_element_size=input_element_size,
+            probabilities=probabilities,
+        )
+
+    def check_memory(self, estimate: SRMemoryEstimate, input_device=None) -> None:
+        check_sr_memory(estimate, self.generator, input_device=input_device)
 
     def refine(
         self,
@@ -147,37 +193,13 @@ class SuperResolutionAPI:
                 "LR input must be D,H,W labels or K,D,H,W phase fractions."
             )
         domain = self.generator.resolve_domain(domain)
-        low_shape = low.shape[-3:]
-        shape = tuple(scaled_size(int(n), self.scale_factor) for n in low_shape)
+        low_shape = tuple(low.shape[-3:])
+        shape, margin, tiled = self._layout(low_shape, tile_size, overlap, margin)
         if base is None and base_offset is not None:
             raise ValueError("base_offset requires base.")
         if base is not None:
             base_offset = resolve_offset(base_offset, shape, volume_shape(base))
         guidance = self.generator.validate_guidance(guidance)
-        if margin is None:
-            margin = self.generator.default_margin
-            if self.scale_factor.is_integer():
-                margin = math.lcm(margin, int(self.scale_factor))
-        if type(margin) is not int or margin < 0:
-            raise ValueError("margin must be a non-negative integer of HR voxels.")
-        if tile_size is not None:
-            if type(tile_size) is not int or tile_size < 1:
-                raise ValueError("tile_size must be a positive integer.")
-            check_overlap(tile_size, overlap)
-        tiled = tile_size is not None and any(n > tile_size for n in shape)
-        if tiled:
-            if not self.scale_factor.is_integer():
-                raise ValueError(
-                    "tiled refinement requires an integer HR/LR scale; use one block for fractional scales."
-                )
-            scale = int(self.scale_factor)
-            if any(
-                value % scale
-                for value in (*shape, tile_size, tile_size - 2 * overlap, margin)
-            ):
-                raise ValueError(
-                    "HR shape, tile_size, stride and margin must be multiples of the LR/HR scale."
-                )
         # Height is validated on the LR grid the input volume was generated on.
         height_extent = self.generator.validate_height(
             low_shape, domain, height_origin, height_extent
@@ -217,6 +239,35 @@ class SuperResolutionAPI:
                 base,
                 base_offset,
             )
+
+    def _layout(self, low_shape, tile_size, overlap, margin):
+        """Return the HR shape, resolved margin and whether refinement is tiled."""
+        shape = tuple(scaled_size(int(n), self.scale_factor) for n in low_shape)
+        if margin is None:
+            margin = self.generator.default_margin
+            if self.scale_factor.is_integer():
+                margin = math.lcm(margin, int(self.scale_factor))
+        if type(margin) is not int or margin < 0:
+            raise ValueError("margin must be a non-negative integer of HR voxels.")
+        if tile_size is not None:
+            if type(tile_size) is not int or tile_size < 1:
+                raise ValueError("tile_size must be a positive integer.")
+            check_overlap(tile_size, overlap)
+        tiled = tile_size is not None and any(n > tile_size for n in shape)
+        if tiled:
+            if not self.scale_factor.is_integer():
+                raise ValueError(
+                    "tiled refinement requires an integer HR/LR scale; use one block for fractional scales."
+                )
+            scale = int(self.scale_factor)
+            if any(
+                value % scale
+                for value in (*shape, tile_size, tile_size - 2 * overlap, margin)
+            ):
+                raise ValueError(
+                    "HR shape, tile_size, stride and margin must be multiples of the LR/HR scale."
+                )
+        return shape, margin, tiled
 
     def _refine_block(self, probs, shape, margin, height, guidance, probabilities):
         domain, height_origin, height_extent = height

@@ -10,9 +10,9 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.src.config import ServerConfig, load_server_config
 from backend.src.middleware import RequestSizeLimit
+from backend.src.pipeline import HighResolutionPipeline
 from backend.src.response import DownloadResponse, volume_response
 from backend.src.schema import GenerateRequest, PrepareRequest
-from src.api import LowResolutionAPI
 from src.phase import PORE_PHASE
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -21,16 +21,18 @@ FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 def create_app(
     weights: str | Path | None = None,
     device: str | torch.device | None = None,
-    inference: LowResolutionAPI | None = None,
+    inference: HighResolutionPipeline | None = None,
     *,
+    lr_weights: str | Path | None = None,
     config: ServerConfig | None = None,
 ) -> FastAPI:
+    """Serve LR generation refined by the SR run at weights."""
     config = load_server_config() if config is None else config
     if inference is None:
         if weights is None:
             raise ValueError("weights are required when inference is not provided.")
-        inference = LowResolutionAPI(weights, device=device)
-    elif weights is not None:
+        inference = HighResolutionPipeline(weights, lr_weights, device)
+    elif weights is not None or lr_weights is not None:
         raise ValueError("weights and inference cannot be provided together.")
 
     app = FastAPI(
@@ -133,8 +135,8 @@ def create_app(
     return app
 
 
-def _axis_block_limit(inference: LowResolutionAPI, config: ServerConfig) -> int:
-    """Largest block count on one axis whose default tiling fits max_size."""
+def _axis_block_limit(inference: HighResolutionPipeline, config: ServerConfig) -> int:
+    """Largest LR block count on one axis whose HR output fits max_size."""
     limit = 1
     for count in range(2, config.max_blocks + 1):
         if max(inference.estimate_memory(blocks=(count, 1, 1)).shape) > config.max_size:
@@ -144,7 +146,7 @@ def _axis_block_limit(inference: LowResolutionAPI, config: ServerConfig) -> int:
 
 
 def _generate_volume(
-    inference: LowResolutionAPI, request: GenerateRequest, config: ServerConfig
+    inference: HighResolutionPipeline, request: GenerateRequest, config: ServerConfig
 ) -> torch.Tensor:
     estimate = inference.estimate_memory(
         blocks=request.blocks,

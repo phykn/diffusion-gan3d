@@ -7,9 +7,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from fastapi.testclient import TestClient
 from PIL import Image
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
+from backend.src.app import create_app
+from src.api import LowResolutionAPI, SuperResolutionAPI
 from src.build.trainer import build_trainer
 from src.config.files import load_yaml, save_yaml
 from src.config.generation import load_generation_settings
@@ -202,6 +205,24 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     assert report["lr_source_verified"] is True
     assert report["lr_guidance"] == load_generation_settings().guidance
     assert json.loads((out2 / "report.json").read_text())["lr_guidance"] is None
+    # The web app refines its frozen LR source and measures the HR volume.
+    lr_options = {"seed": 3, "blocks": (2, 1, 1), "overlap": 2}
+    request = {**lr_options, "format": "raw", "tortuosity": True}
+    with TestClient(create_app(resumed, device="cpu")) as client:
+        response = client.post("/api/generate", json=request)
+    assert response.status_code == 200, response.text
+    shape = tuple(int(n) for n in response.headers["X-Volume-Shape"].split(","))
+    assert shape == (int(12 * scale), high_size, high_size)
+    sr = SuperResolutionAPI(resumed, "cpu")
+    tile_size, overlap = sr.default_tiling()
+    expected = sr.refine(
+        LowResolutionAPI(base_dir, "cpu").generate_probs(**lr_options),
+        seed=3,
+        tile_size=tile_size,
+        overlap=overlap,
+    )
+    served = np.frombuffer(response.content, dtype=np.uint8).reshape(shape)
+    assert np.array_equal(served, expected.numpy())
     with (base_dir / "train.yaml").open("a") as config_file:
         config_file.write("\n# changed after SR training\n")
     with pytest.raises(ValueError, match="configuration changed"):

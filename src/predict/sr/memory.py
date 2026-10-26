@@ -17,6 +17,7 @@ from src.predict.tiling.layout import parse_shape
 
 @dataclass(frozen=True)
 class SRMemoryEstimate:
+    shape: tuple[int, int, int]
     expanded_shape: tuple[int, int, int]
     coarse_bytes: int
     accumulation_bytes: int
@@ -85,6 +86,7 @@ def estimate_sr_memory(
     else:
         interpolation = high_voxels + tile_voxels
     return SRMemoryEstimate(
+        shape=shape,
         expanded_shape=expanded,
         coarse_bytes=coarse,
         state_bytes=4 * num_phases * math.prod(generation_shape) if shared else 0,

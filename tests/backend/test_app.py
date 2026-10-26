@@ -334,6 +334,12 @@ def test_create_app_requires_one_inference_source(service: FakeInference) -> Non
         create_app(
             "generator.pt", inference=service, config=load_server_config(SERVER_CONFIG)
         )
+    with pytest.raises(ValueError, match="cannot be provided together"):
+        create_app(
+            inference=service,
+            lr_weights="generator.pt",
+            config=load_server_config(SERVER_CONFIG),
+        )
 
 
 @pytest.mark.parametrize(
