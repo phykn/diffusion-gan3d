@@ -1,6 +1,6 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { cropAnchor, readPngLabels } from '../image-labels.js'
+import { clampCrop, cropAnchor, readPngLabels } from '../image-labels.js'
 
 const props = defineProps({
   file: File,
@@ -45,13 +45,13 @@ function draw() {
 
   const cx = x + state.crop.x * scale
   const cy = y + state.crop.y * scale
-  const size = state.crop.size * scale
+  const size = props.cropSize * scale
   context.fillStyle = 'rgb(20 20 19 / 48%)'
   context.beginPath()
   context.rect(x, y, drawWidth, drawHeight)
   context.rect(cx, cy, size, size)
   context.fill('evenodd')
-  context.strokeStyle = '#cc785c'
+  context.strokeStyle = getComputedStyle(canvas.value).getPropertyValue('--primary')
   context.lineWidth = 2 * dpr
   context.strokeRect(cx, cy, size, size)
   context.fillStyle = '#fff'
@@ -68,26 +68,22 @@ function point(event) {
 }
 
 function clamp() {
-  state.crop.x = Math.max(0, Math.min(
-    Math.round(state.crop.x), state.image.naturalWidth - state.crop.size,
-  ))
-  state.crop.y = Math.max(0, Math.min(
-    Math.round(state.crop.y), state.image.naturalHeight - state.crop.size,
-  ))
+  Object.assign(state.crop, clampCrop(state.sourceLabels, state.crop, props.cropSize))
 }
 
 function pointerDown(event) {
   if (props.disabled || !state.crop) return
   const next = point(event)
+  const size = props.cropSize
   const inside = next.x >= state.crop.x
-    && next.x <= state.crop.x + state.crop.size
+    && next.x <= state.crop.x + size
     && next.y >= state.crop.y
-    && next.y <= state.crop.y + state.crop.size
+    && next.y <= state.crop.y + size
   if (!inside) {
     const previousX = state.crop.x
     const previousY = state.crop.y
-    state.crop.x = next.x - state.crop.size / 2
-    state.crop.y = next.y - state.crop.size / 2
+    state.crop.x = next.x - size / 2
+    state.crop.y = next.y - size / 2
     clamp()
     if (state.crop.x !== previousX || state.crop.y !== previousY) emit('change')
   }
@@ -143,9 +139,8 @@ watch(() => [props.file, props.cropSize], ([file], previous, onCleanup) => {
     state.image = image
     state.sourceLabels = sourceLabels
     state.crop = {
-      x: Math.floor((image.naturalWidth - cropSize) / 2),
-      y: Math.floor((image.naturalHeight - cropSize) / 2),
-      size: cropSize,
+      x: Math.floor((sourceLabels.width - cropSize) / 2),
+      y: Math.floor((sourceLabels.height - cropSize) / 2),
     }
     emit('ready', true)
     await nextTick()
@@ -178,7 +173,7 @@ defineExpose({ getAnchorImage })
     <header class="panel-header">
       <div><h2>Image</h2></div>
     </header>
-    <div class="canvas-wrap crop-canvas" :class="{ 'crop-canvas--disabled': disabled }">
+    <div class="canvas-wrap" :class="{ 'crop-canvas--disabled': disabled }">
       <canvas
         ref="canvas"
         @pointerdown="pointerDown"

@@ -172,10 +172,16 @@ export async function readPngLabels(file) {
   return labels
 }
 
+// The drawn crop box and the extracted labels share these integer cell boundaries.
+export function clampCrop(source, crop, cropSize) {
+  return {
+    x: Math.max(0, Math.min(Math.round(crop.x), source.width - cropSize)),
+    y: Math.max(0, Math.min(Math.round(crop.y), source.height - cropSize)),
+  }
+}
+
 export function cropAnchor(source, crop, cropSize) {
-  // Use the same integer cell boundaries for the labels and their height metadata.
-  const x = Math.max(0, Math.min(Math.round(crop.x), source.width - cropSize))
-  const y = Math.max(0, Math.min(Math.round(crop.y), source.height - cropSize))
+  const { x, y } = clampCrop(source, crop, cropSize)
   return {
     // /prepare resizes the crop to the model input on the server.
     image: Array.from({ length: cropSize }, (_, row) => {

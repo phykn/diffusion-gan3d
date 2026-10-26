@@ -7,12 +7,22 @@ const HEALTH_RETRY_MAX_MS = 5000
 
 function wait(delay, signal) {
   return new Promise(resolve => {
-    const timer = setTimeout(resolve, delay)
-    signal.addEventListener('abort', () => {
+    const done = () => {
       clearTimeout(timer)
+      signal.removeEventListener('abort', done)
       resolve()
-    }, { once: true })
+    }
+    const timer = setTimeout(done, delay)
+    signal.addEventListener('abort', done, { once: true })
   })
+}
+
+function phaseFraction(values, phase) {
+  let count = 0
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === phase) count += 1
+  }
+  return values.length ? count / values.length : null
 }
 
 export function useGeneration(cropEditor) {
@@ -20,13 +30,12 @@ export function useGeneration(cropEditor) {
   const file = ref(null)
   const seed = ref(0)
   const blocks = ref([1, 1, 1])
-  const plane = ref(0)
+  const axis = ref(0)
   const domain = ref(0)
   const heightOrigin = ref(0)
   const heightExtent = ref(null)
   const busy = ref(false)
-  const status = ref('')
-  const error = ref(false)
+  const error = ref('')
   const health = ref(null)
   const healthError = ref('')
   const measureTortuosity = ref(true)
@@ -43,7 +52,7 @@ export function useGeneration(cropEditor) {
       try {
         health.value = await getHealth(controller.signal)
         healthError.value = ''
-        plane.value = health.value.height_enabled ? 1 : 0
+        axis.value = health.value.height_enabled ? 1 : 0
         heightExtent.value = health.value.height_extents?.[domain.value] ?? null
         return
       } catch {
@@ -61,8 +70,7 @@ export function useGeneration(cropEditor) {
   function invalidateResult() {
     gate.invalidate()
     result.value = null
-    error.value = false
-    status.value = ''
+    error.value = ''
   }
 
   function selectFile(nextFile) {
@@ -73,7 +81,7 @@ export function useGeneration(cropEditor) {
 
   watch(seed, invalidateResult)
   watch(blocks, invalidateResult, { deep: true })
-  watch([plane, domain, heightOrigin, heightExtent], invalidateResult)
+  watch([axis, domain, heightOrigin, heightExtent], invalidateResult)
   watch(domain, value => {
     heightExtent.value = health.value?.height_extents?.[value] ?? null
   })
@@ -82,39 +90,39 @@ export function useGeneration(cropEditor) {
     if (!ready.value) return
     const token = gate.begin()
     busy.value = true
-    error.value = false
-    status.value = ''
+    error.value = ''
     try {
       const crop = cropEditor.value?.getAnchorImage()
       if (!crop) {
         throw new Error(`Choose a valid ${health.value.crop_size} × ${health.value.crop_size} crop first.`)
       }
-      const requestSeed = normalizeSeed(seed.value)
-      const requestBlocks = normalizeBlocks(blocks.value, health.value.max_blocks)
-      const conditions = { axis: plane.value, domain: domain.value }
+      const options = {
+        axis: axis.value,
+        seed: normalizeSeed(seed.value),
+        blocks: normalizeBlocks(blocks.value, health.value.max_axis_blocks),
+        domain: domain.value,
+        tortuosity: measureTortuosity.value,
+      }
       if (health.value.height_enabled) {
-        conditions.height_origin = plane.value === 0 ? heightOrigin.value : crop.cropOrigin[0]
-        conditions.height_extent = plane.value === 0 ? heightExtent.value : crop.sourceShape[0]
+        options.heightOrigin = axis.value === 0 ? heightOrigin.value : crop.cropOrigin[0]
+        options.heightExtent = axis.value === 0 ? heightExtent.value : crop.sourceShape[0]
         if (
-          !Number.isFinite(conditions.height_origin) || conditions.height_origin < 0
-          || !Number.isFinite(conditions.height_extent) || conditions.height_extent <= 0
+          !Number.isFinite(options.heightOrigin) || options.heightOrigin < 0
+          || !Number.isFinite(options.heightExtent) || options.heightExtent <= 0
         ) {
           throw new Error('Enter a non-negative Z origin and a positive full Z extent in source pixels.')
         }
       }
       const image = await prepareImage(crop.image, controller.signal)
       if (!gate.accepts(token)) return
-      const next = await generateVolume(
-        image, requestSeed, requestBlocks, controller.signal, conditions,
-        { tortuosity: measureTortuosity.value },
-      )
-      if (gate.accepts(token)) result.value = next
+      const next = await generateVolume({ ...options, image }, controller.signal)
+      if (gate.accepts(token)) {
+        result.value = { ...next, porosity: phaseFraction(next.values, health.value.pore_phase) }
+      }
     } catch (reason) {
-      if (!gate.accepts(token)) return
-      error.value = true
-      status.value = reason instanceof Error ? reason.message : String(reason)
+      if (gate.accepts(token)) error.value = reason instanceof Error ? reason.message : String(reason)
     } finally {
-      if (gate.ownsRequest(token)) busy.value = false
+      busy.value = false
     }
   }
 
@@ -123,12 +131,11 @@ export function useGeneration(cropEditor) {
     file,
     seed,
     blocks,
-    plane,
+    axis,
     domain,
     heightOrigin,
     heightExtent,
     busy,
-    status,
     error,
     health,
     healthError,

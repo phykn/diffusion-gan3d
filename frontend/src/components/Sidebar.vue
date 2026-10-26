@@ -8,18 +8,17 @@ const props = defineProps({
   healthError: String,
   busy: Boolean,
   ready: Boolean,
-  status: String,
-  error: Boolean,
+  error: String,
   porosity: Number,
   tortuosity: Number,
 })
-const seed = defineModel('seed', { type: Number, default: 0 })
-const blocks = defineModel('blocks', { type: Array, default: () => [1, 1, 1] })
-const plane = defineModel('plane', { type: Number, default: 0 })
-const domain = defineModel('domain', { type: Number, default: 0 })
-const heightOrigin = defineModel('heightOrigin', { type: Number, default: 0 })
-const heightExtent = defineModel('heightExtent', { type: Number, default: null })
-const measureTortuosity = defineModel('measureTortuosity', { type: Boolean, default: true })
+const seed = defineModel('seed', { type: Number })
+const blocks = defineModel('blocks', { type: Array })
+const axis = defineModel('axis', { type: Number })
+const domain = defineModel('domain', { type: Number })
+const heightOrigin = defineModel('heightOrigin', { type: Number })
+const heightExtent = defineModel('heightExtent', { type: Number })
+const measureTortuosity = defineModel('measureTortuosity', { type: Boolean })
 const emit = defineEmits(['select-file', 'generate'])
 const dragging = ref(false)
 
@@ -43,7 +42,7 @@ function setSeed(event) {
 }
 
 function setBlock(index, event) {
-  const value = normalizeBlock(event.target.value, props.health?.max_blocks ?? MIN_BLOCKS)
+  const value = normalizeBlock(event.target.value, props.health?.max_axis_blocks ?? MIN_BLOCKS)
   const next = [...blocks.value]
   next[index] = value
   blocks.value = next
@@ -74,7 +73,7 @@ function setBlock(index, event) {
     </div>
     <label class="number-control">
       <span>Section plane</span>
-      <select v-model.number="plane" :disabled="busy">
+      <select v-model.number="axis" :disabled="busy">
         <option :value="0">XY · rows Y</option>
         <option :value="1">XZ · rows Z</option>
         <option :value="2">YZ · rows Z</option>
@@ -86,7 +85,7 @@ function setBlock(index, event) {
         <option v-for="n in health.num_domains" :key="n" :value="n - 1">{{ n - 1 }}</option>
       </select>
     </label>
-    <template v-if="health?.height_enabled && plane === 0">
+    <template v-if="health?.height_enabled && axis === 0">
       <label class="number-control">
         <span>Z origin (px)</span>
         <input v-model.number="heightOrigin" type="number" min="0" :disabled="busy">
@@ -99,13 +98,13 @@ function setBlock(index, event) {
     <p v-else-if="health?.height_enabled" class="status">Z origin follows the crop rows. Full Z extent is the uploaded image height.</p>
     <div class="blocks-control">
       <span>Blocks</span>
-      <label v-for="(axis, index) in ['Z', 'Y', 'X']" :key="axis">
-        <small>{{ axis }}</small>
+      <label v-for="(name, index) in ['Z', 'Y', 'X']" :key="name">
+        <small>{{ name }}</small>
         <input
           :value="blocks[index]"
           type="number"
           :min="MIN_BLOCKS"
-          :max="health?.max_blocks ?? MIN_BLOCKS"
+          :max="health?.max_axis_blocks ?? MIN_BLOCKS"
           step="1"
           :disabled="busy"
           @change="setBlock(index, $event)"
@@ -123,7 +122,7 @@ function setBlock(index, event) {
     <button class="primary-button" type="button" :disabled="!ready" @click="emit('generate')">
       {{ busy ? 'RUNNING…' : 'RUN' }}
     </button>
-    <p v-if="error" class="status status--error">{{ status }}</p>
+    <p v-if="error" class="status status--error">{{ error }}</p>
     <dl class="metrics">
       <div>
         <dt>Porosity</dt>

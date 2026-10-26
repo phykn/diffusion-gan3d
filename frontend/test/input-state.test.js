@@ -23,20 +23,10 @@ test('three block counts are clamped to the server limit', () => {
 test('an input change rejects an in-flight response', () => {
   const gate = createRequestGate()
   const request = gate.begin()
+  assert.equal(gate.accepts(request), true)
 
   gate.invalidate()
 
   assert.equal(gate.accepts(request), false)
-  assert.equal(gate.ownsRequest(request), true)
-})
-
-test('only the latest request may publish a result or clear busy state', () => {
-  const gate = createRequestGate()
-  const first = gate.begin()
-  const second = gate.begin()
-
-  assert.equal(gate.accepts(first), false)
-  assert.equal(gate.ownsRequest(first), false)
-  assert.equal(gate.accepts(second), true)
-  assert.equal(gate.ownsRequest(second), true)
+  assert.equal(gate.accepts(gate.begin()), true)
 })

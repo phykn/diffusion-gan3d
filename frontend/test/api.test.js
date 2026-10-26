@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { generateVolume, prepareImage } from '../src/api.js'
 
+const OPTIONS = { image: [[0]], axis: 0, seed: 0, blocks: [1, 1, 1], domain: 0, tortuosity: true }
+
 test('generation sends a prepared boundary anchor and decodes volume metadata', async t => {
   const image = [[[0.25]], [[0.75]]]
   t.mock.method(globalThis, 'fetch', async (path, options) => {
@@ -18,17 +20,16 @@ test('generation sends a prepared boundary anchor and decodes volume metadata', 
       'X-Volume-Shape': '2,1,1', 'X-Tortuosity': 'unavailable',
     } })
   })
-  const result = await generateVolume(image, 7, [2, 1, 1])
-  assert.deepEqual(result, { shape: [2, 1, 1], values: new Uint8Array([0, 1]), porosity: 0.5, tortuosity: null })
+  const result = await generateVolume({ ...OPTIONS, image, seed: 7, blocks: [2, 1, 1] })
+  assert.deepEqual(result, { shape: [2, 1, 1], values: new Uint8Array([0, 1]), tortuosity: null })
 })
 
-test('porosity is counted locally when the server skips tortuosity', async t => {
+test('the tortuosity request flag is forwarded', async t => {
   t.mock.method(globalThis, 'fetch', async (path, options) => {
     assert.equal(JSON.parse(options.body).tortuosity, false)
     return new Response(new Uint8Array([0, 0, 0, 1]), { headers: { 'X-Volume-Shape': '4,1,1' } })
   })
-  const result = await generateVolume([[0]], 0, [1, 1, 1], undefined, {}, { tortuosity: false })
-  assert.equal(result.porosity, 0.75)
+  const result = await generateVolume({ ...OPTIONS, tortuosity: false })
   assert.equal(result.tortuosity, null)
 })
 
@@ -36,7 +37,7 @@ test('a phase without a spanning path reports infinite tortuosity', async t => {
   t.mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array([1]), {
     headers: { 'X-Volume-Shape': '1,1,1', 'X-Tortuosity': 'inf' },
   }))
-  assert.equal((await generateVolume([[0]], 0, [1, 1, 1])).tortuosity, Infinity)
+  assert.equal((await generateVolume(OPTIONS)).tortuosity, Infinity)
 })
 
 test('single-block requests omit tiled geometry', async t => {
@@ -44,7 +45,7 @@ test('single-block requests omit tiled geometry', async t => {
     assert.equal('blocks' in JSON.parse(options.body), false)
     return new Response(new Uint8Array([0]), { headers: { 'X-Volume-Shape': '1,1,1' } })
   })
-  await generateVolume([[0]], 0, [1, 1, 1])
+  await generateVolume(OPTIONS)
 })
 
 test('side-section request preserves the physical crop origin in a tiled volume', async t => {
@@ -57,7 +58,9 @@ test('side-section request preserves the physical crop origin in a tiled volume'
     assert.equal(body.height_extent, 512)
     return new Response(new Uint8Array([0]), { headers: { 'X-Volume-Shape': '1,1,1' } })
   })
-  await generateVolume(image, 0, [2, 2, 2], undefined, { axis: 2, domain: 1, height_origin: 23, height_extent: 512 })
+  await generateVolume({
+    ...OPTIONS, image, axis: 2, blocks: [2, 2, 2], domain: 1, heightOrigin: 23, heightExtent: 512,
+  })
 })
 
 for (const shape of ['-1,-1,1', '0,1,1', '0.5,2,1', 'NaN,1,1', '1,1', '']) {
@@ -65,7 +68,7 @@ for (const shape of ['-1,-1,1', '0,1,1', '0.5,2,1', 'NaN,1,1', '1,1', '']) {
     t.mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array([0]), {
       headers: { 'X-Volume-Shape': shape },
     }))
-    await assert.rejects(generateVolume([[0]], 0, [1, 1, 1]), /invalid volume shape/)
+    await assert.rejects(generateVolume(OPTIONS), /invalid volume shape/)
   })
 }
 
@@ -73,7 +76,7 @@ test('reject truncated volume data', async t => {
   t.mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array([0]), {
     headers: { 'X-Volume-Shape': '2,2,2' },
   }))
-  await assert.rejects(generateVolume([[0]], 0, [1, 1, 1]), /does not match/)
+  await assert.rejects(generateVolume(OPTIONS), /does not match/)
 })
 
 test('preparation preserves fractional channels and forwards cancellation', async t => {

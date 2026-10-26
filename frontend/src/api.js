@@ -41,26 +41,17 @@ function readMetric(headers, name) {
   return Number.isFinite(number) ? number : null
 }
 
-function phaseFraction(values, phase) {
-  let count = 0
-  for (let index = 0; index < values.length; index += 1) {
-    if (values[index] === phase) count += 1
-  }
-  return values.length ? count / values.length : null
-}
-
 export async function generateVolume(
-  image, seed, blocks, signal, conditions = {}, { tortuosity = true } = {},
+  { image, axis, seed, blocks, domain, heightOrigin, heightExtent, tortuosity }, signal,
 ) {
-  const { axis = 0, domain = 0, height_origin, height_extent } = conditions
   const response = await request('/api/generate', {
     anchors: [{ image, axis, index: 0, position: [0, 0] }],
     domain,
-    ...(height_origin === undefined ? {} : { height_origin, height_extent }),
+    ...(heightOrigin === undefined ? {} : { height_origin: heightOrigin, height_extent: heightExtent }),
     seed,
     ...(blocks.some(value => value > 1) ? { blocks } : {}),
     format: 'raw',
-    // The server solves tortuosity before streaming; porosity is counted here.
+    // The server solves tortuosity before streaming.
     tortuosity,
   }, signal)
   const shape = response.headers.get('X-Volume-Shape')?.split(',').map(Number)
@@ -74,10 +65,5 @@ export async function generateVolume(
   }
   const values = new Uint8Array(await response.arrayBuffer())
   if (values.length !== size) throw new Error('The returned volume size does not match its header.')
-  return {
-    shape,
-    values,
-    porosity: phaseFraction(values, 0),
-    tortuosity: readMetric(response.headers, 'X-Tortuosity'),
-  }
+  return { shape, values, tortuosity: readMetric(response.headers, 'X-Tortuosity') }
 }

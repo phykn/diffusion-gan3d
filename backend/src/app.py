@@ -13,6 +13,7 @@ from backend.src.middleware import RequestSizeLimit
 from backend.src.response import DownloadResponse, volume_response
 from backend.src.schema import GenerateRequest, PrepareRequest
 from src.api import LowResolutionAPI
+from src.phase import PORE_PHASE
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
@@ -49,7 +50,8 @@ def create_app(
             "num_domains": generator.num_domains,
             "height_enabled": generator.height_data is not None,
             "height_extents": (generator.height_data or {}).get("height_extents", {}),
-            "max_blocks": _axis_block_limit(inference, config),
+            "pore_phase": PORE_PHASE,
+            "max_axis_blocks": _axis_block_limit(inference, config),
         }
 
     @app.post("/api/prepare")
@@ -170,7 +172,9 @@ def _generate_volume(
         anchor_strength=request.anchor_strength,
         height_origin=request.height_origin,
         height_extent=request.height_extent,
-        vf_profile=request.vf_profile,
+        vf_profile=None
+        if request.vf_profile is None
+        else request.vf_profile.model_dump(),
         overlap=request.overlap,
         storage=request.storage,
     )

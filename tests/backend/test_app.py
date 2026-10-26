@@ -16,6 +16,7 @@ from backend.src.app import create_app
 from backend.src.config import load_server_config
 from backend.src.schema import GenerateRequest
 from src.predict.memory import estimate_memory, select_storage
+from src.prepare.profile import validate_profile
 
 SERVER_CONFIG = Path(__file__).resolve().parents[1] / "fixtures/config/backend.yaml"
 
@@ -96,7 +97,8 @@ def test_health_reports_loaded_device(client: TestClient) -> None:
         "num_domains": 1,
         "height_enabled": False,
         "height_extents": {},
-        "max_blocks": 9,
+        "pore_phase": 0,
+        "max_axis_blocks": 9,
     }
 
 
@@ -134,6 +136,19 @@ def test_generate_returns_tiff_volume(
     assert volume.dtype == torch.empty((), dtype=torch.uint8).numpy().dtype
     assert service.calls[0]["seed"] == 3
     assert service.calls[0]["anchors"] == ()
+
+
+def test_generate_forwards_a_profile_the_predictor_accepts(client, service):
+    spec = {"axis": "z", "points": [[0, [0.2, 0.8]], [1, [0.6, 0.4]]]}
+    response = client.post(
+        "/api/generate", json={"vf_profile": spec | {"interpolation": "linear"}}
+    )
+
+    assert response.status_code == 200
+    forwarded = service.calls[0]["vf_profile"]
+    knots, values = validate_profile(forwarded, 2)
+    assert knots.tolist() == [0, 1]
+    assert values.tolist() == [[0.2, 0.8], [0.6, 0.4]]
 
 
 def test_generate_can_return_raw_labels(client: TestClient) -> None:
@@ -349,6 +364,21 @@ def test_cpu_cuda_and_apple_gpu_oom_return_413(client, service, monkeypatch, exc
         {"shape": True},
         {"anchors": [{"image": [[0]], "axis": 0, "index": 0}] * 33},
         {"anchors": [{"image": [[0] * 1025], "axis": 0, "index": 0}]},
+        {"vf_profile": {"axis": "z", "interpolation": "linear", "points": [[0, [1]]]}},
+        {
+            "vf_profile": {
+                "axis": "z",
+                "interpolation": "linear",
+                "points": [[i / 256, [1.0]] for i in range(257)],
+            }
+        },
+        {
+            "vf_profile": {
+                "axis": "x",
+                "interpolation": "linear",
+                "points": [[0, [1]], [1, [1]]],
+            }
+        },
     ],
 )
 def test_request_limits_reject_before_inference(client, service, payload):

@@ -178,12 +178,8 @@ function setPhaseColor(phase, event) {
 }
 
 watch(() => props.values, values => setVolume(values, props.shape))
-watch(() => props.numPhases, () => {
-  ensurePhaseState()
-  updateAppearance()
-})
+watch(() => props.numPhases, updateAppearance)
 onMounted(() => {
-  ensurePhaseState()
   initialize()
   if (props.values) setVolume(props.values, props.shape)
 })
@@ -227,7 +223,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </header>
-    <div ref="host" class="canvas-wrap volume-canvas">
+    <div ref="host" class="canvas-wrap">
       <div v-if="!values && !busy" class="empty-state">
         <strong>No generated volume</strong>
       </div>
@@ -235,7 +231,7 @@ onBeforeUnmount(() => {
         <span></span><strong>Generating…</strong>
       </div>
     </div>
-    <footer class="volume-footer">
+    <footer>
       <span>{{ shape ? shape.join(' × ') : '—' }}</span>
       <label class="depth-control">
         <input

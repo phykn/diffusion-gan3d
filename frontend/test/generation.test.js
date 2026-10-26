@@ -11,7 +11,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve))
 
 async function mount(t, respond, health = {}) {
   t.mock.method(globalThis, 'fetch', async (path, options) => {
-    if (path === '/api/health') return Response.json({ crop_size: 1, num_phases: 2, max_blocks: 4, ...health })
+    if (path === '/api/health') return Response.json({ crop_size: 1, num_phases: 2, max_axis_blocks: 4, pore_phase: 0, ...health })
     if (path === '/api/prepare') {
       assert.deepEqual(JSON.parse(options.body).image, [[1]])
       return Response.json({ image: [[[0]], [[1]]] })
@@ -42,8 +42,15 @@ test('publish one complete volume result and clear busy state', async t => {
   await state.generate()
   assert.deepEqual(state.result.value.shape, [1, 1, 1])
   assert.deepEqual(state.result.value.values, new Uint8Array([1]))
+  assert.equal(state.result.value.porosity, 0)
   assert.equal(state.busy.value, false)
-  assert.equal(state.error.value, false)
+  assert.equal(state.error.value, '')
+})
+
+test('porosity counts the pore phase the server reports', async t => {
+  const { state } = await mount(t, async () => volume(), { pore_phase: 1 })
+  await state.generate()
+  assert.equal(state.result.value.porosity, 1)
 })
 
 test('input changes discard a pending generation without leaving busy set', async t => {
@@ -71,7 +78,7 @@ test('unmount cancels pending network work and prevents publication', async t =>
   await pending
   assert.equal(signal.aborted, true)
   assert.equal(state.result.value, null)
-  assert.equal(state.error.value, false)
+  assert.equal(state.error.value, '')
 })
 
 test('height-conditioned sections send source geometry and the selected domain', async t => {
@@ -80,7 +87,7 @@ test('height-conditioned sections send source geometry and the selected domain',
     body = JSON.parse(options.body)
     return volume()
   }, { height_enabled: true, num_domains: 2, height_extents: { 0: null, 1: 768 } })
-  assert.equal(state.plane.value, 1)
+  assert.equal(state.axis.value, 1)
   state.domain.value = 1
   await nextTick()
   assert.equal(state.heightExtent.value, 768)
@@ -89,7 +96,7 @@ test('height-conditioned sections send source geometry and the selected domain',
   assert.equal(body.height_origin, 23)
   assert.equal(body.height_extent, 512)
   assert.equal(body.domain, 1)
-  state.plane.value = 0
+  state.axis.value = 0
   state.heightOrigin.value = 10
   await nextTick()
   await state.generate()
@@ -100,11 +107,10 @@ test('height-conditioned sections send source geometry and the selected domain',
 
 test('XY sections require an explicit Z extent when the model has mixed heights', async t => {
   const { state } = await mount(t, () => { throw new Error('must not generate') }, { height_enabled: true })
-  state.plane.value = 0
+  state.axis.value = 0
   await nextTick()
   await state.generate()
-  assert.equal(state.error.value, true)
-  assert.match(state.status.value, /full Z extent/)
+  assert.match(state.error.value, /full Z extent/)
 })
 
 test('health checks retry until the server answers and report the outage', async t => {
@@ -114,7 +120,7 @@ test('health checks retry until the server answers and report the outage', async
     assert.equal(path, '/api/health')
     attempts += 1
     if (attempts < 3) throw new TypeError('connection refused')
-    return Response.json({ crop_size: 1, num_phases: 2, max_blocks: 4 })
+    return Response.json({ crop_size: 1, num_phases: 2, max_axis_blocks: 4, pore_phase: 0 })
   })
   let state
   const app = renderer.createApp({

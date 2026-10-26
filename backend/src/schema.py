@@ -18,6 +18,7 @@ ProbabilityPlane = Annotated[list[ProbabilityRow], Field(min_length=1)]
 ProbabilityImage = Annotated[
     list[ProbabilityPlane], Field(min_length=1, max_length=256)
 ]
+PhaseFractions = Annotated[list[Probability], Field(min_length=1, max_length=256)]
 
 
 class Request(BaseModel):
@@ -52,19 +53,28 @@ class AnchorRequest(Request):
         )
 
 
+class ProfileRequest(Request):
+    axis: Literal["z"]
+    # Sampling loops over knots while holding the generation lock.
+    points: list[
+        tuple[Annotated[float, Field(allow_inf_nan=False)], PhaseFractions]
+    ] = Field(min_length=2, max_length=256)
+    interpolation: Literal["linear", "constant"]
+
+
 class GenerateRequest(Request):
     anchors: list[AnchorRequest] = Field(default_factory=list)
     blocks: Dimension | tuple[Dimension, Dimension, Dimension] | None = None
     shape: Dimension | tuple[Dimension, Dimension, Dimension] | None = None
     size: Dimension | None = None
-    vf: list[Probability] | None = Field(default=None, max_length=256)
+    vf: PhaseFractions | None = None
     domain: Index | None = None
     seed: int | None = Field(default=None, ge=0, le=2**64 - 1, strict=True)
     guidance: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     anchor_strength: Probability | None = None
     height_origin: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     height_extent: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-    vf_profile: dict | None = None
+    vf_profile: ProfileRequest | None = None
     overlap: Index | None = None
     storage: Literal["auto", "cpu", "cuda"] = "auto"
     format: Literal["tiff", "raw"] = "tiff"

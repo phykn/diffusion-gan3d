@@ -19,23 +19,19 @@ export function normalizeBlocks(values, maximum) {
   return Array.from({ length: 3 }, (_, index) => normalizeBlock(values?.[index], maximum))
 }
 
+// Inputs changed after begin() make that request's result stale.
 export function createRequestGate() {
-  let inputRevision = 0
-  let latestRequest = 0
+  let revision = 0
 
   return {
     invalidate() {
-      inputRevision += 1
+      revision += 1
     },
     begin() {
-      latestRequest += 1
-      return { inputRevision, request: latestRequest }
+      return revision
     },
     accepts(token) {
-      return token.inputRevision === inputRevision && token.request === latestRequest
-    },
-    ownsRequest(token) {
-      return token.request === latestRequest
+      return token === revision
     },
   }
 }

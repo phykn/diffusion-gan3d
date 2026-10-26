@@ -11,12 +11,11 @@ const {
   file,
   seed,
   blocks,
-  plane,
+  axis,
   domain,
   heightOrigin,
   heightExtent,
   busy,
-  status,
   error,
   health,
   healthError,
@@ -34,7 +33,7 @@ const {
     <Sidebar
       v-model:seed="seed"
       v-model:blocks="blocks"
-      v-model:plane="plane"
+      v-model:axis="axis"
       v-model:domain="domain"
       v-model:height-origin="heightOrigin"
       v-model:height-extent="heightExtent"
@@ -44,7 +43,6 @@ const {
       :health-error="healthError"
       :busy
       :ready
-      :status
       :error
       :porosity="result?.porosity"
       :tortuosity="result?.tortuosity"
@@ -59,7 +57,7 @@ const {
           :crop-size="health?.crop_size"
           :disabled="busy"
           @change="invalidateResult"
-          @error="status = $event; error = true"
+          @error="error = $event"
           @ready="cropReady = $event"
         />
         <VolumeViewer
