@@ -97,6 +97,18 @@ def test_relocation_rejects_merged_image_paths(tmp_path):
         relocate_checkpoint(payload, [("/a", str(tmp_path)), ("/b", str(tmp_path))])
 
 
+@pytest.mark.parametrize("unused", ["/elsewhere", "old/images", "~/old"])
+def test_relocation_rejects_prefixes_that_match_no_saved_path(tmp_path, unused):
+    # A relative or ~ prefix never matches the resolved paths a run saves.
+    payload = {
+        "config": {"data": {"domains": {0: {"xy": ["/old/images"]}}}},
+        "data_fingerprint": {"/old/images/a.png": "x"},
+        "path_maps": [],
+    }
+    with pytest.raises(ValueError, match="matches no saved path.*/old/images/a.png"):
+        relocate_checkpoint(payload, [("/old", str(tmp_path)), (unused, str(tmp_path))])
+
+
 @pytest.mark.parametrize("prefixes", [[""], ["/a/../b"], ["C:/old", "c:/OLD"]])
 def test_relocation_rejects_ambiguous_prefixes(tmp_path, prefixes):
     with pytest.raises(ValueError, match="path-map"):

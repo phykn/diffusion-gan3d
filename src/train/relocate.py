@@ -19,6 +19,7 @@ class PathRemapper:
             )
             for group in groups
         ]
+        self.matched = set()
 
     def __call__(self, value):
         original = value
@@ -29,6 +30,7 @@ class PathRemapper:
                 except ValueError:
                     continue
                 value = new.joinpath(*relative.parts).as_posix()
+                self.matched.add(old)
                 break
         return str(Path(value)) if value != original else value
 
@@ -79,6 +81,13 @@ def relocate_checkpoint(payload, path_map):
     result = dict(payload)
     result["config"] = mapper.config(payload["config"])
     result["data_fingerprint"] = mapper.keys(payload["data_fingerprint"])
+    # OLD is compared as written, since it may name another machine's path; one
+    # that matches nothing would otherwise fail later as a missing folder.
+    for old, _ in mapper.groups[0]:
+        if old not in mapper.matched:
+            saved = next(iter(payload["data_fingerprint"]), None)
+            example = f"; saved paths look like {saved}" if saved else ""
+            raise ValueError(f"path-map OLD matches no saved path: {old}{example}")
     # Keep the map history for frozen LR train.yaml files, which must remain
     # byte-identical to preserve the recorded source configuration hash.
     result["path_maps"] = [*payload["path_maps"], group]

@@ -128,6 +128,8 @@ no sample, `--sr-steps`, or `--bank-size`; `--steps` is that stage's total, incl
 completed steps. It writes a new run directory (here `run/my-run-2-lr`); an LR resume
 needs `--run-dir`. After an LR resume, `python train.py <sample> --run-dir "run/my-run-2"`
 reuses it and trains SR. Pass `--path-map OLD NEW` (repeatable) when data or runs have moved.
+OLD is matched as written against the absolute paths the run saved, so give it in full
+(no `~` or relative path); an OLD that matches none of them stops the resume.
 
 - A finished stage holds a `.done` file. While `NAME-lr` or `NAME-sr` exists unfinished,
   `train.py --run-dir NAME` stops and says how to resume or delete it.

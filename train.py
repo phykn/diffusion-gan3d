@@ -67,7 +67,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs=2,
         action="append",
         metavar=("OLD", "NEW"),
-        help="Relocate saved path prefixes on resume; repeat for multiple roots.",
+        help=(
+            "Relocate saved path prefixes on resume; OLD is the absolute saved "
+            "prefix as written. Repeat for multiple roots."
+        ),
     )
     parser.add_argument(
         "--device",
