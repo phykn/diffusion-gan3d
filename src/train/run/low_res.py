@@ -35,7 +35,7 @@ def run_low_res_train(
     if resume:
         payload, cfg, source = load_resume(resume, "low_res", path_map)
     else:
-        source = load_source(config)
+        source = load_source(config, "low_res")
         cfg = load_train_config(source)
         # Prediction reads train.yaml; keep the conditions measured from the
         # images so it needs neither the images nor their current contents.

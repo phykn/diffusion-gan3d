@@ -282,7 +282,10 @@ def test_cpu_entrypoint_saves_complete_run(
         tuple(path.name for path in sorted(run_dirs[0].glob("critic_*.pt")))
         == expected_critics
     )
-    assert load_yaml(run_dirs[0] / "train.yaml") == load_yaml(config)
+    # The config leaves its stage implicit; resume reads it from train.yaml.
+    assert load_yaml(run_dirs[0] / "train.yaml") == load_yaml(config) | {
+        "stage": "low_res"
+    }
     checkpoints = sorted((run_dirs[0] / "checkpoints").glob("step_*.pt"))
     assert len(checkpoints) == 2
     for step, checkpoint in enumerate(checkpoints, start=1):

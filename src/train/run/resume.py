@@ -22,11 +22,15 @@ def check_resume_args(
         raise ValueError("a new run needs a training config.")
 
 
-def load_source(config: Path | Mapping) -> dict:
+def load_source(config: Path | Mapping, stage: str) -> dict:
     """Return the training YAML that a new run saves as its train.yaml."""
     if isinstance(config, Mapping):
-        return copy.deepcopy(dict(config))
-    return load_yaml(config)
+        source = copy.deepcopy(dict(config))
+    else:
+        source = load_yaml(config)
+    # A config may leave its stage implicit, but resume reads it from train.yaml.
+    source.setdefault("stage", stage)
+    return source
 
 
 def load_resume(

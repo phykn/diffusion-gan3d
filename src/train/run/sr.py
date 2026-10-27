@@ -57,7 +57,7 @@ def run_sr_train(
         load_frozen_source(cfg["source"], payload["path_maps"])
         bank_payload = load_bank(bank_path)
     else:
-        source = load_source(config)
+        source = load_source(config, "sr")
         cfg = load_train_config(source, "sr")
         prepare_source(cfg, base_weights)
         if base_weights is not None:
