@@ -89,9 +89,9 @@ A sample is one file in [config/samples/](../config/samples/); copy
     rotates sections less often (probability 0.2 instead of 0.5) so a tilt stays visible,
     and never flips SR's LR input volumes (`lr_bank.flips`), which would reverse their tilt.
 
-  When z differs from x and y (either of the first two flags), training never rotates
-  `xz`/`yz` sections, which would swap z with x or y; with a depth gradient it also
-  never flips z.
+  When z differs from x and y (either of the first two flags), or no `xy` images are
+  judged with the side planes, training never rotates `xz`/`yz` sections, which would
+  swap z with x or y; with a depth gradient it also never flips z.
 - `tune.lr` and `tune.sr` change single settings of that stage.
 
 Settings apply in order, later winning: code defaults, [config/base/](../config/base/)`<lr|sr>.yaml`,
