@@ -31,8 +31,12 @@
 - [ ] **SR 디퓨전 단계를 10단계에서 2~4단계로 줄이기** (속도)
   - SR 재학습이 필요하다. 품질이 유지되는지 실험해야 한다.
 
+## 5. 논문
+
+- [ ] SR 학습이 끝나면 `PAPER.md` 6장(SR)과 결론을 쓰고, README 그림을 HR 볼륨으로 바꾼다.
+  - LR 부분은 `scripts/paper/evaluate_lr.py` → `make_lr_figures.py`로 다시 만든다.
+
 ## 보류
 
 - latent를 거의 무시하는 문제: 다양성은 초기 노이즈와 posterior 노이즈에서만 나온다. 결과물에 바로 드러나지 않으니 다양성이 부족해 보일 때 다시 본다.
 - `train.initial_weights`가 best step generator와 최신 step critic을 짝지어 쓰는 문제.
-- `PAPER.md`가 아직 예전 앵커 방식(학습형 앵커)을 설명한다.

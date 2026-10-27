@@ -1,5 +1,4 @@
 import ast
-import hashlib
 import importlib
 import json
 import re
@@ -184,66 +183,23 @@ def test_anchor_coverage_order_is_nested_and_complete() -> None:
     assert set(order[:2]).issubset(order[:4])
 
 
-def test_paper_numbers_and_assets_match_tracked_results() -> None:
+def test_paper_numbers_and_assets_match_lr_results() -> None:
     paper = (ROOT / "PAPER.md").read_text(encoding="utf-8")
-    structure = json.loads(
-        (ROOT / "assets/paper/structure-results.json").read_text(encoding="utf-8")
+    results = json.loads(
+        (ROOT / "assets/paper/lr-results.json").read_text(encoding="utf-8")
     )
-    continuation = json.loads(
-        (ROOT / "assets/paper/05-boundary-continuation.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    coverage = json.loads(
-        (ROOT / "assets/paper/04-anchor-coverage.json").read_text(encoding="utf-8")
-    )
-
-    direct = structure["summary"][1]
-    external = continuation["summary"][2]
-    assert f"{direct['fid_mean']:.2f} ± {direct['fid_std']:.2f}" in paper
-    assert (
-        f"{100 * external['pool4_similarity_mean']:.2f} ± "
-        f"{100 * external['pool4_similarity_std']:.2f}%"
-    ) in paper
-    assert (
-        f"{external['smoothness_p95_ratio_mean']:.2f} ± "
-        f"{external['smoothness_p95_ratio_std']:.2f}"
-    ) in paper
-    coverage_by_count = {
-        result["anchor_count"]: result["voxel_accuracy"]
-        for result in coverage["results"]
-    }
-    assert f"{100 * coverage_by_count[64]:.2f}%" in paper
-    assert f"{100 * coverage_by_count[128]:.2f}%" in paper
-    assert "192-dimensional Inception-v3 feature layer" in paper
+    best = results["steps"][str(results["best_step"])]
+    assert f"**{best['structure']:.2f}**" in paper
+    exact = 100 * np.asarray([row["exact"] for row in results["anchor"]["internal"]])
+    assert f"{exact.mean():.1f} ± {exact.std(ddof=1):.1f}%" in paper
+    sixteen = [
+        row["whole"] for row in results["anchor"]["coverage"] if row["count"] == 16
+    ]
+    assert f"{100 * np.mean(sixteen):.1f}%" in paper
 
     assets = re.findall(r'<img src="([^"]+)"', paper)
     assert assets
     assert all((ROOT / asset).is_file() for asset in assets)
-    assert not any("paper-metrics" in asset for asset in assets)
-
-
-def test_paper_sidecars_match_rendered_assets() -> None:
-    weight_digests = set()
-    for stem in (
-        "04-anchor-conditioning",
-        "04-anchor-coverage",
-        "05-boundary-continuation",
-        "06-scale-up",
-    ):
-        image = ROOT / "assets/paper" / f"{stem}.png"
-        metadata = json.loads(
-            (ROOT / "assets/paper" / f"{stem}.json").read_text(encoding="utf-8")
-        )
-        digest = hashlib.sha256(image.read_bytes()).hexdigest()
-        assert metadata["output"]["sha256"] == digest
-        weight_digests.add(metadata["weight_sha256"])
-
-    structure = json.loads(
-        (ROOT / "assets/paper/structure-results.json").read_text(encoding="utf-8")
-    )
-    weight_digests.add(structure["weight_sha256"])
-    assert len(weight_digests) == 1
 
 
 def test_common_manifest_rejects_changed_inputs_and_cache_paths(tmp_path: Path) -> None:
