@@ -70,7 +70,8 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser.add_argument(
         "--gt",
         type=Path,
-        help="Ground-truth TIFF volume used to build anchors.",
+        help="Ground-truth LR label TIFF, one LR patch (lo_res_size^3), whose "
+        "sections anchor the base.",
     )
     parser.add_argument(
         "--blocks",
@@ -184,6 +185,7 @@ def main() -> None:
     generator = load_generator(args.weight, device=device)
     if anchor_count is not None and anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
+    # A small test patch cannot take the default overlap; keep below half of it.
     overlap = (
         min(settings.overlap, (generator.patch_size - 1) // 2)
         if args.overlap is None

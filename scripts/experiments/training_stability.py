@@ -134,7 +134,8 @@ def main():
         raise ValueError("at least two LR steps and one SR step are required.")
     device = check_device(args.device)
     torch.set_num_threads(1)
-    root = args.run_dir or result_directory(__file__)
+    # Its LR and SR training runs belong in run/, not checks/.
+    root = args.run_dir or PROJECT_ROOT / "run" / result_directory(__file__).name
     if args.continue_run and args.run_dir is None:
         raise ValueError("--continue-run requires --run-dir.")
     root.mkdir(parents=True, exist_ok=args.continue_run)
