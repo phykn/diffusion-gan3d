@@ -189,7 +189,7 @@ def test_lr_cli_resumes_progress_without_training_seed(tmp_path):
             [
                 sys.executable,
                 "-B",
-                "run_train.py",
+                "train.py",
                 "--device",
                 "cpu",
                 *map(str, args),

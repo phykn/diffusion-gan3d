@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-import run_train
+import train
 from scripts.simul.src.anode import depth_profile
 from src.config.data import describe_resolution, get_resolution
 from src.config.files import load_yaml, save_yaml
@@ -118,7 +118,7 @@ def test_sample_rejects_unknown_or_invalid_settings(tmp_path, sample, match):
 def test_tune_typos_fail_before_any_stage_trains(tmp_path, capsys, stage):
     path = write_sample(tmp_path, tune={stage: {"train": {"total_step": 10}}})
     with pytest.raises(ValueError, match="unknown training setting: train.total_step"):
-        run_train.main([str(path), "--show"])
+        train.main([str(path), "--show"])
     assert capsys.readouterr().out == ""
 
 
@@ -133,7 +133,7 @@ def test_tune_typos_fail_before_any_stage_trains(tmp_path, capsys, stage):
 def test_invalid_sr_values_fail_before_lr_trains(tmp_path, capsys, tune, message):
     path = write_sample(tmp_path, tune={"sr": tune})
     with pytest.raises(ValueError, match=message):
-        run_train.main([str(path), "--show"])
+        train.main([str(path), "--show"])
     assert capsys.readouterr().out == ""
 
 
@@ -174,7 +174,7 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
         "diffusion": {"num_steps": 2},
         "gradient_checkpointing": False,
     }
-    train = {
+    train_settings = {
         "total_steps": 1,
         "mixed_precision": False,
         "real_batch_size": 2,
@@ -197,25 +197,25 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
                 "lr": {
                     "model": model,
                     "loss": {"r1_weight": 0.0},
-                    "train": train,
+                    "train": train_settings,
                 },
                 "sr": {
                     "model": model,
                     "lr_bank": {"samples_per_domain": 1},
-                    "train": train,
+                    "train": train_settings,
                 },
             },
         },
     )
     name = tmp_path / "trial"
     args = [str(sample), "--run-dir", str(name), "--device", "cpu"]
-    run_train.main([*args, "--lr-only"])
+    train.main([*args, "--lr-only"])
     assert (tmp_path / "trial-lr" / ".done").is_file()
     assert not (tmp_path / "trial-sr").exists()
     # Without NAME, an LR run could never be found again to train its SR stage.
     with pytest.raises(SystemExit, match="needs --run-dir"):
-        run_train.main(["--resume", str(tmp_path / "trial-lr"), "--device", "cpu"])
-    run_train.main(args)
+        train.main(["--resume", str(tmp_path / "trial-lr"), "--device", "cpu"])
+    train.main(args)
     lr_dir, sr_dir = tmp_path / "trial-lr", tmp_path / "trial-sr"
     for path in (lr_dir, sr_dir):
         assert (path / ".done").is_file()
@@ -227,7 +227,7 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
     assert saved["data"]["domains"][0]["xy"] == [str(images)]
 
     capsys.readouterr()
-    run_train.main(args)
+    train.main(args)
     assert "Reuse finished" in capsys.readouterr().out
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("trial")) == [
         "trial-lr",
@@ -236,11 +236,11 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
 
     (tmp_path / "broken-lr").mkdir()
     with pytest.raises(SystemExit, match="did not finish"):
-        run_train.main([str(sample), "--run-dir", str(tmp_path / "broken")])
+        train.main([str(sample), "--run-dir", str(tmp_path / "broken")])
 
 
 def test_cli_show_prints_both_stages(capsys):
-    run_train.main(["default", "--show"])
+    train.main(["default", "--show"])
     out = capsys.readouterr().out
     assert "# low_res\nstage: low_res" in out
     assert "# sr\nstage: sr" in out
@@ -248,13 +248,13 @@ def test_cli_show_prints_both_stages(capsys):
 
 def test_cli_resume_rejects_a_sample():
     with pytest.raises(SystemExit):
-        run_train.parse_args(["default", "--resume", "run/x"])
+        train.parse_args(["default", "--resume", "run/x"])
 
 
 @pytest.mark.parametrize("option", ["--sr-steps", "--bank-size"])
 def test_cli_resume_rejects_options_of_the_other_stage(option):
     with pytest.raises(SystemExit):
-        run_train.parse_args(["--resume", "run/x", option, "5"])
+        train.parse_args(["--resume", "run/x", option, "5"])
 
 
 @pytest.mark.parametrize(
@@ -262,17 +262,17 @@ def test_cli_resume_rejects_options_of_the_other_stage(option):
 )
 def test_cli_lr_only_rejects_resume_and_sr_options(options):
     with pytest.raises(SystemExit):
-        run_train.parse_args(["--lr-only", "--run-dir", "run/x", *options])
+        train.parse_args(["--lr-only", "--run-dir", "run/x", *options])
 
 
 def test_cli_lr_only_needs_a_run_dir():
     with pytest.raises(SystemExit):
-        run_train.parse_args(["default", "--lr-only"])
-    assert run_train.parse_args(["default", "--lr-only", "--run-dir", "run/x"]).lr_only
+        train.parse_args(["default", "--lr-only"])
+    assert train.parse_args(["default", "--lr-only", "--run-dir", "run/x"]).lr_only
 
 
 def test_cli_expands_home_in_run_paths():
-    args = run_train.parse_args(["--resume", "~/x", "--run-dir", "~/y"])
+    args = train.parse_args(["--resume", "~/x", "--run-dir", "~/y"])
     assert args.resume == Path.home() / "x"
     assert args.run_dir == Path.home() / "y"
 

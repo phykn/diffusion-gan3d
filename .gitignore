@@ -22,7 +22,7 @@ htmlcov/
 
 *.bat
 *.command
-!/commands/*.command
+!/scripts/commands/*.command
 
 .DS_Store
 Thumbs.db

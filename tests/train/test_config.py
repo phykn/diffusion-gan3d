@@ -131,7 +131,7 @@ def test_invalid_yaml_reports_the_source(tmp_path: Path) -> None:
 
 def test_stage1_training_has_no_measured_3d_target() -> None:
     paths = [
-        ROOT / "run_train.py",
+        ROOT / "train.py",
         ROOT / "src" / "train" / "trainer.py",
         ROOT / "src" / "data" / "dataset.py",
         ROOT / "src" / "data" / "slice.py",

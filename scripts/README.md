@@ -41,9 +41,9 @@ python scripts/check/05_continuation.py --weight "run/my-run-lr" --anchor data/s
 
 ## Training options
 
-On macOS, `commands/train_default.command` (and `train_anode.command` for the simulated
+On macOS, `scripts/commands/train_default.command` (and `train_anode.command` for the simulated
 anode) runs the README training steps on double-click in Finder; the `_1st`/`_2nd` variants split LR
-and SR. `STEPS=200 SR_STEPS=200 commands/train_default.command` makes a short trial.
+and SR. `STEPS=200 SR_STEPS=200 scripts/commands/train_default.command` makes a short trial.
 `--resume` continues one interrupted stage ([Save and resume](#save-and-resume)).
 During the first `burn_in.steps` steps (LR 5000, SR 2500) a cosine curve moves the
 learning rates to `burn_in.lr_scale` (0.25) of `optim.*_lr`, Adam β2 from
@@ -86,7 +86,7 @@ A sample is one file in [config/samples/](../config/samples/); copy
 - `tune.lr` and `tune.sr` change single settings of that stage.
 
 Settings apply in order, later winning: code defaults, [config/base/](../config/base/)`<lr|sr>.yaml`,
-`structure`, then `tune`. `python run_train.py default --show` prints the YAML of both
+`structure`, then `tune`. `python train.py default --show` prints the YAML of both
 stages without the code defaults.
 
 ### Web backend
@@ -110,7 +110,7 @@ Viewer, porosity, and tortuosity are on the HR volume, and one block is
   `selection/scores.yaml` ([Best step](#best-step)).
 
 ```bash
-python run_train.py --resume "run/my-run-lr" --steps 30000 --run-dir "run/my-run-2"
+python train.py --resume "run/my-run-lr" --steps 30000 --run-dir "run/my-run-2"
 ```
 
 ### Best step
@@ -158,7 +158,7 @@ input, so matching it exactly is not the goal.
 Resume continues the stage the checkpoint belongs to with its saved settings, so it takes
 no sample, `--sr-steps`, or `--bank-size`; `--steps` is that stage's total, including
 completed steps. It writes a new run directory (here `run/my-run-2-lr`). After an LR
-resume, `python run_train.py <sample> --run-dir "run/my-run-2"` reuses it and trains SR. Pass
+resume, `python train.py <sample> --run-dir "run/my-run-2"` reuses it and trains SR. Pass
 `--path-map OLD NEW` (repeatable) when data or runs have moved.
 
 
@@ -183,7 +183,7 @@ per-height profile, sections flip at probability 0.2, and z is never flipped or 
 ```bash
 python scripts/simul/run.py --config scripts/simul/config_anode.yaml
 python scripts/check/01_dataset.py --sample simul_anode --no-view
-python run_train.py simul_anode --run-dir "run/anode"
+python train.py simul_anode --run-dir "run/anode"
 python scripts/check/02_generated.py --weight "run/anode-lr" --no-view
 python scripts/check/06_hr.py --weight "run/anode-sr" --no-view
 ```

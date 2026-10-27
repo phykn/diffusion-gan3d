@@ -1,10 +1,10 @@
 #!/bin/zsh
 # Double-click in Finder: SR training from the newest run/*-default-lr -> HR check.
 # Run train_default_1st.command first; the SR model goes to the same run's -sr folder.
-# For a short trial from a terminal: SR_STEPS=200 commands/train_default_2nd.command
+# For a short trial from a terminal: SR_STEPS=200 scripts/commands/train_default_2nd.command
 
-cd "${0:A:h:h}" || exit 1
-source commands/lib.zsh
+cd "${0:A:h:h:h}" || exit 1
+source scripts/commands/lib.zsh
 
 # Run names start with a timestamp, so reverse name order is newest first.
 lr=(run/*-default-lr(N/On[1]))
@@ -12,7 +12,7 @@ lr=(run/*-default-lr(N/On[1]))
 [[ -f $lr/.done ]] || finish 1 "$lr is still training or was interrupted."
 RUN=${lr%-lr}
 [[ -f $RUN-sr/.done ]] && finish 1 "$RUN-sr is already trained. Run train_default_1st.command for a new run."
-step "Train $RUN-sr from $RUN-lr" caffeinate -i $PY run_train.py default \
+step "Train $RUN-sr from $RUN-lr" caffeinate -i $PY train.py default \
   --run-dir $RUN ${SR_STEPS:+--sr-steps=$SR_STEPS}
 step "Check SR generation" $PY scripts/check/06_hr.py --weight $RUN-sr --no-view
 

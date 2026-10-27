@@ -139,9 +139,7 @@ def resume(args: argparse.Namespace) -> None:
         run_dir = run_low_res_train(args.device, run_dir=lr_dir, **options)
         mark_done(run_dir)
         report_done(run_dir)
-        path_field(
-            "Next", f"python run_train.py <sample> --run-dir {args.run_dir}  (SR)"
-        )
+        path_field("Next", f"python train.py <sample> --run-dir {args.run_dir}  (SR)")
     else:
         run_dir = run_sr_train(args.device, run_dir=sr_dir, **options)
         mark_done(run_dir)

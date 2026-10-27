@@ -39,12 +39,12 @@ The **SR** (super-resolution) model then refines LR volumes `sr_scale` times fin
 
 ```bash
 python scripts/check/01_dataset.py --sample default --no-view
-python run_train.py default --run-dir "run/my-run"
+python train.py default --run-dir "run/my-run"
 python scripts/check/02_generated.py --weight "run/my-run-lr" --no-view
 python scripts/check/06_hr.py --weight "run/my-run-sr" --no-view
 ```
 
-`run_train.py` trains LR, then SR from frozen LR volumes. `--run-dir NAME` writes `NAME-lr`
+`train.py` trains LR, then SR from frozen LR volumes. `--run-dir NAME` writes `NAME-lr`
 and `NAME-sr` and skips a finished stage on rerun; `--lr-only` stops after LR. Each stage's
 `generator.pt` is its best scored step, not the last one. Resume, burn-in, devices, and
 memory options are in [Training options](scripts/README.md#training-options).
@@ -61,7 +61,7 @@ A sample is one file in [config/samples/](config/samples/); copy
 - `structure`: `isotropic`, `depth_gradient`, and `mirror_symmetric` describe the material.
 - `tune.lr` and `tune.sr` change single settings of a stage.
 
-`python run_train.py default --show` prints the resolved YAML of both stages. Details of each
+`python train.py default --show` prints the resolved YAML of both stages. Details of each
 field are in [Training options](scripts/README.md#sample-fields).
 
 ## Web interface

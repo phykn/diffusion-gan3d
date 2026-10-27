@@ -5,7 +5,7 @@ import pytest
 import torch
 from PIL import Image
 
-import run_train
+import train
 from src.build.trainer import build_trainer
 from src.config.train import load_train_config
 from src.device import (
@@ -36,8 +36,8 @@ def test_default_device_prefers_cuda_then_apple_gpu(monkeypatch, cuda, mps, expe
     monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
     assert default_device() == expected
-    assert run_train.parse_args([]).device == expected
-    assert run_train.parse_args(["--device", "mps"]).device == "mps"
+    assert train.parse_args([]).device == expected
+    assert train.parse_args(["--device", "mps"]).device == "mps"
 
 
 def test_check_device_rejects_unavailable_or_unsupported_devices(monkeypatch):
