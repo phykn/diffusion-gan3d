@@ -72,9 +72,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
         schema = common | {
             "conditioning": {
                 "height_enabled": None,
-                "spatial_profile": dict.fromkeys(
-                    ("enabled", "num_bins", "critic_enabled")
-                ),
+                "spatial_profile": dict.fromkeys(("enabled", "num_bins")),
                 "domain_keep_probability": None,
                 "cfg_dropout_probability": None,
             },
@@ -84,7 +82,6 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                     (
                         "volume_fraction_weight",
                         "spatial_profile_weight",
-                        "spatial_profile_gradient_weight",
                     )
                 )
                 | {

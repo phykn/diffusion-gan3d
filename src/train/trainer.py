@@ -11,7 +11,6 @@ from src.evaluate.structure import structure_metrics
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.plane import AXES, PLANE_AXES
-from src.prepare.profile import profile_field
 from src.train.batch import (
     DenoiserBatch,
     DenoiserUpdate,
@@ -164,25 +163,10 @@ class Trainer:
             transition, prepared.model_conditions
         )
         clean_probs = (prediction + 1.0) * 0.5
-        profile_present = prepared.vf_present.to(self.device)
-        profile = (
-            prepared.model_conditions.get("profile")
-            if self.settings.profile_settings["critic_enabled"]
-            else None
-        )
-        has_profile = profile is not None
-        critic_height = self._with_profile(
-            prepared.model_conditions.get("height"),
-            profile,
-            profile_present,
-            prediction.shape[-3:],
-        )
         fake = self._sample_fake_pairs(
-            previous, current, real, critic_height, has_profile
+            previous, current, real, prepared.model_conditions.get("height")
         )
-        real_pairs = self._sample_real_pairs(
-            transition, real, profile_present, has_profile
-        )
+        real_pairs = self._sample_real_pairs(transition, real)
         critic_vals, r1 = self.update_critics(
             transition, fake, real_pairs, prepared.critic_domains
         )
@@ -294,7 +278,6 @@ class Trainer:
         current: torch.Tensor,
         real: RealBatch,
         volume_height: torch.Tensor | None,
-        has_profile: bool,
     ) -> SampledPairs:
         result = SampledPairs(pairs={})
         for axis in self.active_axes:
@@ -309,48 +292,24 @@ class Trainer:
             )
             if not self.critic_augment.real_only:
                 pairs = self.critic_augment.apply_together(pairs, plane=axis)
-            result.add(axis, pairs, has_profile)
+            result.add(axis, pairs)
         return result
 
     def _sample_real_pairs(
         self,
         transition: int,
         real: RealBatch,
-        profile_present: torch.Tensor,
-        has_profile: bool,
     ) -> SampledPairs:
         result = SampledPairs(pairs={})
         for axis in self.active_axes:
             images = real.images[axis].mul(2.0).sub(1.0)
             previous, current = self.diffusion.sample_pair(images, transition)
             height = real.heights.get(axis)
-            if height is not None and has_profile:
-                profile = (real.profiles[axis] * 2 - 1)[..., None].expand(
-                    -1, -1, *height.shape[-2:]
-                )
-                present = profile_present[
-                    torch.randint(
-                        len(profile_present), (len(profile),), device=self.device
-                    )
-                ]
-                height = torch.cat((height, profile * present.reshape(-1, 1, 1, 1)), 1)
             inputs = (
                 (previous, current) if height is None else (previous, current, height)
             )
-            result.add(
-                axis,
-                self.critic_augment.apply_together(inputs, plane=axis),
-                has_profile,
-            )
+            result.add(axis, self.critic_augment.apply_together(inputs, plane=axis))
         return result
-
-    @staticmethod
-    def _with_profile(height, profile, present, shape) -> torch.Tensor | None:
-        """Append the masked profile field to the height channel for critics."""
-        if height is None or profile is None:
-            return height
-        field = profile_field(profile * 2 - 1, shape) * present.reshape(-1, 1, 1, 1, 1)
-        return torch.cat((height, field), 1)
 
     def _make_denoiser_batch(
         self,

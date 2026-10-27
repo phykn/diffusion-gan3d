@@ -76,7 +76,6 @@ def test_profile_loss_supervises_height_only_samples():
     )
     settings = SimpleNamespace(
         profile_bins=4,
-        profile_gradient_weight=0.0,
         profile_weight=1.0,
         num_phases=2,
     )

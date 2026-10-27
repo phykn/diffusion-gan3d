@@ -62,7 +62,6 @@ def build_models(cfg: dict) -> tuple[Denoiser3D, nn.ModuleDict]:
         groups = get_plane_groups(cfg)
     conditioning, _ = get_trainer_sections(cfg)
     height = conditioning["height_enabled"]
-    profile = conditioning["spatial_profile"]["critic_enabled"]
     phases = data["num_phases"]
     shared = dict(
         num_phases=phases,
@@ -79,7 +78,6 @@ def build_models(cfg: dict) -> tuple[Denoiser3D, nn.ModuleDict]:
                 **shared,
                 time_scale=get_time_scale(cfg),
                 height_channels=int(height),
-                profile_channels=phases if profile else 0,
             )
             for group in groups
         }

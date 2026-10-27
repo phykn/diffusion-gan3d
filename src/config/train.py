@@ -96,7 +96,6 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     if stage == "low_res":
         flags += [
             "conditioning.spatial_profile.enabled",
-            "conditioning.spatial_profile.critic_enabled",
         ]
     for name in flags:
         check_boolean(_setting(cfg, name), name)
@@ -154,10 +153,6 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
     get_schedule_steps(cfg["loss"]["group_statistics"], "loss.group_statistics")
     if stage == "low_res":
         profile = cfg["conditioning"]["spatial_profile"]
-        if profile["critic_enabled"] and not profile["enabled"]:
-            raise ValueError(
-                "spatial_profile.critic_enabled requires an enabled profile."
-            )
         if profile["enabled"] and not cfg["conditioning"]["height_enabled"]:
             raise ValueError("spatial_profile requires height_enabled.")
     optim = cfg["optim"]

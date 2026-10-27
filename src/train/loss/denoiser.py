@@ -23,7 +23,6 @@ class DenoiserLossSettings:
     real_transition_weight: float
     profile_bins: int
     profile_weight: float
-    profile_gradient_weight: float
     consistency_weight: float
     consistency_tolerance: float
     num_phases: int
@@ -166,7 +165,6 @@ def profile_loss(batch, settings):
         batch.profile,
         torch.ones_like(batch.vf_present, dtype=torch.bool),
         settings.profile_bins,
-        settings.profile_gradient_weight,
         settings.profile_weight,
     )
     soft = batch.clean_probs.detach().mean((-1, -2))

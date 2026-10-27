@@ -621,7 +621,6 @@ def _make_trainer(
                 real_transition_weight=0.0,
                 profile_bins=16,
                 profile_weight=0.0,
-                profile_gradient_weight=0.0,
                 consistency_weight=0.0,
                 consistency_tolerance=0.0,
                 num_phases=data["num_phases"],
@@ -651,7 +650,6 @@ def _make_trainer(
             profile_settings={
                 "enabled": False,
                 "num_bins": 16,
-                "critic_enabled": False,
             },
             volume_permute_z=True,
             volume_flip_z=True,

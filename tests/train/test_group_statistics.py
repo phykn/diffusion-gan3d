@@ -201,7 +201,6 @@ def objective_batch():
         real_transition_weight=0,
         profile_bins=4,
         profile_weight=0,
-        profile_gradient_weight=0,
         consistency_weight=0,
         consistency_tolerance=0,
         num_phases=2,

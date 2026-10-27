@@ -17,24 +17,16 @@ class RealBatch:
 class SampledPairs:
     pairs: dict[int, tuple[torch.Tensor, torch.Tensor]]
     heights: dict[int, torch.Tensor] = field(default_factory=dict)
-    profiles: dict[int, torch.Tensor] = field(default_factory=dict)
 
-    def add(self, axis: int, pairs: tuple[torch.Tensor, ...], has_profile: bool):
-        """Store one axis's slice pairs; condition channel 0 is height, then profile."""
+    def add(self, axis: int, pairs: tuple[torch.Tensor, ...]):
+        """Store one axis's slice pairs and, when present, their height."""
         self.pairs[axis] = pairs[:2]
         if len(pairs) == 3:
-            self.heights[axis] = pairs[2][:, :1]
-            if has_profile:
-                self.profiles[axis] = pairs[2][:, 1:]
+            self.heights[axis] = pairs[2]
 
     def conditions(self, axis: int) -> dict[str, torch.Tensor]:
-        """Critic height and profile inputs for one axis."""
-        values = {}
-        if axis in self.heights:
-            values["height"] = self.heights[axis]
-        if axis in self.profiles:
-            values["profile"] = self.profiles[axis]
-        return values
+        """Critic height input for one axis."""
+        return {"height": self.heights[axis]} if axis in self.heights else {}
 
 
 @dataclass(frozen=True)

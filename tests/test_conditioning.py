@@ -362,11 +362,9 @@ def test_height_conditioned_sr_refresh_survives_repeated_directory_moves(tmp_pat
         run_sr_train(resume=checkpoint, steps=4, run_dir=original / "invalid_bank")
 
 
-def test_profile_training_conditions_the_plane_critics_and_resumes(tmp_path):
+def test_profile_training_conditions_the_denoiser_and_resumes(tmp_path):
     cfg = configuration(tmp_path, height=True)
-    cfg["conditioning"]["spatial_profile"].update(
-        enabled=True, num_bins=4, critic_enabled=True
-    )
+    cfg["conditioning"]["spatial_profile"].update(enabled=True, num_bins=4)
     Image.fromarray(np.zeros((32, 24), dtype=np.uint8)).save(
         tmp_path / "images/second.png"
     )
@@ -375,8 +373,6 @@ def test_profile_training_conditions_the_plane_critics_and_resumes(tmp_path):
     metrics = trainer.step(0, transition=0)
     assert np.isfinite(metrics.generator_total)
     assert trainer.denoiser.profile_input.weight.grad.abs().sum() > 0
-    # Only side sections carry height, and so the profile beside it.
-    assert trainer.critics["xz_yz"].profile_input.weight.grad.abs().sum() > 0
     assert "profile/label_mae" in metrics.diagnostics
     save_training(trainer, tmp_path / "training.pt")
     restored = build_trainer(cfg, torch.device("cpu"))

@@ -124,14 +124,3 @@ def test_label_profile_does_not_claim_soft_fraction_is_label_fraction():
     labels = phase_profile(probs.argmax(1), 2)
     torch.testing.assert_close(soft[0, :, 0], torch.tensor([0.7, 0.3]))
     torch.testing.assert_close(labels[0, :, 0], torch.tensor([1.0, 0.0]))
-
-
-def test_gradient_weight_is_independent_of_profile_weight():
-    probs = torch.full((1, 2, 2, 2, 2), 0.5, requires_grad=True)
-    target = torch.tensor([[[0.1, 0.9], [0.9, 0.1]]])
-    loss = compute_profile_loss(
-        probs, target, torch.tensor([True]), 2, gradient_weight=1, profile_weight=0
-    )
-    assert loss > 0
-    loss.backward()
-    assert probs.grad.abs().sum() > 0

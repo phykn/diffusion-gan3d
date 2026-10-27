@@ -40,9 +40,7 @@ STAGE_DEFAULTS = {
     "low_res": {
         "conditioning.spatial_profile.enabled": False,
         "conditioning.spatial_profile.num_bins": 16,
-        "conditioning.spatial_profile.critic_enabled": False,
         "loss.spatial_profile_weight": 1.0,
-        "loss.spatial_profile_gradient_weight": 0.0,
         "loss.volume_fraction_weight": 0.0,
         "conditioning.cfg_dropout_probability": 0.1,
         "loss.real_transition.weight": 0.1,
@@ -75,7 +73,6 @@ INACTIVE_DEFAULTS = {
     "sr": {
         "conditioning.spatial_profile.enabled": False,
         "conditioning.spatial_profile.num_bins": 16,
-        "conditioning.spatial_profile.critic_enabled": False,
         "conditioning.cfg_dropout_probability": 0.0,
         "loss.real_transition.weight": 0.0,
         "loss.real_transition.max_gap": 1,
@@ -83,6 +80,5 @@ INACTIVE_DEFAULTS = {
         "loss.real_transition.ramp_steps": 0,
         "loss.volume_fraction_weight": 0.0,
         "loss.spatial_profile_weight": 0.0,
-        "loss.spatial_profile_gradient_weight": 0.0,
     },
 }

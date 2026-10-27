@@ -64,10 +64,9 @@ class CriticBase(nn.Module):
         gradient_checkpointing: bool = False,
         *,
         height_channels: int = 0,
-        profile_channels: int = 0,
         pyramid_min_size: int = 16,
     ) -> None:
-        """height/profile_channels add optional condition inputs (0 disables)."""
+        """height_channels adds an optional condition input (0 disables)."""
         super().__init__()
         widths = tuple(channels)
         if len(widths) < 2:
@@ -76,7 +75,6 @@ class CriticBase(nn.Module):
         self.gradient_checkpointing = gradient_checkpointing
         self.pyramid_min_size = pyramid_min_size
         self.height_input = self._condition_input(height_channels, widths[0])
-        self.profile_input = self._condition_input(profile_channels, widths[0])
         self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv2d(input_channels, widths[0], 3, padding=1)
         self.blocks = nn.ModuleList(
@@ -108,25 +106,20 @@ class CriticBase(nn.Module):
         embedding: torch.Tensor,
         domain: torch.Tensor,
         height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
     ) -> CriticScores:
         domain_emb = embed_domain(self.domain_embedding, domain, inputs.dtype)
         embedding = (embedding + domain_emb) * INV_SQRT_TWO
         scores = tuple(
-            self.score_level(level, embedding, height, profile)
+            self.score_level(level, embedding, height)
             for level in area_pyramid(inputs, self.pyramid_min_size)
         )
         return CriticScores(scores[0].logits_global, scores if len(scores) > 1 else ())
 
-    def score_level(self, inputs, embedding, height=None, profile=None) -> CriticScores:
+    def score_level(self, inputs, embedding, height=None) -> CriticScores:
         x = self.input(inputs)
         if height is not None and self.height_input is not None:
             x = x + self.height_input(
                 adaptive_pool(height.to(inputs), inputs.shape[-2:])
-            )
-        if profile is not None and self.profile_input is not None:
-            x = x + self.profile_input(
-                adaptive_pool(profile.to(inputs), inputs.shape[-2:])
             )
         checkpointing = self.gradient_checkpointing and self.training
         for idx, block in enumerate(self.blocks):
@@ -168,20 +161,13 @@ class PlaneCritic2D(CriticBase):
         time: torch.Tensor,
         domain: torch.Tensor,
         height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
     ) -> CriticScores:
         embedding = self.time_mlp(
             self.time_embedding(time.to(device=x_previous.device) * self.time_scale).to(
                 dtype=x_previous.dtype
             )
         )
-        return self.score(
-            x_previous,
-            embedding,
-            domain,
-            height,
-            profile,
-        )
+        return self.score(x_previous, embedding, domain, height)
 
 
 class PairCritic2D(PlaneCritic2D):
@@ -199,8 +185,7 @@ class PairCritic2D(PlaneCritic2D):
         time: torch.Tensor,
         domain: torch.Tensor,
         height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
     ) -> CriticScores:
         return super().forward(
-            torch.cat((x_previous, x_current), dim=1), time, domain, height, profile
+            torch.cat((x_previous, x_current), dim=1), time, domain, height
         )

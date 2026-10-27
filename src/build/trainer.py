@@ -165,7 +165,6 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
             vf_weight=loss["volume_fraction_weight"],
             profile_bins=profile["num_bins"],
             profile_weight=loss["spatial_profile_weight"],
-            profile_gradient_weight=loss["spatial_profile_gradient_weight"],
             consistency_weight=loss["downsample_consistency_weight"],
             consistency_tolerance=loss["downsample_mse_tolerance"],
             num_phases=data["num_phases"],
