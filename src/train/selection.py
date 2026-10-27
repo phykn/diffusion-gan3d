@@ -18,6 +18,7 @@ from src.config.files import save_yaml
 from src.evaluate.structure import (
     SectionErrors,
     compare_sections,
+    label_sections,
     section_errors,
     section_statistics,
 )
@@ -25,7 +26,7 @@ from src.predict.sr.inference import SuperResolutionAPI
 from src.prepare.resize import downsample
 from src.random import seeded_rng
 from src.storage import torch_save
-from src.train.state import export_sr
+from src.train.state import export_generator
 
 # Fixed reference sections per domain and plane, and the seed behind them and
 # behind every evaluation volume, so each step meets the same data and noise.
@@ -84,11 +85,14 @@ class CheckpointSelection:
         self.samples = samples
         self.height_enabled = height_enabled
         self.history: list[dict] = []
+        # EMA weights of the best step, kept in the training state so a resume
+        # from any checkpoint can restore them.
+        self.best_state: dict | None = None
         self.real = {}
         self.noise = {}
         for domain, planes in reference.items():
             for axis, plane in planes.items():
-                images = plane["images"].float()
+                images = label_sections(plane["images"])
                 self.real[(domain, axis)] = section_statistics(images)
                 # Errors between halves of the real crops: the sampling noise
                 # that puts every error on one scale.
@@ -161,9 +165,6 @@ class CheckpointSelection:
             return None
         return min(self.history, key=lambda entry: entry["structure"])
 
-    def save_weights(self, trainer, path: Path) -> None:
-        torch_save(trainer.ema_denoiser.state_dict(), path, overwrite=False)
-
     def update(self, trainer, root: Path) -> dict:
         """Score the current EMA weights, keeping them only while they are best."""
         previous = self.best()
@@ -171,11 +172,21 @@ class CheckpointSelection:
         entry = {"step": step, **self.evaluate(trainer)}
         self.history.append(entry)
         if self.best() is entry:
-            self.save_weights(trainer, weights_path(root, step))
+            self.best_state = {
+                name: value.detach().cpu().clone()
+                for name, value in trainer.ema_denoiser.state_dict().items()
+            }
+            self.save_best(trainer, root)
             if previous is not None:
                 weights_path(root, previous["step"]).unlink(missing_ok=True)
         self.save_report(root)
         return entry
+
+    def save_best(self, trainer, root: Path) -> None:
+        step = self.best()["step"]
+        export_generator(
+            trainer.cfg, step, self.best_state, weights_path(root, step), False
+        )
 
     def export(self, root: Path) -> bool:
         """Copy the best step's weights to generator.pt; False before any score."""
@@ -191,24 +202,22 @@ class CheckpointSelection:
             {"best_step": self.best()["step"], "steps": self.history},
         )
 
-    def import_best(self, source: Path, root: Path) -> None:
-        """Copy a resumed run's best weights into the new run directory."""
-        best = self.best()
-        if best is None:
+    def restore(self, trainer, root: Path) -> None:
+        """Write a resumed run's best weights and scores into its new directory."""
+        if self.best() is None:
             return
-        path = weights_path(source, best["step"])
-        if not path.is_file():
-            raise FileNotFoundError(f"selection weights are missing: {path}")
-        target = weights_path(root, best["step"])
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, target)
+        self.save_best(trainer, root)
         self.save_report(root)
 
     def state_dict(self) -> dict:
-        return {"history": [dict(entry) for entry in self.history]}
+        return {
+            "history": [dict(entry) for entry in self.history],
+            "best_state": self.best_state,
+        }
 
     def load_state_dict(self, state: dict) -> None:
         self.history = [dict(entry) for entry in state["history"]]
+        self.best_state = state["best_state"]
 
 
 def lr_mse(high: torch.Tensor, low: torch.Tensor) -> float:
@@ -277,19 +286,12 @@ class SRCheckpointSelection(CheckpointSelection):
         # LR input, so following it exactly is not the goal.
         return {**self.score(volumes), "lr_mse": float(np.mean(errors))}
 
-    def save_weights(self, trainer, path: Path) -> None:
-        export_sr(trainer, path, overwrite=False)
-
     def save_inputs(self, root: Path) -> None:
         torch_save(self.inputs, inputs_path(root), overwrite=False)
 
-    def import_best(self, source: Path, root: Path) -> None:
-        """Score the resumed run's LR inputs again and keep its best weights."""
+    def load_inputs(self, source: Path) -> None:
+        """Score a resumed run on the LR inputs its earlier steps were scored on."""
         path = inputs_path(source)
         if not path.is_file():
             raise FileNotFoundError(f"selection inputs are missing: {path}")
         self.inputs = torch.load(path, map_location="cpu", weights_only=True)
-        target = inputs_path(root)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, target)
-        super().import_best(source, root)

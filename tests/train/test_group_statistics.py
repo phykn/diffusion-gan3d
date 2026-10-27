@@ -12,12 +12,7 @@ from src.train.loss.denoiser import DenoiserLossSettings, denoiser_objective
 from src.train.loss.group_statistics import compute_group_statistics_loss
 from src.train.loss.mirror_balance import compute_mirror_balance_loss
 from src.train.loss.transition import compute_real_transition_loss
-from src.train.state import (
-    resume_sr_training,
-    resume_training,
-    save_sr_training,
-    save_training,
-)
+from src.train.state import resume_training, save_training
 
 ALL = {"xy_xz_yz": (0, 1, 2)}
 SIDES = {"xy": (0,), "xz_yz": (1, 2)}
@@ -295,10 +290,10 @@ def test_trainer_schedule_roundtrips_checkpoints(tmp_path, stage):
     if stage == "low_res":
         save_training(trainer, path)
     else:
-        save_sr_training(trainer, path)
+        save_training(trainer, path)
     payload = torch.load(path, weights_only=True)
     restored = build_trainer(cfg, torch.device("cpu"), bank=bank)
-    resume = resume_training if stage == "low_res" else resume_sr_training
+    resume = resume_training if stage == "low_res" else resume_training
     resume(restored, payload)
     assert restored.completed_steps == 1
     assert restored.settings.loss.group_statistics_weight == 0.2

@@ -144,7 +144,7 @@ def adversarial_loss(batch, critics, groups, diagnose):
             domains.new_full((len(real_prev),), batch.critic_domains[axis]),
             **batch.real.conditions(axis),
         )
-        loss = get_relativistic_loss(scores, real_scores).global_loss
+        loss = get_relativistic_loss(scores, real_scores)
         if diagnose:
             # Undo only the batch mean, retaining pyramid weights.
             norms = input_gradient_norms(loss * len(fake_prev), (fake_prev, fake_curr))

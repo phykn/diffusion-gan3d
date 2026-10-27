@@ -18,6 +18,7 @@ from scripts.common.cli import (
     positive_int,
     result_directory,
 )
+from scripts.common.diagnostic import format_phases
 from src.build.predict import resolve_weights
 from src.config.data import validate_sr_source
 from src.config.files import load_yaml
@@ -45,12 +46,6 @@ def latest_sr():
     if not candidates:
         raise FileNotFoundError("No trained SR export found in run/. Supply --weight.")
     return max(candidates, key=lambda path: path.stat().st_mtime)
-
-
-def format_fractions(values) -> str:
-    return "  ".join(
-        f"phase {phase}: {value:.2%}" for phase, value in enumerate(values)
-    )
 
 
 def comparison(low, high, phases, path, show):
@@ -238,8 +233,8 @@ def main(argv=None):
     path_field("Results", root.resolve())
     field("HR shape", tuple(high.shape))
     section("Quality")
-    metric("LR phase VF", format_fractions(report["lr_phase_fractions"]))
-    metric("HR phase VF", format_fractions(report["hr_label_phase_fractions"]))
+    metric("LR phase VF", format_phases(report["lr_phase_fractions"]))
+    metric("HR phase VF", format_phases(report["hr_label_phase_fractions"]))
     metric("Coarse MAE", f"{report['hr_label_coarse_mae']:.4f}")
     path_field("Comparison", root.resolve() / "comparison.png")
     comparison(

@@ -23,7 +23,6 @@ def test_tensorboard_records_collected_step_metrics(tmp_path):
     )
 
     metrics = collect_metrics(
-        volume_size=8,
         diagnostics={"skipped/generator": 0},
         prepared=prepared,
         denoiser_update=update,

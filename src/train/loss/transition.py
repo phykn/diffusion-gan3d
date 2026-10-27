@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-
 import torch
 
 from src.plane import PLANE_DIRECTIONS, PLANES
@@ -20,16 +18,9 @@ def height_intervals(height: torch.Tensor, dim: int, gap: int):
     return (centers - width * 0.5).flatten(), (centers + width * 0.5).flatten()
 
 
-@dataclass(frozen=True)
-class TransitionStatistics:
-    values: torch.Tensor
-    low: torch.Tensor | None = None
-    high: torch.Tensor | None = None
-
-
 @torch.no_grad()
 def transition_statistics(real, max_gap, heights=None, rotations=()):
-    """Cache observed row-wise joints, retaining separate crops and directions."""
+    """Observed row-wise joints, retaining separate crops and directions."""
     statistics = {}
     for axis, images in real.items():
         if not len(images) or (
@@ -51,17 +42,9 @@ def transition_statistics(real, max_gap, heights=None, rotations=()):
                                 ],
                                 1,
                             )
-                        statistics[axis, dim, gap] = TransitionStatistics(pooled[gap])
+                        statistics[axis, dim, gap] = pooled[gap]
                         continue
-                    values = phase_pairs(images, dim, gap)
-                    low = high = None
-                    if heights is not None:
-                        low, high = height_intervals(heights[axis], dim, gap)
-                        low, high = (
-                            low.reshape(values.shape[:2]),
-                            high.reshape(values.shape[:2]),
-                        )
-                    statistics[axis, dim, gap] = TransitionStatistics(values, low, high)
+                    statistics[axis, dim, gap] = phase_pairs(images, dim, gap)
     return statistics
 
 
@@ -95,7 +78,6 @@ def compute_real_transition_loss(
     max_gap: int,
     real_heights: dict[int, torch.Tensor] | None = None,
     fake_heights: dict[int, torch.Tensor] | None = None,
-    statistics: dict[tuple[int, int, int], TransitionStatistics] | None = None,
     rotations: tuple[int, ...] = (),
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Match observed in-plane transitions at equal LR-grid separations.
@@ -106,10 +88,9 @@ def compute_real_transition_loss(
     zero = next(iter(fake.values())).sum(dtype=torch.float32) * 0.0
     groups: dict[tuple[str, int], list] = {}
     height_enabled = fake_heights is not None
-    if statistics is None:
-        statistics = transition_statistics(
-            real, max_gap, real_heights if height_enabled else None, rotations
-        )
+    statistics = transition_statistics(
+        real, max_gap, real_heights if height_enabled else None, rotations
+    )
     with torch.autocast(device_type=zero.device.type, enabled=False):
         for axis, generated in fake.items():
             if axis not in real or not len(generated):
@@ -124,7 +105,7 @@ def compute_real_transition_loss(
             for dim, direction in enumerate(PLANE_DIRECTIONS[PLANES[axis]], 2):
                 limit = min(max_gap + 1, observed.shape[dim], generated.shape[dim])
                 for gap in range(1, limit):
-                    target = statistics[axis, dim, gap].values
+                    target = statistics[axis, dim, gap]
                     predicted = phase_pairs(generated, dim, gap)
                     if height_enabled:
                         error, count = match_height(

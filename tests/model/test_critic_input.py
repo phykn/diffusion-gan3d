@@ -12,7 +12,7 @@ def _generator_loss(scores):
         torch.zeros_like(scores.logits_global),
         tuple(CriticScores(torch.zeros_like(s.logits_global)) for s in scores.levels),
     )
-    return get_relativistic_loss(scores, zero).global_loss
+    return get_relativistic_loss(scores, zero)
 
 
 @pytest.mark.parametrize("mode,channels", [("pair", 4), ("single", 2)])

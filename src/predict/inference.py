@@ -77,6 +77,7 @@ class LowResolutionAPI:
             shape = self.input_size if size is None else size
         shape = parse_shape(shape)
         if tiled:
+            # Raise on a shape or overlap that generate would reject.
             self.scaled.plan(shape, overlap)
         return estimate_memory(
             shape,

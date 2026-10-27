@@ -55,6 +55,12 @@ def format_percent(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2%}"
 
 
+def format_phases(values) -> str:
+    return "  ".join(
+        f"phase {phase}: {float(value):.2%}" for phase, value in enumerate(values)
+    )
+
+
 def format_ratio(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}x"
 

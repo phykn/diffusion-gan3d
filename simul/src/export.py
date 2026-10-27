@@ -7,7 +7,7 @@ import tifffile
 import yaml
 from PIL import Image
 
-from simul.src.anode import GRAPHITE, SILICON, check_anode, pack_anode
+from simul.src.anode import GRAPHITE, SILICON, check_anode, pack_anode, vf_profile
 from simul.src.geometry import check_geometry, pack
 from src.config.files import project_path
 from src.plane import AXES
@@ -36,6 +36,7 @@ class Export:
     volumes: tuple[Path, ...]
     slices: dict[int, tuple[Path, ...]]
     measured: tuple[dict[str, float], ...]
+    targets: dict[str, float]
 
 
 def generate(cfg: dict) -> Export:
@@ -60,12 +61,16 @@ def generate(cfg: dict) -> Export:
     slices: dict[int, list[Path]] = {axis: [] for axis in AXES}
     measured = []
 
-    jammed = False
+    # Mean over z; anode fractions are depth profiles.
+    targets = {
+        key: float(vf_profile(geometry["size"], 0, geometry[key]).mean())
+        for key in fractions
+    }
+    jammed = set()
     for idx in range(count):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             vol = pack_volume(**geometry, rng=rng)
-        jammed |= bool(caught)
         stem = f"volume_{idx:03d}"
         path = vol_dir / f"{stem}.tiff"
         tifffile.imwrite(path, vol)
@@ -73,6 +78,10 @@ def generate(cfg: dict) -> Export:
         measured.append(
             {key: float((vol == label).mean()) for key, label in fractions.items()}
         )
+        if caught:
+            jammed |= {
+                key for key, value in measured[-1].items() if value < targets[key]
+            }
 
         for axis in AXES:
             paths = save_slices(
@@ -84,11 +93,12 @@ def generate(cfg: dict) -> Export:
             slices[axis].extend(paths)
 
     if jammed:
-        means = {key: np.mean([item[key] for item in measured]) for key in measured[0]}
         warnings.warn(
             "random packing jammed below the configured fractions: "
             + ", ".join(
-                f"{key} {means[key]:.3f} (target {geometry[key]})" for key in means
+                f"{key} {np.mean([item[key] for item in measured]):.3f} "
+                f"(target {targets[key]:.3f})"
+                for key in sorted(jammed)
             ),
             stacklevel=2,
         )
@@ -110,6 +120,7 @@ def generate(cfg: dict) -> Export:
         volumes=tuple(volumes),
         slices={axis: tuple(paths) for axis, paths in slices.items()},
         measured=tuple(measured),
+        targets=targets,
     )
 
 

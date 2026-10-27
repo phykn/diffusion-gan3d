@@ -16,7 +16,7 @@ from src.model.critic import CriticScores
 from src.plane import PLANES
 from src.train.batch import SampledPairs
 from src.train.run.loop import run_train
-from src.train.state import resume_sr_training, save_sr_training
+from src.train.state import resume_training, save_training
 
 GROUPS = [[["xy", "xz", "yz"]], [["xy"], ["xz", "yz"]], [["xy"], ["xz"], ["yz"]]]
 
@@ -150,10 +150,10 @@ def test_sr_groups_step_once_per_critic_update_and_restore_state(tmp_path, group
     for optimizer in trainer.critic_optims.values():
         assert optimizer.step.call_count == 1
     path = tmp_path / "last.pt"
-    save_sr_training(trainer, path)
+    save_training(trainer, path)
     expected = copy.deepcopy(trainer.denoiser.state_dict())
     restored = build_sr_trainer(cfg, bank, torch.device("cpu"))
-    resume_sr_training(restored, torch.load(path, weights_only=True))
+    resume_training(restored, torch.load(path, weights_only=True))
     for key, value in expected.items():
         torch.testing.assert_close(
             restored.denoiser.state_dict()[key], value, rtol=0, atol=0
@@ -170,7 +170,7 @@ def test_sr_groups_step_once_per_critic_update_and_restore_state(tmp_path, group
         GROUPS[1] if len(groups) != 2 else GROUPS[0]
     )
     with pytest.raises(ValueError, match="saved settings"):
-        resume_sr_training(
+        resume_training(
             build_sr_trainer(other, bank, torch.device("cpu")),
             torch.load(path, weights_only=True),
         )

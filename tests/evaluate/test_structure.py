@@ -1,6 +1,6 @@
 import torch
 
-from src.evaluate.structure import section_errors, structure_metrics
+from src.evaluate.structure import label_sections, section_errors, structure_metrics
 
 
 def test_structure_metrics_detect_disconnection_and_match_measured_planes():
@@ -46,3 +46,12 @@ def test_cluster_error_sees_merged_regions_of_equal_area():
     # Phase 1: 4 vs 1 clusters and area 4 vs 16, each a gap of 1.2 relative to
     # the mean; phase 0 is one cluster of the same area on both sides.
     assert abs(section_errors(real, fake)[2] - 0.6) < 1e-9
+
+
+def test_labelled_sections_split_exact_ties_evenly_and_keep_clear_phases():
+    sections = torch.full((64, 2, 16, 16), 0.5)
+    sections[:, :, :, :8] = torch.tensor([0.25, 0.75])[:, None, None]
+    labels = label_sections(sections)
+    assert torch.equal(labels[..., :8].argmax(1), torch.ones(64, 16, 8).long())
+    assert abs(float(labels[..., 8:, 1].mean()) - 0.5) < 0.02
+    assert torch.equal(labels, label_sections(sections))

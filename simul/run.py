@@ -29,7 +29,7 @@ def main() -> None:
     field("Slices", slice_count)
     for key in export.measured[0]:
         mean = sum(item[key] for item in export.measured) / len(export.measured)
-        field(key, f"{mean:.3f} measured, {cfg['geometry'][key]} target")
+        field(key, f"{mean:.3f} measured, {export.targets[key]:.3f} target")
     path_field("Output", cfg["output"]["data_dir"])
 
 

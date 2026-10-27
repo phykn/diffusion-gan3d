@@ -89,7 +89,7 @@ def estimate_sr_memory(
         shape=shape,
         expanded_shape=expanded,
         coarse_bytes=coarse,
-        state_bytes=4 * num_phases * math.prod(generation_shape) if shared else 0,
+        state_bytes=2 * num_phases * math.prod(generation_shape) if shared else 0,
         accumulation_bytes=4
         * (num_phases + 1)
         * expanded[0]

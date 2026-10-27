@@ -78,7 +78,9 @@ Only 2D sections of the material exist, so the score compares sections:
 
 Each error is divided by the same error between two halves of the real crops, so all
 three use the sampling noise of the real data as their unit; **structure** is their
-mean over planes. `generator.pt` is the step with the lowest structure. Each plane uses
+mean over planes. `generator.pt` is the step with the lowest structure. Real crops are
+labelled by their largest phase; exact ties left by area downsampling are broken at
+random, so they do not favor phase 0. Each plane uses
 128 generated sections spread evenly over the volumes, so the statistics cost grows with
 the section area, not the volume size.
 
@@ -88,8 +90,10 @@ input, so matching it exactly is not the goal.
 
 - `selection/scores.yaml` lists every scored step and the best step; TensorBoard has
   `selection/*`.
-- `selection/generator_N.pt` keeps the best step's weights, and SR runs keep their LR
-  inputs in `selection/inputs.pt`. Resume copies both from the resumed run, so keep them.
+- `selection/generator_N.pt` keeps the best step's weights. Archive checkpoints carry
+  them too, so a resume from any checkpoint writes them into the new run. SR runs keep
+  their LR inputs in `selection/inputs.pt`; an SR resume reads it from the resumed run,
+  so keep it.
 - One LR evaluation of 8 samples takes about 4 s per domain at 64³ on Apple MPS; most of
   it is generation, which grows with volume size like a training step does. Set
   `selection.enabled: false` to export the latest step instead.

@@ -152,52 +152,22 @@ def test_transition_targets_exclude_borrowed_domain_planes():
     assert not any("/z/" in key for key in trainer.diagnostics)
 
 
-@pytest.mark.parametrize("height_enabled", (False, True))
-def test_cached_statistics_preserve_real_loss_and_generated_gradients(height_enabled):
-    torch.manual_seed(7)
-    real = {axis: torch.rand(2, 2, 8, 8).softmax(1) for axis in range(3)}
-    fake = {axis: torch.rand(2, 2, 8, 8, requires_grad=True) for axis in range(3)}
-    heights = (
-        {axis: height_field((8, 8), 0, [0, 1], 1, 16) for axis in (1, 2)}
-        if height_enabled
-        else None
-    )
-    stats = transition_statistics(real, 3, heights)
-    original, original_logs = compute_real_transition_loss(
-        real, fake, 3, heights, heights
-    )
-    cached, cached_logs = compute_real_transition_loss(
-        real, fake, 3, heights, heights, stats
-    )
-    torch.testing.assert_close(original, cached, rtol=0, atol=0)
-    assert original_logs.keys() == cached_logs.keys()
-    for key in original_logs:
-        torch.testing.assert_close(original_logs[key], cached_logs[key], rtol=0, atol=0)
-    active = [fake[axis] for axis in ((1, 2) if height_enabled else (0, 1, 2))]
-    first = torch.autograd.grad(original, active)
-    second = torch.autograd.grad(cached, active)
-    for a, b in zip(first, second, strict=True):
-        torch.testing.assert_close(a, b, rtol=0, atol=0)
-
-
 def test_rotated_planes_share_pooled_row_and_column_targets():
     labels = torch.arange(6).remainder(2)[None, :, None].expand(2, -1, 6)
     images = phase_channels(labels, 2)
     plain = transition_statistics({0: images, 1: images}, 2)
     pooled = transition_statistics({0: images, 1: images}, 2, rotations=(0,))
     for gap in (1, 2):
-        rows, cols = plain[0, 2, gap].values, plain[0, 3, gap].values
+        rows, cols = plain[0, 2, gap], plain[0, 3, gap]
         assert torch.equal(rows.mean((0, 1)), cols.mean((0, 1))) == (gap == 2)
         transposed = phase_pairs(images.transpose(2, 3), 2, gap)
         for dim in (2, 3):
             torch.testing.assert_close(
-                pooled[0, dim, gap].values, torch.cat((rows, transposed), 1)
+                pooled[0, dim, gap], torch.cat((rows, transposed), 1)
             )
-            torch.testing.assert_close(
-                pooled[1, dim, gap].values, plain[1, dim, gap].values
-            )
+            torch.testing.assert_close(pooled[1, dim, gap], plain[1, dim, gap])
         torch.testing.assert_close(
-            pooled[0, 2, gap].values.mean((0, 1)),
+            pooled[0, 2, gap].mean((0, 1)),
             (rows.mean((0, 1)) + cols.mean((0, 1))) * 0.5,
         )
 
@@ -227,8 +197,7 @@ def test_height_conditioned_statistics_ignore_rotation():
     rotated = transition_statistics(real, 2, heights, rotations=(1,))
     assert plain.keys() == rotated.keys()
     for key, stats in plain.items():
-        torch.testing.assert_close(rotated[key].values, stats.values)
-        torch.testing.assert_close(rotated[key].low, stats.low)
+        torch.testing.assert_close(rotated[key], stats)
 
 
 @pytest.mark.parametrize(
@@ -269,9 +238,7 @@ def test_trainer_transition_targets_use_rotating_augmentation_planes():
         model_conditions={},
         real=RealBatch(images={0: images}, domains={0: 0}),
     )
-    statistics = trainer._transition_statistics(prepared)
-    torch.testing.assert_close(statistics[0, 2, 1].values, statistics[0, 3, 1].values)
     volume = images[:1, :, None].expand(-1, -1, 4, -1, -1)
-    assert trainer._real_transition_loss(prepared, volume, statistics) > 0
+    assert trainer._real_transition_loss(prepared, volume) > 0
     trainer.critic_augment = CriticAugment()
     assert trainer._real_transition_loss(prepared, volume) == 0

@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
+import torch
 
-from src.evaluate.tortuosity import tau, tortuosity
+import src.evaluate.tortuosity as tortuosity_module
+from src.evaluate.tortuosity import pore_tortuosity, tau, tortuosity
 
 
 def test_tortuosity_orients_selected_phase_for_taufactor(
@@ -78,20 +80,6 @@ def test_tortuosity_rejects_unconverged_or_invalid_results(
         tortuosity(np.zeros((2, 2, 2)), device="cpu")
 
 
-def test_tortuosity_preserves_infinity_for_no_percolating_path(monkeypatch):
-    class Solver:
-        converged = True
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def solve(self, **kwargs):
-            self.tau = np.array([np.inf])
-
-    monkeypatch.setattr(tau, "Solver", Solver)
-    assert tortuosity(np.ones((2, 2, 2)), device="cpu") == np.inf
-
-
 def test_tortuosity_reads_the_solver_tau_after_inf_replacement(monkeypatch):
     class Solver:
         converged = True
@@ -104,7 +92,8 @@ def test_tortuosity_reads_the_solver_tau_after_inf_replacement(monkeypatch):
             return np.array([0.0])
 
     monkeypatch.setattr(tau, "Solver", Solver)
-    assert tortuosity(np.ones((2, 2, 2)), device="cpu") == np.inf
+    # Phase 0 spans the volume, so the solver runs rather than the span check.
+    assert tortuosity(np.zeros((2, 2, 2)), device="cpu") == np.inf
 
 
 def test_tortuosity_measures_a_straight_channel_along_the_thickness_axis():
@@ -128,3 +117,47 @@ def test_tortuosity_is_infinite_without_a_spanning_path(monkeypatch, blocked):
     else:
         volume[:] = 1
     assert tortuosity(volume, phase=0, axis=0, device="cpu") == float("inf")
+
+
+def test_pore_tortuosity_uses_phase_zero_and_thickness_axis(monkeypatch):
+    volume = torch.zeros(2, 2, 2, dtype=torch.uint8)
+    calls = []
+
+    def fake_tortuosity(values, *, phase, axis, device):
+        calls.append((values, phase, axis, device))
+        return 1.75
+
+    monkeypatch.setattr(tortuosity_module, "tortuosity", fake_tortuosity)
+    assert pore_tortuosity(volume, torch.device("cpu")) == pytest.approx(1.75)
+    assert calls == [(volume, 0, 0, torch.device("cpu"))]
+
+
+def test_unconverged_solver_reports_unavailable(monkeypatch):
+    class Solver:
+        converged = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def solve(self, **kwargs):
+            self.tau = np.array([2.75])
+
+    monkeypatch.setattr(tau, "Solver", Solver)
+    volume = torch.zeros(2, 2, 2, dtype=torch.uint8)
+    assert pore_tortuosity(volume, torch.device("cpu")) is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        torch.OutOfMemoryError("CUDA out of memory"),
+        RuntimeError("MPS backend out of memory (MPS allocated: 1 GB)"),
+    ],
+)
+def test_pore_tortuosity_propagates_memory_exhaustion(monkeypatch, error):
+    def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(tortuosity_module, "tortuosity", fail)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        pore_tortuosity(torch.zeros(2, 2, 2, dtype=torch.uint8), torch.device("cpu"))

@@ -142,7 +142,7 @@ def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
 
     def track_r1(scores, inputs):
         penalties = get_gradient_penalty(scores, inputs)
-        r1_values.append(float(penalties.global_loss.detach()))
+        r1_values.append(float(penalties.detach()))
         return penalties
 
     with patch("src.train.loss.gan.get_gradient_penalty", side_effect=track_r1):
@@ -156,7 +156,6 @@ def test_training_step_updates_denoiser_and_all_critics(real_only) -> None:
     assert trainer.critic_augment.apply_together.call_count == (3 if real_only else 6)
     assert math.isclose(metrics.r1, sum(r1_values) / len(r1_values), rel_tol=1e-6)
     assert 0 <= metrics.transition < 2
-    assert metrics.volume_size == 8
     assert _changed(denoiser_before, denoiser)
     assert all(
         _changed(critic_before[axis], critics[PLANES[axis]]) for axis in (0, 1, 2)
@@ -324,7 +323,7 @@ def test_generate_pair_keeps_initial_noise_and_returns_the_final_prediction() ->
         patch.object(trainer, "sample_latent", return_value=latent),
     ):
         previous, current, prediction = trainer.generate_pair(
-            transition=0, model_conditions=conditions, volume_size=8
+            transition=0, model_conditions=conditions
         )
 
     assert torch.equal(current, initial)
@@ -343,12 +342,11 @@ def test_training_volume_and_critic_use_patch_size() -> None:
         for critic in trainer.critics.values()
     ]
     try:
-        metrics = trainer.step(0, transition=0)
+        trainer.step(0, transition=0)
     finally:
         for hook in hooks:
             hook.remove()
 
-    assert metrics.volume_size == 8
     assert all(stream.calls == 1 for stream in streams.values())
     assert shapes
     assert all(shape[-2:] == (8, 8) for shape in shapes)
@@ -495,7 +493,6 @@ def test_fit_separates_weight_updates_and_checkpoint_archives(
             critic=1.0,
             r1=0.0,
             transition=0,
-            volume_size=8,
             domain=0,
             critic_axes=(1.0, 1.0, 1.0),
         )
@@ -505,9 +502,9 @@ def test_fit_separates_weight_updates_and_checkpoint_archives(
 
     weight_steps = []
 
-    def record_weights(trainer, root, stage):
+    def record_weights(trainer, root):
         weight_steps.append(trainer.completed_steps)
-        save_weights(trainer, root, stage)
+        save_weights(trainer, root)
 
     monkeypatch.setattr("src.train.run.loop.save_weights", record_weights)
 

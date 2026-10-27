@@ -122,6 +122,21 @@ def test_tune_typos_fail_before_any_stage_trains(tmp_path, capsys, stage):
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.parametrize(
+    "tune,message",
+    [
+        ({"lr_bank": {"samples_per_domain": 0}}, "lr_bank.samples_per_domain"),
+        ({"lr_bank": {"guidance": True}}, "lr_bank.guidance"),
+        ({"model": {"critic": {"channels": [32]}}}, "two levels"),
+    ],
+)
+def test_invalid_sr_values_fail_before_lr_trains(tmp_path, capsys, tune, message):
+    path = write_sample(tmp_path, tune={"sr": tune})
+    with pytest.raises(ValueError, match=message):
+        run_train.main([str(path), "--show"])
+    assert capsys.readouterr().out == ""
+
+
 def test_missing_sample_lists_available_names():
     with pytest.raises(FileNotFoundError, match="available: .*default"):
         load_sample("missing")
@@ -197,6 +212,9 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
     run_train.main([*args, "--lr-only"])
     assert (tmp_path / "trial-lr" / ".done").is_file()
     assert not (tmp_path / "trial-sr").exists()
+    # Without NAME, an LR run could never be found again to train its SR stage.
+    with pytest.raises(SystemExit, match="needs --run-dir"):
+        run_train.main(["--resume", str(tmp_path / "trial-lr"), "--device", "cpu"])
     run_train.main(args)
     lr_dir, sr_dir = tmp_path / "trial-lr", tmp_path / "trial-sr"
     for path in (lr_dir, sr_dir):
@@ -244,7 +262,13 @@ def test_cli_resume_rejects_options_of_the_other_stage(option):
 )
 def test_cli_lr_only_rejects_resume_and_sr_options(options):
     with pytest.raises(SystemExit):
-        run_train.parse_args(["--lr-only", *options])
+        run_train.parse_args(["--lr-only", "--run-dir", "run/x", *options])
+
+
+def test_cli_lr_only_needs_a_run_dir():
+    with pytest.raises(SystemExit):
+        run_train.parse_args(["default", "--lr-only"])
+    assert run_train.parse_args(["default", "--lr-only", "--run-dir", "run/x"]).lr_only
 
 
 def test_cli_expands_home_in_run_paths():

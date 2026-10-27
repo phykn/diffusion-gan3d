@@ -64,6 +64,18 @@ class SectionErrors(NamedTuple):
     cluster_error: float
 
 
+def label_sections(sections, seed: int = 0) -> torch.Tensor:
+    """One-hot sections, with exact phase ties broken at random.
+
+    Area-downsampled crops hold exact ties such as 0.5/0.5, which argmax would
+    all give to the lowest phase.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    noise = torch.rand(sections.shape, generator=generator) * 1e-3
+    labels = (sections.float() + noise).argmax(1)
+    return torch.nn.functional.one_hot(labels, sections.shape[1]).movedim(-1, 1).float()
+
+
 class SectionStatistics(NamedTuple):
     two_point: list
     chords: list
@@ -149,17 +161,12 @@ def structure_metrics(probs, real, groups):
             metrics[f"structure/phase_{phase}/tilt_balance_{name}"] = stats["balance"]
     generated_curves = {}
     for axis, images in real.items():
-        images = images.detach().float().cpu()
-        if images.ndim == 3:
-            images = (
-                torch.nn.functional.one_hot(images.long(), phases)
-                .movedim(-1, 1)
-                .float()
-            )
+        images = label_sections(images.detach().cpu())
         planes = probs.movedim(axis + 2, 1).flatten(0, 1)
         indices = torch.linspace(0, len(planes) - 1, len(images)).long()
-        fake = planes[indices]
-        fake = fake[..., : images.shape[-2], : images.shape[-1]]
+        fake = label_sections(
+            planes[indices][..., : images.shape[-2], : images.shape[-1]]
+        )
         for name, value in section_errors(images, fake)._asdict().items():
             metrics[f"structure/{PLANES[axis]}/{name}"] = value
         generated_curves[axis] = two_point(fake)

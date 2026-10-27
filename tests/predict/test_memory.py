@@ -20,7 +20,7 @@ def test_estimate_counts_states_but_bounds_fusion_by_tile_depth():
     small = memory.estimate_memory((64, 100, 90), 3, tile_size=32, margin=4)
     tall = memory.estimate_memory((640, 100, 90), 3, tile_size=32, margin=4)
     assert small.generation_shape == (72, 108, 98)
-    assert small.state_bytes == 2 * 2 * 3 * 72 * 108 * 98
+    assert small.state_bytes == 2 * 3 * 72 * 108 * 98
     assert small.fusion_bytes == 4 * 4 * 32 * 108 * 98
     assert tall.fusion_bytes == small.fusion_bytes
     assert tall.state_bytes > small.state_bytes

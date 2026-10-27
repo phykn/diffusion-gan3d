@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -14,7 +13,7 @@ from src.storage import (
     save_volume,
 )
 from src.train.run.bank import publish_bank
-from src.train.state import export_sr
+from src.train.state import export_generator
 
 
 @pytest.mark.parametrize("damage", ["extra", "missing"])
@@ -88,16 +87,17 @@ def test_exports_overwrite_directly(tmp_path, kind):
         save_model(path, model)
         expected = model.state_dict()
     else:
-        export_sr(SimpleNamespace(cfg={}, completed_steps=3, ema_denoiser=model), path)
+        export_generator({"stage": "sr"}, 3, model.state_dict(), path)
         expected = {
             "format": "diffusion-gan3d.sr",
-            "config": {},
+            "config": {"stage": "sr"},
             "step": 3,
             "model": model.state_dict(),
         }
     actual = torch.load(path, weights_only=True)
     if kind == "sr":
         assert actual.pop("format") == expected.pop("format")
+        assert actual.pop("config") == expected.pop("config")
     torch.testing.assert_close(actual, expected)
     assert list(tmp_path.iterdir()) == [path]
 

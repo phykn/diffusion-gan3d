@@ -170,7 +170,6 @@ class Denoiser3D(nn.Module):
             nn.init.zeros_(vf_out.weight)
             nn.init.zeros_(vf_out.bias)
 
-        # Build optional weights last so the shared backbone keeps identical RNG init.
         self.coarse_input = (
             Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
             if coarse_enabled

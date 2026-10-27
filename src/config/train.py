@@ -127,6 +127,9 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
             raise ValueError(
                 f"model.{name}.channels must list integers of at least {minimum}."
             )
+    critic_channels = cfg["model"]["critic"].get("channels")
+    if critic_channels is not None and len(critic_channels) < 2:
+        raise ValueError("model.critic.channels must list at least two levels.")
     channels = cfg["model"]["generator"].get("channels")
     if channels and any(value % channels[0] for value in channels):
         raise ValueError(

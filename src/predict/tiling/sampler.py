@@ -32,8 +32,9 @@ class TileSampler:
         """tile_guidance(tile, index) returns the tile's AnchorGuidance or None."""
         generator = self.generator
         device = generator.device if storage == "cuda" else torch.device("cpu")
+        # One state suffices: a z-layer is updated only after every tile that
+        # reads it, and later layers read only z at or above their own start.
         current = VolumeState(generator.num_phases, plan.shape, device)
-        next_state = VolumeState(generator.num_phases, plan.shape, device)
         shape = tuple(n - 2 * plan.margin for n in plan.shape)
         output = torch.empty(
             (generator.num_phases, *shape) if probabilities else shape,
@@ -69,14 +70,15 @@ class TileSampler:
                     device=generator.device,
                     dtype=torch.float32,
                 )
-                if base is not None:
+                # A preserved base is already re-noised at the end of each step.
+                first = transition == generator.diffusion.timesteps - 1
+                if base is not None and (first or not base.preserve):
                     base.condition(
                         current, generator.diffusion, transition + 1, plan.tile_size
                     )
                 final_output = output if transition == 0 else None
                 self.step(
                     current,
-                    next_state,
                     tiles,
                     time,
                     latent,
@@ -91,8 +93,6 @@ class TileSampler:
                     tile_guidance=tile_guidance,
                     base=base,
                 )
-                if final_output is None:
-                    current, next_state = next_state, current
                 bar.update()
         return output
 
@@ -118,7 +118,6 @@ class TileSampler:
     def step(
         self,
         current: VolumeState,
-        next_state: VolumeState,
         tiles: tuple[Tile, ...],
         time: torch.Tensor,
         latent: torch.Tensor,
@@ -169,7 +168,6 @@ class TileSampler:
             if next_z != tile.source[0].start:
                 self.flush_slab(
                     current,
-                    next_state,
                     tiles[layer_start : index + 1],
                     fusion,
                     transition,
@@ -183,7 +181,6 @@ class TileSampler:
     def flush_slab(
         self,
         current: VolumeState,
-        next_state: VolumeState,
         tiles: tuple[Tile, ...],
         fusion: Fusion,
         transition: int,
@@ -220,7 +217,7 @@ class TileSampler:
                         base.constrain(
                             updated, global_region, generator.diffusion, transition
                         )
-                    next_state.write(global_region, updated)
+                    current.write(global_region, updated)
                 else:
                     write_output(output, global_region, clean, margin)
                 fusion.pred_sum[region].zero_()

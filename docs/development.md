@@ -44,8 +44,9 @@
   diagonals equal.
 - LR and SR runs score their EMA weights at every weights save with
   [CheckpointSelection](../src/train/selection.py) (`SRCheckpointSelection` for SR)
-  before the archive checkpoint, so a resume keeps that score; `save_weights` exports
-  the best step as `generator.pt`. Statistics use a fixed number of sections per plane
+  before the archive checkpoint, which carries the scores and the best EMA weights, so
+  a resume from any checkpoint keeps them; `save_weights` exports the best step as
+  `generator.pt`. Statistics use a fixed number of sections per plane
   (`SECTIONS`), so their cost grows with section area, not volume size.
 - With `augmentation.auto_planes`, `auto_plane_policies` in `src/config/train.py` picks
   each plane's flips and rotations. z stays fixed (no `xz`/`yz` rotation) when height is

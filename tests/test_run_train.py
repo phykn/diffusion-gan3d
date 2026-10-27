@@ -34,7 +34,6 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
         critic=2.0,
         r1=0.0,
         transition=1,
-        volume_size=8,
         domain=0,
         critic_axes=(2.0, 2.0, 2.0),
     )
@@ -52,15 +51,13 @@ def test_shared_run_records_resumed_steps_and_preserves_save_schedule(
     trainer.step = step
     monkeypatch.setattr(
         "src.train.run.loop.save_weights",
-        lambda trainer, path, stage: exports.append(
+        lambda trainer, path: exports.append(
             (trainer.completed_steps, path.relative_to(tmp_path).as_posix(), stage)
         ),
     )
     monkeypatch.setattr(
         "src.train.run.loop.save_checkpoint",
-        lambda trainer, path, stage: checkpoints.append(
-            (stage, trainer.completed_steps)
-        ),
+        lambda trainer, path: checkpoints.append((stage, trainer.completed_steps)),
     )
     with pytest.raises(KeyboardInterrupt) if interrupt else nullcontext():
         run_train(
@@ -152,7 +149,6 @@ def test_metrics_write_loss_conditioning_and_plane_tags() -> None:
         critic=2.0,
         r1=0.0,
         transition=1,
-        volume_size=8,
         domain=2,
         critic_axes=(0.5, 0.7, 0.8),
         real_transition_ramp=0.5,
@@ -420,7 +416,7 @@ def test_interrupt_while_saving_stops_without_saving_again(tmp_path, monkeypatch
     trainer.step = step
     saves = []
 
-    def interrupted_save(trainer, root, stage):
+    def interrupted_save(trainer, root):
         saves.append(trainer.completed_steps)
         raise KeyboardInterrupt
 

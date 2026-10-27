@@ -18,7 +18,7 @@ def test_sr_budget_counts_shared_states_slab_and_coarse_label_conversion():
     )
     assert estimate.expanded_shape == (24, 24, 24)
     assert estimate.accumulation_bytes == 4 * 4 * 24 * 48 * 56
-    assert estimate.state_bytes == 4 * 3 * 40 * 48 * 56
+    assert estimate.state_bytes == 2 * 3 * 40 * 48 * 56
     assert estimate.coarse_bytes == (1 + 8 + 4 * 3) * 16 * 20 * 24
     assert estimate.output_bytes == 4 * 3 * 32 * 40 * 48
     # Interpolation requires the expanded coarse tile plus one voxel per side.

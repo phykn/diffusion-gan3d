@@ -30,7 +30,7 @@ from src.prepare.resize import (
 from src.train.batch import RealBatch
 from src.train.coarse import corrupt_coarse
 from src.train.loss.sr import consistency_loss
-from src.train.state import export_sr, resume_sr_training, save_sr_training
+from src.train.state import export_generator, resume_training, save_training
 from src.train.trainer import Trainer
 
 
@@ -379,11 +379,11 @@ def test_sr_training_restores_state_without_rng(tmp_path):
         for k, v in trainer.critics.state_dict().items()
     )
     checkpoint = tmp_path / "training.pt"
-    save_sr_training(trainer, checkpoint)
+    save_training(trainer, checkpoint)
     saved_bytes = checkpoint.read_bytes()
     with patch("src.storage.torch.save", side_effect=OSError("write failed")):
         with pytest.raises(OSError, match="write failed"):
-            save_sr_training(trainer, tmp_path / "next.pt")
+            save_training(trainer, tmp_path / "next.pt")
     assert checkpoint.read_bytes() == saved_bytes
     expected = copy.deepcopy(trainer.denoiser.state_dict())
     expected_critics = copy.deepcopy(trainer.critics.state_dict())
@@ -396,12 +396,12 @@ def test_sr_training_restores_state_without_rng(tmp_path):
     incomplete.pop("path_maps")
     before_restore = copy.deepcopy(restored.denoiser.state_dict())
     with pytest.raises(KeyError, match="path_maps"):
-        resume_sr_training(restored, incomplete)
+        resume_training(restored, incomplete)
     torch.testing.assert_close(
         restored.denoiser.state_dict(), before_restore, rtol=0, atol=0
     )
     rng = torch.get_rng_state().clone()
-    resume_sr_training(restored, payload)
+    resume_training(restored, payload)
     assert torch.equal(rng, torch.get_rng_state())
     assert restored.completed_steps == 1
     torch.testing.assert_close(
@@ -424,7 +424,9 @@ def test_sr_training_restores_state_without_rng(tmp_path):
     assert np.isfinite(actual_metrics.generator_total)
     assert restored.completed_steps == 2
     path = tmp_path / "model.pt"
-    export_sr(restored, path)
+    export_generator(
+        restored.cfg, restored.completed_steps, restored.ema_denoiser.state_dict(), path
+    )
     api = SuperResolutionAPI(path, "cpu")
     assert api.refine(bank[0][0]).shape == (12, 12, 12)
 
@@ -791,7 +793,7 @@ def test_sr_tiles_share_current_latent_and_update_each_voxel_once(
 
     def step(sampler, *args, **kwargs):
         nonlocal active
-        active = int(args[3].item())
+        active = int(args[2].item())
         writes[active] = torch.zeros(16, 12, 12, dtype=torch.int32)
         original_step(sampler, *args, **kwargs)
         active = None
@@ -882,7 +884,9 @@ def test_sr_runs_full_reverse_chain_and_training_uses_matching_hr_slices(tmp_pat
     assert not metrics.vf_active
     assert trainer.denoiser.coarse_input.weight.grad.abs().sum() > 0
     path = tmp_path / "sr.pt"
-    export_sr(trainer, path)
+    export_generator(
+        trainer.cfg, trainer.completed_steps, trainer.ema_denoiser.state_dict(), path
+    )
     api = SuperResolutionAPI(path, "cpu")
     with patch.object(api.model, "forward", wraps=api.model.forward) as forward:
         api.refine_probs(bank[0][0], margin=0)
@@ -936,7 +940,9 @@ def test_sr_cuda_amp_checkpointing_and_cfg_inference(tmp_path):
     assert trainer.updates["generator"] == 2
     assert all(trainer.updates[group] == 2 for group in trainer.critics)
     path = tmp_path / "sr.pt"
-    export_sr(trainer, path)
+    export_generator(
+        trainer.cfg, trainer.completed_steps, trainer.ema_denoiser.state_dict(), path
+    )
     api = SuperResolutionAPI(path, "cuda")
     for guidance in (1.0, 1.7):
         probs = api.refine_probs(

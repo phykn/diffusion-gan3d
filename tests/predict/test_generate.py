@@ -1083,11 +1083,13 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
     plan = scaled.plan((7, 6, 6), overlap=1)
     tiles = make_tiles(plan)
     current = VolumeState(3, plan.shape, torch.device("cpu"))
-    next_state = VolumeState(3, plan.shape, torch.device("cpu"))
-    assert current.values.dtype == next_state.values.dtype == torch.float16
+    assert current.values.dtype == torch.float16
     values = torch.arange(current.values.numel(), dtype=torch.float32)
     values = values.reshape_as(current.values).remainder(17).div_(8).sub_(1)
     current.values.copy_(values)
+    expected = (
+        F.avg_pool3d(current.values.float(), 3, stride=1, padding=1).half().float()
+    )
     time = torch.zeros(1, dtype=torch.long)
     latent = torch.zeros(1, 4)
     fusion = make_fusion(
@@ -1098,7 +1100,6 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
 
     TileSampler(scaled.generator).step(
         current,
-        next_state,
         tiles,
         time,
         latent,
@@ -1109,11 +1110,9 @@ def test_tile_core_prediction_matches_full_non_periodic_prediction() -> None:
         fusion,
         TileBuffer(3, plan.tile_size, False),
     )
-    expected = (
-        F.avg_pool3d(current.values.float(), 3, stride=1, padding=1).half().float()
-    )
 
-    assert torch.equal(next_state.values.float(), expected)
+    # The state is updated in place, yet no tile read a value already updated.
+    assert torch.equal(current.values.float(), expected)
 
 
 @pytest.mark.parametrize(
@@ -1125,7 +1124,7 @@ def test_circular_slab_matches_full_weighted_fusion(shape, overlap):
     tiles = make_tiles(plan)
     current = VolumeState(3, shape, torch.device("cpu"))
     current.values.copy_(torch.randn_like(current.values))
-    next_state = VolumeState(3, shape, torch.device("cpu"))
+    initial = current.values.clone()
     fusion = make_fusion(plan, 3, torch.device("cpu"))
     assert fusion.pred_sum.shape == (1, 3, min(shape[0], 4), *shape[1:])
     expected = torch.zeros_like(current.values, dtype=torch.float32)
@@ -1143,9 +1142,9 @@ def test_circular_slab_matches_full_weighted_fusion(shape, overlap):
         weights[region] += window
     expected.div_(weights)
     for _ in range(2):
+        current.values.copy_(initial)
         TileSampler(scaled.generator).step(
             current,
-            next_state,
             tiles,
             torch.zeros(1, dtype=torch.long),
             torch.zeros(1, 4),
@@ -1156,7 +1155,7 @@ def test_circular_slab_matches_full_weighted_fusion(shape, overlap):
             fusion,
             TileBuffer(3, plan.tile_size, False),
         )
-        torch.testing.assert_close(next_state.values, expected.half())
+        torch.testing.assert_close(current.values, expected.half())
         assert not torch.count_nonzero(fusion.weight_sum)
 
 
@@ -1192,7 +1191,6 @@ def test_boundary_tile_reads_only_bounded_context() -> None:
     tiles = make_tiles(plan)
     tile = tiles[0]
     current = VolumeState(3, plan.shape, torch.device("cpu"))
-    next_state = VolumeState(3, plan.shape, torch.device("cpu"))
     coordinates = torch.arange(math.prod(plan.shape), dtype=torch.float32).reshape(
         plan.shape
     )
@@ -1206,7 +1204,6 @@ def test_boundary_tile_reads_only_bounded_context() -> None:
 
     TileSampler(scaled.generator).step(
         current,
-        next_state,
         tiles,
         torch.zeros(1, dtype=torch.long),
         torch.zeros(1, 4),

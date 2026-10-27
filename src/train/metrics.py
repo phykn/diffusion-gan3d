@@ -15,7 +15,6 @@ class Metrics:
     critic: float
     r1: float
     transition: int
-    volume_size: int
     domain: int
     critic_axes: tuple[float, float, float]
     vf_loss: float = 0.0
@@ -26,7 +25,6 @@ class Metrics:
 
 
 def collect_metrics(
-    volume_size: int,
     diagnostics: dict,
     prepared: StepPreparation,
     denoiser_update: DenoiserUpdate,
@@ -40,7 +38,6 @@ def collect_metrics(
             critic=sum(critic_vals),
             r1=r1,
             transition=prepared.transition,
-            volume_size=volume_size,
             domain=prepared.domain,
             critic_axes=tuple(critic_vals),
             real_transition_ramp=prepared.real_transition_ramp,
@@ -110,7 +107,6 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
         "conditioning/vf_fraction": metrics.vf_active_fraction,
         "loss/real_transition_ramp": metrics.real_transition_ramp,
         "sampling/transition": metrics.transition,
-        "sampling/volume_size": metrics.volume_size,
         "sampling/domain": metrics.domain,
         f"timestep/{metrics.transition}/generator": metrics.generator,
         f"timestep/{metrics.transition}/critic": metrics.critic,

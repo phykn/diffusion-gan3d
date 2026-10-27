@@ -27,13 +27,7 @@ from src.train.checkpoint import resolve_checkpoint
 from src.train.run.bank import refresh_bank
 from src.train.run.low_res import run_low_res_train
 from src.train.run.sr import run_sr_train
-from src.train.state import (
-    export_sr,
-    resume_sr_training,
-    resume_training,
-    save_sr_training,
-    save_training,
-)
+from src.train.state import export_generator, resume_training, save_training
 
 
 @pytest.mark.parametrize("stage", ["low_res", "sr"])
@@ -73,8 +67,8 @@ def test_single_critic_trains_with_regularization_and_resumes(tmp_path, stage, h
         save_training(trainer, checkpoint)
         resume = resume_training
     else:
-        save_sr_training(trainer, checkpoint)
-        resume = resume_sr_training
+        save_training(trainer, checkpoint)
+        resume = resume_training
     payload = torch.load(checkpoint, weights_only=True)
     restored = build(cfg)
     resume(restored, payload)
@@ -671,7 +665,12 @@ def test_sr_bank_records_2d_profile_and_per_image_extent(tmp_path):
         {0: torch.tensor([24.0, 32.0])},
     )
     assert np.isfinite(trainer.step(0).generator_total)
-    export_sr(trainer, tmp_path / "sr.pt")
+    export_generator(
+        trainer.cfg,
+        trainer.completed_steps,
+        trainer.ema_denoiser.state_dict(),
+        tmp_path / "sr.pt",
+    )
     api = SuperResolutionAPI(tmp_path / "sr.pt", "cpu")
     with pytest.raises(ValueError, match="height_extent is required"):
         api.refine_probs(bank[0][0])
@@ -693,7 +692,7 @@ def test_interrupt_during_optimizer_step_saves_a_resumable_completed_step(
     import signal
 
     from src.train.run.loop import run_train
-    from src.train.state import resume_sr_training, resume_training
+    from src.train.state import resume_training
 
     cfg = configuration(tmp_path, stage=stage)
     bank = {0: torch.rand(2, 2, 8, 8, 8).softmax(1)}
@@ -734,7 +733,7 @@ def test_interrupt_during_optimizer_step_saves_a_resumable_completed_step(
     if stage == "low_res":
         resume_training(restored, payload)
     else:
-        resume_sr_training(restored, payload)
+        resume_training(restored, payload)
     assert restored.completed_steps == 1
     assert np.isfinite(restored.step(1).generator_total)
     assert restored.completed_steps == 2
@@ -907,7 +906,12 @@ def test_height_conditioned_sr_uses_fractional_bank_and_zero_level_at_inference(
     assert "profile/sr_coarse_soft_mae" in metrics.diagnostics
     assert "profile/sr_coarse_label_mae" in metrics.diagnostics
     assert trainer.denoiser.height_input.weight.grad.abs().sum() > 0
-    export_sr(trainer, tmp_path / "model.pt")
+    export_generator(
+        trainer.cfg,
+        trainer.completed_steps,
+        trainer.ema_denoiser.state_dict(),
+        tmp_path / "model.pt",
+    )
     api = SuperResolutionAPI(tmp_path / "model.pt", "cpu")
     with patch.object(api.model, "forward", wraps=api.model.forward) as forward:
         result = api.refine_probs(bank[0][0], height_origin=2, margin=0)

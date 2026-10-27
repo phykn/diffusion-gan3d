@@ -46,7 +46,11 @@ python scripts/06_check_hr.py --weight "run/my-run-sr" --no-view
 `run_train.py` trains the LR model, then the SR model from frozen LR volumes and the real
 high-resolution sections. `--run-dir NAME` writes `NAME-lr` and `NAME-sr`, and rerunning
 the command skips a finished stage; without it, each stage gets a new timestamped folder in
-`run/`. `--lr-only` stops after LR, so a later run with the same `--run-dir` trains only SR.
+`run/`. `--lr-only` (with `--run-dir`) stops after LR, so a later run with the same `--run-dir`
+trains only SR.
+On macOS, `commands/train_default.command` (and `train_anode.command` for the simulated
+anode) runs these steps on double-click in Finder; the `_1st`/`_2nd` variants split LR
+and SR. `STEPS=200 SR_STEPS=200 commands/train_default.command` makes a short trial.
 `--resume` continues one interrupted stage ([Save and resume](docs/checks.md#save-and-resume)).
 Each stage's `generator.pt` is its best scored step, not the last one
 ([Best step](docs/checks.md#best-step)).

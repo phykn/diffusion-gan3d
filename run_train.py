@@ -81,6 +81,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         or args.bank_size is not None
     ):
         parser.error("--lr-only trains a new LR stage; omit --resume and SR options.")
+    if args.lr_only and args.run_dir is None:
+        parser.error("--lr-only needs --run-dir NAME; SR then continues from NAME-lr.")
     if args.run_dir is not None:
         args.run_dir = args.run_dir.expanduser()
     return args
@@ -130,14 +132,16 @@ def resume(args: argparse.Namespace) -> None:
     lr_dir, sr_dir = get_stage_dirs(args.run_dir)
     options = dict(resume=args.resume, steps=args.steps, path_map=args.path_map)
     if stage == "low_res":
+        if args.run_dir is None:
+            sys.exit(
+                "An LR --resume needs --run-dir NAME; SR then continues from NAME-lr."
+            )
         run_dir = run_low_res_train(args.device, run_dir=lr_dir, **options)
         mark_done(run_dir)
-        if args.run_dir is not None:
-            report_done(run_dir)
-            path_field(
-                "Next",
-                f"python run_train.py <sample> --run-dir {args.run_dir}  (SR)",
-            )
+        report_done(run_dir)
+        path_field(
+            "Next", f"python run_train.py <sample> --run-dir {args.run_dir}  (SR)"
+        )
     else:
         run_dir = run_sr_train(args.device, run_dir=sr_dir, **options)
         mark_done(run_dir)

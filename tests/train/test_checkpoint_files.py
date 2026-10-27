@@ -9,7 +9,7 @@ from src.train.checkpoint import complete_checkpoint, resolve_checkpoint
 from src.train.run.loop import save_checkpoint, save_weights
 
 
-def trainer():
+def trainer(stage="low_res"):
     model = torch.nn.Linear(2, 2)
     ema = torch.nn.Linear(2, 2)
     with torch.no_grad():
@@ -17,7 +17,7 @@ def trainer():
         ema.weight.fill_(2)
     optim = SimpleNamespace(state_dict=lambda: {})
     return SimpleNamespace(
-        cfg={},
+        cfg={"stage": stage},
         completed_steps=1,
         data_fingerprint={},
         path_maps=[],
@@ -43,13 +43,13 @@ def test_training_keeps_checkpoints_without_rename_or_temporary_files(
     monkeypatch.setattr(Path, "rename", forbidden)
     monkeypatch.setattr(Path, "unlink", forbidden)
     monkeypatch.setattr("src.storage.os.link", forbidden)
-    model = trainer()
-    save_checkpoint(model, tmp_path, stage)
+    model = trainer(stage)
+    save_checkpoint(model, tmp_path)
     first = resolve_checkpoint(tmp_path)
     assert first.name == "step_00000001.pt"
     original = first.read_bytes()
     model.completed_steps = 2
-    save_checkpoint(model, tmp_path, stage)
+    save_checkpoint(model, tmp_path)
     latest = resolve_checkpoint(tmp_path / "checkpoints")
     assert latest.name == "step_00000002.pt"
     assert first.read_bytes() == original
@@ -66,7 +66,7 @@ def test_training_keeps_checkpoints_without_rename_or_temporary_files(
         torch.testing.assert_close(exported, model.ema_denoiser.state_dict())
         assert not torch.equal(exported["weight"], model.denoiser.weight)
     with pytest.raises(FileExistsError):
-        save_checkpoint(model, tmp_path, stage)
+        save_checkpoint(model, tmp_path)
     assert len(list((tmp_path / "checkpoints").glob("step_*.pt"))) == 2
     assert first.read_bytes() == original
     assert all(path.read_bytes() == contents for path, contents in exports.items())
@@ -78,8 +78,8 @@ def test_training_keeps_checkpoints_without_rename_or_temporary_files(
 def test_interrupted_locked_write_leaves_previous_checkpoint_usable(
     tmp_path, monkeypatch, stage
 ):
-    model = trainer()
-    save_checkpoint(model, tmp_path, stage)
+    model = trainer(stage)
+    save_checkpoint(model, tmp_path)
     previous = resolve_checkpoint(tmp_path)
     original = previous.read_bytes()
 
@@ -94,7 +94,7 @@ def test_interrupted_locked_write_leaves_previous_checkpoint_usable(
     monkeypatch.setattr(torch, "save", interrupted)
     monkeypatch.setattr(Path, "unlink", locked)
     with pytest.raises(OSError, match="write failed"):
-        save_checkpoint(model, tmp_path, stage)
+        save_checkpoint(model, tmp_path)
     assert resolve_checkpoint(tmp_path) == previous
     assert previous.read_bytes() == original
     partial = tmp_path / "checkpoints/step_00000002.pt"
@@ -104,7 +104,7 @@ def test_interrupted_locked_write_leaves_previous_checkpoint_usable(
 
 def test_checkpoint_is_available_even_if_generator_export_fails(tmp_path, monkeypatch):
     model = trainer()
-    save_checkpoint(model, tmp_path, "low_res")
+    save_checkpoint(model, tmp_path)
     model.completed_steps = 2
     original = torch.save
 
@@ -115,9 +115,9 @@ def test_checkpoint_is_available_even_if_generator_export_fails(tmp_path, monkey
         original(payload, file)
 
     monkeypatch.setattr(torch, "save", fail_export)
-    save_checkpoint(model, tmp_path, "low_res")
+    save_checkpoint(model, tmp_path)
     with pytest.raises(OSError, match="export failed"):
-        save_weights(model, tmp_path, "low_res")
+        save_weights(model, tmp_path)
     assert torch.load(resolve_checkpoint(tmp_path), weights_only=True)["step"] == 2
 
 
@@ -177,8 +177,8 @@ def test_directory_without_completed_checkpoint_reports_missing(tmp_path):
 def test_failed_ema_export_does_not_publish_checkpoint_completion(
     tmp_path, monkeypatch, stage
 ):
-    model = trainer()
-    save_checkpoint(model, tmp_path, stage)
+    model = trainer(stage)
+    save_checkpoint(model, tmp_path)
     previous = resolve_checkpoint(tmp_path)
     model.completed_steps = 2
     save = torch.save
@@ -192,7 +192,7 @@ def test_failed_ema_export_does_not_publish_checkpoint_completion(
 
     monkeypatch.setattr(torch, "save", interrupted)
     with pytest.raises(OSError, match="export failed"):
-        save_checkpoint(model, tmp_path, stage)
+        save_checkpoint(model, tmp_path)
     assert resolve_checkpoint(tmp_path) == previous
     assert not (tmp_path / "checkpoints/step_00000002.complete").exists()
 
@@ -203,6 +203,6 @@ def test_checkpoint_preserves_existing_companion_files(tmp_path, name):
     path.parent.mkdir()
     path.write_bytes(b"existing artifact")
     with pytest.raises(FileExistsError):
-        save_checkpoint(trainer(), tmp_path, "low_res")
+        save_checkpoint(trainer(), tmp_path)
     assert path.read_bytes() == b"existing artifact"
     assert list(path.parent.iterdir()) == [path]

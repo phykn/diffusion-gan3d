@@ -239,6 +239,17 @@ def test_anode_export_follows_silicon_height_profile(tmp_path):
     assert set(metadata["measured"][0]) == {"graphite_vf", "silicon_vf"}
 
 
+def test_jam_warning_names_only_short_phases_against_their_mean_target(tmp_path):
+    cfg = {"output": {"data_dir": tmp_path / "anode", "count": 1, "seed": 0}}
+    cfg["geometry"] = {**ANODE, "graphite_vf": 0.1, "silicon_vf": [0.0, 0.9]}
+    with pytest.warns(UserWarning) as caught:
+        result = generate(cfg)
+    assert result.targets == pytest.approx({"graphite_vf": 0.1, "silicon_vf": 0.45})
+    (message,) = [str(warning.message) for warning in caught]
+    assert "silicon_vf" in message and "(target 0.450)" in message
+    assert "graphite_vf" not in message
+
+
 def test_anode_flakes_are_flat_along_thickness():
     from simul.src.anode import graphite_shapes
 

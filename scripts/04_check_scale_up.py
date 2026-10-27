@@ -23,6 +23,7 @@ from scripts.common.cli import (
 from scripts.common.diagnostic import (
     anchor_accuracy,
     format_percent,
+    format_phases,
     middle_slices,
     select_display_index,
     select_indices,
@@ -405,12 +406,6 @@ def format_axes(
     return "  ".join(
         f"axis {axis}: {'n/a' if value is None else f'{value:.4f}'}"
         for axis, value in enumerate(values)
-    )
-
-
-def format_phases(values: torch.Tensor) -> str:
-    return "  ".join(
-        f"phase {phase}: {float(value):.2%}" for phase, value in enumerate(values)
     )
 
 

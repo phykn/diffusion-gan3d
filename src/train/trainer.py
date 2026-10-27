@@ -29,10 +29,7 @@ from src.train.loss.gan import (
     get_relativistic_loss,
     score_plane,
 )
-from src.train.loss.transition import (
-    compute_real_transition_loss,
-    transition_statistics,
-)
+from src.train.loss.transition import compute_real_transition_loss
 from src.train.metrics import Metrics, collect_metrics
 from src.train.selection import CheckpointSelection
 from src.train.step import (
@@ -164,7 +161,7 @@ class Trainer:
         transition = prepared.transition
         real = prepared.real
         previous, current, prediction = self.generate_pair(
-            transition, prepared.model_conditions, self.settings.patch_size
+            transition, prepared.model_conditions
         )
         clean_probs = (prediction + 1.0) * 0.5
         profile_present = prepared.vf_present.to(self.device)
@@ -205,7 +202,6 @@ class Trainer:
         if self.generator_updated:
             update_ema(self.ema_denoiser, self.denoiser, self.scheduled.ema_decay)
         return collect_metrics(
-            volume_size=self.settings.patch_size,
             diagnostics=self.diagnostics,
             prepared=prepared,
             denoiser_update=denoiser_update,
@@ -253,14 +249,14 @@ class Trainer:
         self,
         transition: int,
         model_conditions: dict[str, torch.Tensor],
-        volume_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        size = self.settings.patch_size
         shape = (
             self.settings.volume_batch_size,
             self.settings.num_phases,
-            volume_size,
-            volume_size,
-            volume_size,
+            size,
+            size,
+            size,
         )
         current = torch.randn(shape, device=self.device, dtype=torch.float32)
 
@@ -379,9 +375,7 @@ class Trainer:
             coarse_target=prepared.coarse_target,
             coarse_mask=prepared.coarse_mask,
             real_transition_loss=(
-                self._real_transition_loss(
-                    prepared, clean_probs, self._transition_statistics(prepared)
-                )
+                self._real_transition_loss(prepared, clean_probs)
                 if real_transition
                 else None
             ),
@@ -389,18 +383,7 @@ class Trainer:
             group_statistics_ramp=prepared.group_statistics_ramp,
         )
 
-    def _transition_statistics(self, prepared):
-        real = {
-            axis: prepared.real.images[axis] for axis in self.streams[prepared.domain]
-        }
-        return transition_statistics(
-            real,
-            self.settings.real_transition_max_gap,
-            prepared.real.heights if "height" in prepared.model_conditions else None,
-            self.critic_augment.rotated_axes,
-        )
-
-    def _real_transition_loss(self, prepared, clean_probs, statistics=None):
+    def _real_transition_loss(self, prepared, clean_probs):
         real, fake, real_heights, fake_heights = {}, {}, {}, {}
         height = prepared.model_conditions.get("height")
         for axis in self.streams[prepared.domain]:
@@ -428,7 +411,6 @@ class Trainer:
             self.settings.real_transition_max_gap,
             real_heights if height is not None else None,
             fake_heights if height is not None else None,
-            statistics,
             self.critic_augment.rotated_axes,
         )
         self.diagnostics.update(diagnostics)
@@ -548,7 +530,7 @@ class Trainer:
                     self.diagnostics[f"r2/{group}/{axis}"] = losses.r2.detach()
                 loss = validate_loss(losses.total, f"critic {group}/{axis}")
                 self.scaler.scale(loss * weight).backward()
-                critic_losses[axis] = losses.adversarial.global_loss.detach() * weight
+                critic_losses[axis] = losses.adversarial.detach() * weight
             if step_optimizer(optimizer, self.scaler, self.diagnostics, group):
                 self.updates[group] += 1
         return critic_losses, r1_sum

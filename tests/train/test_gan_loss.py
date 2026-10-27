@@ -18,8 +18,8 @@ def test_relativistic_loss_pairs_samples_and_reuses_the_smaller_batch() -> None:
     generator = get_relativistic_loss(fake, real)
 
     margins = torch.tensor([0.5 - 1.0, 0.0 + 2.0, 3.0 - 1.0])
-    torch.testing.assert_close(critic.global_loss, F.softplus(margins).mean())
-    torch.testing.assert_close(generator.global_loss, F.softplus(-margins).mean())
+    torch.testing.assert_close(critic, F.softplus(margins).mean())
+    torch.testing.assert_close(generator, F.softplus(-margins).mean())
 
 
 def test_relativistic_loss_depends_only_on_score_differences() -> None:
@@ -30,8 +30,8 @@ def test_relativistic_loss_depends_only_on_score_differences() -> None:
     shifted_fake = CriticScores(fake.logits_global + 5.0)
 
     torch.testing.assert_close(
-        get_relativistic_loss(shifted_real, shifted_fake).global_loss,
-        get_relativistic_loss(real, fake).global_loss,
+        get_relativistic_loss(shifted_real, shifted_fake),
+        get_relativistic_loss(real, fake),
     )
 
 
@@ -53,8 +53,8 @@ def test_pyramid_averages_losses_after_nonlinearity():
     expected = torch.stack(
         [F.softplus(-s.logits_global).mean() for s in scores.levels]
     ).mean()
-    torch.testing.assert_close(loss.global_loss, expected)
-    loss.global_loss.backward()
+    torch.testing.assert_close(loss, expected)
+    loss.backward()
     assert torch.isfinite(previous.grad).all()
 
 
@@ -96,9 +96,7 @@ def test_objective_and_penalties_preserve_gradients(levels, r1_weight, r2_weight
     ).mean()
     expected = adversarial + 2 * r1_weight * expected_r1 + 2 * r2_weight * expected_r2
     expected_grad = torch.autograd.grad(expected, weight, retain_graph=True)[0]
-    torch.testing.assert_close(
-        get_gradient_penalty(real_scores, (real,)).global_loss, penalty
-    )
+    torch.testing.assert_close(get_gradient_penalty(real_scores, (real,)), penalty)
     torch.testing.assert_close(result.total, expected)
     torch.testing.assert_close(result.r1, expected_r1)
     torch.testing.assert_close(result.r2, expected_r2)

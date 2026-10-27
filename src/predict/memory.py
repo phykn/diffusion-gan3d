@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import psutil
 import torch
 
-from src.predict.tiling.layout import check_overlap, parse_shape
+from src.predict.tiling.layout import check_overlap, make_plan, parse_shape
 
 
 @dataclass(frozen=True)
@@ -44,18 +44,14 @@ def estimate_memory(
     tiled = tile_size is not None
     tile_size = max(generation_shape) if tile_size is None else tile_size
     check_overlap(tile_size, overlap)
-    stride = tile_size - 2 * overlap
     tile_shape = tuple(min(size, tile_size) for size in generation_shape)
     voxels = math.prod(generation_shape)
     return MemoryEstimate(
         shape=shape,
         generation_shape=generation_shape,
         tile_size=tile_size,
-        tile_count=math.prod(
-            1 + (max(0, size - tile_size) + stride - 1) // stride
-            for size in generation_shape
-        ),
-        state_bytes=4 * num_phases * voxels,
+        tile_count=make_plan(generation_shape, tile_size, overlap).tile_count,
+        state_bytes=2 * num_phases * voxels,
         fusion_bytes=4
         * (num_phases + 1)
         * min(tile_size, generation_shape[0])

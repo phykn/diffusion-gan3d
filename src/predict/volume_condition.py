@@ -59,7 +59,7 @@ def fraction_channels(volume, num_phases):
         raise ValueError(
             "phase fractions must be finite, non-negative and sum to one per voxel."
         )
-    return values.unsqueeze(0).clone()
+    return values.unsqueeze(0)
 
 
 @dataclass(frozen=True)
@@ -136,7 +136,8 @@ def prepare_base(volume, num_phases, shape, margin, offset, shell, preserve):
         return None
     base_shape = volume_shape(volume)
     position = resolve_offset(offset, shape, base_shape)
-    clean = fraction_channels(volume, num_phases).mul_(2).sub_(1)
+    # Out of place: CPU float32 fractions come back as the caller's own tensor.
+    clean = fraction_channels(volume, num_phases).mul(2).sub_(1)
     region = tuple(
         slice(margin + p, margin + p + n) for p, n in zip(position, base_shape)
     )

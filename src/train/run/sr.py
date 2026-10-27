@@ -28,7 +28,7 @@ from src.train.run.resume import (
     set_total_steps,
 )
 from src.train.run.source import load_frozen_source, read_source_config
-from src.train.state import resume_sr_training
+from src.train.state import resume_training
 
 
 def run_sr_train(
@@ -80,16 +80,15 @@ def run_sr_train(
         bank_payload.get("height_extents"),
     )
     if payload:
-        resume_sr_training(trainer, payload)
+        resume_training(trainer, payload)
     cfg = trainer.cfg
     section("SR training")
     field("Resolution", describe_resolution(get_sr_resolution(cfg)))
     path_field("Run", run_dir)
-    if trainer.selection is not None and payload:
-        # The scored LR inputs and best weights sit in the resumed run folder.
-        source_run = resolve_checkpoint(resume).parent.parent
-        trainer.selection.import_best(source_run, run_dir)
-    elif trainer.selection is not None:
+    if trainer.selection is not None:
+        if payload:
+            source_run = find_saved_config(resolve_checkpoint(resume)).parent
+            trainer.selection.load_inputs(source_run)
         trainer.selection.save_inputs(run_dir)
 
     def before_step(step: int) -> None:

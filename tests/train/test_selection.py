@@ -162,22 +162,36 @@ def test_runs_export_the_best_step_and_resume_keeps_its_weights(tmp_path, monkey
     assert (final / "generator.pt").read_bytes() == weights_path(final, 4).read_bytes()
 
 
-def test_resume_requires_the_best_weights(tmp_path, monkeypatch):
+def test_resume_restores_the_best_weights_of_an_earlier_checkpoint(
+    tmp_path, monkeypatch
+):
+    scores = {1: 10.0, 2: 4.0, 3: 3.0, 4: 6.0}
+
     def evaluate(self, trainer):
-        entry = _entry(0, 1.0)
+        entry = _entry(0, scores[trainer.completed_steps])
         entry.pop("step")
         return entry
 
     monkeypatch.setattr(CheckpointSelection, "evaluate", evaluate)
     monkeypatch.setattr(low_res, "PROJECT_ROOT", tmp_path)
+    cfg = _config(tmp_path)
+    cfg["train"]["archive_every_steps"] = 2
     first = low_res.run_low_res_train(
-        "cpu", config=_config(tmp_path), run_dir=tmp_path / "first", steps=1
+        "cpu", config=cfg, run_dir=tmp_path / "first", steps=3
     )
-    weights_path(first, 1).unlink()
-    with pytest.raises(FileNotFoundError, match="selection weights"):
-        low_res.run_low_res_train(
-            "cpu", resume=first, run_dir=tmp_path / "resumed", steps=2
-        )
+    # Step 3 replaced the best that the step 2 checkpoint recorded.
+    assert not weights_path(first, 2).exists()
+    scores[3] = 5.0
+    resumed = low_res.run_low_res_train(
+        "cpu",
+        resume=first / "checkpoints" / "step_00000002.pt",
+        run_dir=tmp_path / "resumed",
+        steps=4,
+    )
+    step_2 = torch.load(first / "checkpoints" / "generator_00000002.pt")
+    for path in (weights_path(resumed, 2), resumed / "generator.pt"):
+        torch.testing.assert_close(torch.load(path), step_2, rtol=0, atol=0)
+    assert load_yaml(resumed / "selection" / "scores.yaml")["best_step"] == 2
 
 
 def test_selection_without_scores_exports_the_latest_weights(tmp_path, monkeypatch):

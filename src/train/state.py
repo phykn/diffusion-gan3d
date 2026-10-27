@@ -21,23 +21,12 @@ def load_training(path: str | Path, stage: str) -> dict:
 
 def save_training(trainer, path: str | Path) -> None:
     payload = _capture_state(trainer)
-    payload["format"] = TRAIN_FORMATS["low_res"]
+    payload["format"] = TRAIN_FORMATS[trainer.cfg["stage"]]
     torch_save(payload, path, overwrite=False)
 
 
 def resume_training(trainer, payload: dict) -> None:
-    _check_resume(trainer, payload, "low_res")
-    _restore_state(trainer, payload)
-
-
-def save_sr_training(trainer, path: str | Path) -> None:
-    payload = _capture_state(trainer)
-    payload["format"] = TRAIN_FORMATS["sr"]
-    torch_save(payload, path, overwrite=False)
-
-
-def resume_sr_training(trainer, payload: dict) -> None:
-    _check_resume(trainer, payload, "sr")
+    _check_resume(trainer, payload, trainer.cfg["stage"])
     _restore_state(trainer, payload)
 
 
@@ -107,14 +96,8 @@ def _restore_state(trainer, payload: dict) -> None:
     trainer.path_maps = path_maps
 
 
-def export_sr(trainer, path, *, overwrite=True):
-    torch_save(
-        {
-            "format": SR_FORMAT,
-            "config": trainer.cfg,
-            "step": trainer.completed_steps,
-            "model": trainer.ema_denoiser.state_dict(),
-        },
-        path,
-        overwrite=overwrite,
-    )
+def export_generator(cfg: dict, step: int, model: dict, path, overwrite=True) -> None:
+    """Write EMA weights for inference; SR exports also carry their config."""
+    if cfg["stage"] == "sr":
+        model = {"format": SR_FORMAT, "config": cfg, "step": step, "model": model}
+    torch_save(model, path, overwrite=overwrite)

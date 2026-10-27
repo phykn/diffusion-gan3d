@@ -8,13 +8,8 @@ from src.model.critic import CriticScores
 
 
 @dataclass(frozen=True)
-class HeadLoss:
-    global_loss: torch.Tensor
-
-
-@dataclass(frozen=True)
 class CriticObjective:
-    adversarial: HeadLoss
+    adversarial: torch.Tensor
     total: torch.Tensor
     r1: torch.Tensor
     r2: torch.Tensor
@@ -37,7 +32,7 @@ def active_groups(fake, groups):
 def get_relativistic_loss(
     preferred: CriticScores,
     other: CriticScores,
-) -> HeadLoss:
+) -> torch.Tensor:
     """RpGAN loss: each other sample should score below its paired preferred one.
 
     Judging pairs instead of single samples removes the mode-dropping optima of
@@ -45,7 +40,7 @@ def get_relativistic_loss(
     looks real. The smaller batch is reused to pair every sample.
     """
     if preferred.levels or other.levels:
-        return mean_heads(
+        return mean_levels(
             [
                 get_relativistic_loss(first, second)
                 for first, second in zip(
@@ -58,11 +53,11 @@ def get_relativistic_loss(
     first, second = preferred.logits_global, other.logits_global
     index = torch.arange(max(len(first), len(second)), device=first.device)
     margin = second[index % len(second)] - first[index % len(first)]
-    return HeadLoss(global_loss=F.softplus(margin).mean())
+    return F.softplus(margin).mean()
 
 
 def critic_objective(
-    adversarial: HeadLoss,
+    adversarial: torch.Tensor,
     real_scores: CriticScores,
     fake_scores: CriticScores,
     real_inputs: Sequence[torch.Tensor],
@@ -71,14 +66,14 @@ def critic_objective(
     r2_weight: float,
     interval: int,
 ) -> CriticObjective:
-    total = adversarial.global_loss
+    total = adversarial
     r1 = total.new_zeros(())
     r2 = total.new_zeros(())
     if r1_weight > 0:
-        r1 = get_gradient_penalty(real_scores, real_inputs).global_loss
+        r1 = get_gradient_penalty(real_scores, real_inputs)
         total = total + 0.5 * r1_weight * interval * r1
     if r2_weight > 0:
-        r2 = get_gradient_penalty(fake_scores, fake_inputs).global_loss
+        r2 = get_gradient_penalty(fake_scores, fake_inputs)
         total = total + 0.5 * r2_weight * interval * r2
     return CriticObjective(adversarial, total, r1, r2)
 
@@ -86,16 +81,16 @@ def critic_objective(
 def get_gradient_penalty(
     scores: CriticScores,
     inputs: Sequence[torch.Tensor],
-) -> HeadLoss:
+) -> torch.Tensor:
     if scores.levels:
-        return mean_heads(
+        return mean_levels(
             [get_gradient_penalty(level, inputs) for level in scores.levels]
         )
-    return HeadLoss(global_loss=input_gradient_penalty(scores.logits_global, inputs))
+    return input_gradient_penalty(scores.logits_global, inputs)
 
 
-def mean_heads(heads):
-    return HeadLoss(torch.stack([head.global_loss for head in heads]).mean())
+def mean_levels(losses):
+    return torch.stack(losses).mean()
 
 
 def input_gradient_penalty(
