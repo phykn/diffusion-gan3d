@@ -283,7 +283,7 @@ def test_direct_generation_uses_the_model_downsample_factor_as_margin() -> None:
 def test_direct_anchor_coordinates_survive_margin_crop(guidance_calls) -> None:
     model = _AnchorTraceModel()
     model.downsample_factor = 8
-    generator = _generator(model, Diffusion(1))
+    generator = _generator(model, Diffusion(2))
     anchor = PlaneAnchor(
         image=torch.ones((4, 4), dtype=torch.long),
         axis=0,
@@ -294,7 +294,7 @@ def test_direct_anchor_coordinates_survive_margin_crop(guidance_calls) -> None:
     volume = _GENERATOR_GENERATE(generator, anchors=(anchor,))
 
     assert volume.shape == (4, 4, 4)
-    assert len(model.calls) == 1
+    assert len(model.calls) == 2
     assert model.calls[0].anchor_mask is None
     mask = guidance_calls[0].mask[0, 0]
     assert mask.shape == (20, 20, 20)
@@ -439,7 +439,7 @@ def test_guided_sampling_keeps_anchors_out_of_the_model(guidance_calls) -> None:
     for call in apply_guidance_logits.call_args_list:
         assert "anchor_image" not in call.kwargs
         assert "anchor_mask" not in call.kwargs
-    assert [int(guide.mask.sum()) for guide in guidance_calls] == [16] * 2
+    assert [int(guide.mask.sum()) for guide in guidance_calls] == [16]
 
 
 def test_tiled_unit_guidance_uses_one_conditioned_prediction_per_tile_and_transition() -> (
@@ -575,7 +575,9 @@ def test_anchor_guidance_runs_one_plain_forward_per_tile_and_transition(
             gen.generate_probs(**kwargs)
 
     tiles = 2 if tiled else 1
-    assert logits.call_count == len(guidance_calls) == 2 * tiles
+    assert logits.call_count == 2 * tiles
+    # The last transition writes the clean prediction without a guide step.
+    assert len(guidance_calls) == tiles
     assert all(call.kwargs.get("anchor_mask") is None for call in logits.call_args_list)
     assert all(guide.strength == 0.5 for guide in guidance_calls)
 
@@ -649,7 +651,7 @@ def test_mixed_axis_anchors_use_one_joint_guided_state(guidance_calls) -> None:
     assert len(diffusion.calls) == 2
     assert len(model.calls) == 2
     assert all(call.anchor_mask is None for call in model.calls)
-    assert [int(guide.mask.sum()) for guide in guidance_calls] == [28] * 2
+    assert [int(guide.mask.sum()) for guide in guidance_calls] == [28]
 
 
 def test_scaled_generation_reuses_vf_for_every_tile_and_transition() -> None:

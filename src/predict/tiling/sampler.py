@@ -77,6 +77,7 @@ class TileSampler:
                         current, generator.diffusion, transition + 1, plan.tile_size
                     )
                 final_output = output if transition == 0 else None
+                # The last step writes the clean prediction and drops guide steps.
                 self.step(
                     current,
                     tiles,
@@ -90,7 +91,7 @@ class TileSampler:
                     tile_buffer,
                     guidance=guidance,
                     tile_conditions=tile_conditions,
-                    tile_guidance=tile_guidance,
+                    tile_guidance=tile_guidance if transition else None,
                     base=base,
                 )
                 bar.update()

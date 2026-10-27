@@ -240,12 +240,14 @@ def test_prediction_that_ignores_the_state_gets_no_step():
 def test_diffusion_subtracts_the_step_before_every_later_transition():
     diffusion = Diffusion(2)
     states = []
+    guided = []
 
     def model(current, time, latent):
+        states.append(current.clone())
         return torch.tanh(current)
 
     def guide(model, current, time, latent):
-        states.append(current.clone())
+        guided.append(int(time[0]))
         return model(current, time, latent), torch.full_like(current, 0.25)
 
     noise = torch.zeros(1, 2, 2, 2, 2)
@@ -257,6 +259,8 @@ def test_diffusion_subtracts_the_step_before_every_later_transition():
 
     torch.testing.assert_close(states[1], plain - 0.25)
     torch.testing.assert_close(result, torch.tanh(states[1]))
+    # The last step returns the prediction, so its guide step would be unused.
+    assert guided == [1]
 
 
 class _SteerableModel(torch.nn.Module):

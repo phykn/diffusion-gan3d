@@ -169,7 +169,8 @@ class Diffusion(nn.Module):
                 device=current.device,
                 dtype=current.dtype,
             )
-            if guide is None:
+            # The last step returns the clean prediction, so it takes no guide step.
+            if guide is None or transition == 0:
                 pred = model(current, time, latent, **cond)
             else:
                 pred, step = guide(model, current, time, latent, **cond)
