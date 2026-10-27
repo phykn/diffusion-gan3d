@@ -90,7 +90,6 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                     )
                 }
             ),
-            "train": common["train"] | {"initial_weights": None},
         }
     else:
         schema = common | {

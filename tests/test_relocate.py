@@ -24,7 +24,7 @@ def test_relocation_maps_path_fields_without_copying_tensors_or_changing_hashes(
                     "validation_regions": {image: [0, 0, 1, 1]},
                 },
             },
-            "train": {"initial_weights": f"{old}/initial.pt", "total_steps": 5},
+            "train": {"total_steps": 5},
             "source": {
                 "weights": f"{old}/lr/generator.pt",
                 "bank": f"{old}/sr/lr_bank/step_00000000.pt",
@@ -44,10 +44,7 @@ def test_relocation_maps_path_fields_without_copying_tensors_or_changing_hashes(
         "validation_files": [str(tmp_path / "images/heldout.png")],
         "validation_regions": {str(tmp_path / "images/a.png"): [0, 0, 1, 1]},
     }
-    assert cfg["train"] == {
-        "initial_weights": str(tmp_path / "initial.pt"),
-        "total_steps": 5,
-    }
+    assert cfg["train"] == {"total_steps": 5}
     assert cfg["source"]["weights"] == str(tmp_path / "lr/generator.pt")
     assert cfg["source"]["bank"] == str(tmp_path / "sr/lr_bank/step_00000000.pt")
     for key in ("weights_sha256", "config_sha256", "bank_sha256"):

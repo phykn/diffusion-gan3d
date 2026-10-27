@@ -43,10 +43,7 @@ def run_low_res_train(
             if key in cfg["data"]:
                 source["data"][key] = cfg["data"][key]
     set_total_steps(cfg, source, steps, payload)
-    build_cfg = copy.deepcopy(cfg)
-    if payload:
-        build_cfg["train"]["initial_weights"] = None
-    trainer = build_trainer(build_cfg, device)
+    trainer = build_trainer(copy.deepcopy(cfg), device)
     trainer.cfg = cfg
     if payload:
         resume_training(trainer, payload)

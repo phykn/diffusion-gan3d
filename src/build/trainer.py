@@ -8,7 +8,6 @@ from src.build.data import (
 )
 from src.build.model import build_diffusion, build_models
 from src.config.data import get_resolution, get_sr_plane_groups
-from src.config.files import project_path
 from src.config.train import (
     get_schedule_steps,
     get_sr_resolution,
@@ -20,7 +19,6 @@ from src.data.provenance import fingerprint_data
 from src.data.source import fill_height_extents
 from src.device import gpu_amp
 from src.plane import PLANE_DIRECTIONS
-from src.storage import load_model
 from src.train.burn_in import BurnIn
 from src.train.ema import build_ema
 from src.train.loss.denoiser import DenoiserLossSettings
@@ -64,12 +62,6 @@ def build_trainer(
     settings = _build_settings(cfg, device)
     critic_augment = build_augmentation(cfg)
     denoiser, critics = build_models(cfg)
-    initial_weights = None if sr else train["initial_weights"]
-    if initial_weights is not None:
-        root = project_path(initial_weights)
-        load_model(root / "generator.pt", denoiser)
-        for plane, critic_model in critics.items():
-            load_model(root / f"critic_{plane}.pt", critic_model)
     denoiser, critics = denoiser.to(device), critics.to(device)
     ema = build_ema(denoiser)
     denoiser_optim, critic_optims = build_optimizers(denoiser, critics, cfg)

@@ -244,7 +244,6 @@ def test_cpu_entrypoint_saves_complete_run(
                 "total_steps": 2,
                 "mixed_precision": False,
                 "slice_pairs_per_plane": 2,
-                "initial_weights": None,
                 "weights_every_steps": 1,
                 "archive_every_steps": 1,
             },

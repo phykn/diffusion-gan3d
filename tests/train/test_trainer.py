@@ -703,7 +703,6 @@ def _config(domains=None, **overrides) -> dict:
             "ema_decay": 0.9,
         },
         "train": {
-            "initial_weights": None,
             "total_steps": 1,
             "volume_batch_size": 1,
             "slice_pairs_per_plane": 2,

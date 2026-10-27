@@ -54,9 +54,6 @@ class PathRemapper:
             ]
         if "validation_regions" in split:
             split["validation_regions"] = self.keys(split["validation_regions"])
-        train = cfg.get("train", {})
-        if train.get("initial_weights") is not None:
-            train["initial_weights"] = self(train["initial_weights"])
         source = cfg.get("source", {})
         for key in ("weights", "bank"):
             if key in source:

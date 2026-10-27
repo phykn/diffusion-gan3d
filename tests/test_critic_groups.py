@@ -79,13 +79,6 @@ def test_lr_groups_train_once_and_save_one_file_per_group(tmp_path, groups):
         assert optimizer.step.call_count == 1
         assert (tmp_path / "run" / f"critic_{name}.pt").is_file()
         assert optimizer.state
-    cfg["train"]["initial_weights"] = str(tmp_path / "run")
-    restored = build_trainer(cfg, torch.device("cpu"))
-    for name, critic in trainer.critics.items():
-        for key, value in critic.state_dict().items():
-            torch.testing.assert_close(
-                restored.critics[name].state_dict()[key], value, rtol=0, atol=0
-            )
 
 
 class ScalarCritic(nn.Module):

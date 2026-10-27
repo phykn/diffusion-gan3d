@@ -47,7 +47,6 @@ STAGE_DEFAULTS = {
         "loss.real_transition.max_gap": 1,
         "loss.real_transition.start_step": 0,
         "loss.real_transition.ramp_steps": 5000,
-        "train.initial_weights": None,
         "burn_in.steps": 5000,
     },
     "sr": {

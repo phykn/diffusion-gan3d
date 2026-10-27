@@ -38,8 +38,8 @@ def model_hash(model):
 
 
 def compare(cfg, root, seeds, steps, device):
-    if cfg["stage"] != "low_res" or cfg["train"].get("initial_weights"):
-        raise ValueError("comparison requires a fresh LR configuration.")
+    if cfg["stage"] != "low_res":
+        raise ValueError("comparison requires an LR configuration.")
     if steps < 1 or not seeds or len(set(seeds)) != len(seeds):
         raise ValueError("use positive steps and distinct seeds.")
     if cfg["train"]["num_workers"] != 0:

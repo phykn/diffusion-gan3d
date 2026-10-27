@@ -2238,7 +2238,6 @@ def _config(root: Path) -> dict:
             "total_steps": 10,
             "mixed_precision": False,
             "slice_pairs_per_plane": 2,
-            "initial_weights": None,
             "weights_every_steps": 1,
             "archive_every_steps": 10,
         },
