@@ -107,7 +107,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                 ("downsample_consistency_weight", "downsample_mse_tolerance")
             ),
             "lr_bank": dict.fromkeys(
-                ("samples_per_domain", "guidance", "refresh_every_steps")
+                ("samples_per_domain", "guidance", "refresh_every_steps", "flips")
             ),
             "source": dict.fromkeys(
                 (

@@ -97,6 +97,8 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         flags += [
             "conditioning.spatial_profile.enabled",
         ]
+    else:
+        flags += ["lr_bank.flips"]
     for name in flags:
         check_boolean(_setting(cfg, name), name)
     integers = [

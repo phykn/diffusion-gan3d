@@ -8,7 +8,11 @@ from src.plane import PLANE_DIRECTIONS, get_axis
 
 
 def augment_volumes(
-    volumes: torch.Tensor, *, permute_z: bool = True, flip_z: bool = True
+    volumes: torch.Tensor,
+    *,
+    permute_z: bool = True,
+    flip_z: bool = True,
+    flip_xy: bool = True,
 ) -> torch.Tensor:
     """Sample spatial symmetries independently, keeping phase fractions intact."""
     shape = volumes.shape[-3:]
@@ -18,7 +22,7 @@ def augment_volumes(
         if (permute_z or order[0] == 0)
         and tuple(shape[axis] for axis in order) == shape
     ]
-    axes = (1, 2, 3) if flip_z else (2, 3)
+    axes = ((1,) if flip_z else ()) + ((2, 3) if flip_xy else ())
     flip_count = 2 ** len(axes)
     choices = torch.randint(len(orders) * flip_count, (len(volumes),)).tolist()
     result = []

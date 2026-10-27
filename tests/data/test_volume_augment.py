@@ -1,3 +1,4 @@
+from itertools import permutations
 from unittest.mock import patch
 
 import pytest
@@ -39,6 +40,16 @@ def test_volume_augmentation_is_seeded_and_preserves_rectangular_shape():
     second = augment_volumes(source)
     assert torch.equal(first, second)
     assert first.shape == source.shape
+
+
+def test_volume_augmentation_without_flips_only_swaps_axes():
+    values = torch.arange(27, dtype=torch.float32).reshape(1, 1, 3, 3, 3)
+    source = values.expand(6, -1, -1, -1, -1)
+    with patch("src.data.augment.torch.randint", return_value=torch.arange(6)):
+        actual = augment_volumes(source, flip_z=False, flip_xy=False)
+    swaps = [values[0].permute(0, *(a + 1 for a in o)) for o in permutations(range(3))]
+    for row, swap in zip(actual, swaps, strict=True):
+        assert torch.equal(row, swap)
 
 
 def test_fixed_z_volume_augmentation_keeps_z_but_may_flip_it():

@@ -653,6 +653,7 @@ def _make_trainer(
             },
             volume_permute_z=True,
             volume_flip_z=True,
+            volume_flip_xy=True,
         ),
     )
 

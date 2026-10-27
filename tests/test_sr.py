@@ -156,7 +156,11 @@ def test_sr_augments_clean_target_before_corruption_and_preserves_bank(
         prepared = trainer.prepare_step(0, transition=0)
     expected = before.flip(-1)
     # yz neither rotates nor flips z, so the bank volumes keep z as it is.
-    assert augment.call_args.kwargs == {"permute_z": False, "flip_z": False}
+    assert augment.call_args.kwargs == {
+        "permute_z": False,
+        "flip_z": False,
+        "flip_xy": True,
+    }
     torch.testing.assert_close(corrupt.call_args.args[0], expected)
     torch.testing.assert_close(prepared.coarse_target, expected)
     torch.testing.assert_close(

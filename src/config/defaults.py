@@ -55,6 +55,7 @@ STAGE_DEFAULTS = {
         "loss.downsample_mse_tolerance": 0.005,
         "loss.downsample_consistency_weight": 0.0,
         "lr_bank.refresh_every_steps": 1000,
+        "lr_bank.flips": True,
         "conditioning.coarse_corruption_probability": 0.5,
         "conditioning.coarse_corruption_strength": 0.2,
     },

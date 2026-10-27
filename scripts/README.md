@@ -77,8 +77,9 @@ A sample is one file in [config/samples/](../config/samples/); copy
     fractions at each height.
   - `mirror_symmetric: true` makes each volume's phase pairs along mirrored diagonals
     agree in LR (`loss.mirror_balance`), so the generator cannot shear the volume to keep two
-    section planes realistic at the cost of the third. `false` turns that off and flips
-    sections less often (probability 0.2), so a tilt stays visible.
+    section planes realistic at the cost of the third. `false` turns that off, flips and
+    rotates sections less often (probability 0.2 instead of 0.5) so a tilt stays visible,
+    and never flips SR's LR input volumes (`lr_bank.flips`), which would reverse their tilt.
 
   When z differs from x and y (either of the first two flags), training never rotates
   `xz`/`yz` sections, which would swap z with x or y; with a depth gradient it also

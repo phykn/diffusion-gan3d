@@ -87,6 +87,7 @@ class TrainerSettings:
     profile_settings: dict
     volume_permute_z: bool
     volume_flip_z: bool
+    volume_flip_xy: bool
     # fp16 for the denoiser, under the GradScaler; on CUDA and MPS.
     denoiser_amp: bool
     # fp16 for the critics, on CUDA only: on MPS (torch 2.14) it faults the GPU.

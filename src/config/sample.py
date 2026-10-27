@@ -145,6 +145,9 @@ def get_structure_settings(structure: Mapping, planes: list[str], stage: str) ->
         # critic cannot tell either tilt from the real one and the generator drifts
         # to one. Rarer flips keep the tilt visible but still fight critic overfitting.
         cfg["augmentation"] = {"probability": 0.2}
+        if stage == "sr":
+            # A flipped LR volume has the opposite tilt; SR must keep LR's own.
+            cfg["lr_bank"] = {"flips": False}
     return cfg
 
 

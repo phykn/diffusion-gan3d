@@ -52,6 +52,7 @@ class ConditionSampler:
             low,
             permute_z=self.settings.volume_permute_z,
             flip_z=self.settings.volume_flip_z,
+            flip_xy=self.settings.volume_flip_xy,
         )
         coarse, level = corrupt_coarse(
             low,

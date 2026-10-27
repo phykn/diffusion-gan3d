@@ -62,6 +62,9 @@ def test_structure_decides_stage_settings():
     assert low["loss"]["spatial_profile_weight"] == 30.0
     assert low["augmentation"]["probability"] == 0.2
     assert sr["augmentation"]["probability"] == 0.2
+    assert sr["lr_bank"]["flips"] is False
+    default = build_train_config(load_sample("default"), "sr")
+    assert "flips" not in default["lr_bank"]
     assert "spatial_profile" not in sr["conditioning"]
     assert low["data"]["domains"][0]["xz"] == ["data/generated/simul_anode/slices/1"]
 

@@ -152,13 +152,17 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
     permute_z = free_z and (
         not z_policies or any(p.get("rotate_90", False) for p in z_policies)
     )
-    flip_z = free_z and (
-        not z_policies or any("z" in p.get("flip_axes", ()) for p in z_policies)
+    flips = sr and cfg["lr_bank"]["flips"]
+    flip_z = (
+        flips
+        and free_z
+        and (not z_policies or any("z" in p.get("flip_axes", ()) for p in z_policies))
     )
     return TrainerSettings(
         height_data=data if conditioning["height_enabled"] else None,
         volume_permute_z=permute_z,
         volume_flip_z=flip_z,
+        volume_flip_xy=flips,
         profile_settings=profile,
         loss=DenoiserLossSettings(
             real_transition_weight=transition["weight"],

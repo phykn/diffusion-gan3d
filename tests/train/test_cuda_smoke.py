@@ -165,6 +165,7 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             },
             volume_permute_z=True,
             volume_flip_z=True,
+            volume_flip_xy=True,
         ),
     )
 
