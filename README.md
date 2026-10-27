@@ -33,7 +33,8 @@ python -m pip install -r requirements.txt
 
 Training has two stages. The **LR** (low-resolution) model generates volumes from noise
 at `lo_res_size` voxels per `crop_size` source pixels (64 per 128 in the default sample).
-The **SR** (super-resolution) model then refines LR volumes to `hi_res_size` voxels (128).
+The **SR** (super-resolution) model then refines LR volumes `sr_scale` times finer
+(64 to 128 voxels in the default sample).
 
 ```bash
 python scripts/01_check_dataset.py --sample default --no-view
@@ -62,7 +63,11 @@ A sample is one file in [config/samples/](config/samples/); copy
   pixel size; in `xz` and `yz` images, z runs down the rows. Labels are phases `0..K-1`,
   and phase 0 is pore. `K` is the largest label plus one unless `num_phases` is set.
 - `resolution` sets the data size: each training crop is `crop_size` source pixels on
-  an edge, sampled to `lo_res_size` voxels for LR and `hi_res_size` voxels for SR.
+  an edge (enough to hold the structure), resized to `lo_res_size` voxels for LR and to
+  `lo_res_size × sr_scale` voxels for SR (`sr_scale` is an integer of at least 2). Set
+  `sr_scale` to `crop_size / lo_res_size` to recover the source resolution; a larger one
+  trains SR on upsampled images. Training prints how many source pixels one LR and one
+  HR voxel span. Sizes divisible by 8 suit the U-Net, which halves three times.
 - `structure` says what the material looks like:
   - `isotropic: false` judges `xy` sections apart from `xz`/`yz` sections.
   - `depth_gradient: true` conditions both stages on height and, in LR, on the phase
@@ -91,7 +96,7 @@ python backend/run.py --weight "run/my-run-sr"
 
 Each request generates the LR volume with the LR run the SR run was trained from
 (`--lr-weight` picks another), then refines it; the viewer, porosity and tortuosity are
-on the HR volume. Blocks count LR crops, so one block is `hi_res_size` voxels per edge.
+on the HR volume. Blocks count LR crops, so one block is `lo_res_size × sr_scale` voxels per edge.
 
 ```bash
 cd frontend

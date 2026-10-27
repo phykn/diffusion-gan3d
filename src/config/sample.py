@@ -12,7 +12,7 @@ BASE_DIR = PROJECT_ROOT / "config" / "base"
 # Short stage names for config/base/<name>.yaml, tune keys, and run folders.
 STAGE_NAMES = {"low_res": "lr", "sr": "sr"}
 SAMPLE_KEYS = ("images", "structure", "tune", "num_phases", "resolution")
-RESOLUTION = ("crop_size", "lo_res_size", "hi_res_size")
+RESOLUTION = ("crop_size", "lo_res_size", "sr_scale")
 STRUCTURE = ("isotropic", "depth_gradient", "mirror_symmetric")
 TEMPLATE = "config/samples/default.yaml"
 
@@ -53,6 +53,9 @@ def load_sample(sample: str | Path) -> dict:
     for name in RESOLUTION:
         if name not in cfg["resolution"]:
             raise ValueError(f"resolution.{name} is required; see {TEMPLATE}.")
+    scale = cfg["resolution"]["sr_scale"]
+    if type(scale) is not int or scale < 2:
+        raise ValueError("resolution.sr_scale must be an integer of at least 2.")
     for name in STRUCTURE:
         if type(cfg["structure"].get(name)) is not bool:
             raise ValueError(f"structure.{name} must be true or false; see {TEMPLATE}.")
@@ -73,10 +76,13 @@ def build_train_config(sample: Mapping, stage: str) -> dict:
             for plane, paths in images.items()
         }
         num_phases = infer_num_phases({"domains": {0: folders}})
+    resolution = sample["resolution"]
     data = {
         "domains": {0: images},
         "num_phases": num_phases,
-        **sample["resolution"],
+        "crop_size": resolution["crop_size"],
+        "lo_res_size": resolution["lo_res_size"],
+        "hi_res_size": resolution["lo_res_size"] * resolution["sr_scale"],
     }
     cfg = {"stage": stage, "nickname": sample["name"], "data": data} | base
     merge(cfg, get_structure_settings(sample["structure"], list(images), stage))
@@ -84,6 +90,16 @@ def build_train_config(sample: Mapping, stage: str) -> dict:
     # A bad tune.sr fails here, not after the LR stage has trained.
     normalize_train_config(cfg, stage)
     return cfg
+
+
+def describe_resolution(data: Mapping) -> str:
+    """One line on how many source pixels an LR and an HR voxel span."""
+    crop = data["crop_size"]
+    low, high = data["lo_res_size"], data["hi_res_size"]
+    return (
+        f"Resolution: crop {crop} px -> LR {low} voxels (1 voxel = {crop / low:g} px), "
+        f"HR {high} voxels (1 voxel = {crop / high:g} px)"
+    )
 
 
 def get_images(sample: Mapping) -> dict[str, list[str]]:

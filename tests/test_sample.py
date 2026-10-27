@@ -7,7 +7,13 @@ from PIL import Image
 import run_train
 from simul.src.anode import depth_profile
 from src.config.files import load_yaml, save_yaml
-from src.config.sample import SAMPLES_DIR, build_train_config, load_sample
+from src.config.sample import (
+    SAMPLES_DIR,
+    STAGE_NAMES,
+    build_train_config,
+    describe_resolution,
+    load_sample,
+)
 from src.config.train import load_train_config, normalize_train_config
 from src.prepare.profile import validate_profile
 
@@ -39,7 +45,7 @@ def test_sample_needs_images_resolution_and_every_structure_value(tmp_path):
     save_yaml(path, sample | {"structure": {"isotropic": True}})
     with pytest.raises(ValueError, match="resolution.lo_res_size is required"):
         load_sample(path)
-    sample["resolution"] |= {"lo_res_size": 64, "hi_res_size": 128}
+    sample["resolution"] |= {"lo_res_size": 64, "sr_scale": 2}
     save_yaml(path, sample | {"structure": {"isotropic": True}})
     with pytest.raises(ValueError, match="structure.depth_gradient must be true"):
         load_sample(path)
@@ -63,7 +69,7 @@ def test_structure_decides_stage_settings():
 def write_sample(tmp_path, **sample):
     path = tmp_path / "trial.yaml"
     structure = {"isotropic": True, "depth_gradient": False, "mirror_symmetric": True}
-    resolution = {"crop_size": 128, "lo_res_size": 64, "hi_res_size": 128}
+    resolution = {"crop_size": 128, "lo_res_size": 64, "sr_scale": 2}
     base = {
         "images": {"xy": "a", "xz": "b"},
         "resolution": resolution,
@@ -171,7 +177,7 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
                 "depth_gradient": False,
                 "mirror_symmetric": True,
             },
-            "resolution": {"crop_size": 16, "lo_res_size": 8, "hi_res_size": 12},
+            "resolution": {"crop_size": 16, "lo_res_size": 8, "sr_scale": 2},
             "tune": {
                 "lr": {
                     "model": model,
@@ -245,3 +251,36 @@ def test_cli_expands_home_in_run_paths():
     args = run_train.parse_args(["--resume", "~/x", "--run-dir", "~/y"])
     assert args.resume == Path.home() / "x"
     assert args.run_dir == Path.home() / "y"
+
+
+def test_sr_scale_sets_the_hr_size(tmp_path):
+    path = write_sample(
+        tmp_path, resolution={"crop_size": 512, "lo_res_size": 64, "sr_scale": 3}
+    )
+    for stage in STAGE_NAMES:
+        data = build_train_config(load_sample(path), stage)["data"]
+        assert (data["crop_size"], data["lo_res_size"], data["hi_res_size"]) == (
+            512,
+            64,
+            192,
+        )
+    assert describe_resolution(data) == (
+        "Resolution: crop 512 px -> LR 64 voxels (1 voxel = 8 px), "
+        "HR 192 voxels (1 voxel = 2.66667 px)"
+    )
+
+
+@pytest.mark.parametrize(
+    "resolution, message",
+    [
+        ({"sr_scale": 1}, "sr_scale must be an integer of at least 2"),
+        ({"sr_scale": 2.5}, "sr_scale must be an integer of at least 2"),
+        ({"sr_scale": True}, "sr_scale must be an integer of at least 2"),
+        ({"hi_res_size": 128}, "unknown resolution setting: hi_res_size"),
+    ],
+)
+def test_resolution_takes_an_integer_sr_scale(tmp_path, resolution, message):
+    base = {"crop_size": 128, "lo_res_size": 64, "sr_scale": 2}
+    path = write_sample(tmp_path, resolution=base | resolution)
+    with pytest.raises(ValueError, match=message):
+        load_sample(path)

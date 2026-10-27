@@ -6,7 +6,7 @@ images:
 resolution:
   crop_size: 128
   lo_res_size: 64
-  hi_res_size: 128
+  sr_scale: 2
 
 structure:
   isotropic: true

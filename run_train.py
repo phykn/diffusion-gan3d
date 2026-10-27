@@ -3,7 +3,12 @@ import sys
 from pathlib import Path
 
 from src.config.files import dump_yaml, find_saved_config, load_yaml
-from src.config.sample import STAGE_NAMES, build_train_config, load_sample
+from src.config.sample import (
+    STAGE_NAMES,
+    build_train_config,
+    describe_resolution,
+    load_sample,
+)
 from src.device import default_device
 from src.train.checkpoint import resolve_checkpoint
 from src.train.run.low_res import run_low_res_train
@@ -92,6 +97,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     sample = load_sample(args.sample or "default")
     configs = {stage: build_train_config(sample, stage) for stage in STAGE_NAMES}
+    print(describe_resolution(configs["sr"]["data"]), flush=True)
     if args.show:
         for stage, cfg in configs.items():
             print(f"# {stage}\n{dump_yaml(cfg)}")

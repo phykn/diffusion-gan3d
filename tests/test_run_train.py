@@ -371,7 +371,7 @@ def test_dataset_check_script_accepts_one_axis(tmp_path: Path) -> None:
                 "mirror_symmetric": True,
             },
             "num_phases": 2,
-            "resolution": {"crop_size": 8, "lo_res_size": 8, "hi_res_size": 8},
+            "resolution": {"crop_size": 8, "lo_res_size": 8, "sr_scale": 2},
         },
     )
     environment = dict(os.environ)
