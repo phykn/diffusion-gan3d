@@ -44,60 +44,25 @@ python scripts/02_check_generated.py --weight "run/my-run-lr" --no-view
 python scripts/06_check_hr.py --weight "run/my-run-sr" --no-view
 ```
 
-`run_train.py` trains the LR model, then the SR model from frozen LR volumes and the real
-high-resolution sections. `--run-dir NAME` writes `NAME-lr` and `NAME-sr`, and rerunning
-the command skips a finished stage; without it, each stage gets a new timestamped folder in
-`run/`. `--lr-only` (with `--run-dir`) stops after LR, so a later run with the same `--run-dir`
-trains only SR.
-On macOS, `commands/train_default.command` (and `train_anode.command` for the simulated
-anode) runs these steps on double-click in Finder; the `_1st`/`_2nd` variants split LR
-and SR. `STEPS=200 SR_STEPS=200 commands/train_default.command` makes a short trial.
-`--resume` continues one interrupted stage ([Save and resume](docs/checks.md#save-and-resume)).
-Each stage's `generator.pt` is its best scored step, not the last one
-([Best step](docs/checks.md#best-step)).
-During the first `burn_in.steps` steps (LR 5000, SR 2500) a cosine curve moves the
-learning rates to `burn_in.lr_scale` (0.25) of `optim.*_lr`, Adam β2 from
-`optim.adam_betas` to `burn_in.beta2` (0.99), the R1/R2 weights to
-`burn_in.regularization_scale` (0.1) of `loss.r1_weight`/`r2_weight`, and the EMA
-half-life from zero to that of `optim.ema_decay`, as in R3GAN. TensorBoard logs them
-under `burn_in/*`.
-The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
-in training on CUDA and MPS (on MPS for the denoiser only; its critics stay fp32), and in
-LR and SR prediction on CUDA and MPS. Gradient checkpointing is off; when memory is short,
-`model.gradient_checkpointing: true` under `tune.lr` or `tune.sr` costs about 10% more step
-time for 15–30% less peak memory (Apple MPS).
+`run_train.py` trains LR, then SR from frozen LR volumes. `--run-dir NAME` writes `NAME-lr`
+and `NAME-sr` and skips a finished stage on rerun; `--lr-only` stops after LR. Each stage's
+`generator.pt` is its best scored step, not the last one. Resume, burn-in, devices, and
+memory options are in [Training options](docs/checks.md#training-options).
 
 ### Samples
 
 A sample is one file in [config/samples/](config/samples/); copy
 [default.yaml](config/samples/default.yaml) to add one.
 
-- `images` maps `xy`, `xz`, and `yz` to folders of 2D uint8 label images with one shared
-  pixel size; in `xz` and `yz` images, z runs down the rows. Labels are phases `0..K-1`,
-  and phase 0 is pore. `K` is the largest label plus one unless `num_phases` is set.
-- `resolution` sets the data size: each training crop is `crop_size` source pixels on
-  an edge (enough to hold the structure), resized to `lo_res_size` voxels for LR and to
-  `lo_res_size × sr_scale` voxels for SR (`sr_scale` is an integer of at least 2). Set
-  `sr_scale` to `crop_size / lo_res_size` to recover the source resolution; a larger one
-  trains SR on upsampled images. Training prints how many source pixels one LR and one
-  HR voxel span. Sizes divisible by 8 suit the U-Net, which halves three times.
-- `structure` says what the material looks like:
-  - `isotropic: false` judges `xy` sections apart from `xz`/`yz` sections.
-  - `depth_gradient: true` conditions both stages on height and, in LR, on the phase
-    fractions at each height.
-  - `mirror_symmetric: true` makes each volume's phase pairs along mirrored diagonals
-    agree in LR (`loss.mirror_balance`), so the generator cannot shear the volume to keep two
-    section planes realistic at the cost of the third. `false` turns that off and flips
-    sections less often (probability 0.2), so a tilt stays visible.
+- `images` maps `xy`, `xz`, and `yz` to folders of 2D uint8 label images (phases `0..K-1`,
+  phase 0 pore) with one shared pixel size; in `xz` and `yz`, z runs down the rows.
+- `resolution`: training crops are `crop_size` source pixels on an edge, resized to
+  `lo_res_size` voxels for LR and `lo_res_size × sr_scale` for SR.
+- `structure`: `isotropic`, `depth_gradient`, and `mirror_symmetric` describe the material.
+- `tune.lr` and `tune.sr` change single settings of a stage.
 
-  When z differs from x and y (either of the first two flags), training never rotates
-  `xz`/`yz` sections, which would swap z with x or y; with a depth gradient it also
-  never flips z.
-- `tune.lr` and `tune.sr` change single settings of that stage.
-
-Settings apply in order, later winning: code defaults, [config/base/](config/base/)`<lr|sr>.yaml`,
-`structure`, then `tune`. `python run_train.py default --show` prints the YAML of both
-stages without the code defaults.
+`python run_train.py default --show` prints the resolved YAML of both stages. Details of each
+field are in [Training options](docs/checks.md#sample-fields).
 
 ## Web interface
 
@@ -107,9 +72,8 @@ Start the backend with an SR run, then the frontend in another terminal (Node.js
 python backend/run.py --weight "run/my-run-sr"
 ```
 
-Each request generates the LR volume with the LR run the SR run was trained from
-(`--lr-weight` picks another), then refines it; the viewer, porosity and tortuosity are
-on the HR volume. Blocks count LR crops, so one block is `lo_res_size × sr_scale` voxels per edge.
+Each request generates an LR volume with the SR run's LR run (`--lr-weight` picks another)
+and refines it.
 
 ```bash
 cd frontend
@@ -117,10 +81,8 @@ npm ci
 npm run dev
 ```
 
-Open the URL Vite prints. For a non-default backend address, use
-`API_URL=http://HOST:PORT npm run dev`; after `npm run build`, the backend serves the page
-itself (default http://127.0.0.1:8000). The API is `GET /api/health`, `POST /api/prepare`,
-and `POST /api/generate`; HTTP limits are in [backend/config.yaml](backend/config.yaml).
+Open the URL Vite prints (`API_URL=http://HOST:PORT` for another backend); after
+`npm run build`, the backend serves the page itself at http://127.0.0.1:8000.
 
 ## Python API
 

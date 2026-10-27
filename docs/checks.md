@@ -39,6 +39,63 @@ python scripts/05_check_continuation.py --weight "run/my-run-lr" --anchor data/s
   `--guidance` is the SR guidance (default 1.0), and overlap is scale-aligned. Anchor demos
   show controlled generation, not 3D accuracy.
 
+## Training options
+
+On macOS, `commands/train_default.command` (and `train_anode.command` for the simulated
+anode) runs the README training steps on double-click in Finder; the `_1st`/`_2nd` variants split LR
+and SR. `STEPS=200 SR_STEPS=200 commands/train_default.command` makes a short trial.
+`--resume` continues one interrupted stage ([Save and resume](#save-and-resume)).
+During the first `burn_in.steps` steps (LR 5000, SR 2500) a cosine curve moves the
+learning rates to `burn_in.lr_scale` (0.25) of `optim.*_lr`, Adam β2 from
+`optim.adam_betas` to `burn_in.beta2` (0.99), the R1/R2 weights to
+`burn_in.regularization_scale` (0.1) of `loss.r1_weight`/`r2_weight`, and the EMA
+half-life from zero to that of `optim.ema_decay`, as in R3GAN. TensorBoard logs them
+under `burn_in/*`.
+The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
+in training on CUDA and MPS (on MPS for the denoiser only; its critics stay fp32), and in
+LR and SR prediction on CUDA and MPS. Gradient checkpointing is off; when memory is short,
+`model.gradient_checkpointing: true` under `tune.lr` or `tune.sr` costs about 10% more step
+time for 15–30% less peak memory (Apple MPS).
+
+### Sample fields
+
+A sample is one file in [config/samples/](../config/samples/); copy
+[default.yaml](../config/samples/default.yaml) to add one.
+
+- `images` maps `xy`, `xz`, and `yz` to folders of 2D uint8 label images with one shared
+  pixel size; in `xz` and `yz` images, z runs down the rows. Labels are phases `0..K-1`,
+  and phase 0 is pore. `K` is the largest label plus one unless `num_phases` is set.
+- `resolution` sets the data size: each training crop is `crop_size` source pixels on
+  an edge (enough to hold the structure), resized to `lo_res_size` voxels for LR and to
+  `lo_res_size × sr_scale` voxels for SR (`sr_scale` is an integer of at least 2). Set
+  `sr_scale` to `crop_size / lo_res_size` to recover the source resolution; a larger one
+  trains SR on upsampled images. Training prints how many source pixels one LR and one
+  HR voxel span. Sizes divisible by 8 suit the U-Net, which halves three times.
+- `structure` says what the material looks like:
+  - `isotropic: false` judges `xy` sections apart from `xz`/`yz` sections.
+  - `depth_gradient: true` conditions both stages on height and, in LR, on the phase
+    fractions at each height.
+  - `mirror_symmetric: true` makes each volume's phase pairs along mirrored diagonals
+    agree in LR (`loss.mirror_balance`), so the generator cannot shear the volume to keep two
+    section planes realistic at the cost of the third. `false` turns that off and flips
+    sections less often (probability 0.2), so a tilt stays visible.
+
+  When z differs from x and y (either of the first two flags), training never rotates
+  `xz`/`yz` sections, which would swap z with x or y; with a depth gradient it also
+  never flips z.
+- `tune.lr` and `tune.sr` change single settings of that stage.
+
+Settings apply in order, later winning: code defaults, [config/base/](../config/base/)`<lr|sr>.yaml`,
+`structure`, then `tune`. `python run_train.py default --show` prints the YAML of both
+stages without the code defaults.
+
+### Web backend
+
+The web backend (`backend/run.py`) serves `GET /api/health`, `POST /api/prepare`, and
+`POST /api/generate`; HTTP limits are in [backend/config.yaml](../backend/config.yaml).
+Viewer, porosity, and tortuosity are on the HR volume, and one block is
+`lo_res_size × sr_scale` voxels per edge.
+
 ## Save and resume
 
 - `generator.pt` in the run directory is the inference export, refreshed every
