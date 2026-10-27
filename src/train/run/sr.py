@@ -68,10 +68,8 @@ def run_sr_train(
     set_total_steps(cfg, source, steps, payload)
     cfg = validate_sr_config(cfg)
     build_augmentation(cfg)
-    run_dir = make_run_dir(PROJECT_ROOT / "run", "sr", run_dir, cfg["nickname"])
     if payload is None:
         bank_payload = create_bank(cfg, device)
-        publish_bank(bank_payload, cfg, run_dir, 0)
     trainer = build_sr_trainer(
         cfg,
         bank_payload["volumes"],
@@ -82,6 +80,10 @@ def run_sr_train(
     if payload:
         resume_training(trainer, payload)
     cfg = trainer.cfg
+    # Create the run only once setup has worked, so a failure leaves no folder.
+    run_dir = make_run_dir(PROJECT_ROOT / "run", "sr", run_dir, cfg["nickname"])
+    if payload is None:
+        publish_bank(bank_payload, cfg, run_dir, 0)
     section("SR training")
     field("Resolution", describe_resolution(get_sr_resolution(cfg)))
     path_field("Run", run_dir)
@@ -122,16 +124,19 @@ def prepare_source(cfg: dict, base_weights: Path | None) -> None:
     base_path = resolve_weights(base_weights)
     base_cfg = read_source_config(find_saved_config(base_path))
     fill_height_extents(base_cfg)
-    if cfg["conditioning"]["height_enabled"]:
-        cfg["data"]["height_extents"] = infer_height_extents(cfg["data"])
-    cfg["data"] = validate_sr_source(cfg["data"], base_cfg["data"])
-    if (
-        cfg["conditioning"]["height_enabled"]
-        != base_cfg["conditioning"]["height_enabled"]
-    ):
-        raise ValueError("SR height conditioning must match the frozen LR source.")
+    match_source(cfg, base_cfg)
     cfg["source"] = {
         "weights": str(base_path),
         "weights_sha256": file_hash(base_path),
         "config_sha256": file_hash(find_saved_config(base_path)),
     }
+
+
+def match_source(cfg: dict, base_cfg: Mapping) -> None:
+    """Check that SR settings fit an LR model trained with base_cfg."""
+    height = cfg["conditioning"]["height_enabled"]
+    if height != base_cfg["conditioning"]["height_enabled"]:
+        raise ValueError("SR height conditioning must match the frozen LR source.")
+    if height:
+        cfg["data"]["height_extents"] = infer_height_extents(cfg["data"])
+    cfg["data"] = validate_sr_source(cfg["data"], base_cfg["data"])

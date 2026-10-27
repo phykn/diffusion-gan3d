@@ -50,6 +50,9 @@ def load_sample(sample: str | Path) -> dict:
         unknown = set(section) - set(allowed)
         if unknown:
             raise ValueError(f"unknown {name} setting: {', '.join(sorted(unknown))}")
+    for stage, tune in cfg["tune"].items():
+        if tune is not None and not isinstance(tune, Mapping):
+            raise TypeError(f"tune.{stage} must be a mapping.")
     for name in RESOLUTION:
         if name not in cfg["resolution"]:
             raise ValueError(f"resolution.{name} is required; see {TEMPLATE}.")
@@ -101,6 +104,15 @@ def get_images(sample: Mapping) -> dict[str, list[str]]:
         raise ValueError(f"images must map xy, xz and yz to folders; see {TEMPLATE}.")
     if set(images) - set(PLANES):
         raise ValueError("images planes must be xy, xz or yz.")
+    for plane, folders in images.items():
+        if isinstance(folders, str):
+            continue
+        if (
+            not isinstance(folders, list)
+            or not folders
+            or not all(isinstance(folder, str) for folder in folders)
+        ):
+            raise ValueError(f"images.{plane} must be a folder or a list of folders.")
     return {
         plane: [images[plane]] if isinstance(images[plane], str) else images[plane]
         for plane in PLANES

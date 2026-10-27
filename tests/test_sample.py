@@ -107,11 +107,18 @@ def test_tune_overrides_only_the_named_values(tmp_path):
         ({"images": "data"}, "map xy, xz and yz"),
         ({"tune": {"low_res": {}}}, "unknown tune setting"),
         ({"images": {"zz": "a"}}, "xy, xz or yz"),
+        ({"images": {"xy": None}}, "images.xy must be a folder"),
+        ({"images": {"xy": ["a", 1]}}, "images.xy must be a folder"),
     ],
 )
 def test_sample_rejects_unknown_or_invalid_settings(tmp_path, sample, match):
     with pytest.raises(ValueError, match=match):
         build_train_config(load_sample(write_sample(tmp_path, **sample)), "low_res")
+
+
+def test_tune_stage_must_be_a_mapping(tmp_path):
+    with pytest.raises(TypeError, match="tune.lr must be a mapping"):
+        load_sample(write_sample(tmp_path, tune={"lr": ["loss"]}))
 
 
 @pytest.mark.parametrize("stage", ["lr", "sr"])
@@ -158,7 +165,8 @@ def test_anode_simulation_config_gives_its_depth_profile():
     assert values[-1].tolist() == [0.48, 0.22, 0.3]
 
 
-def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
+def write_tiny_sample(tmp_path, lr=None, sr=None):
+    """A sample that trains both stages for one step in about a second."""
     images = tmp_path / "images"
     images.mkdir()
     Image.fromarray((np.indices((20, 20)).sum(0) % 3).astype(np.uint8)).save(
@@ -198,15 +206,23 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
                     "model": model,
                     "loss": {"r1_weight": 0.0},
                     "train": train_settings,
-                },
+                }
+                | (lr or {}),
                 "sr": {
                     "model": model,
                     "lr_bank": {"samples_per_domain": 1},
                     "train": train_settings,
-                },
+                }
+                | (sr or {}),
             },
         },
     )
+    return sample
+
+
+def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
+    sample = write_tiny_sample(tmp_path)
+    images = tmp_path / "images"
     name = tmp_path / "trial"
     args = [str(sample), "--run-dir", str(name), "--device", "cpu"]
     train.main([*args, "--lr-only"])
@@ -228,15 +244,57 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
 
     capsys.readouterr()
     train.main(args)
-    assert "Reuse finished" in capsys.readouterr().out
+    assert f"Finished        {sr_dir}" in capsys.readouterr().out
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("trial")) == [
         "trial-lr",
         "trial-sr",
     ]
 
     (tmp_path / "broken-lr").mkdir()
-    with pytest.raises(SystemExit, match="did not finish"):
+    with pytest.raises(SystemExit, match="saved no checkpoint; delete it"):
         train.main([str(sample), "--run-dir", str(tmp_path / "broken")])
+
+
+@pytest.mark.parametrize(
+    "lr,sr,message",
+    [
+        ({}, {"data": {"crop_size": 12}}, "SR data resolution"),
+        ({"conditioning": {"height_enabled": True}}, {}, "SR height conditioning"),
+    ],
+)
+def test_lr_and_sr_mismatch_fails_before_lr_trains(tmp_path, lr, sr, message):
+    sample = write_tiny_sample(tmp_path, lr=lr, sr=sr)
+    name = tmp_path / "trial"
+    with pytest.raises(ValueError, match=message):
+        train.main([str(sample), "--run-dir", str(name), "--device", "cpu"])
+    assert not (tmp_path / "trial-lr").exists()
+
+
+def test_finished_sr_is_not_paired_with_a_new_lr(tmp_path, capsys, monkeypatch):
+    sample = write_tiny_sample(tmp_path)
+    (tmp_path / "trial-sr").mkdir()
+    (tmp_path / "trial-sr" / ".done").touch()
+    monkeypatch.setattr(train, "run_low_res_train", pytest.fail)
+    train.main([str(sample), "--run-dir", str(tmp_path / "trial"), "--device", "cpu"])
+    assert "Finished" in capsys.readouterr().out
+    assert not (tmp_path / "trial-lr").exists()
+
+
+def test_failed_sr_setup_leaves_no_run_to_block_a_rerun(tmp_path, monkeypatch):
+    sample = write_tiny_sample(tmp_path)
+    args = [str(sample), "--run-dir", str(tmp_path / "trial"), "--device", "cpu"]
+    train.main([*args, "--lr-only"])
+
+    def interrupt(*_):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr("src.train.run.sr.create_bank", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            train.main(args)
+    assert not (tmp_path / "trial-sr").exists()
+    train.main(args)
+    assert (tmp_path / "trial-sr" / ".done").is_file()
 
 
 def test_cli_show_prints_both_stages(capsys):
@@ -249,6 +307,12 @@ def test_cli_show_prints_both_stages(capsys):
 def test_cli_resume_rejects_a_sample():
     with pytest.raises(SystemExit):
         train.parse_args(["default", "--resume", "run/x"])
+
+
+@pytest.mark.parametrize("option", ["--steps", "--sr-steps", "--bank-size"])
+def test_cli_rejects_non_positive_counts(option):
+    with pytest.raises(SystemExit):
+        train.parse_args(["default", option, "0"])
 
 
 @pytest.mark.parametrize("option", ["--sr-steps", "--bank-size"])

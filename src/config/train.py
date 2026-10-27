@@ -235,7 +235,7 @@ def validate_sr_config(cfg: dict) -> dict:
         [PLANES[axis] for axis in axes] for axes in groups.values()
     ]
     validate_training_settings(cfg)
-    _require_settings(cfg, ("lr_bank.samples_per_domain",))
+    _require_settings(cfg, ("lr_bank.samples_per_domain", "lr_bank.guidance"))
     check_integer(cfg["lr_bank"]["samples_per_domain"], "lr_bank.samples_per_domain")
     check_integer(
         cfg["lr_bank"]["refresh_every_steps"], "lr_bank.refresh_every_steps", 0

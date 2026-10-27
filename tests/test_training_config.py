@@ -652,3 +652,10 @@ def test_sr_bank_augmentation_follows_the_critic_z_policy(height, groups, expect
     cfg["augmentation"] = {"probability": 0.5, "auto_planes": True}
     settings = _build_settings(normalize_train_config(cfg, "sr"), torch.device("cpu"))
     assert (settings.volume_permute_z, settings.volume_flip_z) == expected
+
+
+def test_sr_bank_guidance_is_required():
+    cfg = load_train_config("tests/fixtures/config/train/sr.yaml", "sr")
+    del cfg["lr_bank"]["guidance"]
+    with pytest.raises(ValueError, match="lr_bank.guidance"):
+        validate_sr_config(cfg)

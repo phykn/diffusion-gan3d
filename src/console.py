@@ -50,7 +50,7 @@ def section(title: str) -> None:
 
 def field(label: str, value, *styles: str) -> None:
     """One aligned "label  value" line; styles color the value."""
-    emit(f"  {paint(label.ljust(LABEL_WIDTH), 'dim')}{paint(value, *styles)}")
+    emit(f"  {paint(f'{label:<{LABEL_WIDTH - 1}} ', 'dim')}{paint(value, *styles)}")
 
 
 def path_field(label: str, path) -> None:

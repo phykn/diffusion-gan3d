@@ -4,13 +4,21 @@ from pathlib import Path
 
 from src.config.files import dump_yaml, find_saved_config, load_yaml
 from src.config.sample import STAGE_NAMES, build_train_config, load_sample
-from src.console import path_field, section, success
+from src.config.train import load_train_config
+from src.console import path_field, section, success, warning
 from src.device import default_device
 from src.train.checkpoint import resolve_checkpoint
 from src.train.run.low_res import run_low_res_train
-from src.train.run.sr import run_sr_train
+from src.train.run.sr import match_source, run_sr_train
 
 DONE = ".done"
+
+
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -31,8 +39,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--run-dir",
         type=Path,
         help=(
-            "Run name: trains NAME-lr then NAME-sr and reuses a finished stage "
-            "(default: new run/MMDDHHMM_<stage>_<sample> directories)."
+            "Run path such as run/NAME: trains NAME-lr then NAME-sr and reuses a "
+            "finished stage (default: new run/MMDDHHMM_low_res_<sample> and "
+            "run/MMDDHHMM_sr_<sample> directories)."
         ),
     )
     parser.add_argument(
@@ -40,10 +49,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Stop after the LR stage; rerun without it and the same --run-dir for SR.",
     )
-    parser.add_argument("--steps", type=int, help="LR total steps.")
-    parser.add_argument("--sr-steps", type=int, help="SR total steps.")
+    parser.add_argument("--steps", type=positive_int, help="LR total steps.")
+    parser.add_argument("--sr-steps", type=positive_int, help="SR total steps.")
     parser.add_argument(
-        "--bank-size", type=int, help="Frozen LR samples per domain for SR."
+        "--bank-size", type=positive_int, help="Frozen LR samples per domain for SR."
     )
     parser.add_argument(
         "--resume",
@@ -99,10 +108,20 @@ def main(argv: list[str] | None = None) -> None:
         for stage, cfg in configs.items():
             print(f"# {stage}\n{dump_yaml(cfg)}")
         return
+    # SR checks these against the trained LR model; fail before LR trains.
+    match_source(
+        load_train_config(configs["sr"], "sr"), load_train_config(configs["low_res"])
+    )
     lr_dir, sr_dir = get_stage_dirs(args.run_dir)
+    if not args.lr_only and is_done(sr_dir):
+        section("SR training")
+        path_field("Finished", sr_dir)
+        return
     if is_done(lr_dir):
         section("LR training")
         path_field("Reuse finished", lr_dir)
+        if args.steps is not None:
+            warning("--steps applies to a new LR stage; resume this one instead.")
     else:
         lr_dir = run_low_res_train(
             args.device, config=configs["low_res"], run_dir=lr_dir, steps=args.steps
@@ -110,10 +129,6 @@ def main(argv: list[str] | None = None) -> None:
         mark_done(lr_dir)
     if args.lr_only:
         report_done(lr_dir)
-        return
-    if is_done(sr_dir):
-        section("SR training")
-        path_field("Already finished", sr_dir)
         return
     sr_dir = run_sr_train(
         args.device,
@@ -160,6 +175,10 @@ def get_stage_dirs(run_dir: Path | None) -> tuple[Path | None, Path | None]:
     lr_dir, sr_dir = (Path(f"{run_dir}-{name}") for name in STAGE_NAMES.values())
     for path in (lr_dir, sr_dir):
         if path.exists() and not is_done(path):
+            try:
+                resolve_checkpoint(path)
+            except FileNotFoundError:
+                sys.exit(f"{path} exists but saved no checkpoint; delete it.")
             sys.exit(
                 f"{path} exists but did not finish. Continue it with --resume "
                 f"{path}/checkpoints --run-dir <new name>, or delete it."
