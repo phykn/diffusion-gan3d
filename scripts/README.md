@@ -21,23 +21,28 @@ python scripts/check/05_continuation.py --weight "run/my-run-lr" --anchor data/s
 
 - `--blocks D H W` sets the `(z, y, x)` size to `patch + (n - 1) * (patch - 2 * overlap)`,
   where `patch` is the LR `lo_res_size` (default 64); the script prints the actual tile grid. `--axis 0/1/2` selects `xy/xz/yz`.
-- `--device`, `--seed`, `--domain`, and `--napari` work in `02–06`; `--help` lists the rest.
+- `--seed` and `--domain` work in `01–07`, `--device` in `02–07`, and `--napari` in `02–06`;
+  `--help` lists the rest.
 - `--height-origin` and `--height-extent` (`02–07`) are in source pixels along the xz/yz row direction.
 - `02 --vf-profile scripts/simul/config_anode.yaml --guidance 1.5` fixes the depth fractions to
   that simulation's targets (a profile YAML/JSON also works). Without it, a
   profile-conditioned model follows its training depth profile, since height alone
   flattens a strong gradient.
-- `02–05` save `volume.tiff/png/json`; `06` saves LR/HR volumes, `comparison.png`, and `report.json`.
+- `01` saves `crops.png`; `02–05` save `volume.tiff/png/json`, and `05` also
+  `volume_continuation.png`; `06` saves `lr.tiff`, `hr.tiff`, `lr_probs.pt` (for fractional
+  LR input), `comparison.png`, and `report.json`; `07` saves `report.json`.
 - `07` counts particles tilted each way (`dz/dy`, `dz/dx`, `dy/dx`); generated volumes
-  should match `--real` (use `--real-stride 2` for 128-pixel crops at 64 voxels). Training
-  logs the same balance as `structure/phase_N/tilt_balance_*` (pore phase 0 excluded);
+  should match `--real` (use `--real-stride 2` for 128-pixel crops at 64 voxels); for a
+  height-conditioned model, only at the real depths the generated volumes span from
+  `--height-origin`. Training logs the same balance as `structure/phase_N/tilt_balance_*`
+  (pore phase 0 excluded);
   percolation is logged per transport axis as `structure/phase_N/percolation_z|y|x`, and
   section errors against real crops as `structure/<plane>/two_point_mae|chord_tv|cluster_error`.
-- In `02–05`, guidance and overlap default to [config/gen.yaml](../config/gen.yaml), and so
-  does the anchor strength of `03–05` (posterior-sampling step scale, 0 = off). In `06`,
-  `--lr-guidance` uses that default,
-  `--guidance` is the SR guidance (default 1.0), and overlap is scale-aligned. Anchor demos
-  show controlled generation, not 3D accuracy.
+- Guidance in `02–05` and `07`, the overlap of `04`, and the anchor strength of `03–05`
+  (posterior-sampling step scale, 0 = off) default to [config/gen.yaml](../config/gen.yaml);
+  `04` keeps its default overlap below half a patch. In `06`, `--lr-guidance` uses that
+  default, `--guidance` is the SR guidance (default 1.0), and overlap is scale-aligned.
+  Anchor demos show controlled generation, not 3D accuracy.
 
 ## Training options
 
@@ -48,22 +53,24 @@ and SR. `STEPS=200 SR_STEPS=200 scripts/commands/train_default.command` makes a 
 During the first `burn_in.steps` steps (LR 5000, SR 2500) a cosine curve moves the
 learning rates to `burn_in.lr_scale` (0.25) of `optim.*_lr`, Adam β2 from
 `optim.adam_betas` to `burn_in.beta2` (0.99), the R1/R2 weights to
-`burn_in.regularization_scale` (0.1) of `loss.r1_weight`/`r2_weight`, and the EMA
-half-life from zero to that of `optim.ema_decay`, as in R3GAN. TensorBoard logs them
-under `burn_in/*`.
+`burn_in.regularization_scale` (0.1; the default sample keeps 0.5) of
+`loss.r1_weight`/`r2_weight`, and the EMA half-life from zero to that of
+`optim.ema_decay`, as in R3GAN. TensorBoard logs them under `burn_in/*`.
 The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
-in training on CUDA and MPS (on MPS for the denoiser only; its critics stay fp32), and in
-LR and SR prediction on CUDA and MPS. Gradient checkpointing is off; when memory is short,
-`model.gradient_checkpointing: true` under `tune.lr` or `tune.sr` costs about 10% more step
-time for 15–30% less peak memory (Apple MPS).
+in training on CUDA and MPS (on MPS for the denoiser only; its critics stay fp32) unless
+`train.mixed_precision: false`, and in LR and SR prediction on CUDA and MPS. Gradient
+checkpointing is off; when memory is short, `model.gradient_checkpointing: true` under
+`tune.lr` or `tune.sr` costs about 10% more step time for 15–30% less peak memory (Apple
+MPS).
 
 ### Sample fields
 
 A sample is one file in [config/samples/](../config/samples/); copy
 [default.yaml](../config/samples/default.yaml) to add one.
 
-- `images` maps `xy`, `xz`, and `yz` to folders of 2D uint8 label images with one shared
-  pixel size; in `xz` and `yz` images, z runs down the rows. Labels are phases `0..K-1`,
+- `images` maps `xy`, `xz`, and `yz` to folders of 2D uint8 label images (`.png`, `.tif`,
+  or `.tiff` directly inside) with one shared pixel size; in `xz` and `yz` images, z runs
+  down the rows. The default sample reads `data/`. Labels are phases `0..K-1`,
   and phase 0 is pore. `K` is the largest label plus one, and every smaller label must
   appear, unless `num_phases` is set.
 - `resolution` sets the data size: each training crop is `crop_size` source pixels on
@@ -91,10 +98,11 @@ Settings apply in order, later winning: code defaults, [config/base/](../config/
 `structure`, then `tune`. `python train.py default --show` prints the YAML of both
 stages without the code defaults.
 
-### Web backend
+## Web backend
 
 The web backend (`app/backend/run.py`) serves `GET /api/health`, `POST /api/prepare`, and
-`POST /api/generate`; HTTP limits are in [app/backend/config.yaml](../app/backend/config.yaml).
+`POST /api/generate`; HTTP limits are in [app/backend/config.yaml](../app/backend/config.yaml),
+and `--help` lists the host, port, and device options.
 Viewer, porosity, and tortuosity are on the HR volume, and one block is
 `lo_res_size × sr_scale` voxels per edge.
 
@@ -108,12 +116,26 @@ Viewer, porosity, and tortuosity are on the HR volume, and one block is
   resume requires.
 - The first Ctrl+C stops after the current step and saves both; a second stops at once
   without saving.
-- Metrics and diagnostics go to `tensorboard/`; step scores also go to
-  `selection/scores.yaml` ([Best step](#best-step)).
+- Metrics and diagnostics go to `tensorboard/` (`tensorboard --logdir run`); step scores
+  also go to `selection/scores.yaml` ([Best step](#best-step)).
 
 ```bash
 python train.py --resume "run/my-run-lr" --steps 30000 --run-dir "run/my-run-2"
 ```
+
+Resume continues the stage the checkpoint belongs to with its saved settings, so it takes
+no sample, `--sr-steps`, or `--bank-size`; `--steps` is that stage's total, including
+completed steps. It writes a new run directory (here `run/my-run-2-lr`); an LR resume
+needs `--run-dir`. After an LR resume, `python train.py <sample> --run-dir "run/my-run-2"`
+reuses it and trains SR. Pass `--path-map OLD NEW` (repeatable) when data or runs have moved.
+
+- A finished stage holds a `.done` file. While `NAME-lr` or `NAME-sr` exists unfinished,
+  `train.py --run-dir NAME` stops and says how to resume or delete it.
+- An SR run checks the LR run's `generator.pt` and `train.yaml` against hashes it recorded,
+  and an SR resume also reads the resumed run's latest `lr_bank/` snapshot and
+  `selection/inputs.pt`; keep them unchanged.
+- `06` and the web app load the LR run from the path the SR run recorded; pass
+  `--lr-weight` when it has moved.
 
 ### Best step
 
@@ -157,18 +179,14 @@ input, so matching it exactly is not the goal.
   it is generation, which grows with volume size like a training step does. Set
   `selection.enabled: false` to export the latest step instead.
 
-Resume continues the stage the checkpoint belongs to with its saved settings, so it takes
-no sample, `--sr-steps`, or `--bank-size`; `--steps` is that stage's total, including
-completed steps. It writes a new run directory (here `run/my-run-2-lr`). After an LR
-resume, `python train.py <sample> --run-dir "run/my-run-2"` reuses it and trains SR. Pass
-`--path-map OLD NEW` (repeatable) when data or runs have moved.
-
-
 ## Synthetic data
 
-`python scripts/simul/run.py --config <file>` writes 3D TIFFs, per-axis slice PNGs
-(`slices/0..2` for `xy`, `xz`, `yz`), and `simulation.yaml` (targets and measured
-fractions). The output folder must be empty.
+`python scripts/simul/run.py --config <file>` writes 3D TIFFs (`volumes/`), per-axis slice
+PNGs (`slices/0..2` for `xy`, `xz`, `yz`), and `simulation.yaml` (targets and measured
+fractions) to the config's `output.data_dir`, under `data/generated/` in the shipped
+configs. Its `volumes/` and `slices/0..2` must be empty or absent. A sample trains on the
+slices by pointing `images` at `<data_dir>/slices/0`, `1`, and `2`, as
+[simul_anode.yaml](../config/samples/simul_anode.yaml) does.
 
 - Default `kind: particles` ([geometry.py](simul/src/geometry.py)): elongated phase 2
   and spherical phase 1 particles. y and x wrap periodically, and z does too unless
@@ -178,9 +196,8 @@ fractions). The output folder must be empty.
   fractions at evenly spaced heights, enforced per slice. Order bias alone cannot
   concentrate silicon once graphite fills the pores.
 
-The anode sample is not isotropic, has a depth gradient, and is not mirror symmetric, so
-both stages use height conditioning and judge `xy` apart from `xz`/`yz`; LR adds the
-per-height profile, sections flip at probability 0.2, and z is never flipped or rotated.
+The anode sample is not isotropic, has a depth gradient, and is not mirror symmetric; its
+settings follow from those flags ([Sample fields](#sample-fields)).
 
 ```bash
 python scripts/simul/run.py --config scripts/simul/config_anode.yaml
@@ -189,5 +206,12 @@ python train.py simul_anode --run-dir "run/anode"
 python scripts/check/02_generated.py --weight "run/anode-lr" --no-view
 python scripts/check/06_hr.py --weight "run/anode-sr" --no-view
 ```
+
+## Experiments
+
+[scripts/experiments/](experiments/) holds bounded ablations, not quality scores.
+`critic_inputs.py` trains LR runs from the same seeds with the critic seeing section pairs
+or single sections, into `--run-dir run/NAME`. `training_stability.py` runs short LR
+ablations and an LR → SR run with held-out-region checks, under `run/` by default.
 
 [Back to README](../README.md)

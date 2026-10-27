@@ -45,24 +45,21 @@ python scripts/check/06_hr.py --weight "run/my-run-sr" --no-view
 ```
 
 `train.py` trains LR, then SR from frozen LR volumes. `--run-dir NAME` writes `NAME-lr`
-and `NAME-sr` and skips a finished stage on rerun; `--lr-only` stops after LR. Each stage's
-`generator.pt` is its best scored step, not the last one. Resume, burn-in, devices, and
-memory options are in [Training options](scripts/README.md#training-options).
+and `NAME-sr` and skips a finished stage on rerun; without it, each stage gets a new dated
+folder under `run/`. `--lr-only` stops after LR. `--steps` and `--sr-steps` set the LR and
+SR totals (10000 and 5000 by default), and `--bank-size` the frozen LR volumes per domain
+that SR trains on (8). Each stage's `generator.pt` is its best scored step, not the last
+one. Burn-in, devices, and memory options are in
+[Training options](scripts/README.md#training-options); resume is in
+[Save and resume](scripts/README.md#save-and-resume).
 
 ### Samples
 
 A sample is one file in [config/samples/](config/samples/); copy
-[default.yaml](config/samples/default.yaml) to add one.
-
-- `images` maps `xy`, `xz`, and `yz` to folders of 2D uint8 label images (phases `0..K-1`,
-  phase 0 pore) with one shared pixel size; in `xz` and `yz`, z runs down the rows.
-- `resolution`: training crops are `crop_size` source pixels on an edge, resized to
-  `lo_res_size` voxels for LR and `lo_res_size × sr_scale` for SR.
-- `structure`: `isotropic`, `depth_gradient`, and `mirror_symmetric` describe the material.
-- `tune.lr` and `tune.sr` change single settings of a stage.
-
-`python train.py default --show` prints the resolved YAML of both stages. Details of each
-field are in [Training options](scripts/README.md#sample-fields).
+[default.yaml](config/samples/default.yaml) to add one. It names folders of 2D uint8 label
+images for the `xy`, `xz`, and `yz` planes (phases `0..K-1`, phase 0 pore), the crop and
+voxel sizes, what the material looks like, and single settings to change per stage. Each
+field is described in [Sample fields](scripts/README.md#sample-fields).
 
 ## Web interface
 
@@ -81,8 +78,9 @@ npm ci
 npm run dev
 ```
 
-Open the URL Vite prints (`API_URL=http://HOST:PORT` for another backend); after
-`npm run build`, the backend serves the page itself at http://127.0.0.1:8000.
+Open the URL Vite prints (`API_URL=http://HOST:PORT` for another backend). After
+`npm run build`, a restarted backend serves the page itself at http://127.0.0.1:8000
+(`--host` and `--port` change it).
 
 ## Python API
 
@@ -98,8 +96,14 @@ sr = SuperResolutionAPI("run/my-run-sr")
 high = sr.refine(labels, seed=1, tile_size=128)  # (192, 128, 128) at the default 2x
 ```
 
-`generate_probs` and `refine_probs` return phase fractions instead of labels and take the
-same options; `seed=None` leaves the RNG unseeded.
+`generate` takes unset guidance, anchor strength, and overlap from
+[config/gen.yaml](config/gen.yaml); `anchors=[PlaneAnchor(labels, axis, index)]` steers it
+toward a known 2D section at `index` along `axis` (0, 1, 2 for `xy`, `xz`, `yz`).
+`refine` uses guidance 1.0 and refines in one block unless `tile_size` is given;
+`sr.default_tiling()` returns a run's SR training size (128 for the default sample), and an
+unset `overlap` is scale-aligned to the tile. `extend_hr` grows a larger HR volume around
+an existing one. `generate_probs` and `refine_probs` return phase fractions
+instead of labels and take the same options; `seed=None` leaves the RNG unseeded.
 
 Generated volumes are plausible samples, not measurements of an unknown 3D specimen.
 

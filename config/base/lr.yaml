@@ -29,7 +29,7 @@ optim:
   critic_lr: 0.0001
 
 # Learning rates, Adam beta2, R1/R2 and EMA move to their end values over
-# these steps; see README.md (Train).
+# these steps; see scripts/README.md (Training options).
 burn_in:
   steps: 5000
 
