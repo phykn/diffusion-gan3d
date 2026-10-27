@@ -86,11 +86,15 @@ def main() -> None:
         parser.error("give --weight or --volumes.")
 
     generated = [load_labels(path) for path in args.volumes]
+    depths = slice(None)
     if args.weight is not None:
-        generated += generate_volumes(args)
+        volumes, depths = generate_volumes(args)
+        generated += volumes
+    stride = args.real_stride
+    # A height-conditioned sample covers only its own depths; compare the same
+    # depths of the real volumes.
     real = [
-        load_labels(path)[:: args.real_stride, :: args.real_stride, :: args.real_stride]
-        for path in args.real
+        load_labels(path)[depths][::stride, ::stride, ::stride] for path in args.real
     ]
 
     phases = args.phases or sorted(
@@ -118,7 +122,8 @@ def load_labels(path: Path) -> np.ndarray:
     return np.asarray(load_volume(path))
 
 
-def generate_volumes(args: argparse.Namespace) -> list[np.ndarray]:
+def generate_volumes(args: argparse.Namespace) -> tuple[list[np.ndarray], slice]:
+    """Generated label volumes and the source z range they cover."""
     device = check_device(args.device)
     if args.guidance is None:
         args.guidance = load_generation_settings().guidance
@@ -131,7 +136,16 @@ def generate_volumes(args: argparse.Namespace) -> list[np.ndarray]:
             vol = generator.generate(**options)
         volumes.append(vol.numpy())
         emit(paint(f"  sample {index + 1}/{args.samples} done", "dim"))
-    return volumes
+    return volumes, source_depths(generator, args.height_origin, len(volumes[0]))
+
+
+def source_depths(generator, origin: float, depth: int) -> slice:
+    """Source z pixels of depth LR voxels from origin; all of z without height."""
+    data = generator.height_data
+    if data is None:
+        return slice(None)
+    start = round(origin)
+    return slice(start, start + round(depth * data["crop_size"] / data["lo_res_size"]))
 
 
 def print_phase(phase: int, entry: dict) -> None:
