@@ -114,6 +114,7 @@ class TiledGenerator:
         self.generator.validate_profile_request(
             vf_profile, output_shape[0], domain, height_origin, height_extent, vf
         )
+        anchor_strength = self.generator.validate_anchor_strength(anchor_strength)
         storage = select_storage(
             storage,
             estimate_memory(
@@ -124,11 +125,11 @@ class TiledGenerator:
                 overlap=overlap,
                 probabilities=probabilities,
                 base_shape=volume_shape(base),
+                guided=anchor_strength > 0 and bool(anchors),
             ),
             self.generator,
         )
         tiles = make_tiles(plan)
-        anchor_strength = self.generator.validate_anchor_strength(anchor_strength)
         tile_anchors = (
             self.prepare_anchors(anchors, tiles, plan)
             if anchor_strength > 0

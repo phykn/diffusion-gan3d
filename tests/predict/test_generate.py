@@ -582,6 +582,25 @@ def test_anchor_guidance_runs_one_plain_forward_per_tile_and_transition(
     assert all(guide.strength == 0.5 for guide in guidance_calls)
 
 
+@pytest.mark.parametrize("strength", (0.5, 0.0))
+def test_tiled_memory_check_counts_anchor_guidance(strength) -> None:
+    from src.predict.tiling import generator as tiled_module
+
+    generator = _generator(_AnchorTraceModel(), Diffusion(2))
+    anchor = PlaneAnchor(torch.zeros(4, 4, dtype=torch.long), 0, 1)
+    with patch.object(
+        tiled_module, "estimate_memory", wraps=tiled_module.estimate_memory
+    ) as estimate:
+        TiledGenerator(generator).generate(
+            shape=(4, 4, 6),
+            overlap=0,
+            progress=False,
+            anchors=(anchor,),
+            anchor_strength=strength,
+        )
+    assert estimate.call_args.kwargs["guided"] is (strength > 0)
+
+
 def test_anchor_never_overwrites_a_different_model_prediction() -> None:
     generator = _generator(
         _OptionalAnchorPhaseModel(phase=2),

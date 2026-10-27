@@ -29,6 +29,21 @@ def test_estimate_counts_states_but_bounds_fusion_by_tile_depth():
     )
 
 
+def test_estimate_counts_the_allocated_fusion_with_and_without_guidance():
+    from src.predict.tiling.fusion import make_fusion
+    from src.predict.tiling.layout import make_plan
+
+    plan = make_plan((72, 108, 98), 32, 0)
+    for guided in (False, True):
+        fusion = make_fusion(plan, 3, torch.device("cpu"), guided=guided)
+        tensors = (fusion.weight_sum, fusion.pred_sum, fusion.step_sum)
+        allocated = sum(t.numel() * t.element_size() for t in tensors if t is not None)
+        estimate = memory.estimate_memory(
+            (64, 100, 90), 3, tile_size=32, margin=4, guided=guided
+        )
+        assert estimate.fusion_bytes == allocated
+
+
 def test_estimate_counts_margin_and_overlap_in_resolved_tiles():
     from src.predict.tiling.generator import TiledGenerator
 

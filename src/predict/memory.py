@@ -38,7 +38,9 @@ def estimate_memory(
     overlap: int = 0,
     probabilities: bool = False,
     base_shape=None,
+    guided: bool = False,
 ) -> MemoryEstimate:
+    """guided counts the fused anchor guidance steps of tiled sampling."""
     shape = parse_shape(shape)
     generation_shape = tuple(size + 2 * margin for size in shape)
     tiled = tile_size is not None
@@ -53,7 +55,7 @@ def estimate_memory(
         tile_count=make_plan(generation_shape, tile_size, overlap).tile_count,
         state_bytes=2 * num_phases * voxels,
         fusion_bytes=4
-        * (num_phases + 1)
+        * ((2 if guided else 1) * num_phases + 1)
         * min(tile_size, generation_shape[0])
         * math.prod(generation_shape[1:]),
         buffer_bytes=tile_buffer_bytes(num_phases, tile_shape),
