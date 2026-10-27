@@ -210,7 +210,7 @@ def test_cli_trains_lr_then_sr_and_reuses_finished_stages(tmp_path, capsys):
 
     capsys.readouterr()
     run_train.main(args)
-    assert "reuse finished" in capsys.readouterr().out
+    assert "Reuse finished" in capsys.readouterr().out
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("trial")) == [
         "trial-lr",
         "trial-sr",

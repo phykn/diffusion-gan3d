@@ -15,6 +15,7 @@ from scripts.common.diagnostic import show_napari, show_slices
 from simul.src.anode import depth_profile
 from src.build.predict import load_generator
 from src.config.files import load_yaml
+from src.console import field, path_field, section, status
 from src.device import check_device
 from src.random import seeded_rng
 
@@ -32,17 +33,16 @@ def main() -> None:
         "(default: the training depth profile of a profile-conditioned model).",
     )
     args = parser.parse_args()
+    section("LR generation check")
     prepare_check(args, __file__)
 
     device = check_device(args.device)
-    print(f"\nWeights : {args.weight}", flush=True)
+    path_field("Weights", args.weight)
 
     generator = load_generator(args.weight, device=device)
     shape = (generator.patch_size,) * 3
-    print(
-        f"Generate: {' × '.join(map(str, shape))}, domain {args.domain}, {device}",
-        flush=True,
-    )
+    field("Volume", f"{' × '.join(map(str, shape))}, domain {args.domain}, {device}")
+    status("Generating")
 
     with seeded_rng(args.seed, device):
         vol = generator.generate(

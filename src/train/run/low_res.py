@@ -8,6 +8,7 @@ from src.build.trainer import build_trainer
 from src.config.data import describe_resolution, get_resolution
 from src.config.files import PROJECT_ROOT
 from src.config.train import load_train_config
+from src.console import field, path_field, section
 from src.device import check_device
 from src.train.checkpoint import resolve_checkpoint
 from src.train.run.loop import check_run_dir, make_run_dir, run_train
@@ -51,10 +52,9 @@ def run_low_res_train(
     if payload:
         resume_training(trainer, payload)
     run_dir = make_run_dir(PROJECT_ROOT / "run", "low_res", run_dir, cfg["nickname"])
-    print(
-        f"LR: {describe_resolution(get_resolution(cfg['data']))}; run {run_dir}",
-        flush=True,
-    )
+    section("LR training")
+    field("Resolution", describe_resolution(get_resolution(cfg["data"])))
+    path_field("Run", run_dir)
     if payload and trainer.selection is not None:
         # The best step's weights sit beside the resumed checkpoint's run folder.
         source_run = resolve_checkpoint(resume).parent.parent

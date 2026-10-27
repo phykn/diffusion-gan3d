@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import torch
 from matplotlib.colors import ListedColormap
 
+from src.console import metric
 from src.evaluate.anchor import SliceSmoothness
 from src.evaluate.label import voxel_accuracy
 from src.plane import PLANES
@@ -78,20 +79,20 @@ def print_anchor_effect(
     peak = ""
     if smoothness.peak_anchor_distance is not None:
         peak = f" at distance {smoothness.peak_anchor_distance}"
-    print(
-        "Smoothness    : "
+    metric(
+        "Smoothness",
         f"p95 {format_ratio(smoothness.p95_ratio)}, "
-        f"peak {format_ratio(smoothness.max_ratio)}{peak}"
+        f"peak {format_ratio(smoothness.max_ratio)}{peak}",
     )
     if smoothness.reversal_rate is not None:
-        print(
-            "Surface bumps : "
+        metric(
+            "Surface bumps",
             f"{smoothness.reversal_rate:.2%} vs baseline "
             f"{format_percent(smoothness.baseline_reversal_rate)} "
-            f"({format_ratio(smoothness.reversal_ratio)})"
+            f"({format_ratio(smoothness.reversal_ratio)})",
         )
     if profile:
-        print(f"Anchor effect : {format_profile(profile, label)}")
+        metric("Anchor effect", format_profile(profile, label))
 
 
 def middle_slices(volume: torch.Tensor) -> tuple[torch.Tensor, ...]:

@@ -17,6 +17,7 @@ from src.build.predict import resolve_weights
 from src.config.files import find_saved_config, load_yaml
 from src.config.sample import build_train_config, find_sample, load_sample
 from src.config.train import load_train_config
+from src.console import field, path_field, section
 from src.phase import PORE_PHASE
 from src.plane import PLANE_DIRECTIONS, PLANES
 
@@ -95,11 +96,12 @@ def main() -> None:
     name = config.parent.name if args.weight else config.stem
     if len(stages["LR"]) > 1:
         name += f" (domain {args.domain})"
-    print(f"Config  : {config.resolve()}")
+    section("Training crops")
+    path_field("Config", config.resolve())
     for label, size in sizes.items():
-        print(f"{label:<8}: {crop} px -> {size}x{size} (1 cell = {crop / size:g} px)")
+        field(label, f"{crop} px -> {size}x{size} (1 cell = {crop / size:g} px)")
     for axis in axes:
-        print(f"{PLANES[axis]:<8}: {image_count(len(planes['LR'][axis]))}")
+        field(PLANES[axis], image_count(len(planes["LR"][axis])))
     # Fixed layout in inches: a narrow gap inside each LR/SR pair, a wider one
     # between pairs, and room above each pair for its phase fractions.
     pair = 2 * PANEL + PAIR_GAP
@@ -169,7 +171,7 @@ def main() -> None:
     output = args.out or result_directory(__file__) / "crops.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150)
-    print(f"Preview : {output.resolve()}")
+    path_field("Preview", output.resolve())
     if not args.no_view:
         plt.show()
     plt.close(fig)

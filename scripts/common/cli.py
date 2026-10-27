@@ -9,6 +9,7 @@ from scripts.common.diagnostic import slice_figure
 from src.build.predict import resolve_weights
 from src.config.files import PROJECT_ROOT
 from src.config.generation import load_generation_settings
+from src.console import path_field
 from src.device import default_device
 from src.storage import save_volume
 
@@ -119,7 +120,7 @@ def prepare_check(args, script):
     if args.out is None:
         args.out = result_directory(script) / "volume.tiff"
     args.out = args.out.expanduser().resolve()
-    print(f"Results : {args.out.parent}", flush=True)
+    path_field("Results", args.out.parent)
     settings = load_generation_settings()
     if args.guidance is None:
         args.guidance = settings.guidance
@@ -131,7 +132,7 @@ def prepare_check(args, script):
 def save_results(volume, args, num_phases):
     """Save the TIFF, a middle-slice PNG and the options as JSON next to it."""
     save_volume(volume, args.out)
-    print(f"Saved   : {args.out}", flush=True)
+    path_field("Volume", args.out)
     fig = slice_figure(volume, num_phases)
     path = args.out.with_suffix(".png")
     fig.savefig(path, dpi=150)
@@ -144,4 +145,4 @@ def save_results(volume, args, num_phases):
     args.out.with_suffix(".json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
     )
-    print(f"Preview : {path}", flush=True)
+    path_field("Preview", path)

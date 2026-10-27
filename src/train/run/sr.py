@@ -9,6 +9,7 @@ from src.build.sr import build_sr_trainer
 from src.config.data import describe_resolution, validate_sr_source
 from src.config.files import PROJECT_ROOT, find_saved_config, project_path
 from src.config.train import get_sr_resolution, load_train_config, validate_sr_config
+from src.console import field, path_field, section
 from src.data.bank import load_bank
 from src.data.source import fill_height_extents, infer_height_extents
 from src.device import check_device
@@ -80,9 +81,9 @@ def run_sr_train(
     if payload:
         resume_sr_training(trainer, payload)
     cfg = trainer.cfg
-    print(
-        f"SR: {describe_resolution(get_sr_resolution(cfg))}; run {run_dir}", flush=True
-    )
+    section("SR training")
+    field("Resolution", describe_resolution(get_sr_resolution(cfg)))
+    path_field("Run", run_dir)
 
     def before_step(step: int) -> None:
         interval = cfg["lr_bank"]["refresh_every_steps"]

@@ -66,7 +66,7 @@ def test_boundary_continuation_defaults_to_an_unconditioned_reference(
 
     assert tifffile.imread(output_path).shape == (8, 8, 8)
     output = capsys.readouterr().out
-    assert "Anchor  : unanchored reference boundary" in output
+    assert "Anchor          unanchored reference boundary" in output
     assert "Generating unanchored reference" in output
 
 
@@ -120,7 +120,7 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     assert figure_path.is_file()
     output = capsys.readouterr().out
     assert "crop (1, 2, 16, 16) -> input 8 x 8" in output
-    assert f"Boundary: axis {int(height)}, start plane 0" in output
+    assert f"Boundary        axis {int(height)}, start plane 0" in output
     assert "Anchor match" in output
     assert "First change" in output
     assert "farthest" in output
@@ -251,9 +251,9 @@ def test_anchor_check_script_runs_with_generated_reference(
     assert tifffile.imread(output_path).shape == (8, 8, 8)
 
     output = capsys.readouterr().out
-    assert "Input   : 8 x 8 x 8, cpu" in output
-    assert f"Anchors : {count} planes on axis 0" in output
-    assert "Anchor match  :" in output
+    assert "Input           8 x 8 x 8, cpu" in output
+    assert f"Anchors         {count} planes on axis 0" in output
+    assert "Anchor match    " in output
     assert "Smoothness" in output
     assert "Surface bumps" in output
     assert "Volume match" not in output
@@ -267,7 +267,10 @@ def test_anchor_check_script_runs_with_generated_reference(
         assert "Strength" not in output
     else:
         assert "Anchor effect" in output
-        assert f"Strength: {load_generation_settings().anchor_strength:.2f}" in output
+        assert (
+            f"Strength        {load_generation_settings().anchor_strength:.2f}"
+            in output
+        )
     assert "Indices" not in output
     assert "Center slice" not in output
 
@@ -367,7 +370,7 @@ def test_zero_strength_is_unanchored(
         ((), 0.0, 1.75, 1, 8),
         ((), 0.0, 1.75, 1, 8),
     ]
-    assert "Anchors : 0 planes on axis 0" in output
+    assert "Anchors         0 planes on axis 0" in output
     assert "Guidance" not in output
 
 

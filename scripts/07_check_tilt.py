@@ -19,6 +19,7 @@ from scripts.common.cli import (
 )
 from src.build.predict import load_generator
 from src.config.generation import load_generation_settings
+from src.console import emit, paint, path_field, section, status
 from src.device import check_device
 from src.evaluate.tilt import TILT_PAIRS, tilt_balance
 from src.phase import PORE_PHASE
@@ -81,6 +82,7 @@ def main() -> None:
     add_device_argument(parser)
     add_height_arguments(parser)
     args = parser.parse_args()
+    section("Particle tilt check")
     if args.weight is None and not args.volumes:
         parser.error("give --weight or --volumes.")
 
@@ -109,7 +111,8 @@ def main() -> None:
     out = args.out or result_directory(__file__) / "report.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"\nReport  : {out.resolve()}")
+    emit()
+    path_field("Report", out.resolve())
 
 
 def load_labels(path: Path) -> np.ndarray:
@@ -123,6 +126,7 @@ def generate(args: argparse.Namespace) -> list[np.ndarray]:
     )
     generator = load_generator(args.weight, device=device)
     volumes = []
+    status(f"Generating {args.samples} samples")
     for index in range(args.samples):
         with seeded_rng(args.seed + index, device):
             vol = generator.generate(
@@ -133,16 +137,17 @@ def generate(args: argparse.Namespace) -> list[np.ndarray]:
                 margin=generator.default_margin,
             )
         volumes.append(vol.numpy())
-        print(f"Generated sample {index + 1}/{args.samples}", flush=True)
+        emit(paint(f"  sample {index + 1}/{args.samples} done", "dim"))
     return volumes
 
 
 def print_phase(phase: int, entry: dict) -> None:
-    print(f"\nPhase {phase}  (+/- = tilted fraction, balance = + minus -)")
+    section(f"Phase {phase}")
+    emit(paint("  +/- = tilted fraction, balance = + minus -", "dim"))
     for name in TILT_PAIRS:
         for source, stats in entry.items():
             s = stats[name]
-            print(
+            emit(
                 f"  d{name[0]}/d{name[1]} {source:9s} n={s['count']:4d}  "
                 f"+{s['positive']:5.0%} -{s['negative']:5.0%}  "
                 f"balance {s['balance']:+.2f}  mean {s['mean']:+.3f}±{s['sem']:.3f}"

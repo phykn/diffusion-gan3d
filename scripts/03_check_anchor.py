@@ -28,6 +28,7 @@ from scripts.common.diagnostic import (
     show_napari,
 )
 from src.build.predict import load_generator
+from src.console import field, metric, path_field, section, status
 from src.device import check_device
 from src.evaluate.anchor import measure_distance_divergence, measure_slice_smoothness
 from src.evaluate.label import voxel_accuracy
@@ -54,17 +55,18 @@ def main() -> None:
     )
     add_generation_arguments(parser, anchors=True)
     args = parser.parse_args()
+    section("Anchor check")
     prepare_check(args, __file__)
     anchor_count = args.count if args.anchor_strength > 0.0 else 0
 
     device = check_device(args.device)
-    print(f"\nWeights : {args.weight}")
+    path_field("Weights", args.weight)
 
     generator = load_generator(args.weight, device=device)
     if anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
     with seeded_rng(args.seed, device):
-        print("Generating reference...", flush=True)
+        status("Generating reference")
         target = generator.generate(
             anchors=(),
             anchor_strength=0.0,
@@ -79,11 +81,11 @@ def main() -> None:
             PlaneAnchor(image=target_slices[index], axis=args.axis, index=index)
             for index in indices
         )
-        print(f"Input   : {' x '.join(map(str, target.shape))}, {device}")
-        print(f"Anchors : {len(indices)} planes on axis {args.axis}")
+        field("Input", f"{' x '.join(map(str, target.shape))}, {device}")
+        field("Anchors", f"{len(indices)} planes on axis {args.axis}")
         if indices:
-            print(f"Strength: {args.anchor_strength:.2f}")
-        print("Generating anchored sample...", flush=True)
+            field("Strength", f"{args.anchor_strength:.2f}")
+        status("Generating anchored sample")
 
         gen, baseline = generate_with_baseline(
             generator,
@@ -97,9 +99,9 @@ def main() -> None:
     save_results(gen, args, generator.num_phases)
     profile = measure_distance_divergence(gen, baseline, indices, args.axis)
     smoothness = measure_slice_smoothness(gen, indices, args.axis, baseline)
-    print("\nQuality")
+    section("Quality")
     score = anchor_accuracy(gen, target, indices, args.axis)
-    print(f"Anchor match  : {'n/a' if score is None else f'{score:7.2%}'}")
+    metric("Anchor match", "n/a" if score is None else f"{score:.2%}")
     print_anchor_effect(smoothness, profile, "anchor")
     if args.no_view:
         return

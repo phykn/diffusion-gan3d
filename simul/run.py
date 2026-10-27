@@ -7,6 +7,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from simul.src.export import generate
 from src.config.files import load_yaml
+from src.console import field, path_field, section
 
 DEFAULT_CONFIG = Path(__file__).resolve().with_name("config.yaml")
 
@@ -23,12 +24,13 @@ def main() -> None:
     cfg = load_yaml(args.config)
     export = generate(cfg)
     slice_count = sum(len(paths) for paths in export.slices.values())
-    print(f"Volumes : {len(export.volumes)}")
-    print(f"Slices  : {slice_count}")
+    section("Simulated data")
+    field("Volumes", len(export.volumes))
+    field("Slices", slice_count)
     for key in export.measured[0]:
         mean = sum(item[key] for item in export.measured) / len(export.measured)
-        print(f"{key:<8}: {mean:.3f} measured, {cfg['geometry'][key]} target")
-    print(f"Output  : {cfg['output']['data_dir']}")
+        field(key, f"{mean:.3f} measured, {cfg['geometry'][key]} target")
+    path_field("Output", cfg["output"]["data_dir"])
 
 
 if __name__ == "__main__":

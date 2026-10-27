@@ -32,6 +32,7 @@ from scripts.common.diagnostic import (
     show_slices,
 )
 from src.build.predict import load_generator
+from src.console import field, metric, path_field, section, status
 from src.device import check_device
 from src.evaluate.label import phase_fractions, voxel_accuracy
 from src.evaluate.seam import SeamQuality, measure_seams
@@ -103,10 +104,10 @@ def generate_base(
     args: argparse.Namespace, generator, anchor_count: int | None
 ) -> BaseResult:
     if anchor_count is None:
-        print("Base    : none")
+        field("Base", "none")
         return BaseResult(None, None, (), None)
     if anchor_count == 0:
-        print("Base    : generating unanchored volume...", flush=True)
+        status("Generating unanchored base volume")
         base = generator.generate(
             guidance=args.guidance,
             domain=args.domain,
@@ -121,7 +122,7 @@ def generate_base(
     anchors = tuple(
         PlaneAnchor(image=slices[index], axis=AXIS, index=index) for index in indices
     )
-    print(f"Base    : generating with {len(indices)} anchor planes...", flush=True)
+    status(f"Generating base with {len(indices)} anchor planes")
     base = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
@@ -187,6 +188,7 @@ def assess_result(
 
 def main() -> None:
     parser, args = parse_args()
+    section("Scale-up check")
     settings = prepare_check(args, __file__)
     anchor_count = args.count if args.count is None or args.anchor_strength > 0.0 else 0
     if anchor_count is not None and anchor_count > 0 and args.gt is None:
@@ -197,7 +199,7 @@ def main() -> None:
         )
 
     device = check_device(args.device)
-    print(f"\nWeights : {args.weight}", flush=True)
+    path_field("Weights", args.weight)
 
     generator = load_generator(args.weight, device=device)
     if anchor_count is not None and anchor_count > generator.patch_size:
@@ -213,11 +215,12 @@ def main() -> None:
     shape = scaled.shape_from_blocks(tuple(args.blocks), overlap)
     generation_shape = tuple(size + 2 * args.margin for size in shape)
     plan = scaled.plan(generation_shape, overlap)
-    print(
-        f"Plan    : {' × '.join(map(str, plan.grid))} tiles "
-        f"({plan.tile_count} total), overlap {plan.overlap}, {device}"
+    field(
+        "Plan",
+        f"{' × '.join(map(str, plan.grid))} tiles "
+        f"({plan.tile_count} total), overlap {plan.overlap}, {device}",
     )
-    print(f"Output  : {' × '.join(map(str, shape))}, margin {args.margin}")
+    field("Output", f"{' × '.join(map(str, shape))}, margin {args.margin}")
     with seeded_rng(args.seed, device):
         base_args = copy.copy(args)
         if generator.height_data is not None:
@@ -232,7 +235,7 @@ def main() -> None:
             )
         base_result = generate_base(base_args, generator, anchor_count)
 
-        print("Scaling...", flush=True)
+        status("Scaling")
 
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -261,26 +264,26 @@ def main() -> None:
     )
     quality = assessment.quality
     base, target = base_result.volume, base_result.target
-    print("\nQuality")
-    print(f"Phase VF        : {format_phases(assessment.phase_fractions)}")
-    print(f"Seam TV         : {format_axes(quality.transition_tv)}")
-    print(f"Seam continuity : {format_axes(quality.continuation_delta)}")
+    section("Quality")
+    metric("Phase VF", format_phases(assessment.phase_fractions))
+    metric("Seam TV", format_axes(quality.transition_tv))
+    metric("Seam continuity", format_axes(quality.continuation_delta))
     if base is not None:
-        print(f"Base interior   : {format_percent(assessment.base_interior_match)}")
+        metric("Base interior", format_percent(assessment.base_interior_match))
         if target is None:
-            print(f"Whole base      : {format_percent(assessment.base_match)}")
+            metric("Whole base", format_percent(assessment.base_match))
         else:
-            print(
-                "Anchor match   : "
+            metric(
+                "Anchor match",
                 f"{format_percent(base_result.accuracy)} → "
-                f"{format_percent(assessment.scaled_accuracy)}"
+                f"{format_percent(assessment.scaled_accuracy)}",
             )
 
-    performance = f"Elapsed : {elapsed:.1f} s"
+    performance = f"{elapsed:.1f} s"
     if device.type == "cuda":
         peak = torch.cuda.max_memory_allocated(device) / 1024**3
         performance += f", peak {peak:.2f} GiB"
-    print(performance)
+    field("Elapsed", performance)
 
     if args.no_view:
         return

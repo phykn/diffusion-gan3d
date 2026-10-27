@@ -21,6 +21,7 @@ from scripts.common.cli import (
 from src.build.predict import resolve_weights
 from src.config.data import validate_sr_source
 from src.config.files import load_yaml
+from src.console import field, metric, path_field, section, status
 from src.device import check_device, empty_cache
 from src.evaluate.label import phase_fractions
 from src.plane import PLANES
@@ -44,6 +45,12 @@ def latest_sr():
     if not candidates:
         raise FileNotFoundError("No trained SR export found in run/. Supply --weight.")
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def format_fractions(values) -> str:
+    return "  ".join(
+        f"phase {phase}: {value:.2%}" for phase, value in enumerate(values)
+    )
 
 
 def comparison(low, high, phases, path, show):
@@ -139,6 +146,7 @@ def main(argv=None):
         "--no-view", action="store_true", help="Save results without opening a viewer."
     )
     args = parser.parse_args(argv)
+    section("SR generation check")
     device = check_device(args.device)
     weight = resolve_weights(args.weight or latest_sr())
     cfg = load_sr_export(weight)["config"]
@@ -161,7 +169,8 @@ def main(argv=None):
             if args.lr_weight
             else frozen_source_weights(cfg.get("source", {}))
         )
-        print(f"LR weights: {lr_weight}\nGenerating LR...", flush=True)
+        path_field("LR weights", lr_weight)
+        status("Generating LR")
         lr = LowResolutionAPI(lr_weight, device)
         validate_sr_source(cfg["data"], lr.data)
         if args.lr_guidance is None:
@@ -170,7 +179,8 @@ def main(argv=None):
         del lr
         gc.collect()
         empty_cache(device)
-    print(f"SR weights: {weight}\nRefining LR {tuple(low.shape[-3:])}...", flush=True)
+    path_field("SR weights", weight)
+    status(f"Refining LR {tuple(low.shape[-3:])}")
     sr = SuperResolutionAPI(weight, device)
     tile_size, overlap = sr.default_tiling(args.tile_size)
     if args.overlap is not None:
@@ -225,10 +235,13 @@ def main(argv=None):
     (root / "report.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
-    print(
-        f"Saved HR {tuple(high.shape)} to {root.resolve()}\nOpening/saving comparison.png",
-        flush=True,
-    )
+    path_field("Results", root.resolve())
+    field("HR shape", tuple(high.shape))
+    section("Quality")
+    metric("LR phase VF", format_fractions(report["lr_phase_fractions"]))
+    metric("HR phase VF", format_fractions(report["hr_label_phase_fractions"]))
+    metric("Coarse MAE", f"{report['hr_label_coarse_mae']:.4f}")
+    path_field("Comparison", root.resolve() / "comparison.png")
     comparison(
         low_labels.cpu(),
         high.cpu(),

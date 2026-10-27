@@ -27,6 +27,7 @@ from scripts.common.diagnostic import (
 from src.build.predict import load_generator
 from src.config.files import find_saved_config
 from src.config.train import load_train_config
+from src.console import field, metric, path_field, section, status
 from src.device import check_device
 from src.evaluate.anchor import (
     measure_boundaries,
@@ -70,6 +71,7 @@ def main() -> None:
     )
     add_generation_arguments(parser, anchors=True, origin_default=None)
     args = parser.parse_args()
+    section("Boundary continuation check")
     prepare_check(args, __file__)
     if args.figure is None:
         args.figure = args.out.with_name(args.out.stem + "_continuation.png")
@@ -77,13 +79,13 @@ def main() -> None:
     device = check_device(args.device)
     generator = load_generator(args.weight, device=device)
     index = 0 if args.side == "start" else generator.patch_size - 1
-    print(f"\nWeights : {args.weight}")
-    print(f"Boundary: axis {args.axis}, {args.side} plane {index}")
-    print(f"Strength: {args.anchor_strength:.2f}")
+    path_field("Weights", args.weight)
+    field("Boundary", f"axis {args.axis}, {args.side} plane {index}")
+    field("Strength", f"{args.anchor_strength:.2f}")
     with seeded_rng(args.seed, device):
         if args.anchor is None:
-            print("Anchor  : unanchored reference boundary")
-            print("Generating unanchored reference...", flush=True)
+            field("Anchor", "unanchored reference boundary")
+            status("Generating unanchored reference")
             reference = generator.generate(
                 anchors=(),
                 anchor_strength=0.0,
@@ -108,13 +110,14 @@ def main() -> None:
                     args.height_origin = float(crop[0])
                 if args.height_extent is None:
                     args.height_extent = float(source_height)
-            print(
-                f"Anchor  : {args.anchor.resolve()}, crop {crop} -> "
-                f"input {generator.patch_size} x {generator.patch_size}"
+            field(
+                "Anchor",
+                f"{args.anchor.resolve()}, crop {crop} -> "
+                f"input {generator.patch_size} x {generator.patch_size}",
             )
         anchor = PlaneAnchor(anchor_image, args.axis, index)
 
-        print("Generating boundary-anchored volume...", flush=True)
+        status("Generating boundary-anchored volume")
 
         generated, baseline = generate_with_baseline(
             generator,
@@ -184,13 +187,13 @@ def print_quality(
     boundary = measure_boundaries(generated, (index,), axis)
     smoothness = measure_slice_smoothness(generated, (index,), axis, baseline)
     profile = measure_distance_divergence(generated, baseline, (index,), axis)
-    print("\nQuality")
-    print(f"Anchor match  : {accuracy:7.2%}")
-    print(
-        "First change  : "
+    section("Quality")
+    metric("Anchor match", f"{accuracy:.2%}")
+    metric(
+        "First change",
         f"{format_percent(boundary.anchor_change)} vs ordinary "
         f"{format_percent(boundary.ordinary_change)} "
-        f"({format_ratio(boundary.change_ratio)})"
+        f"({format_ratio(boundary.change_ratio)})",
     )
     print_anchor_effect(smoothness, profile, "boundary")
 
@@ -257,7 +260,7 @@ def render_strip(
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(output, dpi=160, bbox_inches="tight")
-        print(f"Figure  : {output.resolve()}")
+        path_field("Figure", output.resolve())
     if show:
         plt.show()
     plt.close(figure)

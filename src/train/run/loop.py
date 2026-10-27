@@ -9,6 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from src.config.files import save_yaml
+from src.console import paint, warning
 from src.storage import save_model, torch_save
 from src.train.checkpoint import checkpoint_paths, complete_checkpoint
 from src.train.metrics import write_metrics
@@ -66,10 +67,12 @@ def select_step(trainer, root, writer):
         if name != "step":
             writer.add_scalar(f"selection/{name}", value, entry["step"])
     writer.add_scalar("selection/best_step", best["step"], entry["step"])
-    tqdm.write(
-        f"Step {entry['step']}: structure {entry['structure']:.2f}; "
-        f"best step {best['step']}"
-    )
+    line = f"step {entry['step']:>7}  structure {entry['structure']:.3f}"
+    if best["step"] == entry["step"]:
+        tqdm.write(paint(f"{line}  ★ new best", "green"))
+    else:
+        best_text = f"best {best['structure']:.3f} @ {best['step']}"
+        tqdm.write(f"{line}  {paint(best_text, 'dim')}")
 
 
 def save_checkpoint(trainer, root, stage):
@@ -95,7 +98,7 @@ def deferred_sigint():
         if requested.is_set():
             raise KeyboardInterrupt
         requested.set()
-        tqdm.write("Stopping after the current step; press Ctrl+C again to stop now.")
+        warning("Stopping after the current step; press Ctrl+C again to stop now.")
 
     in_main_thread = current_thread() is main_thread()
     if in_main_thread:
@@ -138,7 +141,7 @@ def run_train(
         SummaryWriter(root / "tensorboard") as writer,
         tqdm(
             range(start_step, steps),
-            desc="SR train" if stage == "sr" else "Diffusion GAN3D",
+            desc="SR train" if stage == "sr" else "LR train",
             dynamic_ncols=True,
         ) as bar,
     ):

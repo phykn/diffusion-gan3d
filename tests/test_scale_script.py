@@ -126,9 +126,9 @@ def test_main_prints_plan_before_scaled_generation(
         ("plan", (6, 6, 6), 1),
         ("generate", (2, 2, 2), 1, 1.0, 1),
     ]
-    assert output.index("Plan    :") < output.index("Scaling...")
-    assert "Plan    : 2 × 2 × 2 tiles (8 total), overlap 1, cpu" in output
-    assert "Memory  :" not in output
+    assert output.index("Plan    ") < output.index("Scaling…")
+    assert "Plan            2 × 2 × 2 tiles (8 total), overlap 1, cpu" in output
+    assert "Memory" not in output
     assert not (weights.parent / "scaled_4x4x4.tiff").exists()
 
 
@@ -214,5 +214,5 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
         ("base", 1.75, 2, 0),
         ("scaled", 1, True, 1.75, 2),
     ]
-    assert "Base    : generating unanchored volume..." in output
+    assert "Generating unanchored base volume…" in output
     assert "anchor planes" not in output

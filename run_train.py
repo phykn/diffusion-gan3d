@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.config.files import dump_yaml, find_saved_config, load_yaml
 from src.config.sample import STAGE_NAMES, build_train_config, load_sample
+from src.console import path_field, section, success
 from src.device import default_device
 from src.train.checkpoint import resolve_checkpoint
 from src.train.run.low_res import run_low_res_train
@@ -98,17 +99,19 @@ def main(argv: list[str] | None = None) -> None:
         return
     lr_dir, sr_dir = get_stage_dirs(args.run_dir)
     if is_done(lr_dir):
-        print(f"LR: reuse finished {lr_dir}", flush=True)
+        section("LR training")
+        path_field("Reuse finished", lr_dir)
     else:
         lr_dir = run_low_res_train(
             args.device, config=configs["low_res"], run_dir=lr_dir, steps=args.steps
         )
         mark_done(lr_dir)
     if args.lr_only:
-        print(f"Done: LR {lr_dir}", flush=True)
+        report_done(lr_dir)
         return
     if is_done(sr_dir):
-        print(f"SR: {sr_dir} already finished", flush=True)
+        section("SR training")
+        path_field("Already finished", sr_dir)
         return
     sr_dir = run_sr_train(
         args.device,
@@ -119,7 +122,7 @@ def main(argv: list[str] | None = None) -> None:
         bank_size=args.bank_size,
     )
     mark_done(sr_dir)
-    print(f"Done: LR {lr_dir}, SR {sr_dir}", flush=True)
+    report_done(lr_dir, sr_dir)
 
 
 def resume(args: argparse.Namespace) -> None:
@@ -130,14 +133,23 @@ def resume(args: argparse.Namespace) -> None:
         run_dir = run_low_res_train(args.device, run_dir=lr_dir, **options)
         mark_done(run_dir)
         if args.run_dir is not None:
-            print(
-                f"LR finished. Next: python run_train.py <sample> --run-dir "
-                f"{args.run_dir} trains its SR model.",
-                flush=True,
+            report_done(run_dir)
+            path_field(
+                "Next",
+                f"python run_train.py <sample> --run-dir {args.run_dir}  (SR)",
             )
     else:
         run_dir = run_sr_train(args.device, run_dir=sr_dir, **options)
         mark_done(run_dir)
+        report_done(sr_dir=run_dir)
+
+
+def report_done(lr_dir: Path | None = None, sr_dir: Path | None = None) -> None:
+    print()
+    success("Training finished")
+    for label, path in (("LR model", lr_dir), ("SR model", sr_dir)):
+        if path is not None:
+            path_field(label, path)
 
 
 def get_stage_dirs(run_dir: Path | None) -> tuple[Path | None, Path | None]:
