@@ -541,6 +541,24 @@ def test_lr_prediction_uses_mixed_precision_on_apple_gpu(tmp_path):
         torch.testing.assert_close(half, single, atol=1e-2, rtol=0)
 
 
+def test_tiles_keep_the_training_profile_with_anchors_or_a_soft_base(tmp_path):
+    cfg = configuration(tmp_path, height=True)
+    cfg["conditioning"]["spatial_profile"]["enabled"] = True
+    trainer = build_trainer(cfg, torch.device("cpu"))
+    save_yaml(tmp_path / "train.yaml", trainer.cfg)
+    torch.save(trainer.denoiser.state_dict(), tmp_path / "generator.pt")
+    generator = load_generator(tmp_path / "generator.pt", torch.device("cpu"))
+    anchor = PlaneAnchor(torch.zeros(8, 8, dtype=torch.long), 0, 0)
+    base = torch.ones(8, 8, 8, dtype=torch.long)
+    for options in ({"anchors": [anchor]}, {"base": base}):
+        with patch.object(generator, "predict", wraps=generator.predict) as predict:
+            TiledGenerator(generator).generate(
+                shape=(12, 8, 8), overlap=1, margin=0, progress=False, **options
+            )
+        calls = predict.call_args_list
+        assert calls and all(call.kwargs.get("profile") is not None for call in calls)
+
+
 def test_profile_tiles_use_global_coordinates_and_local_means(tmp_path):
     cfg = configuration(tmp_path, height=True)
     cfg["conditioning"]["spatial_profile"]["enabled"] = True
@@ -575,7 +593,7 @@ def test_profile_tiles_use_global_coordinates_and_local_means(tmp_path):
         generator.generate(vf_profile=spec, vf=[1, 0], height_extent=32)
 
 
-def test_anchor_baseline_keeps_the_conditioned_profile_decision(tmp_path):
+def test_anchors_keep_the_training_depth_profile(tmp_path):
     cfg = configuration(tmp_path, height=True)
     cfg["conditioning"]["spatial_profile"]["enabled"] = True
     trainer = build_trainer(cfg, torch.device("cpu"))
@@ -587,8 +605,9 @@ def test_anchor_baseline_keeps_the_conditioned_profile_decision(tmp_path):
         generate_with_baseline(
             generator, (anchor,), 0.7, guidance=1.0, domain=0, margin=0
         )
+    # DPS never enters the denoiser, so anchors leave its conditions as they are.
     calls = predict.call_args_list
-    assert {call.kwargs.get("profile") is None for call in calls} == {True}
+    assert {call.kwargs.get("profile") is None for call in calls} == {False}
 
 
 def test_height_only_generation_defaults_to_training_depth_profile(tmp_path):

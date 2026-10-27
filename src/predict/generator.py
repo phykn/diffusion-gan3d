@@ -145,9 +145,7 @@ class Generator:
         height_extent = self.validate_height(
             (size,) * 3, domain, height_origin, height_extent
         )
-        # Anchors at any strength skip the default profile, so a zero-strength
-        # baseline keeps the same conditions as its anchored sample.
-        if vf_profile is None and vf is None and not anchors:
+        if vf_profile is None and vf is None:
             vf_profile = self.default_profile(domain)
         self.validate_profile_request(
             vf_profile, size, domain, height_origin, height_extent, vf

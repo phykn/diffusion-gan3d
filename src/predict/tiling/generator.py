@@ -107,7 +107,9 @@ class TiledGenerator:
         height_extent = self.generator.validate_height(
             output_shape, domain, height_origin, height_extent
         )
-        if vf_profile is None and vf is None and not anchors and base is None:
+        # A preserved base may not fit the training profile; only a requested
+        # profile is checked against it.
+        if vf_profile is None and vf is None and not preserve_base:
             vf_profile = self.generator.default_profile(domain)
         self.generator.validate_profile_request(
             vf_profile, output_shape[0], domain, height_origin, height_extent, vf
