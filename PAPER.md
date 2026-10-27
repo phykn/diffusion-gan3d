@@ -1,13 +1,10 @@
 <div align="center">
-  <h1>3D Microstructures from 2D Sections<br>with a Two-Stage Diffusion-GAN</h1>
+  <h1>Generating 3D Microstructures from 2D Sections<br>with a Two-Stage Diffusion-GAN</h1>
 </div>
-
-The code, settings, and scripts that reproduce every number and figure are in the
-[repository](https://github.com/phykn/diffusion-gan3d).
 
 ## Abstract
 
-We present a two-stage diffusion-GAN that learns 3D categorical microstructures from unregistered 2D sections: a low-resolution (LR) stage generates the 3D arrangement, and a super-resolution (SR) stage refines it. This document reports the LR stage; the SR stage is still training. The LR denoiser is trained only through 2D critics, together with losses that make the three axes of each volume agree and mirrored diagonal statistics balance. Because no 3D data exist, the exported step is chosen by a section-structure score normalized by the real data's own sampling noise; the chosen step is also best on independent crops. Generated volumes match the real interface density within 2.5% and percolate in both phases, but undershoot the pore fraction and show anisotropic tortuosity. Supplied planes are applied at inference by diffusion posterior sampling without anchor-specific training: a plane is reproduced with about 90% voxel agreement and no seam, and sixteen planes recover 91.8% of a known volume. These are controlled generation results, not 3D reconstruction accuracy.
+We present a two-stage diffusion-GAN that learns 3D categorical microstructures from unregistered 2D sections: a low-resolution (LR) stage generates the 3D arrangement, and a super-resolution (SR) stage refines it. This document reports the LR stage; the SR stage is still training. The LR denoiser is trained only through 2D critics, together with losses that make the three axes of each volume agree and mirrored diagonal statistics balance. Because no 3D data exist, the exported step is chosen by a section-structure score normalized by the real data's own sampling noise; the chosen step is also best on independent crops. Generated volumes match the real interface density within 2.5% and percolate in both phases, but undershoot the pore fraction and show anisotropic tortuosity. Supplied planes are applied at inference by diffusion posterior sampling without anchor-specific training: a plane is reproduced with about 90% voxel agreement and no seam, and sixteen planes recover 91.8% of a known volume. These are controlled generation results, not 3D reconstruction accuracy. Code, settings, and evaluation scripts are available at https://github.com/phykn/diffusion-gan3d.
 
 ## 1. Introduction
 
