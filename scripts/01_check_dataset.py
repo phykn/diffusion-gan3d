@@ -5,6 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.patches import Patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -16,9 +17,23 @@ from src.build.predict import resolve_weights
 from src.config.files import find_saved_config, load_yaml
 from src.config.sample import build_train_config, find_sample, load_sample
 from src.config.train import load_train_config
-from src.plane import PLANES
+from src.phase import PORE_PHASE
+from src.plane import PLANE_DIRECTIONS, PLANES
 
 SAMPLES = 4
+
+
+def phase_name(phase: int) -> str:
+    return f"phase {phase} (pore)" if phase == PORE_PHASE else f"phase {phase}"
+
+
+def image_count(count: int) -> str:
+    return f"{count} image" if count == 1 else f"{count} images"
+
+
+def phase_color(phase: int, num_phases: int):
+    # The value show_labels maps phase to under its gray colormap.
+    return plt.get_cmap("gray")((phase + 0.5) / num_phases)
 
 
 def main() -> None:
@@ -66,23 +81,63 @@ def main() -> None:
     datasets = build_datasets(cfg, high_resolution=stage == "sr")
     if args.domain not in datasets:
         parser.error(f"--domain must be one of {list(datasets)}")
+    num_phases = cfg["data"]["num_phases"]
+    planes = datasets[args.domain]
+    first = next(iter(planes.values()))
+    name = config.parent.name if args.weight else config.stem
+    stage_label = "SR (HR)" if stage == "sr" else "LR"
+    voxel = f"{first.crop_size} px crop -> {first.patch_size}x{first.patch_size} {stage_label} grid"
     print(f"Config  : {config.resolve()}")
-    axes = tuple(datasets[args.domain])
+    print(f"Crops   : {voxel} (1 cell = {first.crop_size / first.patch_size:g} px)")
+    for axis, ds in planes.items():
+        print(f"{PLANES[axis]:<8}: {image_count(len(ds))}")
     fig, panels = plt.subplots(
-        len(axes),
+        len(planes),
         SAMPLES,
         squeeze=False,
-        figsize=(3 * SAMPLES, 2.5 * len(axes)),
+        figsize=(3 * SAMPLES, 2.9 * len(planes) + 0.6),
     )
-    for row, axis in enumerate(axes):
-        ds = datasets[args.domain][axis]
+    for row, (axis, ds) in enumerate(planes.items()):
+        plane = PLANES[axis]
+        down, right = PLANE_DIRECTIONS[plane]
+        panels[row, 0].text(
+            -0.08,
+            0.5,
+            f"{plane}  ({image_count(len(ds))})\nrows {down}, columns {right}",
+            transform=panels[row, 0].transAxes,
+            rotation=90,
+            ha="right",
+            va="center",
+        )
         for col in range(SAMPLES):
             group = ds.path_groups[np.random.randint(len(ds.path_groups))]
             path = group[np.random.randint(len(group))]
-            img = ds[path]["image"].argmax(0)
-            show_labels(panels[row, col], img, cfg["data"]["num_phases"], PLANES[axis])
-    fig.suptitle("Random training crops (dominant phase; training retains fractions)")
-    fig.tight_layout()
+            image = ds[path]["image"]
+            fractions = "  ".join(
+                f"{phase}: {fraction:.0%}"
+                for phase, fraction in enumerate(image.mean((1, 2)).tolist())
+            )
+            show_labels(
+                panels[row, col],
+                image.argmax(0),
+                num_phases,
+                f"{path.name}\n{fractions}",
+            )
+            panels[row, col].title.set_fontsize(9)
+    fig.legend(
+        handles=[
+            Patch(color=phase_color(phase, num_phases), label=phase_name(phase))
+            for phase in range(num_phases)
+        ],
+        loc="lower center",
+        ncol=num_phases,
+        frameon=False,
+    )
+    fig.suptitle(
+        f"{name}, domain {args.domain}: random training crops, {voxel}\n"
+        "Each cell shows its dominant phase; titles give phase fractions."
+    )
+    fig.tight_layout(rect=(0.02, 0.04, 1, 1))
     output = args.out or result_directory(__file__) / "crops.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150)
