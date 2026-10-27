@@ -219,7 +219,7 @@ def main(argv=None):
         "hr_shape": list(high.shape),
         "tile_size": tile_size,
         "overlap": overlap,
-        "margin": args.margin,
+        "margin": sr.default_margin if args.margin is None else args.margin,
         "sr_guidance": args.guidance,
         "lr_guidance": args.lr_guidance,
         "lr_phase_fractions": low_probs.mean((0, 2, 3, 4)).tolist(),

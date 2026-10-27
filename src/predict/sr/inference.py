@@ -78,6 +78,14 @@ class SuperResolutionAPI:
             self.model, self.config, self.device, self.hi_res_size
         )
 
+    @property
+    def default_margin(self) -> int:
+        """HR margin refine uses when none is given, whole LR cells at integer scales."""
+        margin = self.generator.default_margin
+        if self.scale_factor.is_integer():
+            margin = math.lcm(margin, int(self.scale_factor))
+        return margin
+
     def default_tiling(self, tile_size: int | None = None) -> tuple[int | None, int]:
         """HR tile edge (default: the training size) and its scale-aligned overlap
         up to 8.
@@ -263,9 +271,7 @@ class SuperResolutionAPI:
         refinement is tiled."""
         shape = tuple(scaled_size(int(n), self.scale_factor) for n in low_shape)
         if margin is None:
-            margin = self.generator.default_margin
-            if self.scale_factor.is_integer():
-                margin = math.lcm(margin, int(self.scale_factor))
+            margin = self.default_margin
         if type(margin) is not int or margin < 0:
             raise ValueError("margin must be a non-negative integer of HR voxels.")
         if tile_size is not None:

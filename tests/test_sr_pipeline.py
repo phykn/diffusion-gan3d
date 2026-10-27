@@ -203,6 +203,8 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
     assert torch.equal(load_volume(out / "hr.tiff"), load_volume(out2 / "hr.tiff"))
     report = json.loads((out / "report.json").read_text())
     assert report["lr_source_verified"] is True
+    # The report records the margin refine resolved, not the unset option.
+    assert report["margin"] == SuperResolutionAPI(resumed, "cpu").default_margin > 0
     assert report["lr_guidance"] == load_generation_settings().guidance
     assert json.loads((out2 / "report.json").read_text())["lr_guidance"] is None
     # The web app refines its frozen LR source and measures the HR volume.
