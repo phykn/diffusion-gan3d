@@ -38,7 +38,7 @@ def phase_color(phase: int, num_phases: int):
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Inspect training crops of a sample or of a trained run."
+        description="Show the same training crops at the LR and SR grids."
     )
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
@@ -50,12 +50,6 @@ def main() -> None:
         "--sample",
         default="default",
         help="Name in config/samples/ or a sample YAML path (default: default).",
-    )
-    parser.add_argument(
-        "--stage",
-        choices=("low_res", "sr"),
-        default="low_res",
-        help="With --sample: sr shows the HR crops (default: low_res).",
     )
     parser.add_argument(
         "--out",
@@ -71,70 +65,81 @@ def main() -> None:
         plt.switch_backend("Agg")
     if args.weight:
         config = find_saved_config(resolve_weights(args.weight))
-        stage = load_yaml(config)["stage"]
-        cfg = load_train_config(config, stage)
+        cfg = load_train_config(config, load_yaml(config)["stage"])
     else:
-        config, stage = find_sample(args.sample), args.stage
-        cfg = load_train_config(build_train_config(load_sample(config), stage), stage)
-    np.random.seed(args.seed)
+        config = find_sample(args.sample)
+        cfg = load_train_config(
+            build_train_config(load_sample(config), "low_res"), "low_res"
+        )
     torch.manual_seed(args.seed)
-    datasets = build_datasets(cfg, high_resolution=stage == "sr")
-    if args.domain not in datasets:
-        parser.error(f"--domain must be one of {list(datasets)}")
+    stages = {
+        "LR": build_datasets(cfg),
+        "SR": build_datasets(cfg, high_resolution=True),
+    }
+    if args.domain not in stages["LR"]:
+        parser.error(f"--domain must be one of {list(stages['LR'])}")
     num_phases = cfg["data"]["num_phases"]
-    planes = datasets[args.domain]
-    first = next(iter(planes.values()))
+    planes = {label: datasets[args.domain] for label, datasets in stages.items()}
+    axes = tuple(planes["LR"])
+    crop = planes["LR"][axes[0]].crop_size
+    sizes = {label: planes[label][axes[0]].patch_size for label in stages}
     name = config.parent.name if args.weight else config.stem
-    if len(datasets) > 1:
+    if len(stages["LR"]) > 1:
         name += f" (domain {args.domain})"
-    stage_label = "SR" if stage == "sr" else "LR"
-    grid = f"{first.patch_size}x{first.patch_size}"
     print(f"Config  : {config.resolve()}")
-    print(
-        f"Crops   : {first.crop_size} px -> {stage_label} {grid} "
-        f"(1 cell = {first.crop_size / first.patch_size:g} px)"
+    for label, size in sizes.items():
+        print(f"{label:<8}: {crop} px -> {size}x{size} (1 cell = {crop / size:g} px)")
+    for axis in axes:
+        print(f"{PLANES[axis]:<8}: {image_count(len(planes['LR'][axis]))}")
+    fig = plt.figure(
+        figsize=(4.4 * SAMPLES + 0.8, 2.6 * len(axes) + 1.0), layout="constrained"
     )
-    for axis, ds in planes.items():
-        print(f"{PLANES[axis]:<8}: {image_count(len(ds))}")
-    fig, panels = plt.subplots(
-        len(planes),
-        SAMPLES,
+    # Column 0 holds the plane labels so every crop panel gets the same size.
+    rows = fig.subfigures(
+        len(axes),
+        SAMPLES + 1,
         squeeze=False,
-        figsize=(2.6 * SAMPLES + 0.8, 2.8 * len(planes) + 0.6),
+        wspace=0.04,
+        width_ratios=(0.3, *[1] * SAMPLES),
     )
-    for row, (axis, ds) in enumerate(planes.items()):
+    rng = np.random.RandomState(args.seed)
+    for row, axis in enumerate(axes):
         plane = PLANES[axis]
         down, right = PLANE_DIRECTIONS[plane]
-        panels[row, 0].text(
-            -0.1,
-            0.5,
-            f"{plane}\n\n{down} ↓\n{right} →",
-            transform=panels[row, 0].transAxes,
-            ha="right",
-            va="center",
-        )
+        dataset = planes["LR"][axis]
         for col in range(SAMPLES):
-            group = ds.path_groups[np.random.randint(len(ds.path_groups))]
-            path = group[np.random.randint(len(group))]
-            image = ds[path]["image"]
+            group = dataset.path_groups[rng.randint(len(dataset.path_groups))]
+            path = group[rng.randint(len(group))]
+            # The same seed makes both datasets cut the same source region.
+            seed = rng.randint(2**31)
+            images = {
+                label: planes[label][axis].sample(path, np.random.RandomState(seed))[
+                    "image"
+                ]
+                for label in stages
+            }
             fractions = " / ".join(
-                f"{fraction:.0%}" for fraction in image.mean((1, 2)).tolist()
+                f"{fraction:.0%}" for fraction in images["SR"].mean((1, 2)).tolist()
             )
-            show_labels(panels[row, col], image.argmax(0), num_phases, fractions)
-            panels[row, col].title.set_fontsize(9)
+            cell = rows[row, col + 1]
+            cell.suptitle(fractions, fontsize=9)
+            panels = cell.subplots(1, len(stages))
+            for panel, image in zip(panels, images.values()):
+                show_labels(panel, image.argmax(0), num_phases, "")
+        rows[row, 0].text(
+            0.5, 0.5, f"{plane}\n\n{down} ↓\n{right} →", ha="center", va="center"
+        )
     fig.legend(
         handles=[
             Patch(color=phase_color(phase, num_phases), label=phase_name(phase))
             for phase in range(num_phases)
         ],
-        loc="lower center",
+        loc="outside lower center",
         ncol=num_phases,
         frameon=False,
     )
-    fig.suptitle(
-        f"{name}: {stage_label} training crops, {first.crop_size} px -> {grid}"
-    )
-    fig.tight_layout(rect=(0.03, 0.04, 1, 1))
+    lr, sr = (f"{size}x{size}" for size in sizes.values())
+    fig.suptitle(f"{name}: {crop} px crops, left LR {lr}, right SR {sr}")
     output = args.out or result_directory(__file__) / "crops.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150)

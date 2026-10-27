@@ -6,7 +6,7 @@ add `--no-view` to skip the viewer in `01–06`.
 
 | Script | Purpose | Weights |
 | --- | --- | --- |
-| [01_check_dataset.py](../scripts/01_check_dataset.py) | Preview training crops | None (`--sample`) or a run's data (`--weight`) |
+| [01_check_dataset.py](../scripts/01_check_dataset.py) | Preview the same training crops at the LR and SR grids | None (`--sample`) or a run's data (`--weight`) |
 | [02_check_generated.py](../scripts/02_check_generated.py) | Generate an LR volume | LR |
 | [03_check_anchor.py](../scripts/03_check_anchor.py) | Compare anchored and unanchored samples | LR |
 | [04_check_scale_up.py](../scripts/04_check_scale_up.py) | Tiled generation and seams | LR |
