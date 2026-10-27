@@ -80,14 +80,15 @@ class SuperResolutionAPI:
         )
 
     def default_tiling(self, tile_size: int | None = None) -> tuple[int | None, int]:
-        """HR tile edge (default up to 64) and its scale-aligned overlap up to 8.
+        """HR tile edge (default: the training size) and its scale-aligned overlap
+        up to 8.
 
         A fractional scale refines in one block unless tile_size is given.
         """
         integer = self.scale_factor.is_integer()
         scale = int(self.scale_factor) if integer else 1
         if tile_size is None and integer:
-            tile_size = max(scale, min(64, self.hi_res_size) // scale * scale)
+            tile_size = max(scale, self.hi_res_size // scale * scale)
         if tile_size is None:
             return None, 0
         return tile_size, min(8 // scale, (tile_size - 1) // (2 * scale)) * scale

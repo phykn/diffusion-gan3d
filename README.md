@@ -95,7 +95,7 @@ from src.api import LowResolutionAPI, SuperResolutionAPI
 lr = LowResolutionAPI("run/my-run-lr")  # a run directory or its generator.pt
 labels = lr.generate(shape=(96, 64, 64), seed=1)  # uint8 phase labels
 sr = SuperResolutionAPI("run/my-run-sr")
-high = sr.refine(labels, seed=1, tile_size=64)  # (192, 128, 128) at the default 2x
+high = sr.refine(labels, seed=1, tile_size=128)  # (192, 128, 128) at the default 2x
 ```
 
 `generate_probs` and `refine_probs` return phase fractions instead of labels and take the

@@ -120,7 +120,7 @@ def main(argv=None):
     parser.add_argument(
         "--tile-size",
         type=positive_int,
-        help="HR tile edge (default: up to 64, aligned to the SR scale).",
+        help="HR tile edge (default: the SR training size).",
     )
     parser.add_argument(
         "--overlap",

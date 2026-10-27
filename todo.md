@@ -1,37 +1,22 @@
 # TODO
 
-## 1. 재학습 (LR → SR)
+## 1. 학습 후반 크리틱 과적합 (재학습 필요)
 
-- [ ] default 샘플을 LR부터 SR까지 끝까지 학습한다 (`commands/train_default.command`).
-  - 이번 학습에 처음 적용되는 것: critic `input_mode: pair` 기본값, 새 선택 기준(구조 오차 최저, cluster error 포함, SR도 best step 선택), LR 10000 step, burn-in 스케줄(학습률·β2·R1/R2·EMA, LR 5000 / SR 2500 step), SR group_statistics 램프 2500.
-  - 지난 run(`run/20261027-0703-default-lr`)은 single critic, 고정 학습률로 10269 step에서 멈췄다.
+- [ ] `default` 샘플 LR을 다시 학습해 R1/R2 감쇠 완화(burn-in 뒤 0.5, 191a7ca)의 효과를 본다.
+  - `run/20261027-1522-default-lr`(0.3)에서는 real−fake 점수 차이가 끝까지 벌어졌고(1k 0.4 → 9k 2.8), two-point 오차는 3000 step 0.007에서 8500 step 0.031로 커졌다.
+  - 학습 데이터가 이미지 한 장이라 근본 원인은 데이터 쪽으로 본다. 크리틱 크기는 생성기와 비슷하다(LR 2.24M 대 1.87M).
+- [ ] 효과를 나누려면 burn-in을 끈 학습(`burn_in`: `steps: 0`, `lr_scale: 1.0`, `beta2: 0.9`, `regularization_scale: 1.0`)을 하나 더 돌린다.
 
-## 2. 학습 결과 확인
-
-- [ ] `selection/scores.yaml`에서 best step 주변의 `two_point_mae`, `chord_tv`, `cluster_error` 추이를 본다.
-  - 지난 run에서는 cluster error가 step 4500 이후 0.13~0.17에서 멈췄고, two-point 오차는 계속 커졌다.
-- [ ] 지난 run과 같은 지표로 비교한다. 비교 대상: 지난 run의 step 4500(structure 1.96)과 10269(2.59).
-  - 이 숫자는 실제 단면의 상 동점을 무작위로 나누기 전 값이다. 새 run과 바로 비교하지 말고, 지난 run 가중치를 지금 코드로 다시 채점해 비교한다.
-  - pair critic과 burn-in이 함께 바뀌었으니, 어느 쪽 효과인지 나누려면 burn-in을 끈 학습(`burn_in`: `steps: 0`, `lr_scale: 1.0`, `beta2: 0.9`, `regularization_scale: 1.0`. `steps: 0`이 없으면 EMA 반감기는 여전히 0에서 올라간다)을 하나 더 돌린다.
-- [ ] 학습 후반에 two-point 오차가 커지는 원인을 확인한다. critic이 학습 데이터를 외우는 것으로 의심된다.
-
-## 3. SR 추론 타일 크기 (SR 모델이 생긴 뒤)
-
-- [ ] 같은 LR 입력으로 SR 타일 64(현재 기본값)와 128(학습 크기)의 결과를 비교한다.
-  - SR은 HR 128³로 학습하는데, 추론 기본 타일은 HR 64(여백 포함 80)다(`src/predict/sr/inference.py` `default_tiling`).
-  - 차이가 있으면 기본 타일을 학습 크기에 맞춘다. 메모리 사용량도 같이 본다.
-
-## 4. 검토 후 결정할 것
+## 2. 검토 후 결정할 것
 
 - [ ] **SR 단계에도 앵커 DPS 적용** (앵커 품질 개선)
   - 지금은 앵커를 LR 64로 줄여서 맞추기 때문에, 세부 모양은 SR이 새로 그린다.
   - SR refine 경로(`refine`, `refine_probs`, `extend_hr`, `backend/src/pipeline.py`)에서 `TileSampler`에 `tile_guidance`를 넘기는 방식이다.
   - 비용: SR 타일에서 역전파가 필요해 메모리와 시간이 크게 는다.
-  - LR에서는 DPS가 앵커 이음새를 만들지 않음을 확인했다(앵커 평면 양옆 변화량 0.82~0.85배, 앵커 없는 볼륨은 1.02~1.09배).
 - [ ] **SR 디퓨전 단계를 10단계에서 2~4단계로 줄이기** (속도)
   - SR 재학습이 필요하다. 품질이 유지되는지 실험해야 한다.
 
-## 5. 논문
+## 3. 논문
 
 - [ ] SR 학습이 끝나면 `paper/README.md`의 SR 절과 결론을 쓰고, README 그림을 HR 볼륨으로 바꾼다.
   - LR 부분은 `paper/scripts/evaluate_lr.py` → `make_figures.py`로 다시 만든다.
