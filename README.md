@@ -59,8 +59,8 @@ under `burn_in/*`.
 The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
 in training on CUDA and MPS (on MPS for the denoiser only; its critics stay fp32), and in
 LR and SR prediction on CUDA and MPS. Gradient checkpointing is off; when memory is short,
-`model.gradient_checkpointing: true` under `tune.lr` or `tune.sr` costs 10–20% more step
-time for 15–40% less peak memory (Apple MPS).
+`model.gradient_checkpointing: true` under `tune.lr` or `tune.sr` costs about 10% more step
+time for 15–30% less peak memory (Apple MPS).
 
 ### Samples
 

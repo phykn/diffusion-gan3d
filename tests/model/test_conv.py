@@ -67,8 +67,8 @@ def test_apple_gpu_pointwise_gradients_match_the_native_convolution(bias):
 
 
 @pytest.mark.skipif(not MPS, reason="MPS unavailable")
-@pytest.mark.parametrize("kernel", [3, 1])
-def test_apple_gpu_half_precision_keeps_the_fast_gradients(kernel):
+@pytest.mark.parametrize("kernel,dtype", [(3, torch.float16), (1, torch.float32)])
+def test_apple_gpu_half_precision_keeps_the_fast_gradients(kernel, dtype):
     torch.manual_seed(0)
     native = nn.Conv3d(3, 4, kernel, padding=kernel // 2).to("mps")
     layer = Conv3d(3, 4, kernel, padding=kernel // 2).to("mps")
@@ -79,9 +79,10 @@ def test_apple_gpu_half_precision_keeps_the_fast_gradients(kernel):
         inputs = x.clone().requires_grad_()
         with torch.autocast("mps", dtype=torch.float16, enabled=half):
             out = module(inputs)
-        out.float().square().mean().backward()
+        # A sum keeps fp16 gradients clear of subnormals, as the GradScaler does.
+        out.float().square().sum().backward()
         grads.append([out, inputs.grad, *(p.grad for p in module.parameters())])
-    assert out.dtype == torch.float16
+    assert out.dtype == dtype
     assert type(out.grad_fn).__name__ != "ConvolutionBackward0"
     assert all(p.grad.dtype == torch.float32 for p in layer.parameters())
     for fast, reference in zip(*grads):

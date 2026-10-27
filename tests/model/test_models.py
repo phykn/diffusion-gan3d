@@ -1,4 +1,5 @@
 import unittest
+from functools import partial
 
 import pytest
 import torch
@@ -36,12 +37,10 @@ def test_apple_gpu_fused_norm_matches_the_eager_one(dtype):
     shift = torch.randn(2, 8, 1, 1, 1, device="mps", dtype=dtype)
     weights = torch.randn_like(inputs)
     results = []
-    for norm in (ChannelNormSiLU3D(8, affine=False).to("mps"), channel_norm_silu):
+    module = ChannelNormSiLU3D(8, affine=False).to("mps")
+    for norm in (module, partial(channel_norm_silu, eps=module.eps)):
         values = [v.clone().requires_grad_() for v in (inputs, scale, shift)]
-        if isinstance(norm, ChannelNormSiLU3D):
-            output = norm(*values)
-        else:
-            output = norm(*values, 1.0e-5)
+        output = norm(*values)
         (output.float() * weights.float()).sum().backward()
         results.append([output, *(v.grad for v in values)])
     tolerance = 1e-5 if dtype == torch.float32 else 2e-2

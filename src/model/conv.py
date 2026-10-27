@@ -93,10 +93,13 @@ class Conv3d(nn.Conv3d):
             return super()._conv_forward(x, weight, bias)
         if self.kernel_size == (1, 1, 1) and self.padding == (0, 0, 0):
             # A pointwise convolution is a matrix product, whose backward on
-            # MPS is about six times faster than the convolution's.
-            out = torch.matmul(weight.flatten(1), x.flatten(2))
+            # MPS is about six times faster than the convolution's. It stays
+            # fp32 under autocast: fp16 is no faster here, and its gradient
+            # sums over all voxels overflow.
+            with torch.autocast("mps", enabled=False):
+                out = torch.matmul(weight.flatten(1), x.flatten(2).float())
             if bias is not None:
-                out = out + bias[:, None].to(out.dtype)
+                out = out + bias[:, None]
             return out.view(x.shape[0], -1, *x.shape[2:])
         if (
             self.kernel_size == (3, 3, 3)
