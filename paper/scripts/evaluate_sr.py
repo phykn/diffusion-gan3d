@@ -106,9 +106,9 @@ def main() -> None:
         if step == best:
             high = volumes
     for name, upsample in (("nearest", upsample_nearest), ("linear", upsample_linear)):
-        high = [upsample(v) for v in low]
+        baseline = [upsample(v) for v in low]
         results["baselines"][name] = volume_summary(
-            high, low, real_labels, noise, full=name == "nearest"
+            baseline, low, real_labels, noise, full=name == "nearest"
         )
 
     again = cached(f"step{best}-reseed", args.reuse, lambda: refine(best, RESEED))

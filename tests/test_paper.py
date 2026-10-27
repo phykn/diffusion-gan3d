@@ -52,7 +52,9 @@ def test_paper_numbers_match_sr_results() -> None:
         fraction = summary["phase0_fraction"]
         assert f"{fraction['mean']:.3f} ± {fraction['std']:.3f}" in paper
     assert f"{100 * best['lr_agreement']['mean']:.1f}% of LR voxels" in paper
-    assert f"differ in {100 * results['reseed']['between_seeds']['mean']:.1f}%" in paper
+    reseed = results["reseed"]
+    assert f"changes {100 * reseed['from_nearest']['mean']:.1f}% of HR" in paper
+    assert f"differ in {100 * reseed['between_seeds']['mean']:.1f}%" in paper
     tau = best["tortuosity_phase0"]
     assert (
         f"{tau['z']['mean']:.2f} ± {tau['z']['std']:.2f}, "
