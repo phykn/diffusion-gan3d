@@ -21,6 +21,15 @@ from src.phase import PORE_PHASE
 from src.plane import PLANE_DIRECTIONS, PLANES
 
 SAMPLES = 4
+# Figure layout in inches.
+PANEL = 1.9
+PAIR_GAP = 0.05
+CROP_GAP = 0.3
+LABEL_WIDTH = 0.6
+MARGIN = 0.1
+TITLE_HEIGHT = 0.4
+FRACTION_HEIGHT = 0.3
+LEGEND_HEIGHT = 0.4
 
 
 def phase_name(phase: int) -> str:
@@ -91,22 +100,25 @@ def main() -> None:
         print(f"{label:<8}: {crop} px -> {size}x{size} (1 cell = {crop / size:g} px)")
     for axis in axes:
         print(f"{PLANES[axis]:<8}: {image_count(len(planes['LR'][axis]))}")
-    fig = plt.figure(
-        figsize=(4.4 * SAMPLES + 0.8, 2.6 * len(axes) + 1.0), layout="constrained"
-    )
-    # Column 0 holds the plane labels so every crop panel gets the same size.
-    rows = fig.subfigures(
-        len(axes),
-        SAMPLES + 1,
-        squeeze=False,
-        wspace=0.04,
-        width_ratios=(0.3, *[1] * SAMPLES),
-    )
+    # Fixed layout in inches: a narrow gap inside each LR/SR pair, a wider one
+    # between pairs, and room above each pair for its phase fractions.
+    pair = 2 * PANEL + PAIR_GAP
+    width = LABEL_WIDTH + SAMPLES * pair + (SAMPLES - 1) * CROP_GAP + MARGIN
+    height = TITLE_HEIGHT + len(axes) * (FRACTION_HEIGHT + PANEL) + LEGEND_HEIGHT
+    fig = plt.figure(figsize=(width, height))
     rng = np.random.RandomState(args.seed)
     for row, axis in enumerate(axes):
         plane = PLANES[axis]
         down, right = PLANE_DIRECTIONS[plane]
         dataset = planes["LR"][axis]
+        top = height - TITLE_HEIGHT - row * (FRACTION_HEIGHT + PANEL) - FRACTION_HEIGHT
+        fig.text(
+            LABEL_WIDTH / 2 / width,
+            (top - PANEL / 2) / height,
+            f"{plane}\n\n{down} ↓\n{right} →",
+            ha="center",
+            va="center",
+        )
         for col in range(SAMPLES):
             group = dataset.path_groups[rng.randint(len(dataset.path_groups))]
             path = group[rng.randint(len(group))]
@@ -118,28 +130,42 @@ def main() -> None:
                 ]
                 for label in stages
             }
-            fractions = " / ".join(
-                f"{fraction:.0%}" for fraction in images["SR"].mean((1, 2)).tolist()
+            left = LABEL_WIDTH + col * (pair + CROP_GAP)
+            fig.text(
+                (left + pair / 2) / width,
+                (top + 0.05) / height,
+                " / ".join(
+                    f"{fraction:.0%}" for fraction in images["SR"].mean((1, 2)).tolist()
+                ),
+                ha="center",
+                va="bottom",
+                fontsize=9,
             )
-            cell = rows[row, col + 1]
-            cell.suptitle(fractions, fontsize=9)
-            panels = cell.subplots(1, len(stages))
-            for panel, image in zip(panels, images.values()):
+            for index, image in enumerate(images.values()):
+                panel = fig.add_axes(
+                    (
+                        (left + index * (PANEL + PAIR_GAP)) / width,
+                        (top - PANEL) / height,
+                        PANEL / width,
+                        PANEL / height,
+                    )
+                )
                 show_labels(panel, image.argmax(0), num_phases, "")
-        rows[row, 0].text(
-            0.5, 0.5, f"{plane}\n\n{down} ↓\n{right} →", ha="center", va="center"
-        )
     fig.legend(
         handles=[
             Patch(color=phase_color(phase, num_phases), label=phase_name(phase))
             for phase in range(num_phases)
         ],
-        loc="outside lower center",
+        loc="lower center",
         ncol=num_phases,
         frameon=False,
     )
     lr, sr = (f"{size}x{size}" for size in sizes.values())
-    fig.suptitle(f"{name}: {crop} px crops, left LR {lr}, right SR {sr}")
+    fig.suptitle(
+        f"{name}: {crop} px crops, left LR {lr}, right SR {sr}",
+        y=1 - 0.08 / height,
+        va="top",
+    )
     output = args.out or result_directory(__file__) / "crops.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150)
