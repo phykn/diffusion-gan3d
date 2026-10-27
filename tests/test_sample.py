@@ -6,12 +6,12 @@ from PIL import Image
 
 import run_train
 from simul.src.anode import depth_profile
+from src.config.data import describe_resolution, get_resolution
 from src.config.files import load_yaml, save_yaml
 from src.config.sample import (
     SAMPLES_DIR,
     STAGE_NAMES,
     build_train_config,
-    describe_resolution,
     load_sample,
 )
 from src.config.train import load_train_config, normalize_train_config
@@ -264,8 +264,8 @@ def test_sr_scale_sets_the_hr_size(tmp_path):
             64,
             192,
         )
-    assert describe_resolution(data) == (
-        "Resolution: crop 512 px -> LR 64 voxels (1 voxel = 8 px), "
+    assert describe_resolution(get_resolution(data)) == (
+        "crop 512 px -> LR 64 voxels (1 voxel = 8 px), "
         "HR 192 voxels (1 voxel = 2.66667 px)"
     )
 

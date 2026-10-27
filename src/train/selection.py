@@ -14,7 +14,7 @@ import torch
 
 from src.build.predict import make_generator
 from src.config.files import save_yaml
-from src.evaluate.structure import section_errors
+from src.evaluate.structure import SectionErrors, section_errors
 from src.random import seeded_rng
 from src.storage import torch_save
 
@@ -22,7 +22,6 @@ from src.storage import torch_save
 # behind every evaluation volume, so each step meets the same data and noise.
 REFERENCE_CROPS = 64
 SEED = 0
-ERRORS = ("two_point_mae", "chord_tv", "cluster_error")
 
 
 def build_reference(datasets: dict) -> dict:
@@ -95,7 +94,7 @@ class CheckpointSelection:
             trainer.device,
             trainer.settings.patch_size,
         )
-        errors = {name: [] for name in ERRORS}
+        errors = {name: [] for name in SectionErrors._fields}
         structure = []
         for domain, planes in self.reference.items():
             volumes = []
@@ -112,7 +111,7 @@ class CheckpointSelection:
             for axis, plane in planes.items():
                 fake = probs.movedim(axis + 2, 1).flatten(0, 1)
                 values = section_errors(plane["images"].float(), fake)
-                for name, value in zip(ERRORS, values):
+                for name, value in values._asdict().items():
                     errors[name].append(value)
                 noise = self.noise[(domain, axis)]
                 structure.append(

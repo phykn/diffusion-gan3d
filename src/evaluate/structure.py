@@ -1,4 +1,5 @@
 from itertools import combinations
+from typing import NamedTuple
 
 import numpy as np
 import scipy.ndimage as ndi
@@ -57,8 +58,14 @@ def cluster_statistics(labels, phases):
     return density, area
 
 
-def section_errors(real, fake):
-    """Two-point MAE, chord-length TV and relative cluster error between sections."""
+class SectionErrors(NamedTuple):
+    two_point_mae: float
+    chord_tv: float
+    cluster_error: float
+
+
+def section_errors(real, fake) -> SectionErrors:
+    """How far generated sections are from real ones in three statistics."""
     phases = real.shape[1]
     first, second = two_point(real), two_point(fake)
     two_point_mae = float(
@@ -87,7 +94,7 @@ def section_errors(real, fake):
             np.divide(np.abs(a - b), mean, out=np.zeros_like(mean), where=mean > 0)
         )
     cluster_error = float(np.mean(gaps))
-    return two_point_mae, chord_tv, cluster_error
+    return SectionErrors(two_point_mae, chord_tv, cluster_error)
 
 
 @torch.no_grad()
@@ -138,10 +145,8 @@ def structure_metrics(probs, real, groups):
         indices = torch.linspace(0, len(planes) - 1, len(images)).long()
         fake = planes[indices]
         fake = fake[..., : images.shape[-2], : images.shape[-1]]
-        two_point_mae, chord_tv, cluster_error = section_errors(images, fake)
-        metrics[f"structure/{PLANES[axis]}/two_point_mae"] = two_point_mae
-        metrics[f"structure/{PLANES[axis]}/chord_tv"] = chord_tv
-        metrics[f"structure/{PLANES[axis]}/cluster_error"] = cluster_error
+        for name, value in section_errors(images, fake)._asdict().items():
+            metrics[f"structure/{PLANES[axis]}/{name}"] = value
         generated_curves[axis] = two_point(fake)
     for group, axes in groups.items():
         pairs = list(combinations([a for a in axes if a in generated_curves], 2))

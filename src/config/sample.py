@@ -92,16 +92,6 @@ def build_train_config(sample: Mapping, stage: str) -> dict:
     return cfg
 
 
-def describe_resolution(data: Mapping) -> str:
-    """One line on how many source pixels an LR and an HR voxel span."""
-    crop = data["crop_size"]
-    low, high = data["lo_res_size"], data["hi_res_size"]
-    return (
-        f"Resolution: crop {crop} px -> LR {low} voxels (1 voxel = {crop / low:g} px), "
-        f"HR {high} voxels (1 voxel = {crop / high:g} px)"
-    )
-
-
 def get_images(sample: Mapping) -> dict[str, list[str]]:
     images = sample["images"]
     if not isinstance(images, Mapping) or not images:

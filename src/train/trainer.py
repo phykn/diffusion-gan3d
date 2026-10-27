@@ -103,7 +103,7 @@ class Trainer:
         settings: TrainerSettings,
     ) -> None:
         self.settings = settings
-        self.burn_in = settings.burn_in.values(0)
+        self.scheduled = settings.burn_in.values(0)
         self.denoiser = components.denoiser
         self.ema_denoiser = components.ema_denoiser
         self.critics = components.critics
@@ -158,7 +158,7 @@ class Trainer:
         transition: int | None = None,
     ) -> Metrics:
         self.diagnostics = {}
-        self.burn_in = self.apply_burn_in(step)
+        self.scheduled = self.apply_burn_in(step)
         prepared = self.prepare_step(step, transition)
         transition = prepared.transition
         real = prepared.real
@@ -202,7 +202,7 @@ class Trainer:
         self.completed_steps = step + 1
         self.diagnostics["amp/scale"] = self.scaler.get_scale()
         if self.generator_updated:
-            update_ema(self.ema_denoiser, self.denoiser, self.burn_in.ema_decay)
+            update_ema(self.ema_denoiser, self.denoiser, self.scheduled.ema_decay)
         return collect_metrics(
             volume_size=self.settings.patch_size,
             diagnostics=self.diagnostics,
@@ -457,7 +457,7 @@ class Trainer:
     def regularization(self, name: str) -> tuple[bool, float, float]:
         """Lazy R1/R2 schedule and weights for one critic's next update."""
         regularize = (self.updates[name] + 1) % self.settings.r1_every_steps == 0
-        scale = self.burn_in.regularization_scale if regularize else 0.0
+        scale = self.scheduled.regularization_scale if regularize else 0.0
         return (
             regularize,
             self.settings.r1_weight * scale,

@@ -12,6 +12,15 @@ class DataResolution(NamedTuple):
     hi_res_size: int
 
 
+def describe_resolution(resolution: DataResolution) -> str:
+    """How many source pixels one LR and one HR voxel span."""
+    crop, low, high = resolution
+    return (
+        f"crop {crop} px -> LR {low} voxels (1 voxel = {crop / low:g} px), "
+        f"HR {high} voxels (1 voxel = {crop / high:g} px)"
+    )
+
+
 def validate_sr_source(data: Mapping, base_data: Mapping) -> Mapping:
     if "lo_res_size" not in base_data:
         raise ValueError("SR requires LR weights trained with lo_res_size.")

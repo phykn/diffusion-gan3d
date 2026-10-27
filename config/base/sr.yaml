@@ -20,6 +20,10 @@ loss:
 
   downsample_consistency_weight: 10.0
 
+  # Reach full weight halfway through the 5000 SR steps, as LR does.
+  group_statistics:
+    ramp_steps: 2500
+
 optim:
   generator_lr: 0.00016
   critic_lr: 0.0001

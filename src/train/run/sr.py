@@ -6,7 +6,7 @@ import torch
 from src.build.data import build_augmentation
 from src.build.predict import resolve_weights
 from src.build.sr import build_sr_trainer
-from src.config.data import validate_sr_source
+from src.config.data import describe_resolution, validate_sr_source
 from src.config.files import PROJECT_ROOT, find_saved_config, project_path
 from src.config.train import get_sr_resolution, load_train_config, validate_sr_config
 from src.data.bank import load_bank
@@ -80,8 +80,9 @@ def run_sr_train(
     if payload:
         resume_sr_training(trainer, payload)
     cfg = trainer.cfg
-    crop, low, high = get_sr_resolution(cfg)
-    print(f"SR: source crop {crop}, LR {low}³ -> HR {high}³; run {run_dir}", flush=True)
+    print(
+        f"SR: {describe_resolution(get_sr_resolution(cfg))}; run {run_dir}", flush=True
+    )
 
     def before_step(step: int) -> None:
         interval = cfg["lr_bank"]["refresh_every_steps"]

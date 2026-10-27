@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 
 from src.build.trainer import build_trainer
+from src.config.data import describe_resolution, get_resolution
 from src.config.files import PROJECT_ROOT
 from src.config.train import load_train_config
 from src.device import check_device
@@ -50,6 +51,10 @@ def run_low_res_train(
     if payload:
         resume_training(trainer, payload)
     run_dir = make_run_dir(PROJECT_ROOT / "run", "low_res", run_dir, cfg["nickname"])
+    print(
+        f"LR: {describe_resolution(get_resolution(cfg['data']))}; run {run_dir}",
+        flush=True,
+    )
     if payload and trainer.selection is not None:
         # The best step's weights sit beside the resumed checkpoint's run folder.
         source_run = resolve_checkpoint(resume).parent.parent

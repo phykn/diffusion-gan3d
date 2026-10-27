@@ -2,16 +2,16 @@
 
 ## 1. 재학습 (LR → SR)
 
-- [ ] default 샘플을 LR부터 SR까지 끝까지 학습한다.
-  - 이번 학습에 처음 적용되는 것: critic `input_mode: pair` 기본값, 새 LR 선택 기준(구조 오차 최저, cluster error 포함), 77f9891.
-  - 지난 run(`run/20261027-0703-default-lr`)은 10269/20000 step에서 멈췄다. 이때 단면 클러스터 통계가 아직 진짜에 못 미쳤으니 이번에는 끝까지 돌린다.
+- [ ] default 샘플을 LR부터 SR까지 끝까지 학습한다 (`commands/train_default.command`).
+  - 이번 학습에 처음 적용되는 것: critic `input_mode: pair` 기본값, 새 LR 선택 기준(구조 오차 최저, cluster error 포함), LR 10000 step, burn-in 스케줄(학습률·β2·R1/R2·EMA, LR 5000 / SR 2500 step), SR group_statistics 램프 2500.
+  - 지난 run(`run/20261027-0703-default-lr`)은 single critic, 고정 학습률로 10269 step에서 멈췄다.
 
 ## 2. 학습 결과 확인
 
 - [ ] `selection/scores.yaml`에서 best step 주변의 `two_point_mae`, `chord_tv`, `cluster_error` 추이를 본다.
   - 지난 run에서는 cluster error가 step 4500 이후 0.13~0.17에서 멈췄고, two-point 오차는 계속 커졌다.
-- [ ] pair critic이 single 때보다 나은지 같은 지표로 비교한다.
-  - 비교 대상: 지난 run의 step 4500(structure 1.96)과 10269(2.59).
+- [ ] 지난 run과 같은 지표로 비교한다. 비교 대상: 지난 run의 step 4500(structure 1.96)과 10269(2.59).
+  - pair critic과 burn-in이 함께 바뀌었으니, 어느 쪽 효과인지 나누려면 burn-in을 끈 학습(`burn_in`: `lr_scale: 1.0`, `beta2: 0.9`, `regularization_scale: 1.0`)을 하나 더 돌린다.
 - [ ] 학습 후반에 two-point 오차가 커지는 원인을 확인한다. critic이 학습 데이터를 외우는 것으로 의심된다.
 
 ## 3. SR 추론 타일 크기 (SR 모델이 생긴 뒤)
