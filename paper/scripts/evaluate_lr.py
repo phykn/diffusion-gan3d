@@ -33,7 +33,7 @@ from src.evaluate.structure import (
 from src.evaluate.tilt import tilt_balance
 from src.evaluate.tortuosity import tortuosity
 from src.predict.anchor import PlaneAnchor
-from src.prepare.resize import resize_crop
+from src.prepare.resize import phase_channels, resize_crop, resize_phases
 from src.random import seeded_rng
 from src.train.selection import pick_sections
 
@@ -90,7 +90,7 @@ def main() -> None:
         "best_step": best,
         "guidance": settings.guidance,
         "anchor_strength": settings.anchor_strength,
-        "real": real_summary(real_labels, noise),
+        "real": real_summary(real_labels, noise) | {"tilt_phase1": real_tilt(dataset)},
         "selection": scores["steps"],
         "steps": {},
     }
@@ -133,6 +133,18 @@ def external_anchor(dataset) -> torch.Tensor:
     labels = torch.from_numpy(source[top : top + size, left : left + size].copy())
     image = resize_crop(labels.long(), dataset.patch_size, dataset.num_phases)
     return label_sections(image[None])[0].argmax(0).to(torch.uint8)
+
+
+def real_tilt(dataset) -> dict:
+    """Solid tilt balance of the whole training image on the LR grid."""
+    source = torch.from_numpy(dataset.decode(dataset.path_groups[0][0].resolve()))
+    shape = tuple(n * dataset.patch_size // dataset.crop_size for n in source.shape)
+    probs = resize_phases(
+        phase_channels(source.long()[None], dataset.num_phases), shape
+    )
+    labels = label_sections(probs)[0].argmax(0).numpy()
+    tilt = tilt_balance([labels[None]], phase=1)["yx"]
+    return {key: tilt[key] for key in ("count", "balance", "mean", "sem")}
 
 
 def interface_density(labels: torch.Tensor, dims) -> float:

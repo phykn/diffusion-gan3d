@@ -28,6 +28,9 @@ def test_paper_numbers_and_figures_match_lr_results() -> None:
         row["whole"] for row in results["anchor"]["coverage"] if row["count"] == 16
     ]
     assert f"{100 * np.mean(sixteen):.1f}%" in paper
+    for tilt in (best["tilt_phase1"]["yx"], results["real"]["tilt_phase1"]):
+        balance = f"{tilt['balance']:.2f}".replace("-", "−")
+        assert f"{balance} over {tilt['count']} particles" in paper
 
     figures = re.findall(r'<img src="([^"]+)"', paper)
     assert figures
