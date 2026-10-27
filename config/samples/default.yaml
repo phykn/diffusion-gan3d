@@ -17,20 +17,23 @@ tune:
   lr:
     # The LR critic memorizes the one image too: after burn-in its real scores
     # climb while fake scores stay flat, and two-point error rises again past
-    # 6500 steps. Same fix as SR, and keep R1/R2 at 0.3 of their weights after
-    # burn-in instead of 0.1.
+    # 6500 steps. Same fix as SR. At 0.3 of the R1/R2 weights after burn-in
+    # the real-fake score gap still widened to the end, so keep 0.5.
     augmentation:
       probability: 1.0
     loss:
       r2_weight: 0.5
     burn_in:
-      regularization_scale: 0.3
+      regularization_scale: 0.5
   sr:
     # One image is the only real data, so the critic memorizes it late in
     # training and SR surfaces turn into 1-voxel pits. Isotropic, mirror-
     # symmetric data makes every flip/rotation a true symmetry, so always apply
-    # them; R2 matches R1 as in R3GAN.
+    # them; R2 matches R1 as in R3GAN. R1/R2 end at 0.5 of their weights, as
+    # in LR, instead of 0.1.
     augmentation:
       probability: 1.0
     loss:
       r2_weight: 0.5
+    burn_in:
+      regularization_scale: 0.5
