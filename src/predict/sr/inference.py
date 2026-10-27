@@ -16,7 +16,6 @@ from src.predict.sr.memory import (
     estimate_sr_memory,
 )
 from src.predict.tiling.layout import (
-    DEFAULT_OVERLAP,
     check_overlap,
     make_plan,
     make_tiles,
@@ -83,7 +82,7 @@ class SuperResolutionAPI:
         """HR tile edge (default: the training size) and its scale-aligned overlap
         up to 8.
 
-        A fractional scale refines in one block unless tile_size is given.
+        Only integer scales tile, so a fractional scale refines in one block.
         """
         integer = self.scale_factor.is_integer()
         scale = int(self.scale_factor) if integer else 1
@@ -98,7 +97,7 @@ class SuperResolutionAPI:
         low_shape,
         *,
         tile_size: int | None = None,
-        overlap: int = DEFAULT_OVERLAP,
+        overlap: int | None = None,
         margin: int | None = None,
         label_input: bool = True,
         input_element_size: int = 8,
@@ -106,7 +105,7 @@ class SuperResolutionAPI:
     ) -> SRMemoryEstimate:
         """Bytes to refine a CPU LR volume of low_shape; options are refine's."""
         low_shape = parse_shape(low_shape)
-        shape, margin, _ = self._layout(low_shape, tile_size, overlap, margin)
+        shape, margin, _, _ = self._layout(low_shape, tile_size, overlap, margin)
         return estimate_sr_memory(
             low_shape,
             shape,
@@ -129,7 +128,7 @@ class SuperResolutionAPI:
         seed: int | None = None,
         guidance: float = 1.0,
         tile_size: int | None = None,
-        overlap: int = DEFAULT_OVERLAP,
+        overlap: int | None = None,
         margin: int | None = None,
         height_origin: float = 0.0,
         height_extent: float | None = None,
@@ -160,7 +159,7 @@ class SuperResolutionAPI:
         seed: int | None = None,
         guidance: float = 1.0,
         tile_size: int | None = None,
-        overlap: int = DEFAULT_OVERLAP,
+        overlap: int | None = None,
         margin: int | None = None,
         height_origin: float = 0.0,
         height_extent: float | None = None,
@@ -201,14 +200,19 @@ class SuperResolutionAPI:
         base,
         base_offset,
     ):
-        """Shared refine path; tile_size, overlap and margin are HR voxels."""
+        """Shared refine path; tile_size, overlap and margin are HR voxels.
+
+        Unset overlap is default_tiling's for tile_size.
+        """
         if low.ndim not in (3, 4):
             raise ValueError(
                 "LR input must be D,H,W labels or K,D,H,W phase fractions."
             )
         domain = self.generator.resolve_domain(domain)
         low_shape = tuple(low.shape[-3:])
-        shape, margin, tiled = self._layout(low_shape, tile_size, overlap, margin)
+        shape, margin, overlap, tiled = self._layout(
+            low_shape, tile_size, overlap, margin
+        )
         if base is None and base_offset is not None:
             raise ValueError("base_offset requires base.")
         if base is not None:
@@ -255,7 +259,8 @@ class SuperResolutionAPI:
             )
 
     def _layout(self, low_shape, tile_size, overlap, margin):
-        """Return the HR shape, resolved margin and whether refinement is tiled."""
+        """Return the HR shape, resolved margin and overlap, and whether
+        refinement is tiled."""
         shape = tuple(scaled_size(int(n), self.scale_factor) for n in low_shape)
         if margin is None:
             margin = self.generator.default_margin
@@ -266,6 +271,8 @@ class SuperResolutionAPI:
         if tile_size is not None:
             if type(tile_size) is not int or tile_size < 1:
                 raise ValueError("tile_size must be a positive integer.")
+            if overlap is None:
+                overlap = self.default_tiling(tile_size)[1]
             check_overlap(tile_size, overlap)
         tiled = tile_size is not None and any(n > tile_size for n in shape)
         if tiled:
@@ -281,7 +288,7 @@ class SuperResolutionAPI:
                 raise ValueError(
                     "HR shape, tile_size, stride and margin must be multiples of the LR/HR scale."
                 )
-        return shape, margin, tiled
+        return shape, margin, overlap, tiled
 
     def _refine_block(self, probs, shape, margin, height, guidance, probabilities):
         domain, height_origin, height_extent = height

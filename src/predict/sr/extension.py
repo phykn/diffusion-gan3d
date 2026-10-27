@@ -5,7 +5,7 @@ import torch
 
 from src.config.data import validate_sr_source
 from src.predict.memory import base_bytes, ram_budget, require_memory
-from src.predict.tiling.layout import DEFAULT_OVERLAP, parse_shape
+from src.predict.tiling.layout import parse_shape
 from src.predict.volume_condition import fraction_channels, resolve_offset, volume_shape
 from src.prepare.resize import downsample
 
@@ -45,12 +45,13 @@ def extend_hr(
     low=None,
     base_offset=(0, 0, 0),
     anchors=(),
+    anchor_strength=None,
     vf=None,
     domain=None,
     seed=None,
     lr_overlap=None,
     tile_size=None,
-    overlap=DEFAULT_OVERLAP,
+    overlap=None,
     margin=None,
     guidance=None,
     sr_guidance=1.0,
@@ -87,6 +88,20 @@ def extend_hr(
             )
     if low is not None and volume_shape(low) != old_shape:
         raise ValueError("original LR shape must match the existing HR base.")
+    if tile_size is None:
+        tile_size = sr.hi_res_size
+    # Check the HR tiling and memory before the LR volume is generated.
+    sr.check_memory(
+        sr.estimate_memory(
+            low_shape,
+            tile_size=tile_size,
+            overlap=overlap,
+            margin=margin,
+            label_input=False,
+            input_element_size=4,
+            probabilities=probabilities,
+        )
+    )
     if low is None:
         low = coarsen_volume(base, scale, sr.num_phases)
     expanded = lr.generate_probs(
@@ -95,6 +110,7 @@ def extend_hr(
         base_offset=tuple(n // scale for n in position),
         preserve_base=True,
         anchors=anchors,
+        anchor_strength=anchor_strength,
         vf=vf,
         vf_profile=vf_profile,
         domain=domain,
@@ -111,7 +127,7 @@ def extend_hr(
         expanded,
         domain=domain,
         seed=seed,
-        tile_size=sr.hi_res_size if tile_size is None else tile_size,
+        tile_size=tile_size,
         overlap=overlap,
         margin=margin,
         guidance=sr_guidance,

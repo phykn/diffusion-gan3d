@@ -221,6 +221,54 @@ def test_hr_extension_rejects_misaligned_geometry_before_lr_sampling(tmp_path):
         )
 
 
+def scale_three_sr(tmp_path):
+    cfg = sr_config(tmp_path, scale=3)
+    export_model(tmp_path / "sr.pt", cfg)
+    return cfg, SuperResolutionAPI(tmp_path / "sr.pt", "cpu")
+
+
+def test_sr_default_overlap_aligns_with_the_scale(tmp_path):
+    _, api = scale_three_sr(tmp_path)
+    low = torch.zeros(16, 8, 8, dtype=torch.long)
+    # A fixed overlap of 8 would leave a stride of 8, not a multiple of 3.
+    api.estimate_memory(low.shape, tile_size=24, margin=0)
+    assert api.refine(low, seed=0, tile_size=24, margin=0).shape == (48, 24, 24)
+
+
+def test_hr_extension_checks_sr_tiling_before_lr_sampling(tmp_path):
+    cfg, sr = scale_three_sr(tmp_path)
+    lr = SimpleNamespace(data=cfg["data"], input_size=8, generate_probs=None)
+    with pytest.raises(ValueError, match="multiples"):
+        extend_hr(
+            lr,
+            sr,
+            torch.zeros(24, 24, 24, dtype=torch.long),
+            (48, 24, 24),
+            overlap=4,
+            margin=0,
+        )
+
+
+def test_hr_extension_refines_with_scale_aligned_defaults(tmp_path):
+    cfg, sr = scale_three_sr(tmp_path)
+    expanded = torch.zeros(3, 16, 8, 8)
+    expanded[1] = 1
+    lr = SimpleNamespace(
+        data=cfg["data"], input_size=8, generate_probs=lambda **kwargs: expanded
+    )
+    base = torch.ones(24, 24, 24, dtype=torch.long)
+    anchor = object()
+    with patch.object(lr, "generate_probs", wraps=lr.generate_probs) as generate:
+        low, high = extend_hr(
+            lr, sr, base, (48, 24, 24), anchors=(anchor,), anchor_strength=0.3, seed=0
+        )
+    assert generate.call_args.kwargs["anchors"] == (anchor,)
+    assert generate.call_args.kwargs["anchor_strength"] == 0.3
+    assert low is expanded
+    assert high.shape == (48, 24, 24)
+    assert torch.equal(high[:24], base)
+
+
 @pytest.mark.parametrize(
     "crop,low,scale,high", [(256, 64, 1.5, 96), (128, 64, 2, 128), (256, 64, 4, 256)]
 )
