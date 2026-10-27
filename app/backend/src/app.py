@@ -158,9 +158,15 @@ def _generate_volume(
         max(estimate.shape) > config.max_size
         or math.prod(estimate.shape) > config.max_voxels
     ):
-        raise ValueError("resolved output shape exceeds the server size limit")
+        raise ValueError(
+            f"output shape {list(estimate.shape)} exceeds the server limits of "
+            f"{config.max_size} voxels per axis and {config.max_voxels} voxels"
+        )
     if estimate.tile_count > config.max_tiles:
-        raise ValueError("resolved tile count exceeds the server tile limit")
+        raise ValueError(
+            f"{estimate.tile_count} LR tiles exceed the server limit of "
+            f"{config.max_tiles}"
+        )
     inference.check_memory(estimate, storage=request.storage)
     return inference.generate(
         anchors=tuple(anchor.to_anchor() for anchor in request.anchors),

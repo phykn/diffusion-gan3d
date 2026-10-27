@@ -397,7 +397,7 @@ def test_extreme_overlap_cannot_expand_a_small_request_into_millions_of_tiles(
 ):
     response = client.post("/api/generate", json={"shape": 512, "overlap": 63})
     assert response.status_code == 422
-    assert "tile count" in response.json()["detail"]
+    assert "LR tiles exceed" in response.json()["detail"]
     assert not service.calls
 
 
@@ -512,6 +512,23 @@ def test_configured_limits_reject_before_generation(service, settings, payload):
     with TestClient(create_app(inference=service, config=cfg)) as client:
         assert client.post("/api/generate", json=payload).status_code == 422
     assert not service.calls
+
+
+@pytest.mark.parametrize(
+    "settings,payload,detail",
+    [
+        ({"max_voxels": 63}, {}, "output shape [128, 128, 128] exceeds"),
+        ({"max_tiles": 2}, {"blocks": [3, 1, 1]}, "3 LR tiles exceed"),
+    ],
+)
+def test_resolved_limits_report_the_request_and_the_limit(
+    service, settings, payload, detail
+):
+    cfg = CONFIG.model_copy(update=settings)
+    with TestClient(create_app(inference=service, config=cfg)) as client:
+        message = client.post("/api/generate", json=payload).json()["detail"]
+    assert detail in message
+    assert str(next(iter(settings.values()))) in message
 
 
 def test_prepare_uses_configured_image_limit(service):
