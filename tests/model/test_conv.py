@@ -91,6 +91,24 @@ def test_apple_gpu_half_precision_keeps_the_fast_gradients(kernel, dtype):
 
 
 @pytest.mark.skipif(not MPS, reason="MPS unavailable")
+@pytest.mark.parametrize("kernel", [3, 1])
+def test_apple_gpu_frozen_weights_take_the_fast_input_gradient(kernel):
+    # Anchor guidance differentiates the frozen denoiser with respect to its input.
+    torch.manual_seed(0)
+    native = nn.Conv3d(3, 4, kernel, padding=kernel // 2).to("mps")
+    layer = Conv3d(3, 4, kernel, padding=kernel // 2).to("mps")
+    layer.load_state_dict(native.state_dict())
+    x = torch.randn(2, 3, 32, 32, 32, device="mps")
+    grads = []
+    for module in (native.requires_grad_(False), layer.requires_grad_(False)):
+        inputs = x.clone().requires_grad_()
+        out = module(inputs)
+        grads.append(torch.autograd.grad(out.square().mean(), inputs)[0])
+    assert type(out.grad_fn).__name__ != "ConvolutionBackward0"
+    torch.testing.assert_close(grads[1], grads[0], rtol=1e-4, atol=1e-6)
+
+
+@pytest.mark.skipif(not MPS, reason="MPS unavailable")
 def test_apple_gpu_falls_back_outside_the_fast_case():
     x = torch.randn(1, 2, 32, 32, 32, device="mps")
     strided = Conv3d(2, 3, 3, stride=2, padding=1).to("mps")

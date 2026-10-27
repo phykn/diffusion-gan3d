@@ -84,7 +84,8 @@ class Conv3d(nn.Conv3d):
         if not (
             x.device.type == "mps"
             and torch.is_grad_enabled()
-            and weight.requires_grad
+            # Anchor guidance needs only input gradients of frozen weights.
+            and (weight.requires_grad or x.requires_grad)
             and self.stride == (1, 1, 1)
             and self.dilation == (1, 1, 1)
             and self.groups == 1
