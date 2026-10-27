@@ -85,8 +85,8 @@ class Upsample3D(nn.Module):
         x: torch.Tensor,
         size: tuple[int, int, int],
     ) -> torch.Tensor:
-        h = F.interpolate(x, size=size, mode="nearest")
-        return self.conv(h)
+        # Convolving before enlarging costs an eighth of convolving after.
+        return F.interpolate(self.conv(x), size=size, mode="nearest")
 
 
 class Denoiser3D(nn.Module):
@@ -155,7 +155,7 @@ class Denoiser3D(nn.Module):
         ch = channels[-1]
         for skip_ch in reversed(channels[:-1]):
             self.upsample.append(Upsample3D(ch, skip_ch))
-            self.decoder.append(block(2 * skip_ch, skip_ch, embedding_channels))
+            self.decoder.append(block(skip_ch, skip_ch, embedding_channels))
             ch = skip_ch
 
         self.output_norm = ChannelNormSiLU3D(channels[0])
@@ -256,11 +256,9 @@ class Denoiser3D(nn.Module):
             reversed(skips),
             strict=True,
         ):
-            x = upsample(x, size=skip.shape[-3:])
-            x = torch.cat(
-                (x * INV_SQRT_TWO, skip * INV_SQRT_TWO),
-                dim=1,
-            )
+            # Adding the skip instead of concatenating it keeps the full-resolution
+            # decoder at its own width, which dominates the step time.
+            x = (upsample(x, size=skip.shape[-3:]) + skip) * INV_SQRT_TWO
             x = run_block(block, x, emb, checkpointing)
 
         return self.output(self.output_norm(x))
