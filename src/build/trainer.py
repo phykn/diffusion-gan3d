@@ -83,11 +83,9 @@ def build_trainer(
     }
     selection = None
     if not sr and cfg["selection"]["enabled"]:
-        samples = cfg["selection"]["samples"]
         selection = CheckpointSelection(
-            build_reference(datasets, samples),
-            samples,
-            cfg["selection"]["structure_tolerance"],
+            build_reference(datasets),
+            cfg["selection"]["samples"],
             cfg["conditioning"]["height_enabled"],
         )
 

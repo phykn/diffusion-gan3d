@@ -31,7 +31,8 @@ python scripts/05_check_continuation.py --weight "run/my-run-lr" --anchor data/s
 - `07` counts particles tilted each way (`dz/dy`, `dz/dx`, `dy/dx`); generated volumes
   should match `--real` (use `--real-stride 2` for 128-pixel crops at 64 voxels). Training
   logs the same balance as `structure/phase_N/tilt_balance_*` (pore phase 0 excluded);
-  percolation is logged per transport axis as `structure/phase_N/percolation_z|y|x`.
+  percolation is logged per transport axis as `structure/phase_N/percolation_z|y|x`, and
+  section errors against real crops as `structure/<plane>/two_point_mae|chord_tv|cluster_error`.
 - In `02–05`, guidance and overlap default to [config/gen.yaml](../config/gen.yaml), and so
   does the anchor strength of `03–05` (posterior-sampling step scale, 0 = off). In `06`,
   `--lr-guidance` uses that default,
@@ -59,31 +60,27 @@ python run_train.py --resume "run/my-run-lr" --steps 30000 --run-dir "run/my-run
 
 LR training improves and then may degrade, for example when the critic memorizes few
 real images. At each `weights_every_steps` save and the last step, LR training scores
-its EMA weights with fixed real crops and fixed seeds, sampling at guidance 1.0 and
-anchor strength 1.0 whatever [config/gen.yaml](../config/gen.yaml) says, so every step
-is scored the same way:
+its EMA weights: `selection.samples` unanchored volumes at guidance 1.0, from fixed
+seeds whatever [config/gen.yaml](../config/gen.yaml) says, against 64 fixed real crops
+per plane. Only 2D sections of the material exist, so the score compares sections:
 
-- **Coverage** (higher is better): each of `selection.samples` real crops anchors one
-  volume through posterior sampling, and the score is the fraction of the anchor plane
-  that volume reproduces. Weights that have dropped part of the data cannot reproduce
-  the crops they no longer cover. Height-conditioned runs anchor `xz`/`yz` crops at
-  their own depth.
-- **Structure** (lower is better): two-point and chord-length errors of
-  `selection.samples` unanchored volumes against 64 real crops per plane. Each error is
-  divided by the same error between two halves of the real crops, so both use the
-  sampling noise of the real data as their unit.
+- **Two-point** and **chord-length** errors, as in `structure/<plane>/*`.
+- **Cluster error**: how far each phase's 4-connected clusters per section pixel and
+  mean cluster area are from the real crops, relative to their mean. Two-point and chord
+  statistics can match while pores merge into large blobs and the solid falls into
+  fragments; clusters show what sections reveal of 3D connectivity.
 
-A step is a candidate while its structure is within `selection.structure_tolerance`
-(0.25 = 25%) of the lowest so far; `generator.pt` is the candidate with the most
-coverage. Coverage alone would favor weak early weights, which bend to any anchor.
+Each error is divided by the same error between two halves of the real crops, so all
+three use the sampling noise of the real data as their unit; **structure** is their
+mean over planes. `generator.pt` is the step with the lowest structure. Height-conditioned
+runs take each volume's depth from an `xz`/`yz` crop.
 
 - `selection/scores.yaml` lists every scored step and the best step; TensorBoard has
   `selection/*`.
-- `selection/generator_N.pt` keeps the weights of each step that was a candidate when
-  scored. Resume copies the still-eligible ones from the resumed run, so keep them.
-- One evaluation of 8 samples takes about 20 s per domain at 64³ on Apple MPS. Raise
-  `weights_every_steps`, lower `selection.samples`, or set `selection.enabled: false`
-  to spend less.
+- `selection/generator_N.pt` keeps the best step's weights. Resume copies it from the
+  resumed run, so keep it.
+- One evaluation of 8 samples takes about 5 s per domain at 64³ on Apple MPS. Set
+  `selection.enabled: false` to export the latest step instead.
 
 Resume continues the stage the checkpoint belongs to with its saved settings, so it takes
 no sample, `--sr-steps`, or `--bank-size`; `--steps` is that stage's total, including

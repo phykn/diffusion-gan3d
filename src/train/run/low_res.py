@@ -51,9 +51,9 @@ def run_low_res_train(
         resume_training(trainer, payload)
     run_dir = make_run_dir(PROJECT_ROOT / "run", "low_res", run_dir, cfg["nickname"])
     if payload and trainer.selection is not None:
-        # Candidate weights sit beside the resumed checkpoint's run folder.
+        # The best step's weights sit beside the resumed checkpoint's run folder.
         source_run = resolve_checkpoint(resume).parent.parent
-        trainer.selection.import_candidates(source_run, run_dir)
+        trainer.selection.import_best(source_run, run_dir)
     run_train(
         trainer,
         steps=cfg["train"]["total_steps"],

@@ -58,10 +58,6 @@ def validate_training_values(cfg):
         if name in conditioning:
             check_number(conditioning[name], f"conditioning.{name}", 1)
     check_number(cfg["augmentation"]["probability"], "augmentation.probability", 1)
-    if "selection" in cfg:
-        check_number(
-            cfg["selection"]["structure_tolerance"], "selection.structure_tolerance"
-        )
 
     for name, value in cfg["loss"].items():
         if name.endswith("_weight") or name == "downsample_mse_tolerance":

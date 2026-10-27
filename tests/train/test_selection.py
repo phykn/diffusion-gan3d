@@ -46,7 +46,7 @@ def _config(tmp_path: Path) -> dict:
     return cfg
 
 
-def _selection(height_enabled=False, tolerance=0.25):
+def _selection(height_enabled=False):
     images = torch.nn.functional.one_hot(torch.randint(0, 2, (4, 4, 4)), 2)
     plane = {
         "images": images.movedim(-1, 1).float(),
@@ -54,57 +54,35 @@ def _selection(height_enabled=False, tolerance=0.25):
         "height_extents": [8.0] * 4,
     }
     reference = {0: {axis: plane for axis in (0, 1, 2)}}
-    return CheckpointSelection(reference, 4, tolerance, height_enabled)
+    return CheckpointSelection(reference, 4, height_enabled)
 
 
-def _entry(step, coverage, structure):
+def _entry(step, structure):
     return {
         "step": step,
-        "coverage": coverage,
         "two_point_mae": 0.0,
         "chord_tv": 0.0,
+        "cluster_error": 0.0,
         "structure": structure,
     }
 
 
-def test_best_step_has_most_coverage_within_structure_tolerance():
+def test_best_step_has_the_lowest_structure():
     selection = _selection()
-    selection.history = [
-        _entry(1, 0.9, 10.0),
-        _entry(2, 0.8, 4.0),
-        _entry(3, 0.95, 6.0),
-        _entry(4, 0.6, 3.5),
-    ]
-    # Lowest structure 3.5 allows up to 4.375: steps 2 and 4.
-    assert [entry["step"] for entry in selection.candidates()] == [2, 4]
+    assert selection.best() is None
+    assert not selection.export(Path("unused"))
+    selection.history = [_entry(1, 10.0), _entry(2, 4.0), _entry(3, 6.0)]
     assert selection.best()["step"] == 2
-    selection.history.append(_entry(5, 0.5, 3.0))
-    # A lower structure error tightens the limit to 3.75; step 2 drops out for good.
-    assert [entry["step"] for entry in selection.candidates()] == [4, 5]
+    selection.history.append(_entry(4, 3.5))
     assert selection.best()["step"] == 4
 
 
-def test_no_scores_means_no_best_step():
-    selection = _selection()
-    assert selection.candidates() == []
-    assert selection.best() is None
-    assert not selection.export(Path("unused"))
-
-
-def test_height_conditioned_anchors_use_side_planes_only():
-    assert [axis for axis, _ in _selection(height_enabled=True).anchors(0)] == [
-        1,
-        2,
-        1,
-        2,
+def test_height_conditioned_volumes_take_side_crop_depths():
+    assert _selection().heights(0) == [{}] * 4
+    assert _selection(height_enabled=True).heights(0) == [
+        {"height_origin": origin, "height_extent": 8.0}
+        for origin in (0.0, 0.0, 1.0, 1.0)
     ]
-    assert [crop for _, crop in _selection(height_enabled=True).anchors(0)] == [
-        0,
-        0,
-        1,
-        1,
-    ]
-    assert [axis for axis, _ in _selection().anchors(0)] == [0, 1, 2, 0]
 
 
 def test_reference_and_scores_are_fixed_and_leave_training_rng_alone(tmp_path):
@@ -124,18 +102,17 @@ def test_reference_and_scores_are_fixed_and_leave_training_rng_alone(tmp_path):
 
     assert torch.equal(torch.get_rng_state(), torch_state)
     assert np.array_equal(np.random.get_state()[1], numpy_state)
-    assert set(scores) == {"coverage", "two_point_mae", "chord_tv", "structure"}
-    assert 0.0 <= scores["coverage"] <= 1.0
+    assert set(scores) == {"two_point_mae", "chord_tv", "cluster_error", "structure"}
     assert all(np.isfinite(value) and value >= 0 for value in scores.values())
     assert first.selection.evaluate(first) == scores
 
 
 def test_runs_export_the_best_step_and_resume_keeps_its_weights(tmp_path, monkeypatch):
     scores = {
-        1: _entry(1, 0.9, 10.0),
-        2: _entry(2, 0.8, 4.0),
-        3: _entry(3, 0.95, 6.0),
-        4: _entry(4, 0.6, 3.5),
+        1: _entry(1, 10.0),
+        2: _entry(2, 4.0),
+        3: _entry(3, 6.0),
+        4: _entry(4, 3.5),
     }
 
     def evaluate(self, trainer):
@@ -149,37 +126,36 @@ def test_runs_export_the_best_step_and_resume_keeps_its_weights(tmp_path, monkey
     first = low_res.run_low_res_train(
         "cpu", config=cfg, run_dir=tmp_path / "first", steps=2
     )
-    resumed = low_res.run_low_res_train(
-        "cpu", resume=first / "checkpoints", run_dir=tmp_path / "resumed", steps=4
-    )
-
+    best = weights_path(first, 2)
+    # A new best replaces the weights of the one before it.
+    assert not weights_path(first, 1).exists()
+    assert (first / "generator.pt").read_bytes() == best.read_bytes()
     payload = torch.load(first / "checkpoints" / "step_00000002.pt", weights_only=True)
     assert [entry["step"] for entry in payload["selection"]["history"]] == [1, 2]
-    best = weights_path(first, 2)
-    assert (first / "generator.pt").read_bytes() == best.read_bytes()
-    # Step 3 was never a candidate, so its weights were never kept.
+
+    resumed = low_res.run_low_res_train(
+        "cpu", resume=first / "checkpoints", run_dir=tmp_path / "resumed", steps=3
+    )
+    # Step 3 was never best, so its weights were never kept.
     assert weights_path(resumed, 2).read_bytes() == best.read_bytes()
     assert not weights_path(resumed, 3).exists()
-    assert weights_path(resumed, 4).is_file()
     assert (resumed / "generator.pt").read_bytes() == best.read_bytes()
     report = load_yaml(resumed / "selection" / "scores.yaml")
     assert report["best_step"] == 2
-    assert [entry["candidate"] for entry in report["steps"]] == [
-        False,
-        True,
-        False,
-        True,
-    ]
+    assert [entry["step"] for entry in report["steps"]] == [1, 2, 3]
+
+    final = low_res.run_low_res_train(
+        "cpu", resume=resumed / "checkpoints", run_dir=tmp_path / "final", steps=4
+    )
+    assert not weights_path(final, 2).exists()
+    assert (final / "generator.pt").read_bytes() == weights_path(final, 4).read_bytes()
 
 
-def test_resume_requires_the_candidate_weights(tmp_path, monkeypatch):
+def test_resume_requires_the_best_weights(tmp_path, monkeypatch):
     def evaluate(self, trainer):
-        return {
-            "coverage": 0.5,
-            "two_point_mae": 0.0,
-            "chord_tv": 0.0,
-            "structure": 1.0,
-        }
+        entry = _entry(0, 1.0)
+        entry.pop("step")
+        return entry
 
     monkeypatch.setattr(CheckpointSelection, "evaluate", evaluate)
     monkeypatch.setattr(low_res, "PROJECT_ROOT", tmp_path)
@@ -209,19 +185,13 @@ def test_selection_without_scores_exports_the_latest_weights(tmp_path, monkeypat
 
 
 def test_selection_settings_are_lr_only_and_validated():
-    assert normalize_train_config({})["selection"] == {
-        "enabled": True,
-        "samples": 8,
-        "structure_tolerance": 0.25,
-    }
+    assert normalize_train_config({})["selection"] == {"enabled": True, "samples": 8}
     with pytest.raises(ValueError, match="selection"):
         normalize_train_config({"selection": {"samples": 2}}, "sr")
     for key, value in (
         ("enabled", "yes"),
         ("samples", 0),
         ("samples", 1.5),
-        ("structure_tolerance", -0.1),
-        ("structure_tolerance", float("nan")),
     ):
         with pytest.raises(ValueError, match=f"selection.{key}"):
             normalize_train_config({"selection": {key: value}})

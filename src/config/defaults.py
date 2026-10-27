@@ -5,7 +5,7 @@ TRAIN_DEFAULTS = {
     "train.structure_every_steps": 100,
     "train.archive_every_steps": None,
     "model.critic.pyramid_min_size": 16,
-    "model.critic.input_mode": "single",
+    "model.critic.input_mode": "pair",
     "conditioning.height_enabled": False,
     "model.gradient_checkpointing": True,
     "model.generator.embedding_channels": 128,
@@ -47,7 +47,6 @@ STAGE_DEFAULTS = {
         "train.initial_weights": None,
         "selection.enabled": True,
         "selection.samples": 8,
-        "selection.structure_tolerance": 0.25,
     },
     "sr": {
         "loss.downsample_mse_tolerance": 0.005,

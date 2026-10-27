@@ -62,12 +62,12 @@ def save_generator(trainer, path, stage, overwrite=True):
 def select_step(trainer, root, writer):
     entry = trainer.selection.update(trainer, root)
     best = trainer.selection.best()
-    for name in ("coverage", "two_point_mae", "chord_tv", "structure"):
+    for name in ("two_point_mae", "chord_tv", "cluster_error", "structure"):
         writer.add_scalar(f"selection/{name}", entry[name], entry["step"])
     writer.add_scalar("selection/best_step", best["step"], entry["step"])
     tqdm.write(
-        f"Step {entry['step']}: coverage {entry['coverage']:.3f}, "
-        f"structure {entry['structure']:.2f}; best step {best['step']}"
+        f"Step {entry['step']}: structure {entry['structure']:.2f}; "
+        f"best step {best['step']}"
     )
 
 

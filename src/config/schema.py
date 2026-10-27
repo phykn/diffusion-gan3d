@@ -90,7 +90,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                 }
             ),
             "train": common["train"] | {"initial_weights": None},
-            "selection": dict.fromkeys(("enabled", "samples", "structure_tolerance")),
+            "selection": dict.fromkeys(("enabled", "samples")),
         }
     else:
         schema = common | {

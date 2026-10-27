@@ -1,6 +1,7 @@
 from itertools import combinations
 
 import numpy as np
+import scipy.ndimage as ndi
 import torch
 
 from src.evaluate.connectivity import spanning_fractions
@@ -40,15 +41,32 @@ def chord_distribution(labels, phases):
     return result
 
 
+def cluster_statistics(labels, phases):
+    """Per phase: 4-connected clusters per section pixel and mean cluster area.
+
+    Sections show how a phase splits into separate regions, which two-point and
+    chord statistics miss: merged pores and fragmented solid can match both.
+    """
+    pixels = labels.size
+    density, area = np.zeros(phases), np.zeros(phases)
+    for phase in range(phases):
+        mask = labels == phase
+        count = sum(ndi.label(section)[1] for section in mask)
+        density[phase] = count / pixels
+        area[phase] = mask.sum() / max(count, 1)
+    return density, area
+
+
 def section_errors(real, fake):
-    """Two-point MAE and chord-length TV between real and generated sections."""
+    """Two-point MAE, chord-length TV and relative cluster error between sections."""
     phases = real.shape[1]
     first, second = two_point(real), two_point(fake)
     two_point_mae = float(
         torch.cat([(a - b).abs().flatten() for a, b in zip(first, second)]).mean()
     )
-    first_chords = chord_distribution(real.argmax(1).numpy(), phases)
-    second_chords = chord_distribution(fake.argmax(1).numpy(), phases)
+    real_labels, fake_labels = real.argmax(1).numpy(), fake.argmax(1).numpy()
+    first_chords = chord_distribution(real_labels, phases)
+    second_chords = chord_distribution(fake_labels, phases)
     chord_tv = float(
         np.mean(
             [
@@ -57,7 +75,19 @@ def section_errors(real, fake):
             ]
         )
     )
-    return two_point_mae, chord_tv
+    # Gap relative to the mean of both sides: bounded at 2 when one side lacks a
+    # phase, and 0 when neither has it.
+    gaps = []
+    for a, b in zip(
+        cluster_statistics(real_labels, phases),
+        cluster_statistics(fake_labels, phases),
+    ):
+        mean = (a + b) / 2
+        gaps.append(
+            np.divide(np.abs(a - b), mean, out=np.zeros_like(mean), where=mean > 0)
+        )
+    cluster_error = float(np.mean(gaps))
+    return two_point_mae, chord_tv, cluster_error
 
 
 @torch.no_grad()
@@ -108,9 +138,10 @@ def structure_metrics(probs, real, groups):
         indices = torch.linspace(0, len(planes) - 1, len(images)).long()
         fake = planes[indices]
         fake = fake[..., : images.shape[-2], : images.shape[-1]]
-        two_point_mae, chord_tv = section_errors(images, fake)
+        two_point_mae, chord_tv, cluster_error = section_errors(images, fake)
         metrics[f"structure/{PLANES[axis]}/two_point_mae"] = two_point_mae
         metrics[f"structure/{PLANES[axis]}/chord_tv"] = chord_tv
+        metrics[f"structure/{PLANES[axis]}/cluster_error"] = cluster_error
         generated_curves[axis] = two_point(fake)
     for group, axes in groups.items():
         pairs = list(combinations([a for a in axes if a in generated_curves], 2))
