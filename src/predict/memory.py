@@ -19,6 +19,7 @@ class MemoryEstimate:
     output_bytes: int
     base_bytes: int
     tiled: bool
+    guided: bool = False
 
     @property
     def tile_shape(self) -> tuple[int, int, int]:
@@ -40,7 +41,7 @@ def estimate_memory(
     base_shape=None,
     guided: bool = False,
 ) -> MemoryEstimate:
-    """guided counts the fused anchor guidance steps of tiled sampling."""
+    """guided counts anchor guidance: its fused steps and saved activations."""
     shape = parse_shape(shape)
     generation_shape = tuple(size + 2 * margin for size in shape)
     tiled = tile_size is not None
@@ -66,6 +67,7 @@ def estimate_memory(
         ),
         base_bytes=0 if base_shape is None else base_bytes(num_phases, base_shape),
         tiled=tiled,
+        guided=guided,
     )
 
 
@@ -82,7 +84,9 @@ def tile_buffer_bytes(num_phases: int, shape: tuple[int, int, int]) -> int:
     return 4 * (12 * num_phases + 4) * math.prod(shape)
 
 
-def workspace_bytes(generator, shape: tuple[int, int, int]) -> int:
+def workspace_bytes(
+    generator, shape: tuple[int, int, int], guided: bool = False
+) -> int:
     channels = getattr(
         getattr(generator.model, "input", None), "out_channels", generator.num_phases
     )
@@ -92,7 +96,12 @@ def workspace_bytes(generator, shape: tuple[int, int, int]) -> int:
     profile_bytes = 0
     if getattr(generator.model, "profile_input", None) is not None:
         profile_bytes = 4 * (generator.num_phases + channels) * voxels
-    return max(256 * 1024**2, 12 * 4 * channels * voxels) + profile_bytes
+    reserve = max(256 * 1024**2, 12 * 4 * channels * voxels) + profile_bytes
+    if guided:
+        # Anchor guidance keeps the activations for its input gradient: about
+        # 28 fp32 values per first-level channel and voxel (21 under fp16).
+        reserve += 28 * 4 * channels * voxels
+    return reserve
 
 
 def cuda_memory_budget(device) -> int:
@@ -117,7 +126,7 @@ def select_storage(storage: str, estimate: MemoryEstimate, generator) -> str:
     device = generator.device
     if storage == "cuda" and device.type != "cuda":
         raise ValueError("storage='cuda' requires a CUDA generator.")
-    reserve = workspace_bytes(generator, estimate.tile_shape)
+    reserve = workspace_bytes(generator, estimate.tile_shape, estimate.guided)
     gpu_budget = 0
     if device.type == "cuda":
         # The driver reports allocator-cached blocks as used even though this

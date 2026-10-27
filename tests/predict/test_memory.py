@@ -112,6 +112,28 @@ def test_cpu_budget_checked_before_state_allocation(monkeypatch):
         )
 
 
+def test_guided_workspace_keeps_the_activations_of_the_input_gradient(monkeypatch):
+    gen = SimpleNamespace(
+        device=torch.device("cpu"),
+        num_phases=2,
+        model=SimpleNamespace(input=SimpleNamespace(out_channels=16)),
+    )
+    shape = (80, 80, 80)
+    extra = memory.workspace_bytes(gen, shape, True) - memory.workspace_bytes(
+        gen, shape
+    )
+    # The default 16-channel LR model saves 872 MiB for an 80^3 guided pass.
+    assert 872 * 1024**2 < extra < 1.1 * 872 * 1024**2
+    monkeypatch.setattr(
+        memory.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(available=512 * 1024**2),
+    )
+    assert memory.select_storage("cpu", memory.estimate_memory(64, 2), gen) == "cpu"
+    with pytest.raises(MemoryError, match="RAM allocation"):
+        memory.select_storage("cpu", memory.estimate_memory(64, 2, guided=True), gen)
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_rectangular_model_workspace_fits_budget(monkeypatch, device):
     gen = SimpleNamespace(

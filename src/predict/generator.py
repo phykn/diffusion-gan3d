@@ -153,7 +153,11 @@ class Generator:
         select_storage(
             "cuda" if self.device.type == "cuda" else "cpu",
             estimate_memory(
-                size, self.num_phases, margin=margin, probabilities=probabilities
+                size,
+                self.num_phases,
+                margin=margin,
+                probabilities=probabilities,
+                guided=anchor_strength > 0 and bool(anchors),
             ),
             self,
         )
