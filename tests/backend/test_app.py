@@ -531,6 +531,17 @@ def test_resolved_limits_report_the_request_and_the_limit(
     assert str(next(iter(settings.values()))) in message
 
 
+def test_health_reports_settings_the_model_cannot_tile_with(service, monkeypatch):
+    def reject(**options):
+        raise ValueError("overlap must satisfy 0 <= 2 * overlap < tile_size.")
+
+    monkeypatch.setattr(service, "estimate_memory", reject)
+    with TestClient(create_app(inference=service, config=CONFIG)) as client:
+        response = client.get("/api/health")
+    assert response.status_code == 500
+    assert "overlap must satisfy" in response.json()["detail"]
+
+
 def test_prepare_uses_configured_image_limit(service):
     cfg = CONFIG.model_copy(update={"max_size": 2})
     with TestClient(create_app(inference=service, config=cfg)) as client:

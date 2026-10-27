@@ -45,6 +45,11 @@ def create_app(
     @app.get("/api/health")
     def health() -> dict:
         generator = inference.generator
+        try:
+            max_axis_blocks = _axis_block_limit(inference, config)
+        except ValueError as exc:
+            # For example a config/gen.yaml overlap the model cannot tile with.
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {
             "device": str(inference.device),
             "crop_size": inference.crop_size,
@@ -53,7 +58,7 @@ def create_app(
             "height_enabled": generator.height_data is not None,
             "height_extents": (generator.height_data or {}).get("height_extents", {}),
             "pore_phase": PORE_PHASE,
-            "max_axis_blocks": _axis_block_limit(inference, config),
+            "max_axis_blocks": max_axis_blocks,
         }
 
     @app.post("/api/prepare")

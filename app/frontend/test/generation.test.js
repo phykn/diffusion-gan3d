@@ -145,6 +145,27 @@ test('health checks retry until the server answers and report the outage', async
   assert.equal(state.healthError.value, '')
 })
 
+test('health shows a server error instead of an outage', async t => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json(
+    { detail: 'overlap must satisfy 0 <= 2 * overlap < tile_size.' }, { status: 500 },
+  ))
+  let state
+  const app = renderer.createApp({
+    setup() {
+      state = useGeneration(ref(null))
+      return () => null
+    },
+  })
+  app.mount({})
+  t.after(() => app.unmount())
+  await settle()
+  assert.equal(state.health.value, null)
+  assert.equal(
+    state.healthError.value,
+    'Inference server error: overlap must satisfy 0 <= 2 * overlap < tile_size. · retrying',
+  )
+})
+
 test('unchecking tortuosity skips the server metric', async t => {
   let body
   const { state } = await mount(t, async options => {

@@ -60,9 +60,12 @@ export function useGeneration(cropEditor) {
         axis.value = health.value.height_enabled ? 1 : 0
         heightExtent.value = heightExtentFor(domain.value)
         return
-      } catch {
+      } catch (reason) {
         if (controller.signal.aborted) return
-        healthError.value = 'Inference server unreachable · retrying'
+        // fetch rejects with a TypeError only when no response arrived.
+        healthError.value = reason instanceof TypeError
+          ? 'Inference server unreachable · retrying'
+          : `Inference server error: ${reason.message} · retrying`
         await wait(delay, controller.signal)
         delay = Math.min(delay * 2, HEALTH_RETRY_MAX_MS)
       }
