@@ -85,27 +85,31 @@ def main() -> None:
     planes = datasets[args.domain]
     first = next(iter(planes.values()))
     name = config.parent.name if args.weight else config.stem
-    stage_label = "SR (HR)" if stage == "sr" else "LR"
-    voxel = f"{first.crop_size} px crop -> {first.patch_size}x{first.patch_size} {stage_label} grid"
+    if len(datasets) > 1:
+        name += f" (domain {args.domain})"
+    stage_label = "SR" if stage == "sr" else "LR"
+    grid = f"{first.patch_size}x{first.patch_size}"
     print(f"Config  : {config.resolve()}")
-    print(f"Crops   : {voxel} (1 cell = {first.crop_size / first.patch_size:g} px)")
+    print(
+        f"Crops   : {first.crop_size} px -> {stage_label} {grid} "
+        f"(1 cell = {first.crop_size / first.patch_size:g} px)"
+    )
     for axis, ds in planes.items():
         print(f"{PLANES[axis]:<8}: {image_count(len(ds))}")
     fig, panels = plt.subplots(
         len(planes),
         SAMPLES,
         squeeze=False,
-        figsize=(3 * SAMPLES, 2.9 * len(planes) + 0.6),
+        figsize=(2.6 * SAMPLES + 0.8, 2.8 * len(planes) + 0.6),
     )
     for row, (axis, ds) in enumerate(planes.items()):
         plane = PLANES[axis]
         down, right = PLANE_DIRECTIONS[plane]
         panels[row, 0].text(
-            -0.08,
+            -0.1,
             0.5,
-            f"{plane}  ({image_count(len(ds))})\nrows {down}, columns {right}",
+            f"{plane}\n\n{down} ↓\n{right} →",
             transform=panels[row, 0].transAxes,
-            rotation=90,
             ha="right",
             va="center",
         )
@@ -113,16 +117,10 @@ def main() -> None:
             group = ds.path_groups[np.random.randint(len(ds.path_groups))]
             path = group[np.random.randint(len(group))]
             image = ds[path]["image"]
-            fractions = "  ".join(
-                f"{phase}: {fraction:.0%}"
-                for phase, fraction in enumerate(image.mean((1, 2)).tolist())
+            fractions = " / ".join(
+                f"{fraction:.0%}" for fraction in image.mean((1, 2)).tolist()
             )
-            show_labels(
-                panels[row, col],
-                image.argmax(0),
-                num_phases,
-                f"{path.name}\n{fractions}",
-            )
+            show_labels(panels[row, col], image.argmax(0), num_phases, fractions)
             panels[row, col].title.set_fontsize(9)
     fig.legend(
         handles=[
@@ -134,10 +132,9 @@ def main() -> None:
         frameon=False,
     )
     fig.suptitle(
-        f"{name}, domain {args.domain}: random training crops, {voxel}\n"
-        "Each cell shows its dominant phase; titles give phase fractions."
+        f"{name}: {stage_label} training crops, {first.crop_size} px -> {grid}"
     )
-    fig.tight_layout(rect=(0.02, 0.04, 1, 1))
+    fig.tight_layout(rect=(0.03, 0.04, 1, 1))
     output = args.out or result_directory(__file__) / "crops.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150)
