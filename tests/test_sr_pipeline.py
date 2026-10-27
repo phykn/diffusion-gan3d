@@ -185,12 +185,14 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
         == 16 / high_size
     )
     out2 = tmp_path / "from_input"
+    # The run directory exports the best-scored step, which may be step 1, so
+    # refining the saved probabilities must name that same file.
     check_hr(
         [
             "--input",
             str(out / "lr_probs.pt"),
             "--weight",
-            str(resumed / "checkpoints/generator_00000002.pt"),
+            str(resumed / "generator.pt"),
             "--out",
             str(out2),
             "--no-view",
