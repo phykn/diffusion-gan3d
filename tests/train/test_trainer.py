@@ -19,6 +19,7 @@ from src.model.layers import NULL_DOMAIN
 from src.plane import PLANE_DIRECTIONS, PLANES
 from src.prepare.resize import phase_channels
 from src.train.batch import RealBatch
+from src.train.burn_in import BurnIn
 from src.train.ema import build_ema
 from src.train.loss.denoiser import DenoiserLossSettings
 from src.train.loss.gan import get_gradient_penalty
@@ -605,7 +606,17 @@ def _make_trainer(
             num_phases=data["num_phases"],
             patch_size=data["lo_res_size"],
             slice_pairs_per_plane=train["slice_pairs_per_plane"],
-            ema_decay=cfg["optim"]["ema_decay"],
+            # A constant schedule: the configured values from the first step.
+            burn_in=BurnIn(
+                steps=0,
+                generator_lr=cfg["optim"]["generator_lr"],
+                critic_lr=cfg["optim"]["critic_lr"],
+                betas=tuple(cfg["optim"]["adam_betas"]),
+                ema_decay=cfg["optim"]["ema_decay"],
+                lr_scale=1.0,
+                beta2=cfg["optim"]["adam_betas"][1],
+                regularization_scale=1.0,
+            ),
             r1_weight=loss["r1_weight"],
             r1_every_steps=loss["r1_every_steps"],
             loss=DenoiserLossSettings(

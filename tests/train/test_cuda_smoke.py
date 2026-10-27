@@ -7,6 +7,7 @@ from src.build.model import build_models
 from src.build.trainer import build_optimizers
 from src.model.diffusion import Diffusion
 from src.prepare.resize import phase_channels
+from src.train.burn_in import BurnIn
 from src.train.ema import build_ema
 from src.train.loss.denoiser import DenoiserLossSettings
 from src.train.trainer import Trainer, TrainerComponents, TrainerSettings
@@ -114,7 +115,17 @@ def test_64_cube_training_step_fits_six_gibibytes() -> None:
             num_phases=data["num_phases"],
             patch_size=data["lo_res_size"],
             slice_pairs_per_plane=train["slice_pairs_per_plane"],
-            ema_decay=optim["ema_decay"],
+            # A constant schedule: the configured values from the first step.
+            burn_in=BurnIn(
+                steps=0,
+                generator_lr=optim["generator_lr"],
+                critic_lr=optim["critic_lr"],
+                betas=tuple(optim["adam_betas"]),
+                ema_decay=optim["ema_decay"],
+                lr_scale=1.0,
+                beta2=optim["adam_betas"][1],
+                regularization_scale=1.0,
+            ),
             r1_weight=cfg["loss"]["r1_weight"],
             r1_every_steps=cfg["loss"]["r1_every_steps"],
             loss=DenoiserLossSettings(

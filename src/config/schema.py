@@ -30,6 +30,9 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
         "optim": dict.fromkeys(
             ("generator_lr", "critic_lr", "adam_betas", "ema_decay")
         ),
+        "burn_in": dict.fromkeys(
+            ("steps", "lr_scale", "beta2", "regularization_scale")
+        ),
         "model": {
             "gradient_checkpointing": None,
             "generator": dict.fromkeys(

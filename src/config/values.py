@@ -47,6 +47,11 @@ def validate_training_values(cfg):
         raise ValueError("optim.adam_betas must contain two numbers in [0, 1).")
     for beta in betas:
         check_number(beta, "optim.adam_betas", 1, exclusive=True)
+    burn_in = cfg["burn_in"]
+    check_integer(burn_in["steps"], "burn_in.steps", 0)
+    check_number(burn_in["lr_scale"], "burn_in.lr_scale")
+    check_number(burn_in["beta2"], "burn_in.beta2", 1, exclusive=True)
+    check_number(burn_in["regularization_scale"], "burn_in.regularization_scale")
 
     conditioning = cfg["conditioning"]
     for name in (

@@ -47,6 +47,9 @@ loss:
     max_gap: 8
     ramp_steps: 5000
 
+burn_in:
+  steps: 5000
+
 optim:
   generator_lr: 0.0001
   critic_lr: 5.0e-05

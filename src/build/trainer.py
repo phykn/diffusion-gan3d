@@ -21,6 +21,7 @@ from src.data.source import fill_height_extents
 from src.device import inference_amp
 from src.plane import PLANE_DIRECTIONS
 from src.storage import load_model
+from src.train.burn_in import BurnIn
 from src.train.ema import build_ema
 from src.train.loss.denoiser import DenoiserLossSettings
 from src.train.selection import CheckpointSelection, build_reference
@@ -124,6 +125,7 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
     statistics = loss["group_statistics"]
     mirror = loss["mirror_balance"]
     optim = cfg["optim"]
+    burn_in = cfg["burn_in"]
     transition_start, transition_ramp = get_schedule_steps(
         transition, "loss.real_transition"
     )
@@ -169,7 +171,16 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         if sr
         else get_resolution(data).lo_res_size,
         slice_pairs_per_plane=train["slice_pairs_per_plane"],
-        ema_decay=optim["ema_decay"],
+        burn_in=BurnIn(
+            steps=burn_in["steps"],
+            generator_lr=optim["generator_lr"],
+            critic_lr=optim["critic_lr"],
+            betas=tuple(optim["adam_betas"]),
+            ema_decay=optim["ema_decay"],
+            lr_scale=burn_in["lr_scale"],
+            beta2=burn_in["beta2"],
+            regularization_scale=burn_in["regularization_scale"],
+        ),
         r1_weight=loss["r1_weight"],
         r1_every_steps=loss["r1_every_steps"],
         structure_every_steps=train["structure_every_steps"],

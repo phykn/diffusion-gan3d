@@ -50,6 +50,12 @@ the command skips a finished stage; without it, each stage gets a new timestampe
 `--resume` continues one interrupted stage ([Save and resume](docs/checks.md#save-and-resume)).
 The LR `generator.pt` is the best scored step, not the last one
 ([Best LR step](docs/checks.md#best-lr-step)).
+During the first `burn_in.steps` steps (LR 5000, SR 2500) a cosine curve moves the
+learning rates to `burn_in.lr_scale` (0.25) of `optim.*_lr`, Adam β2 from
+`optim.adam_betas` to `burn_in.beta2` (0.99), the R1/R2 weights to
+`burn_in.regularization_scale` (0.1) of `loss.r1_weight`/`r2_weight`, and the EMA
+half-life from zero to that of `optim.ema_decay`, as in R3GAN. TensorBoard logs them
+under `burn_in/*`.
 The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
 in training on CUDA (on MPS only for the gradient-free sampling of each step), and in LR
 and SR prediction on CUDA and MPS.

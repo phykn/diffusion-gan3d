@@ -24,8 +24,10 @@
 - Training: `run_train.py` → `src/config/sample.py` builds each stage's settings from
   `config/base/` and the sample → `src/train/run/` → `src/build/` assembles data,
   models, and the trainer.
-- `Trainer.step` owns optimizer and EMA updates. `Trainer.settings` holds runtime and
-  loss settings built once in `src/build/trainer.py`; read them there instead of copying.
+- `Trainer.step` owns optimizer and EMA updates; it first sets that step's learning
+  rates, β2, R1/R2 scale and EMA decay from [BurnIn](../src/train/burn_in.py).
+  `Trainer.settings` holds runtime and loss settings built once in
+  `src/build/trainer.py`; read them there instead of copying.
 - `Trainer.conditions` (`ConditionSampler`) samples real batches, vf/profile targets,
   CFG dropout (`conditioning.cfg_dropout_probability`), and SR coarse inputs. Training
   never sees anchors: the denoiser stays unconditional on known planes.

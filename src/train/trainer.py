@@ -19,6 +19,7 @@ from src.train.batch import (
     SampledPairs,
     StepPreparation,
 )
+from src.train.burn_in import BurnIn, BurnInValues
 from src.train.conditioning import ConditionSampler
 from src.train.ema import update_ema
 from src.train.loss.denoiser import DenoiserLossSettings, denoiser_objective
@@ -71,7 +72,7 @@ class TrainerSettings:
     patch_size: int
     latent_channels: int
     slice_pairs_per_plane: int
-    ema_decay: float
+    burn_in: BurnIn
     r1_weight: float
     r2_weight: float
     r1_every_steps: int
@@ -102,6 +103,7 @@ class Trainer:
         settings: TrainerSettings,
     ) -> None:
         self.settings = settings
+        self.burn_in = settings.burn_in.values(0)
         self.denoiser = components.denoiser
         self.ema_denoiser = components.ema_denoiser
         self.critics = components.critics
@@ -156,6 +158,7 @@ class Trainer:
         transition: int | None = None,
     ) -> Metrics:
         self.diagnostics = {}
+        self.burn_in = self.apply_burn_in(step)
         prepared = self.prepare_step(step, transition)
         transition = prepared.transition
         real = prepared.real
@@ -199,7 +202,7 @@ class Trainer:
         self.completed_steps = step + 1
         self.diagnostics["amp/scale"] = self.scaler.get_scale()
         if self.generator_updated:
-            update_ema(self.ema_denoiser, self.denoiser, self.settings.ema_decay)
+            update_ema(self.ema_denoiser, self.denoiser, self.burn_in.ema_decay)
         return collect_metrics(
             volume_size=self.settings.patch_size,
             diagnostics=self.diagnostics,
@@ -430,13 +433,35 @@ class Trainer:
         self.diagnostics.update(diagnostics)
         return loss
 
+    def apply_burn_in(self, step: int) -> BurnInValues:
+        """Set this step's learning rates and β2; return its scheduled values."""
+        values = self.settings.burn_in.values(step)
+        for optimizer, lr in (
+            (self.denoiser_optim, values.generator_lr),
+            *((optim, values.critic_lr) for optim in self.critic_optims.values()),
+        ):
+            for group in optimizer.param_groups:
+                group["lr"] = lr
+                group["betas"] = values.betas
+        self.diagnostics.update(
+            {
+                "burn_in/generator_lr": values.generator_lr,
+                "burn_in/critic_lr": values.critic_lr,
+                "burn_in/beta2": values.betas[1],
+                "burn_in/regularization_scale": values.regularization_scale,
+                "burn_in/ema_decay": values.ema_decay,
+            }
+        )
+        return values
+
     def regularization(self, name: str) -> tuple[bool, float, float]:
         """Lazy R1/R2 schedule and weights for one critic's next update."""
         regularize = (self.updates[name] + 1) % self.settings.r1_every_steps == 0
+        scale = self.burn_in.regularization_scale if regularize else 0.0
         return (
             regularize,
-            self.settings.r1_weight if regularize else 0.0,
-            self.settings.r2_weight if regularize else 0.0,
+            self.settings.r1_weight * scale,
+            self.settings.r2_weight * scale,
         )
 
     def update_critics(
