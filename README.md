@@ -58,7 +58,9 @@ half-life from zero to that of `optim.ema_decay`, as in R3GAN. TensorBoard logs 
 under `burn_in/*`.
 The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
 in training on CUDA (on MPS only for the gradient-free sampling of each step), and in LR
-and SR prediction on CUDA and MPS.
+and SR prediction on CUDA and MPS. Gradient checkpointing is off; when memory is short,
+`model.gradient_checkpointing: true` under `tune.lr` or `tune.sr` costs 10–20% more step
+time for 15–40% less peak memory (Apple MPS).
 
 ### Samples
 

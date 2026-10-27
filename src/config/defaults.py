@@ -7,7 +7,7 @@ TRAIN_DEFAULTS = {
     "model.critic.pyramid_min_size": 16,
     "model.critic.input_mode": "pair",
     "conditioning.height_enabled": False,
-    "model.gradient_checkpointing": True,
+    "model.gradient_checkpointing": False,
     "model.generator.embedding_channels": 128,
     "model.generator.latent_channels": 64,
     "model.diffusion.beta_min": 0.1,

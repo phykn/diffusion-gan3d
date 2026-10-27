@@ -51,6 +51,8 @@ class SinusoidalEmbedding(nn.Module):
 
 
 class AdaptiveNorm(nn.Module):
+    """Normalize, modulate by the embedding, then apply SiLU in one norm call."""
+
     def __init__(
         self,
         norm: type[nn.Module],
@@ -70,7 +72,7 @@ class AdaptiveNorm(nn.Module):
         dims = (1,) * (x.ndim - 2)
         scale = scale.reshape(scale.shape + dims)
         shift = shift.reshape(shift.shape + dims)
-        return self.norm(x) * (1.0 + scale) + shift
+        return self.norm(x, 1.0 + scale, shift)
 
 
 class AdaptiveResBlock(nn.Module):
@@ -98,8 +100,8 @@ class AdaptiveResBlock(nn.Module):
         x: torch.Tensor,
         emb: torch.Tensor,
     ) -> torch.Tensor:
-        h = self.conv1(F.silu(self.norm1(x, emb)))
-        h = self.conv2(F.silu(self.norm2(h, emb)))
+        h = self.conv1(self.norm1(x, emb))
+        h = self.conv2(self.norm2(h, emb))
         return (self.skip(x) + h) * INV_SQRT_TWO
 
 

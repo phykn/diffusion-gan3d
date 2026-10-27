@@ -29,9 +29,22 @@ def area_pyramid(images, min_size=16):
         yield images
 
 
-class GroupNorm(nn.GroupNorm):
+class GroupNormSiLU(nn.GroupNorm):
+    """Group-normalize, scale and shift when given, then apply SiLU."""
+
     def __init__(self, channels: int, affine: bool = True) -> None:
         super().__init__(self.choose_groups(channels), channels, affine=affine)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        shift: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = super().forward(x)
+        if scale is not None:
+            x = x * scale + shift
+        return F.silu(x)
 
     @staticmethod
     def choose_groups(channels: int) -> int:
@@ -67,7 +80,7 @@ class CriticBase(nn.Module):
         self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = nn.Conv2d(input_channels, widths[0], 3, padding=1)
         self.blocks = nn.ModuleList(
-            AdaptiveResBlock(GroupNorm, nn.Conv2d, ch, ch, embedding_channels)
+            AdaptiveResBlock(GroupNormSiLU, nn.Conv2d, ch, ch, embedding_channels)
             for ch in widths
         )
         self.downsample = nn.ModuleList(
@@ -80,7 +93,7 @@ class CriticBase(nn.Module):
             )
             for idx in range(len(widths) - 1)
         )
-        self.output_norm = GroupNorm(widths[-1])
+        self.output_norm = GroupNormSiLU(widths[-1])
         self.output = nn.Linear(widths[-1], 1)
 
     @staticmethod
@@ -120,7 +133,7 @@ class CriticBase(nn.Module):
             x = run_block(block, x, embedding, checkpointing)
             if idx < len(self.downsample):
                 x = self.downsample[idx](x)
-        x = F.silu(self.output_norm(x)).mean(dim=(-2, -1))
+        x = self.output_norm(x).mean(dim=(-2, -1))
         return CriticScores(logits_global=self.output(x).squeeze(1))
 
 

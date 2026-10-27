@@ -59,8 +59,10 @@ class _Conv3dFunction(torch.autograd.Function):
         kernel = weight.shape[-1]
         grad_x = grad_weight = grad_bias = None
         if ctx.needs_input_grad[0]:
-            grad_x = torch.nn.grad.conv3d_input(
-                x.shape, weight, grad, padding=kernel // 2
+            # With stride 1 and same padding this equals the transposed
+            # convolution, which MPS runs over twice as slowly.
+            grad_x = F.conv3d(
+                grad, weight.flip((2, 3, 4)).transpose(0, 1), padding=kernel // 2
             )
         if ctx.needs_input_grad[1]:
             grad_weight = conv3d_weight(x, grad, kernel)
@@ -70,20 +72,30 @@ class _Conv3dFunction(torch.autograd.Function):
 
 
 class Conv3d(nn.Conv3d):
-    """nn.Conv3d whose MPS weight gradient avoids the slow native kernel."""
+    """nn.Conv3d whose MPS gradients avoid the slow native kernels."""
 
     def _conv_forward(self, x, weight, bias):
-        if (
+        if not (
             x.device.type == "mps"
             and torch.is_grad_enabled()
             and weight.requires_grad
             and not torch.is_autocast_enabled("mps")
-            and self.kernel_size == (3, 3, 3)
             and self.stride == (1, 1, 1)
-            and self.padding == (1, 1, 1)
             and self.dilation == (1, 1, 1)
             and self.groups == 1
             and self.padding_mode == "zeros"
+        ):
+            return super()._conv_forward(x, weight, bias)
+        if self.kernel_size == (1, 1, 1) and self.padding == (0, 0, 0):
+            # A pointwise convolution is a matrix product, whose backward on
+            # MPS is about six times faster than the convolution's.
+            out = torch.matmul(weight.flatten(1), x.flatten(2))
+            if bias is not None:
+                out = out + bias[:, None]
+            return out.view(x.shape[0], -1, *x.shape[2:])
+        if (
+            self.kernel_size == (3, 3, 3)
+            and self.padding == (1, 1, 1)
             and x.shape[2:].numel() >= MIN_VOXELS
         ):
             return _Conv3dFunction.apply(x, weight, bias)

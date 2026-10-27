@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from functools import partial
+from functools import cache, partial
 
 import torch
 import torch.nn.functional as F
@@ -19,7 +19,31 @@ from src.model.layers import (
 from src.prepare.profile import profile_field
 
 
-class ChannelNorm3D(nn.Module):
+def channel_norm_silu(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    dtype = x.dtype
+    h = x.float()
+    var, mean = torch.var_mean(h, dim=1, keepdim=True, correction=0)
+    h = ((h - mean) * torch.rsqrt(var + eps)).to(dtype)
+    return F.silu(h * scale.to(dtype) + shift.to(dtype))
+
+
+@cache
+def fused_channel_norm_silu():
+    # Eager MPS runs each step over the whole volume and keeps every
+    # intermediate for backward; one compiled kernel makes the denoiser step
+    # about an eighth faster and its peak memory about a third smaller.
+    # Created on first use: importing the compiler takes about a second.
+    return torch.compile(channel_norm_silu)
+
+
+class ChannelNormSiLU3D(nn.Module):
+    """Normalize each voxel over channels, scale and shift, then apply SiLU."""
+
     def __init__(
         self,
         channels: int,
@@ -35,23 +59,20 @@ class ChannelNorm3D(nn.Module):
             self.register_parameter("scale", None)
             self.register_parameter("shift", None)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        if dtype in (torch.float16, torch.bfloat16):
-            x = x.float()
-        var, mean = torch.var_mean(
-            x,
-            dim=1,
-            keepdim=True,
-            correction=0,
+    def forward(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        shift: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """scale and shift broadcast over x; they default to the learned affine."""
+        if scale is None:
+            shape = (1, -1, 1, 1, 1)
+            scale, shift = self.scale.view(shape), self.shift.view(shape)
+        norm_silu = (
+            fused_channel_norm_silu() if x.device.type == "mps" else channel_norm_silu
         )
-        x = ((x - mean) * torch.rsqrt(var + self.eps)).to(dtype=dtype)
-        if self.scale is None:
-            return x
-        shape = (1, -1, 1, 1, 1)
-        scale = self.scale.to(dtype=x.dtype).view(shape)
-        shift = self.shift.to(dtype=x.dtype).view(shape)
-        return x * scale + shift
+        return norm_silu(x, scale, shift, self.eps)
 
 
 class Upsample3D(nn.Module):
@@ -112,7 +133,7 @@ class Denoiser3D(nn.Module):
             Conv3d(1, channels[0], 3, padding=1, bias=False) if height_enabled else None
         )
 
-        block = partial(AdaptiveResBlock, ChannelNorm3D, Conv3d)
+        block = partial(AdaptiveResBlock, ChannelNormSiLU3D, Conv3d)
         self.encoder = nn.ModuleList()
         self.downsample = nn.ModuleList()
         for idx, ch in enumerate(channels):
@@ -137,7 +158,7 @@ class Denoiser3D(nn.Module):
             self.decoder.append(block(2 * skip_ch, skip_ch, embedding_channels))
             ch = skip_ch
 
-        self.output_norm = ChannelNorm3D(channels[0])
+        self.output_norm = ChannelNormSiLU3D(channels[0])
         self.output = Conv3d(channels[0], num_phases, 3, padding=1)
 
         self.vf_mlp = None
@@ -242,7 +263,7 @@ class Denoiser3D(nn.Module):
             )
             x = run_block(block, x, emb, checkpointing)
 
-        return self.output(F.silu(self.output_norm(x)))
+        return self.output(self.output_norm(x))
 
     def apply_guidance_logits(
         self,

@@ -1,18 +1,22 @@
 import unittest
 
+import pytest
 import torch
+import torch.nn.functional as F
 
 from src.build.model import build_denoiser
 from src.config.train import load_train_config
-from src.model.critic import CriticScores, GroupNorm, PairCritic2D
-from src.model.denoiser import ChannelNorm3D, Denoiser3D
+from src.model.critic import CriticScores, GroupNormSiLU, PairCritic2D
+from src.model.denoiser import ChannelNormSiLU3D, Denoiser3D, channel_norm_silu
 from src.model.layers import AdaptiveNorm
+
+MPS = torch.backends.mps.is_available()
 
 
 def test_channel_norm_preserves_large_half_precision_features():
     inputs = torch.tensor([-1000.0, 500.0, 1000.0, -500.0], dtype=torch.float16)
     inputs = inputs.reshape(1, 4, 1, 1, 1).requires_grad_()
-    norm = ChannelNorm3D(4, affine=False)
+    norm = ChannelNormSiLU3D(4)
     output = norm(inputs)
     expected = norm(inputs.detach().float()).to(inputs.dtype)
 
@@ -21,6 +25,29 @@ def test_channel_norm_preserves_large_half_precision_features():
     output[:, 0].sum().backward()
     assert bool(torch.isfinite(inputs.grad).all())
     assert bool((inputs.grad != 0).any())
+
+
+@pytest.mark.skipif(not MPS, reason="MPS unavailable")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+def test_apple_gpu_fused_norm_matches_the_eager_one(dtype):
+    torch.manual_seed(0)
+    inputs = torch.randn(2, 8, 6, 7, 9, device="mps", dtype=dtype) * 3
+    scale = torch.randn(2, 8, 1, 1, 1, device="mps", dtype=dtype) + 1
+    shift = torch.randn(2, 8, 1, 1, 1, device="mps", dtype=dtype)
+    weights = torch.randn_like(inputs)
+    results = []
+    for norm in (ChannelNormSiLU3D(8, affine=False).to("mps"), channel_norm_silu):
+        values = [v.clone().requires_grad_() for v in (inputs, scale, shift)]
+        if isinstance(norm, ChannelNormSiLU3D):
+            output = norm(*values)
+        else:
+            output = norm(*values, 1.0e-5)
+        (output.float() * weights.float()).sum().backward()
+        results.append([output, *(v.grad for v in values)])
+    tolerance = 1e-5 if dtype == torch.float32 else 2e-2
+    for fused, eager in zip(*results):
+        assert fused.dtype == eager.dtype == dtype
+        torch.testing.assert_close(fused, eager, rtol=tolerance, atol=tolerance)
 
 
 def _denoiser(
@@ -101,7 +128,7 @@ class Denoiser3DTest(unittest.TestCase):
         self.assertEqual(output.shape, inputs.shape)
 
     def test_3d_norm_is_independent_at_each_spatial_position(self):
-        norm = ChannelNorm3D(4)
+        norm = ChannelNormSiLU3D(4)
         inputs = torch.randn(2, 4, 3, 4, 5)
         changed = inputs.clone()
         changed[:, :, -1, -1, -1].add_(100.0 * torch.randn(2, 4))
@@ -115,21 +142,16 @@ class Denoiser3DTest(unittest.TestCase):
                 changed_output[:, :, 0, 0, 0],
             )
         )
-        self.assertTrue(
-            torch.allclose(
-                output.mean(dim=1),
-                torch.zeros_like(output[:, 0]),
-                atol=1.0e-6,
-            )
-        )
+        normalized = F.layer_norm(inputs.movedim(1, -1), (4,)).movedim(-1, 1)
+        self.assertTrue(torch.allclose(output, F.silu(normalized), atol=1.0e-6))
         self.assertEqual(norm(inputs.half()).dtype, torch.float16)
 
     def test_3d_model_uses_channel_norm(self):
         model = _denoiser()
 
         self.assertIsInstance(model.encoder[0].norm1, AdaptiveNorm)
-        self.assertIsInstance(model.encoder[0].norm1.norm, ChannelNorm3D)
-        self.assertIsInstance(model.output_norm, ChannelNorm3D)
+        self.assertIsInstance(model.encoder[0].norm1.norm, ChannelNormSiLU3D)
+        self.assertIsInstance(model.output_norm, ChannelNormSiLU3D)
         self.assertEqual(model.downsample_factor, 2)
 
     def test_clean_output_is_a_latent_conditioned_simplex_with_gradients(self):
@@ -454,7 +476,7 @@ class PairCritic2DTest(unittest.TestCase):
         model = _critic()
 
         self.assertIsInstance(model.blocks[0].norm1, AdaptiveNorm)
-        self.assertIsInstance(model.blocks[0].norm1.norm, GroupNorm)
+        self.assertIsInstance(model.blocks[0].norm1.norm, GroupNormSiLU)
         self.assertIsInstance(model.output_norm, torch.nn.GroupNorm)
 
     def test_pair_and_time_conditioning_return_global_logits(self):
