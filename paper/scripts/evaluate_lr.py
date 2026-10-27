@@ -1,6 +1,6 @@
 """Evaluate one run's LR stage for the paper: structure, selection and anchors.
 
-Writes assets/paper/lr-results.json. Generated volumes are cached under
+Writes paper/assets/lr-results.json. Generated volumes are cached under
 checks/paper-lr/; --reuse recomputes the metrics from them without sampling.
 """
 
@@ -37,7 +37,7 @@ from src.prepare.resize import resize_crop
 from src.random import seeded_rng
 from src.train.selection import pick_sections
 
-OUTPUT = PROJECT_ROOT / "assets" / "paper" / "lr-results.json"
+OUTPUT = PROJECT_ROOT / "paper" / "assets" / "lr-results.json"
 CACHE = PROJECT_ROOT / "checks" / "paper-lr"
 # Independent of the selection reference (seed 0), so the best step is not
 # scored on the crops that chose it.

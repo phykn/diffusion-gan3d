@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from scripts.paper.evaluate_lr import (
+from paper.scripts.evaluate_lr import (
     interface_density,
     nested_plane_order,
     pool_similarity,
@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_paper_numbers_and_figures_match_lr_results() -> None:
-    paper = (ROOT / "PAPER.md").read_text(encoding="utf-8")
+    paper = (ROOT / "paper/README.md").read_text(encoding="utf-8")
     results = json.loads(
-        (ROOT / "assets/paper/lr-results.json").read_text(encoding="utf-8")
+        (ROOT / "paper/assets/lr-results.json").read_text(encoding="utf-8")
     )
     best = results["steps"][str(results["best_step"])]
     assert f"**{best['structure']:.2f}**" in paper
@@ -31,7 +31,7 @@ def test_paper_numbers_and_figures_match_lr_results() -> None:
 
     figures = re.findall(r'<img src="([^"]+)"', paper)
     assert figures
-    assert all((ROOT / figure).is_file() for figure in figures)
+    assert all((ROOT / "paper" / figure).is_file() for figure in figures)
 
 
 def test_nested_plane_order_covers_every_plane_in_nested_prefixes() -> None:

@@ -16,14 +16,14 @@ from PIL import Image, ImageDraw
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.metrics import read_metrics
-from scripts.paper.evaluate_lr import (
+from paper.scripts.evaluate_lr import (
     CACHE,
     DISTANCES,
     EXTERNAL_CROP,
     OUTPUT,
     real_crops,
 )
+from scripts.common.metrics import read_metrics
 from src.build.data import build_datasets
 from src.config.train import load_train_config
 from src.evaluate.structure import label_sections

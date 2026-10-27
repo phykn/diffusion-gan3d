@@ -33,8 +33,8 @@
 
 ## 5. 논문
 
-- [ ] SR 학습이 끝나면 `PAPER.md` 6장(SR)과 결론을 쓰고, README 그림을 HR 볼륨으로 바꾼다.
-  - LR 부분은 `scripts/paper/evaluate_lr.py` → `make_figures.py`로 다시 만든다.
+- [ ] SR 학습이 끝나면 `paper/README.md`의 SR 절과 결론을 쓰고, README 그림을 HR 볼륨으로 바꾼다.
+  - LR 부분은 `paper/scripts/evaluate_lr.py` → `make_figures.py`로 다시 만든다.
 
 ## 보류
 

@@ -4,13 +4,13 @@ Generate 3D microstructures from **2D label images**, without measured 3D traini
 Learn the appearance of real sections, guide generation with known planes,
 and build larger or higher-resolution volumes.
 
-[Install](#install) · [Run and inspect](docs/checks.md) · [Development](docs/development.md) · [Method & experiments](PAPER.md)
+[Install](#install) · [Run and inspect](scripts/README.md) · [Method & experiments](paper/README.md)
 
 | 2D training image and example crops | Generated LR volume (64³) |
 | :---: | :---: |
-| <img src="assets/paper/01-training-data.png" alt="Labeled 2D microstructure with example training crops" width="360"> | <img src="assets/paper/02-generated-volume.png" alt="Generated 64-cubed LR microstructure with a cutaway view" width="320"> |
+| <img src="paper/assets/01-training-data.png" alt="Labeled 2D microstructure with example training crops" width="360"> | <img src="paper/assets/02-generated-volume.png" alt="Generated 64-cubed LR microstructure with a cutaway view" width="320"> |
 
-The volume comes from the LR stage of the run described in [PAPER.md](PAPER.md), with the
+The volume comes from the LR stage of the run described in [the paper](paper/README.md), with the
 default sample's settings; one voxel spans two source pixels.
 
 - **2D → 3D:** train from categorical sections in the `xy`, `xz`, and `yz` planes.
@@ -47,7 +47,7 @@ python scripts/06_check_hr.py --weight "run/my-run-sr" --no-view
 `run_train.py` trains LR, then SR from frozen LR volumes. `--run-dir NAME` writes `NAME-lr`
 and `NAME-sr` and skips a finished stage on rerun; `--lr-only` stops after LR. Each stage's
 `generator.pt` is its best scored step, not the last one. Resume, burn-in, devices, and
-memory options are in [Training options](docs/checks.md#training-options).
+memory options are in [Training options](scripts/README.md#training-options).
 
 ### Samples
 
@@ -62,7 +62,7 @@ A sample is one file in [config/samples/](config/samples/); copy
 - `tune.lr` and `tune.sr` change single settings of a stage.
 
 `python run_train.py default --show` prints the resolved YAML of both stages. Details of each
-field are in [Training options](docs/checks.md#sample-fields).
+field are in [Training options](scripts/README.md#sample-fields).
 
 ## Web interface
 

@@ -21,7 +21,7 @@ Here we present a two-stage diffusion-GAN in which a low-resolution (LR) stage g
 The training data are one 226 × 690 binary image (Figure 1). Random 128² crops supervise all three axes under an isotropy assumption. Each crop is area-downsampled by two for the LR stage, so one LR voxel spans two source pixels, and the SR stage refines frozen LR volumes back to the source resolution. The LR model thus sees a large field of view and learns the arrangement of particles, while the SR model only adds boundary detail consistent with it. The LR stage trained for 10,000 steps (90 minutes on one Apple-silicon GPU). Generated volumes are compared with real crops by section statistics and by 3D measures (Methods).
 
 <p align="center">
-  <img src="assets/paper/01-training-data.png" alt="Binary training image with example crop regions" width="680">
+  <img src="assets/01-training-data.png" alt="Binary training image with example crop regions" width="680">
 </p>
 <p align="center"><em>Figure 1. Binary training image. Orange boxes are example 128² crops; the middle one is the external anchor. Black: phase 0; gray: phase 1.</em></p>
 
@@ -29,7 +29,7 @@ The training data are one 226 × 690 binary image (Figure 1). Random 128² crops
 
 The selection score falls during burn-in and reaches its minimum at step 8500, then rises (Figure 2a). Its components move in different directions: cluster error falls by a factor of five, while two-point error rises after step 3000 (Figure 2b). The critic logits explain the late rise: after burn-in, scores of real pairs keep climbing while generated pairs stay flat (Figure 2c), the signature of a critic memorizing the one training image.
 
-<p align="center"><img src="assets/paper/lr-training.png" alt="Selection score, its components, and mean critic logits over LR training" width="900"></p>
+<p align="center"><img src="assets/lr-training.png" alt="Selection score, its components, and mean critic logits over LR training" width="900"></p>
 <p align="center"><em>Figure 2. LR training. (a) Selection score; lower is better. (b) Its components, each divided by the real half-split error. (c) Mean critic logit of real and generated pairs. Gray: burn-in. Dashed: selected step 8500.</em></p>
 
 On independent crops (Table 1) the ranking holds: step 8500 scores 4.5% below the last step and 23% below the end of burn-in, so selecting by score matters even within one run. Its two-point error is mostly a phase-fraction offset: a pore fraction of 0.342 against 0.367 alone shifts the two-point curves by about 0.02 of the 0.028 observed. The pore fraction falls in the same steps in which cluster error improves, suggesting the generator traded a little pore volume for better-separated particles.
@@ -49,10 +49,10 @@ On independent crops (Table 1) the ranking holds: step 8500 scores 4.5% below th
 
 The sections of the selected step reproduce rounded solid particles separated by a connected pore network (Figures 3 and 4), and the interface density matches the real crops within 2.5%. Both phases percolate along every axis (99.8% of pore and 98.5% of solid voxels lie in spanning components). Two properties remain off. The pore tortuosity differs by axis, 2.23 ± 0.07, 2.62 ± 0.18, and 2.03 ± 0.09 along z, y, and x, and solid particles keep a slight preferred tilt in the xy plane (balance −0.17). The axis and mirror losses act on statistics over a few voxels, whereas tortuosity integrates connectivity over the whole volume, so this anisotropy lies at a scale those losses do not reach.
 
-<p align="center"><img src="assets/paper/02-generated-volume.png" alt="Generated LR 64-cubed volume with one octant removed" width="470"></p>
+<p align="center"><img src="assets/02-generated-volume.png" alt="Generated LR 64-cubed volume with one octant removed" width="470"></p>
 <p align="center"><em>Figure 3. Unconditional 64³ LR sample at step 8500 with one octant removed.</em></p>
 
-<p align="center"><img src="assets/paper/03-generated-slices.png" alt="Three real LR crops and the three orthogonal center sections of a generated volume" width="700"></p>
+<p align="center"><img src="assets/03-generated-slices.png" alt="Three real LR crops and the three orthogonal center sections of a generated volume" width="700"></p>
 <p align="center"><em>Figure 4. Top: real crops on the LR grid. Bottom: center sections of the volume in Figure 3.</em></p>
 
 ### Plane anchors
@@ -71,7 +71,7 @@ The anchor creates no seam: next to it, sections change less than ordinary adjac
 
 The anchor's 3D information reaches a few voxels (Figure 5d). Agreement with the internal reference falls from 93.2% on the plane to 84.0% one voxel away, 65.6% at four, and 60.0% at twelve, approaching the 55% of unrelated volumes. The far field, however, is not the baseline volume: about 40% of labels differ even 32 voxels away, because the gradient moves the whole noisy state.
 
-<p align="center"><img src="assets/paper/lr-anchor.png" alt="External anchor example and agreement curves for internal anchors and nested anchors" width="900"></p>
+<p align="center"><img src="assets/lr-anchor.png" alt="External anchor example and agreement curves for internal anchors and nested anchors" width="900"></p>
 <p align="center"><em>Figure 5. Plane anchors. (a) Real external section; (b) generated plane at the anchored coordinate; (c) the same coordinate without guidance; right: sections at distance d from the anchor. (d) Agreement with a known reference against distance from one anchored plane. (e) Agreement with a known reference as nested planes are anchored.</em></p>
 
 More planes recover more of a known volume (Figure 5e): agreement rises from 54.1% with no anchors to 78.7% with eight planes and 91.8% with sixteen, and unanchored planes follow closely, so the gain is not only the anchored planes themselves. Beyond sixteen the curve saturates near 92%, the per-plane accuracy of DPS itself.
