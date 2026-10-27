@@ -26,8 +26,8 @@ def test_tensorboard_records_collected_step_metrics(tmp_path):
         diagnostics={"skipped/generator": 0},
         prepared=prepared,
         denoiser_update=update,
-        critic_vals=[torch.tensor(0.5), 0.0, torch.tensor(0.25)],
-        r1=torch.tensor(0.0),
+        critic_vals=[torch.tensor(0.5), None, torch.tensor(0.25)],
+        r1=None,
     )
     with SummaryWriter(tmp_path) as writer:
         write_metrics(writer, 7, metrics)
@@ -35,11 +35,9 @@ def test_tensorboard_records_collected_step_metrics(tmp_path):
     assert record["step"] == 7
     assert record["loss/critic"] == 0.75
     assert record["loss/vf"] == 0.125
-    assert [record[f"critic_plane/{axis}"] for axis in ("xy", "xz", "yz")] == [
-        0.5,
-        0.0,
-        0.25,
-    ]
+    # An unjudged plane and a step without R1 are gaps, not zero losses.
+    assert record["critic_plane/xy"] == 0.5 and record["critic_plane/yz"] == 0.25
+    assert record["critic_plane/xz"] is None and record["loss/r1"] is None
     assert record["conditioning/vf_active"] == 1
     assert record["conditioning/vf_fraction"] == 0.5
     assert record["sampling/domain"] == 2

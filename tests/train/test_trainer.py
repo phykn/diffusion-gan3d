@@ -175,9 +175,11 @@ def test_training_step_with_one_axis_updates_only_that_critic(axis: int) -> None
     assert set(trainer.critics) == {PLANES[axis]}
     assert set(trainer.critic_optims) == {PLANES[axis]}
     assert streams[axis].calls == 1
-    assert metrics.critic_axes[axis] != 0.0
+    assert metrics.critic_axes[axis] not in (None, 0.0)
     assert all(
-        value == 0.0 for index, value in enumerate(metrics.critic_axes) if index != axis
+        value is None
+        for index, value in enumerate(metrics.critic_axes)
+        if index != axis
     )
     assert _changed(denoiser_before, denoiser)
     assert _changed(critic_before, trainer.critics[PLANES[axis]])
@@ -766,3 +768,5 @@ def test_generator_input_diagnostics_preserve_training_updates_and_rng(mode):
     assert not any(
         key.startswith("generator_input_gradient/") for key in metrics.diagnostics
     )
+    # R1 weights are zero here, so no step measured R1.
+    assert actual.r1 is None and metrics.r1 is None

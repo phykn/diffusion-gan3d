@@ -413,10 +413,13 @@ class Trainer:
         fake: SampledPairs,
         real: SampledPairs,
         domains: dict[int, int],
-    ) -> tuple[list[float], float]:
-        """Return per-axis adversarial critic losses (R1/R2 excluded) and mean R1."""
-        critic_losses = [0.0] * len(AXES)
-        r1_sum = 0.0
+    ) -> tuple[list[float | None], float | None]:
+        """Return per-axis adversarial critic losses (R1/R2 excluded) and mean R1.
+
+        Planes no critic judged and steps without R1 give None, not zero.
+        """
+        critic_losses = [None] * len(AXES)
+        r1_sum = None
         groups = active_groups(fake.pairs, self.critic_groups)
         for group, axes in groups.items():
             regularize, r1_weight, r2_weight = self.regularization(group)
@@ -485,7 +488,9 @@ class Trainer:
                     )
                     for name, norm in zip(("previous", "current"), norms):
                         self.diagnostics[f"input_gradient/{group}/{axis}/{name}"] = norm
-                r1_sum += losses.r1.detach() * weight
+                if r1_weight > 0:
+                    r1 = losses.r1.detach() * weight
+                    r1_sum = r1 if r1_sum is None else r1_sum + r1
                 if r2_weight > 0:
                     self.diagnostics[f"r2/{group}/{axis}"] = losses.r2.detach()
                 loss = validate_loss(losses.total, f"critic {group}/{axis}")

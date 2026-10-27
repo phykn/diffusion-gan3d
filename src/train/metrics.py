@@ -13,10 +13,10 @@ class Metrics:
     generator: float
     generator_total: float
     critic: float
-    r1: float
+    r1: float | None
     transition: int
     domain: int
-    critic_axes: tuple[float, float, float]
+    critic_axes: tuple[float | None, float | None, float | None]
     vf_loss: float = 0.0
     vf_active: bool = False
     vf_active_fraction: float = 0.0
@@ -28,14 +28,14 @@ def collect_metrics(
     diagnostics: dict,
     prepared: StepPreparation,
     denoiser_update: DenoiserUpdate,
-    critic_vals: list[float],
-    r1: float,
+    critic_vals: list[float | None],
+    r1: float | None,
 ) -> Metrics:
     return materialize_metrics(
         Metrics(
             generator=denoiser_update.adversarial,
             generator_total=denoiser_update.total,
-            critic=sum(critic_vals),
+            critic=sum(value for value in critic_vals if value is not None),
             r1=r1,
             transition=prepared.transition,
             domain=prepared.domain,
