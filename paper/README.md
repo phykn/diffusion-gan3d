@@ -4,7 +4,7 @@
 
 ## Abstract
 
-We present a two-stage diffusion-GAN that learns 3D categorical microstructures from unregistered 2D sections: a low-resolution (LR) stage generates the 3D arrangement, and a super-resolution (SR) stage refines it. This document reports the LR stage; the SR stage is still training. The LR denoiser is trained only through 2D critics, together with losses that make the three axes of each volume agree and mirrored diagonal statistics balance. Because no 3D data exist, the exported step is chosen by a section-structure score normalized by the real data's own sampling noise; the chosen step also scores lowest of the saved steps on independent crops. Generated volumes match the real interface density within 2.5% and percolate in both phases, but undershoot the pore fraction and show anisotropic tortuosity. Supplied planes are applied at inference by diffusion posterior sampling without anchor-specific training: a plane is reproduced with about 90% voxel agreement and no seam, and sixteen planes recover 91.8% of a known volume. These are controlled generation results, not 3D reconstruction accuracy.
+We present a two-stage diffusion-GAN that learns 3D categorical microstructures from unregistered 2D sections: a low-resolution (LR) stage generates the 3D arrangement, and a super-resolution (SR) stage refines it to the source resolution. Both denoisers are trained only through 2D critics, together with losses that make the three axes of each volume agree and, for LR, mirrored diagonal statistics balance. Because no 3D data exist, the exported step of each stage is chosen by a section-structure score normalized by the real data's own sampling noise; for LR the chosen step also scores lowest of the saved steps on independent crops. LR volumes match the real interface density within 2.5% and percolate in both phases, but undershoot the pore fraction and show anisotropic tortuosity. SR sections lie three to four times closer to real sections than upsampled LR volumes, recover most of the missing pore fraction, and keep the LR phase in 96.5% of LR voxels; the tortuosity anisotropy remains. Supplied planes are applied at inference by diffusion posterior sampling without anchor-specific training: a plane is reproduced with about 90% voxel agreement and no seam, and sixteen planes recover 91.8% of a known volume. These are controlled generation results, not 3D reconstruction accuracy.
 
 ## Introduction
 
@@ -12,13 +12,13 @@ Three-dimensional connectivity controls many transport and mechanical properties
 
 Two problems remain when only 2D sections exist. Section realism is a weak constraint on the volume: a generator can keep every section plausible while choosing an unrealistic 3D arrangement, for example by shearing structure so that only one section plane degrades. And adversarial training on a single small image drifts: critics eventually memorize the data, so the last step is often not the best one, and no 3D data exist to choose another. Applications also need control: known planes, such as a measured surface, should be honored without training a conditional model; diffusion inpainting preserves observed regions [12,13], and diffusion posterior sampling (DPS) [17] steers an unconditional model with the gradient of a measurement error on its clean prediction.
 
-Here we present a two-stage diffusion-GAN in which a low-resolution (LR) stage generates the 3D arrangement and a super-resolution (SR) stage refines it, and report the LR stage. A 3D denoising-diffusion GAN [14,15] is trained only through 2D critics on pairs of adjacent diffusion states, with the relativistic loss and burn-in of R3GAN [16]. Losses on the whole volume make its three axes agree and its mirrored diagonals balance, which suppresses shear. The exported step is chosen by a section-structure score computed from 2D data, and known planes are applied at inference by DPS. The goal is plausible realizations from unregistered 2D sections, not a unique reconstruction.
+Here we present a two-stage diffusion-GAN in which a low-resolution (LR) stage generates the 3D arrangement and a super-resolution (SR) stage refines it to the source resolution. A 3D denoising-diffusion GAN [14,15] is trained only through 2D critics on pairs of adjacent diffusion states, with the relativistic loss and burn-in of R3GAN [16]. Losses on the whole volume make its three axes agree and its mirrored diagonals balance, which suppresses shear. SR is trained in the same way on frozen LR volumes. The exported step of each stage is chosen by a section-structure score computed from 2D data, and known planes are applied at inference by DPS. The goal is plausible realizations from unregistered 2D sections, not a unique reconstruction.
 
 ## Results
 
 ### Two-stage generation from 2D sections
 
-The training data are one 226 × 690 binary image (Figure 1). Random 128² crops supervise all three axes under an isotropy assumption. Each crop is area-downsampled by two for the LR stage, so one LR voxel spans two source pixels, and the SR stage refines frozen LR volumes back to the source resolution. The LR model thus sees a large field of view and learns the arrangement of particles, while the SR model only adds boundary detail consistent with it. The LR stage trained for 10,000 steps (90 minutes on one Apple-silicon GPU). Generated volumes are compared with real crops by section statistics and by 3D measures (Methods).
+The training data are one 226 × 690 binary image (Figure 1). Random 128² crops supervise all three axes under an isotropy assumption. Each crop is area-downsampled by two for the LR stage, so one LR voxel spans two source pixels, and the SR stage refines frozen LR volumes back to the source resolution. The LR model thus sees a large field of view and learns the arrangement of particles, while the SR model only adds boundary detail consistent with it. The LR stage trained for 10,000 steps (90 minutes on one Apple-silicon GPU) and the SR stage for 5000 steps (3.2 hours). Generated volumes are compared with real crops by section statistics and by 3D measures (Methods).
 
 <p align="center">
   <img src="assets/01-training-data.png" alt="Binary training image with example crop regions" width="680">
@@ -78,17 +78,42 @@ More planes recover more of a known volume (Figure 5e): agreement rises from 54.
 
 ### Super-resolution
 
-The SR stage is still training; this section will report it when training completes.
+The SR selection score fell at every evaluation from step 2000 on and was lowest at the last step, 5000 (Figure 6a). On independent crops the last step scores 2.83, against 6.56 at step 2500, the only other saved step (Table 3). Unlike LR, the minimum marks where training stopped rather than a turn, so a longer run might score lower; this is untested. Real and generated critic logits fall together, about 0.4 apart from step 1500 on (Figure 6c), so the widening gap seen in LR does not appear within these steps. As the score falls, the downsampled output moves away from its LR input (Figure 6b): SR improves its sections partly by changing the coarse structure it is given.
+
+<p align="center"><img src="assets/sr-training.png" alt="SR selection score, mismatch with the LR input, and mean critic logits over SR training" width="900"></p>
+<p align="center"><em>Figure 6. SR training. (a) Selection score at source resolution; lower is better. (b) Mean squared difference between the area-downsampled output and the LR input on the selection inputs. (c) Mean critic logit of real and generated pairs. Gray: burn-in. Dashed: selected step 5000.</em></p>
+
+SR sections are compared with real crops at source resolution, and against nearest-neighbour and trilinear upsampling of the same LR volumes (Table 3, Figure 7). SR scores 2.83, against 11.1 and 8.9 for the two upsamplings. Nearest upsampling keeps the two-voxel steps of the LR grid, which the chord distribution penalizes; trilinear upsampling smooths the steps but doubles the cluster error. SR lowers all three errors. It also raises the pore fraction from the 0.342 of its LR inputs to 0.363, against 0.368 for real crops, although no SR loss targets the phase fraction, and the two-point error falls by three-quarters, as expected from Table 1, where most of the LR two-point error was a phase-fraction offset. The interface density matches the real crops within 1.3%, whereas the upsamplings fall 6% and 9% short. SR sections are not yet indistinguishable from real ones: chord and cluster errors remain three and four times the real half-split error.
+
+| Volumes | Structure ↓ | Two-point | Chord | Cluster | Pore fraction | Interface density | LR agreement |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Real crops | — | — | — | — | 0.368 ± 0.050 | 0.0635 ± 0.0043 | — |
+| LR, nearest | 11.13 | 0.0278 | 0.4971 | 0.222 | 0.342 ± 0.007 | 0.0594 ± 0.0007 | 100% |
+| LR, trilinear | 8.86 | 0.0307 | 0.1394 | 0.452 | 0.339 ± 0.007 | 0.0576 ± 0.0006 | 99.0% |
+| SR, step 2500 | 6.56 | 0.0122 | 0.0868 | 0.419 | 0.357 ± 0.007 | 0.0602 ± 0.0009 | 97.4% |
+| **SR, step 5000 (selected)** | **2.83** | 0.0071 | 0.0714 | 0.126 | 0.363 ± 0.008 | 0.0627 ± 0.0010 | 96.5% |
+
+<p align="center"><em>Table 3. Section errors at source resolution of 16 HR volumes, all refined from the LR volumes of Table 1's selected step, against independent real crops. Real values vary over crops; generated values over volumes.</em></p>
+
+<p align="center"><img src="assets/sr-sections.png" alt="Real crops at source resolution and center sections of one LR volume upsampled by nearest and trilinear interpolation and refined by SR" width="640"></p>
+<p align="center"><em>Figure 7. Top: real crops at source resolution. Below: center sections of one LR volume after nearest-neighbour and trilinear upsampling, and after SR.</em></p>
+
+SR keeps the arrangement chosen by LR. Downsampled back to the LR grid, 96.5% of LR voxels keep their LR phase, and SR changes 2.7% of HR voxels relative to nearest upsampling. Two SR seeds on the same LR input differ in 4.3% of voxels, so what SR adds varies between samples while LR fixes the arrangement. Both phases still percolate along every axis (99.8% of pore and 98.8% of solid voxels lie in spanning components). Pore tortuosity is 1.91 ± 0.05, 2.06 ± 0.11, and 1.70 ± 0.06 along z, y, and x, 8–14% below nearest-upsampled LR volumes on the same grid (2.07, 2.39, 1.88), consistent with the larger pore fraction. The order of the axes is unchanged, and the ratio of the y to the x value falls only from 1.27 to 1.21: SR does not remove the anisotropy of the LR arrangement (Figure 8).
+
+<p align="center"><img src="assets/sr-volume.png" alt="Generated HR 128-cubed volume with one octant removed" width="470"></p>
+<p align="center"><em>Figure 8. SR refinement of the volume in Figure 3 to 128³ voxels, one voxel per source pixel, with one octant removed.</em></p>
 
 ## Discussion
 
-A 3D generator trained only through 2D critics can produce volumes whose sections match the data within a few times the data's own sampling noise. Section statistics, however, do not pin down the third dimension: the anisotropic tortuosity remains after the axis and mirror losses, and a section critic cannot see it.
+A 3D generator trained only through 2D critics can produce volumes whose sections match the data within a few times the data's own sampling noise. Section statistics, however, do not pin down the third dimension: the anisotropic tortuosity remains after the axis and mirror losses and after SR, and a section critic cannot see it.
 
 Training on one image does not converge to a fixed point. After burn-in, the critic separates real from generated data increasingly well while the generator stops improving on two of three statistics. Selection by section structure bounds this problem with 2D data alone. Its cost is that the statistics can disagree, as the opposite trends of cluster and two-point error show, and their equal weighting is a choice, not a derivation.
 
+The two stages divide the errors. SR repairs what the LR grid cannot represent, the two-voxel steps and part of the missing pore volume, but it inherits the 3D arrangement, including its anisotropy, so 3D errors have to be fixed in LR. SR also drifts from its input as its sections improve, so the consistency loss bounds rather than prevents changes to the coarse structure.
+
 Posterior sampling makes a separately trained anchor model unnecessary. The price is that the whole volume changes: unlike a pasted plane, DPS gives up a fixed baseline far from the anchor in exchange for continuity near it. The saturation of controlled recovery shows that DPS accuracy, not missing information, limits agreement; stronger guidance, or guidance during SR, may raise it.
 
-The study has clear limits. It uses one binary image and no measured 3D volume, so 3D reconstruction accuracy and true tortuosity cannot be measured; internal anchors come from the model itself, and the external anchor is a crop of the training image. All results come from one training run with no ablations, so they describe the integrated system, not the contribution of each part, and the scale explanation of the anisotropic tortuosity is untested. Only five steps kept their weights, so selection is checked on independent crops among those alone. The 64³ volumes are small relative to the particle size, so tortuosity and percolation compare generated volumes rather than estimate material properties.
+The study has clear limits. It uses one binary image and no measured 3D volume, so 3D reconstruction accuracy and true tortuosity cannot be measured; internal anchors come from the model itself, and the external anchor is a crop of the training image. All results come from one training run with no ablations, so they describe the integrated system, not the contribution of each part, and the scale explanation of the anisotropic tortuosity is untested, as is the cause of the pore-fraction gain in SR. Only five LR and two SR steps kept their weights, so selection is checked on independent crops among those alone, and the SR score had not stopped falling when training ended. SR is evaluated on single 64³ inputs refined in one tile; tiled refinement of larger volumes is not evaluated here. The volumes are small relative to the particle size, and tortuosity depends on the grid (the LR volumes give 2.23, 2.62, and 2.03 on their own grid), so tortuosity and percolation compare generated volumes on one grid rather than estimate material properties.
 
 ## Methods
 
@@ -121,9 +146,13 @@ $$
 \mathcal{L}_{\mathrm{mirror}}=\mathbb{E}_{\text{plane},(a,b)}\Big[\max\big(0,\;\tfrac12\lVert P_{+a,+b}-P_{+a,-b}\rVert_1-\epsilon\big)\Big].
 $$
 
+### Super-resolution
+
+The SR denoiser has the same form, with the LR phase fractions, resized to the output grid, as an extra input. It refines volumes from the frozen LR generator, held in a bank that is refreshed during training, and is judged by the same pair critics on real crops at source resolution, together with axis agreement. Random coarse blocks of the input are sometimes replaced by random phases, and the network receives the corrupted fraction, so it is not forced to copy errors in its input. In place of the other statistical losses, a consistency loss penalizes the squared difference between the area-downsampled clean prediction and the uncorrupted LR input beyond a small tolerance.
+
 ### Checkpoint selection
 
-At regular intervals the EMA generator produces volumes from fixed seeds, and their sections are compared with fixed real crops by three statistics: two-point correlation, chord-length distribution, and cluster density and size per phase. Each error is divided by the same error between two halves of the real crops, so 1 means "as far from the data as the data is from itself"; the normalized errors are averaged into one score, and the lowest-scoring step is exported. Cluster statistics are included because merged pores and fragmented solid can match both two-point and chord statistics while changing 3D connectivity.
+At regular intervals the EMA generator produces volumes from fixed seeds, and their sections are compared with fixed real crops by three statistics: two-point correlation, chord-length distribution, and cluster density and size per phase. Each error is divided by the same error between two halves of the real crops, so 1 means "as far from the data as the data is from itself"; the normalized errors are averaged into one score, and the lowest-scoring step is exported. SR is scored on refinements of fixed bank volumes at source resolution. Cluster statistics are included because merged pores and fragmented solid can match both two-point and chord statistics while changing 3D connectivity.
 
 ### Plane anchors
 
@@ -138,6 +167,8 @@ where RMS is the root-mean-square anchor error, so the step does not depend on h
 ### Evaluation
 
 **Structure.** Each evaluated checkpoint generates 16 unconditional 64³ volumes, compared with 128 real crops that were not used for selection. The structure score is the selection score on these crops. For the selected step we also report percolation (fraction of a phase in components spanning an axis), pore tortuosity along each axis [18], and the tilt balance of solid particles (fraction tilted one way minus the other).
+
+**Super-resolution.** The 16 LR volumes of the selected LR step are refined once each and compared with 128 real crops at source resolution; the baselines upsample the same LR phase fractions. *LR agreement* is the fraction of LR voxels whose majority phase after area downsampling of the HR volume is the LR phase. Tortuosity and percolation are computed as for LR.
 
 **Anchors.** Each anchored sample is compared with a same-noise baseline, the same seed without guidance. *Internal anchors* take the center plane of an unconditional reference volume along each axis (24 cases); since the reference is known in 3D, agreement can be measured at every distance from the plane. *External anchors* use the real crop of Figure 1 at the center or the boundary of the volume (8 cases each). *Controlled recovery* anchors a growing, nested set of planes from a reference volume (4 cases). *Pool4* is the agreement of 4 × 4-cell phase fractions, which tolerates small boundary shifts. *First change* is the label-change rate next to the anchor divided by the ordinary rate between adjacent sections; above 1 indicates a seam. *Flicker* is the 95th percentile of the change in adjacent-section change rate, relative to the baseline.
 

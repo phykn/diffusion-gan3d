@@ -6,12 +6,12 @@ and build larger or higher-resolution volumes.
 
 [Install](#install) · [Run and inspect](scripts/README.md) · [Method & experiments](paper/README.md)
 
-| 2D training image and example crops | Generated LR volume (64³) |
+| 2D training image and example crops | Generated HR volume (128³) |
 | :---: | :---: |
-| <img src="paper/assets/01-training-data.png" alt="Labeled 2D microstructure with example training crops" width="360"> | <img src="paper/assets/02-generated-volume.png" alt="Generated 64-cubed LR microstructure with a cutaway view" width="320"> |
+| <img src="paper/assets/01-training-data.png" alt="Labeled 2D microstructure with example training crops" width="360"> | <img src="paper/assets/sr-volume.png" alt="Generated 128-cubed HR microstructure with a cutaway view" width="320"> |
 
-The volume comes from the LR stage of the run described in [the paper](paper/README.md), with the
-default sample's settings; one voxel spans two source pixels.
+The volume is an LR sample refined by the SR stage of the run described in [the paper](paper/README.md),
+with the default sample's settings; one voxel spans one source pixel.
 
 - **2D → 3D:** train from categorical sections in the `xy`, `xz`, and `yz` planes.
 - **Plane anchors:** steer generation toward known sections by posterior sampling.

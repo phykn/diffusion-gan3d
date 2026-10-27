@@ -1,4 +1,4 @@
-"""Render the paper figures from evaluate_lr.py results and its cached volumes."""
+"""Render the paper figures from evaluate_lr.py and evaluate_sr.py results and caches."""
 
 import json
 import sys
@@ -23,6 +23,10 @@ from paper.scripts.evaluate_lr import (
     OUTPUT,
     real_crops,
 )
+from paper.scripts.evaluate_sr import CACHE as SR_CACHE
+from paper.scripts.evaluate_sr import OUTPUT as SR_OUTPUT
+from paper.scripts.evaluate_sr import real_crops as hr_crops
+from paper.scripts.evaluate_sr import upsample_linear, upsample_nearest
 from scripts.common.metrics import read_metrics
 from src.build.data import build_datasets
 from src.config.train import load_train_config
@@ -63,6 +67,7 @@ def main() -> None:
     render_sections(volumes[0], dataset)
     render_training(results, run, cfg["burn_in"]["steps"])
     render_anchor(results)
+    render_sr(json.loads(SR_OUTPUT.read_text()))
 
 
 def render_training_image(dataset) -> None:
@@ -80,12 +85,12 @@ def render_training_image(dataset) -> None:
     print(f"Figure: {path.relative_to(PROJECT_ROOT)}")
 
 
-def render_volume(volume: np.ndarray) -> None:
+def render_volume(volume: np.ndarray, name: str = "02-generated-volume.png") -> None:
     figure = plt.figure(figsize=(8, 7), facecolor="#f8fafc")
     panel = figure.add_subplot(111, projection="3d")
     draw_volume(panel, volume, PHASE_RGB)
     figure.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    save(figure, "02-generated-volume.png", pad=0.03)
+    save(figure, name, pad=0.03)
 
 
 def draw_volume(
@@ -248,8 +253,21 @@ def render_training(results, run: Path, burn_in: int) -> None:
     panel.set_xlabel("Step")
 
     panel = panels[2]
+    plot_logits(panel, rows)
+    mark_schedule(panel, best, burn_in)
+    panel.set_title("(c) Mean critic logit", loc="left", color=INK)
+    panel.set_xlabel("Step")
+    panel.set_xlim(0, x[-1] * 1.22)
+    panel.set_xticks(range(0, x[-1] + 1, 2000))
+    figure.tight_layout(w_pad=1.5)
+    save(figure, "lr-training.png")
+
+
+def plot_logits(panel, rows) -> None:
+    """Mean critic logit of real and generated pairs over the three planes."""
+    names = {tag for row in rows for tag in row if tag.startswith("score/")}
     for color, (kind, label) in zip(SERIES, (("real", "Real"), ("fake", "Generated"))):
-        tags = [f"score/xy_xz_yz/{axis}/{kind}" for axis in range(3)]
+        tags = sorted(tag for tag in names if tag.endswith(f"/{kind}"))
         points = [
             (row["step"], np.mean([row[t] for t in tags]))
             for row in rows
@@ -267,13 +285,6 @@ def render_training(results, run: Path, burn_in: int) -> None:
             va="center",
             fontsize=9,
         )
-    mark_schedule(panel, best, burn_in)
-    panel.set_title("(c) Mean critic logit", loc="left", color=INK)
-    panel.set_xlabel("Step")
-    panel.set_xlim(0, x[-1] * 1.22)
-    panel.set_xticks(range(0, x[-1] + 1, 2000))
-    figure.tight_layout(w_pad=1.5)
-    save(figure, "lr-training.png")
 
 
 def mark_schedule(panel, best, burn_in):
@@ -375,6 +386,70 @@ def render_anchor(results) -> None:
     panel.set_title("(e) Controlled recovery", loc="left", color=INK)
     panel.grid(axis="y", color="#e5e7eb", lw=0.8)
     save(figure, "lr-anchor.png")
+
+
+def render_sr(results) -> None:
+    run = PROJECT_ROOT / results["run"]
+    cfg = load_train_config(run / "train.yaml", "sr")
+    best = results["best_step"]
+    low = torch.load(SR_CACHE / "lr.pt", weights_only=True)
+    high = torch.load(SR_CACHE / f"step{best}.pt", weights_only=True)
+    render_sr_training(results, run, cfg["burn_in"]["steps"])
+    render_sr_sections(low[0], high[0], build_datasets(cfg, True)[0][0])
+    render_volume(high[0].numpy(), "sr-volume.png")
+
+
+def render_sr_training(results, run: Path, burn_in: int) -> None:
+    steps = results["selection"]
+    x = [row["step"] for row in steps]
+    best = results["best_step"]
+    figure, panels = plt.subplots(1, 3, figsize=(12, 3.5))
+    for panel, key, title, label in (
+        (
+            panels[0],
+            "structure",
+            "(a) Structure score (selection)",
+            "Mean error / real split error",
+        ),
+        (panels[1], "lr_mse", "(b) Mismatch with LR input", "Downsampled HR vs LR MSE"),
+    ):
+        panel.plot(x, [row[key] for row in steps], color=SERIES[0], lw=2)
+        mark_schedule(panel, best, burn_in)
+        panel.set_title(title, loc="left", color=INK)
+        panel.set_xlabel("Step")
+        panel.set_ylabel(label)
+    panel = panels[2]
+    plot_logits(panel, read_metrics(run / "tensorboard"))
+    mark_schedule(panel, best, burn_in)
+    panel.set_title("(c) Mean critic logit", loc="left", color=INK)
+    panel.set_xlabel("Step")
+    panel.set_xlim(0, x[-1] * 1.22)
+    panel.set_xticks(range(0, x[-1] + 1, 1000))
+    figure.tight_layout(w_pad=1.5)
+    save(figure, "sr-training.png")
+
+
+def render_sr_sections(low: torch.Tensor, high: torch.Tensor, dataset) -> None:
+    labels = label_sections(hr_crops(dataset)).argmax(1)
+    volumes = (
+        ("LR, nearest", upsample_nearest(low)),
+        ("LR, trilinear", upsample_linear(low)),
+        ("SR", high),
+    )
+    center = high.shape[0] // 2
+    figure, panels = plt.subplots(4, 3, figsize=(8.4, 11.4))
+    for column in range(3):
+        show(panels[0, column], labels[column], f"Real crop {column + 1}")
+    for row, (name, volume) in enumerate(volumes, 1):
+        for column, (plane, section) in enumerate(
+            zip(
+                ("xy", "xz", "yz"),
+                (volume[center], volume[:, center], volume[:, :, center]),
+            )
+        ):
+            show(panels[row, column], section, f"{name} {plane}")
+    figure.tight_layout(pad=0.6, h_pad=1.0)
+    save(figure, "sr-sections.png")
 
 
 def save(figure, name, pad=0.05):
