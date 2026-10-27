@@ -64,7 +64,8 @@ A sample is one file in [config/samples/](../config/samples/); copy
 
 - `images` maps `xy`, `xz`, and `yz` to folders of 2D uint8 label images with one shared
   pixel size; in `xz` and `yz` images, z runs down the rows. Labels are phases `0..K-1`,
-  and phase 0 is pore. `K` is the largest label plus one unless `num_phases` is set.
+  and phase 0 is pore. `K` is the largest label plus one, and every smaller label must
+  appear, unless `num_phases` is set.
 - `resolution` sets the data size: each training crop is `crop_size` source pixels on
   an edge (enough to hold the structure), resized to `lo_res_size` voxels for LR and to
   `lo_res_size × sr_scale` voxels for SR (`sr_scale` is an integer of at least 2). Set

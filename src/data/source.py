@@ -55,14 +55,27 @@ def collect_image_groups(data: dict) -> ImageGroups:
 
 
 def infer_num_phases(data: dict) -> int:
-    """Count phases as the largest label in the training images plus one."""
-    largest = 0
+    """Count phases as the largest label in the training images plus one.
+
+    Every smaller label must appear too: 0/255 masks, or 2- and 4-bit PNGs that
+    PIL scales to 0..255, would otherwise make hundreds of phases.
+    """
+    present = np.zeros(256, dtype=bool)
     for planes in collect_image_groups(data).values():
         for groups in planes.values():
             for paths in groups:
                 for path in paths:
-                    largest = max(largest, read_labels(path)[1])
-    return largest + 1
+                    present |= (
+                        np.bincount(read_labels(path)[0].ravel(), minlength=256) > 0
+                    )
+    count = int(np.flatnonzero(present)[-1]) + 1
+    missing = np.flatnonzero(~present[:count])
+    if missing.size:
+        raise ValueError(
+            f"label {missing[0]} never appears below the largest label {count - 1}; "
+            "use labels 0..K-1, or set num_phases to keep an unused phase."
+        )
+    return count
 
 
 def fill_height_extents(cfg: dict) -> dict:

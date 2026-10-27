@@ -34,6 +34,30 @@ def test_default_sample_counts_phases_from_its_images():
     assert cfg["data"]["num_phases"] == 2
 
 
+def test_counting_phases_rejects_labels_with_gaps(tmp_path):
+    images = tmp_path / "images"
+    images.mkdir()
+    # A 0/255 mask would otherwise train 256 phases.
+    Image.fromarray((np.indices((20, 20)).sum(0) % 2 * 255).astype(np.uint8)).save(
+        images / "mask.png"
+    )
+    sample = {
+        "name": "mask",
+        "images": {"xy": str(images)},
+        "resolution": {"crop_size": 16, "lo_res_size": 8, "sr_scale": 2},
+        "structure": {
+            "isotropic": True,
+            "depth_gradient": False,
+            "mirror_symmetric": True,
+        },
+        "tune": {},
+    }
+    with pytest.raises(ValueError, match="label 1 never appears.*largest label 255"):
+        build_train_config(sample, "low_res")
+    cfg = build_train_config(sample | {"num_phases": 256}, "low_res")
+    assert cfg["data"]["num_phases"] == 256
+
+
 def test_sample_needs_images_resolution_and_every_structure_value(tmp_path):
     path = tmp_path / "bare.yaml"
     save_yaml(path, {"images": {"xy": "a"}})
