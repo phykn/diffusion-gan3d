@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.diagnostic import generate_with_baseline
+from scripts.common.metrics import wall_minutes
 from src.build.data import build_datasets
 from src.build.predict import build_generator
 from src.config.files import load_yaml
@@ -88,6 +89,7 @@ def main() -> None:
     results = {
         "run": str(run.relative_to(PROJECT_ROOT)),
         "best_step": best,
+        "training_minutes": wall_minutes(run / "tensorboard"),
         "guidance": settings.guidance,
         "anchor_strength": settings.anchor_strength,
         "real": real_summary(real_labels, noise) | {"tilt_phase1": real_tilt(dataset)},

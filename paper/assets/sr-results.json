@@ -2,6 +2,7 @@
   "run": "run/20261027-1522-default-sr",
   "lr_run": "run/20261027-1522-default-lr",
   "best_step": 5000,
+  "training_minutes": 192.40614081223805,
   "lr_guidance": 0.9,
   "real": {
     "crops": 128,

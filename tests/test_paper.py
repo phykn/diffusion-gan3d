@@ -16,19 +16,65 @@ from paper.scripts.evaluate_sr import lr_agreement, upsample_linear, upsample_ne
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def read_paper() -> str:
+    return (ROOT / "paper/README.md").read_text(encoding="utf-8")
+
+
+def read_results(stage: str) -> dict:
+    path = ROOT / f"paper/assets/{stage}-results.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def table(paper: str, header: str) -> dict[str, list[str]]:
+    """Cells of the paper table whose first column is header, by row name."""
+    lines = paper.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"| {header} |"))
+    rows = {}
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        name, *cells = (cell.strip().strip("*") for cell in line.strip("|").split("|"))
+        rows[name] = cells
+    return rows
+
+
+def spread(values, digits: int, scale: float = 1.0, unit: str = "") -> str:
+    """Mean ± standard deviation of a summary or of raw values, as the paper prints it."""
+    if isinstance(values, dict):
+        mean, std = values["mean"], values["std"]
+    else:
+        mean, std = np.mean(values), np.std(values, ddof=1)
+    return f"{scale * mean:.{digits}f} ± {scale * std:.{digits}f}{unit}"
+
+
+def section_cells(summary: dict) -> list[str]:
+    planes = summary["planes"].values()
+    error = {
+        key: np.mean([plane[key] for plane in planes])
+        for key in ("two_point_mae", "chord_tv", "cluster_error")
+    }
+    return [
+        f"{summary['structure']:.2f}",
+        f"{error['two_point_mae']:.4f}",
+        f"{error['chord_tv']:.4f}",
+        f"{error['cluster_error']:.3f}",
+        spread(summary["phase0_fraction"], 3),
+        spread(summary["interface_density"], 4),
+    ]
+
+
+def real_cells(real: dict) -> list[str]:
+    return ["—"] * 4 + [
+        spread(real["phase0_fraction"], 3),
+        spread(real["interface_density"], 4),
+    ]
+
+
 def test_paper_numbers_and_figures_match_lr_results() -> None:
-    paper = (ROOT / "paper/README.md").read_text(encoding="utf-8")
-    results = json.loads(
-        (ROOT / "paper/assets/lr-results.json").read_text(encoding="utf-8")
-    )
+    paper = read_paper()
+    results = read_results("lr")
     best = results["steps"][str(results["best_step"])]
     assert f"**{best['structure']:.2f}**" in paper
-    exact = 100 * np.asarray([row["exact"] for row in results["anchor"]["internal"]])
-    assert f"{exact.mean():.1f} ± {exact.std(ddof=1):.1f}%" in paper
-    sixteen = [
-        row["whole"] for row in results["anchor"]["coverage"] if row["count"] == 16
-    ]
-    assert f"{100 * np.mean(sixteen):.1f}%" in paper
     for tilt in (best["tilt_phase1"]["yx"], results["real"]["tilt_phase1"]):
         balance = f"{tilt['balance']:.2f}".replace("-", "−")
         assert f"{balance} over {tilt['count']} particles" in paper
@@ -39,10 +85,8 @@ def test_paper_numbers_and_figures_match_lr_results() -> None:
 
 
 def test_paper_numbers_match_sr_results() -> None:
-    paper = (ROOT / "paper/README.md").read_text(encoding="utf-8")
-    results = json.loads(
-        (ROOT / "paper/assets/sr-results.json").read_text(encoding="utf-8")
-    )
+    paper = read_paper()
+    results = read_results("sr")
     best = results["steps"][str(results["best_step"])]
     assert f"**{best['structure']:.2f}**" in paper
     for name in ("nearest", "linear"):
@@ -64,6 +108,98 @@ def test_paper_numbers_match_sr_results() -> None:
     for phase, label in ((0, "pore"), (1, "solid")):
         span = 100 * best[f"percolation_phase{phase}"]["z"]["mean"]
         assert f"{span:.1f}% of {label}" in paper
+
+
+def test_lr_table_matches_results() -> None:
+    results = read_results("lr")
+    rows = table(read_paper(), "Step")
+    best, last = results["best_step"], max(map(int, results["steps"]))
+    labels = {best: " (selected)", last: " (last)"}
+
+    assert rows.pop("Real crops") == real_cells(results["real"])
+    for step, summary in results["steps"].items():
+        assert rows.pop(step + labels.get(int(step), "")) == section_cells(summary)
+    assert not rows
+
+
+def test_sr_table_matches_results() -> None:
+    results = read_results("sr")
+    rows = table(read_paper(), "Volumes")
+
+    def agreement(summary):
+        value = 100 * summary["lr_agreement"]["mean"]
+        return "100%" if value == 100 else f"{value:.1f}%"
+
+    assert rows.pop("Real crops") == real_cells(results["real"]) + ["—"]
+    for name, label in (("nearest", "nearest"), ("linear", "trilinear")):
+        summary = results["baselines"][name]
+        assert rows.pop(f"LR, {label}") == section_cells(summary) + [agreement(summary)]
+    for step, summary in results["steps"].items():
+        selected = " (selected)" if int(step) == results["best_step"] else ""
+        assert rows.pop(f"SR, step {step}{selected}") == section_cells(summary) + [
+            agreement(summary)
+        ]
+    assert not rows
+
+
+def test_anchor_table_matches_results() -> None:
+    anchor = read_results("lr")["anchor"]
+    rows = table(read_paper(), "Anchor")
+    center = max(row["index"] for row in anchor["external"])
+    cases = {
+        "Internal": anchor["internal"],
+        "External, center": [r for r in anchor["external"] if r["index"] == center],
+        "External, boundary": [r for r in anchor["external"] if r["index"] == 0],
+    }
+
+    for name, group in cases.items():
+
+        def column(key, scale=1.0, digits=2, unit=""):
+            return spread([row[key] for row in group], digits, scale, unit)
+
+        assert rows.pop(name) == [
+            str(len(group)),
+            column("exact_baseline", 100, 1, "%"),
+            column("exact", 100, 1, "%"),
+            column("pool4", 100, 1, "%"),
+            column("first_change_ratio"),
+            column("first_change_ratio_baseline"),
+            column("p95_flicker_ratio"),
+        ]
+    assert not rows
+
+
+def test_paper_text_numbers_match_results() -> None:
+    paper = read_paper()
+    lr, sr = read_results("lr"), read_results("sr")
+    assert f"({lr['training_minutes']:.0f} minutes" in paper
+    assert f"({sr['training_minutes'] / 60:.1f} hours)" in paper
+    for results in (lr, sr):
+        best = results["steps"][str(results["best_step"])]
+        real = results["real"]["interface_density"]["mean"]
+        gap = 100 * (1 - best["interface_density"]["mean"] / real)
+        assert f"within {gap:.1f}%" in paper
+
+    best = lr["best_step"]
+    selected = next(row for row in lr["selection"] if row["step"] == best)
+    scores = (
+        f"{lr['steps'][str(best)]['structure']:.2f} against {selected['structure']:.2f}"
+    )
+    assert f"({scores} for step {best})" in paper
+
+    anchor = lr["anchor"]
+    reference = [row["reference"] for row in anchor["internal"]]
+    for distance, text in ((1, "one voxel away"), (4, "at four"), (12, "at twelve")):
+        agreement = np.mean([r[str(distance)]["anchored"] for r in reference])
+        assert f"{100 * agreement:.1f}% {text}" in paper
+    divergence = [
+        100 * np.mean([row["divergence"][d] for row in anchor["internal"]])
+        for d in anchor["internal"][0]["divergence"]
+    ]
+    assert f"differ in {min(divergence):.0f}–{max(divergence):.0f}% of voxels" in paper
+    for count, text in ((0, "no anchors"), (8, "eight planes"), (16, "sixteen")):
+        whole = [r["whole"] for r in anchor["coverage"] if r["count"] == count]
+        assert f"{100 * np.mean(whole):.1f}% with {text}" in paper
 
 
 def test_readme_figures_exist() -> None:
