@@ -91,12 +91,12 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         "train.mixed_precision",
         "model.gradient_checkpointing",
         "augmentation.real_only",
+        "selection.enabled",
     ]
     if stage == "low_res":
         flags += [
             "conditioning.spatial_profile.enabled",
             "conditioning.spatial_profile.critic_enabled",
-            "selection.enabled",
         ]
     for name in flags:
         check_boolean(_setting(cfg, name), name)
@@ -107,12 +107,12 @@ def normalize_train_config(cfg: Mapping, stage: str = "low_res") -> dict:
         ("model.critic.pyramid_min_size", 2),
         ("loss.group_statistics.max_gap", 1),
         ("loss.mirror_balance.max_gap", 1),
+        ("selection.samples", 1),
     ]
     if stage == "low_res":
         integers += [
             ("loss.real_transition.max_gap", 1),
             ("conditioning.spatial_profile.num_bins", 1),
-            ("selection.samples", 1),
         ]
     for name, minimum in integers:
         check_integer(_setting(cfg, name), name, minimum)

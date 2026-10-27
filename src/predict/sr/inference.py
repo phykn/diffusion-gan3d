@@ -50,13 +50,25 @@ class SuperResolutionAPI:
     def __init__(
         self, weights: str | Path, device: str | torch.device | None = None
     ) -> None:
-        self.device = check_device(default_device() if device is None else device)
+        device = check_device(default_device() if device is None else device)
         self.weights = resolve_weights(weights)
         payload = load_sr_export(self.weights)
-        self.config = payload["config"]
-        self.model = build_denoiser(self.config).to(self.device)
-        self.model.load_state_dict(payload["model"], strict=True)
-        self.model.eval().requires_grad_(False)
+        model = build_denoiser(payload["config"]).to(device)
+        model.load_state_dict(payload["model"], strict=True)
+        self._attach(model.eval().requires_grad_(False), payload["config"], device)
+
+    @classmethod
+    def from_model(cls, model, config: dict, device: torch.device):
+        """Refine with a model already in memory, such as a training EMA."""
+        api = cls.__new__(cls)
+        api.weights = None
+        api._attach(model, config, device)
+        return api
+
+    def _attach(self, model, config: dict, device: torch.device) -> None:
+        self.device = device
+        self.config = config
+        self.model = model
         resolution = get_sr_resolution(self.config)
         self.crop_size = resolution.crop_size
         self.lo_res_size = resolution.lo_res_size

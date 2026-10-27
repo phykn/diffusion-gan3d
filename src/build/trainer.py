@@ -24,7 +24,11 @@ from src.storage import load_model
 from src.train.burn_in import BurnIn
 from src.train.ema import build_ema
 from src.train.loss.denoiser import DenoiserLossSettings
-from src.train.selection import CheckpointSelection, build_reference
+from src.train.selection import (
+    CheckpointSelection,
+    SRCheckpointSelection,
+    build_reference,
+)
 from src.train.trainer import Trainer, TrainerComponents, TrainerSettings
 
 
@@ -83,7 +87,15 @@ def build_trainer(
         for domain_id, axes in datasets.items()
     }
     selection = None
-    if not sr and cfg["selection"]["enabled"]:
+    if cfg["selection"]["enabled"] and sr:
+        selection = SRCheckpointSelection.from_bank(
+            build_reference(datasets),
+            cfg["selection"]["samples"],
+            bank,
+            bank_origins,
+            bank_extents,
+        )
+    elif cfg["selection"]["enabled"]:
         selection = CheckpointSelection(
             build_reference(datasets),
             cfg["selection"]["samples"],

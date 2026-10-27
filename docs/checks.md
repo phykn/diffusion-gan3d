@@ -42,27 +42,33 @@ python scripts/05_check_continuation.py --weight "run/my-run-lr" --anchor data/s
 ## Save and resume
 
 - `generator.pt` in the run directory is the inference export, refreshed every
-  `weights_every_steps` and at the last step. In LR runs it is the best scored step so
-  far, not the latest one ([Best LR step](#best-lr-step)); in SR runs it is the latest.
+  `weights_every_steps` and at the last step. It is the best scored step so far, not the
+  latest one ([Best step](#best-step)).
 - Every `archive_every_steps` and at the last step, `checkpoints/` gets `step_N.pt` (full
   training state), `generator_N.pt` (EMA weights), and a `step_N.complete` marker that
   resume requires.
 - The first Ctrl+C stops after the current step and saves both; a second stops at once
   without saving.
-- Metrics and diagnostics go to `tensorboard/`; LR step scores also go to
-  `selection/scores.yaml` ([Best LR step](#best-lr-step)).
+- Metrics and diagnostics go to `tensorboard/`; step scores also go to
+  `selection/scores.yaml` ([Best step](#best-step)).
 
 ```bash
 python run_train.py --resume "run/my-run-lr" --steps 30000 --run-dir "run/my-run-2"
 ```
 
-### Best LR step
+### Best step
 
-LR training improves and then may degrade, for example when the critic memorizes few
-real images. At each `weights_every_steps` save and the last step, LR training scores
-its EMA weights: `selection.samples` unanchored volumes at guidance 1.0, from fixed
-seeds whatever [config/gen.yaml](../config/gen.yaml) says, against 64 fixed real crops
-per plane. Only 2D sections of the material exist, so the score compares sections:
+Training improves and then may degrade, for example when the critic memorizes few real
+images. At each `weights_every_steps` save and the last step, a run scores its EMA
+weights on `selection.samples` volumes against 64 fixed real crops per plane:
+
+- **LR** generates unanchored volumes at guidance 1.0, from fixed seeds whatever
+  [config/gen.yaml](../config/gen.yaml) says. Height-conditioned runs take each
+  volume's depth from an `xz`/`yz` crop.
+- **SR** refines fixed LR volumes, the first ones of the initial bank, with their bank
+  heights; bank refreshes do not change them. The real crops are HR sections.
+
+Only 2D sections of the material exist, so the score compares sections:
 
 - **Two-point** and **chord-length** errors, as in `structure/<plane>/*`.
 - **Cluster error**: how far each phase's 4-connected clusters per section pixel and
@@ -72,14 +78,20 @@ per plane. Only 2D sections of the material exist, so the score compares section
 
 Each error is divided by the same error between two halves of the real crops, so all
 three use the sampling noise of the real data as their unit; **structure** is their
-mean over planes. `generator.pt` is the step with the lowest structure. Height-conditioned
-runs take each volume's depth from an `xz`/`yz` crop.
+mean over planes. `generator.pt` is the step with the lowest structure. Each plane uses
+128 generated sections spread evenly over the volumes, so the statistics cost grows with
+the section area, not the volume size.
+
+SR also records **lr_mse**, the gap between its downsampled output and the LR input, as
+in training's `lr_mse`. It does not affect the choice: SR learns to repair corrupted LR
+input, so matching it exactly is not the goal.
 
 - `selection/scores.yaml` lists every scored step and the best step; TensorBoard has
   `selection/*`.
-- `selection/generator_N.pt` keeps the best step's weights. Resume copies it from the
-  resumed run, so keep it.
-- One evaluation of 8 samples takes about 5 s per domain at 64³ on Apple MPS. Set
+- `selection/generator_N.pt` keeps the best step's weights, and SR runs keep their LR
+  inputs in `selection/inputs.pt`. Resume copies both from the resumed run, so keep them.
+- One LR evaluation of 8 samples takes about 4 s per domain at 64³ on Apple MPS; most of
+  it is generation, which grows with volume size like a training step does. Set
   `selection.enabled: false` to export the latest step instead.
 
 Resume continues the stage the checkpoint belongs to with its saved settings, so it takes

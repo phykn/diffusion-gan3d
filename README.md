@@ -48,8 +48,8 @@ high-resolution sections. `--run-dir NAME` writes `NAME-lr` and `NAME-sr`, and r
 the command skips a finished stage; without it, each stage gets a new timestamped folder in
 `run/`. `--lr-only` stops after LR, so a later run with the same `--run-dir` trains only SR.
 `--resume` continues one interrupted stage ([Save and resume](docs/checks.md#save-and-resume)).
-The LR `generator.pt` is the best scored step, not the last one
-([Best LR step](docs/checks.md#best-lr-step)).
+Each stage's `generator.pt` is its best scored step, not the last one
+([Best step](docs/checks.md#best-step)).
 During the first `burn_in.steps` steps (LR 5000, SR 2500) a cosine curve moves the
 learning rates to `burn_in.lr_scale` (0.25) of `optim.*_lr`, Adam β2 from
 `optim.adam_betas` to `burn_in.beta2` (0.99), the R1/R2 weights to

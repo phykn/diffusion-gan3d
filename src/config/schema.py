@@ -65,6 +65,7 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
             ),
             "mirror_balance": dict.fromkeys(("weight", "max_gap", "tolerance")),
         },
+        "selection": dict.fromkeys(("enabled", "samples")),
     }
     common["data"]["split"] = dict.fromkeys(("validation_files", "validation_regions"))
     if stage == "low_res":
@@ -93,7 +94,6 @@ def validate_config_keys(cfg: Mapping, stage: str) -> Mapping:
                 }
             ),
             "train": common["train"] | {"initial_weights": None},
-            "selection": dict.fromkeys(("enabled", "samples")),
         }
     else:
         schema = common | {

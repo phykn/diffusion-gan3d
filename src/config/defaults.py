@@ -31,6 +31,8 @@ TRAIN_DEFAULTS = {
     "train.num_workers": 0,
     "augmentation.probability": 0.5,
     "augmentation.real_only": False,
+    "selection.enabled": True,
+    "selection.samples": 8,
 }
 
 
@@ -48,8 +50,6 @@ STAGE_DEFAULTS = {
         "loss.real_transition.start_step": 0,
         "loss.real_transition.ramp_steps": 5000,
         "train.initial_weights": None,
-        "selection.enabled": True,
-        "selection.samples": 8,
         "burn_in.steps": 5000,
     },
     "sr": {

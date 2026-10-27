@@ -14,6 +14,7 @@ from src.data.bank import load_bank
 from src.data.source import fill_height_extents, infer_height_extents
 from src.device import check_device
 from src.storage import file_hash
+from src.train.checkpoint import resolve_checkpoint
 from src.train.run.bank import (
     create_bank,
     publish_bank,
@@ -84,6 +85,12 @@ def run_sr_train(
     section("SR training")
     field("Resolution", describe_resolution(get_sr_resolution(cfg)))
     path_field("Run", run_dir)
+    if trainer.selection is not None and payload:
+        # The scored LR inputs and best weights sit in the resumed run folder.
+        source_run = resolve_checkpoint(resume).parent.parent
+        trainer.selection.import_best(source_run, run_dir)
+    elif trainer.selection is not None:
+        trainer.selection.save_inputs(run_dir)
 
     def before_step(step: int) -> None:
         interval = cfg["lr_bank"]["refresh_every_steps"]

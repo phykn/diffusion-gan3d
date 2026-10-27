@@ -64,37 +64,52 @@ class SectionErrors(NamedTuple):
     cluster_error: float
 
 
-def section_errors(real, fake) -> SectionErrors:
-    """How far generated sections are from real ones in three statistics."""
-    phases = real.shape[1]
-    first, second = two_point(real), two_point(fake)
-    two_point_mae = float(
-        torch.cat([(a - b).abs().flatten() for a, b in zip(first, second)]).mean()
+class SectionStatistics(NamedTuple):
+    two_point: list
+    chords: list
+    clusters: tuple
+
+
+def section_statistics(sections) -> SectionStatistics:
+    """The statistics section_errors compares, so fixed sections compute them once."""
+    phases = sections.shape[1]
+    labels = sections.argmax(1).numpy()
+    return SectionStatistics(
+        two_point(sections),
+        chord_distribution(labels, phases),
+        cluster_statistics(labels, phases),
     )
-    real_labels, fake_labels = real.argmax(1).numpy(), fake.argmax(1).numpy()
-    first_chords = chord_distribution(real_labels, phases)
-    second_chords = chord_distribution(fake_labels, phases)
+
+
+def compare_sections(real: SectionStatistics, fake: SectionStatistics) -> SectionErrors:
+    two_point_mae = float(
+        torch.cat(
+            [(a - b).abs().flatten() for a, b in zip(real.two_point, fake.two_point)]
+        ).mean()
+    )
     chord_tv = float(
         np.mean(
             [
                 np.abs(a - b).sum(-1).mean() * 0.5
-                for a, b in zip(first_chords, second_chords)
+                for a, b in zip(real.chords, fake.chords)
             ]
         )
     )
     # Gap relative to the mean of both sides: bounded at 2 when one side lacks a
     # phase, and 0 when neither has it.
     gaps = []
-    for a, b in zip(
-        cluster_statistics(real_labels, phases),
-        cluster_statistics(fake_labels, phases),
-    ):
+    for a, b in zip(real.clusters, fake.clusters):
         mean = (a + b) / 2
         gaps.append(
             np.divide(np.abs(a - b), mean, out=np.zeros_like(mean), where=mean > 0)
         )
     cluster_error = float(np.mean(gaps))
     return SectionErrors(two_point_mae, chord_tv, cluster_error)
+
+
+def section_errors(real, fake) -> SectionErrors:
+    """How far generated sections are from real ones in three statistics."""
+    return compare_sections(section_statistics(real), section_statistics(fake))
 
 
 @torch.no_grad()

@@ -11,7 +11,7 @@
 | Anchors at inference | [anchor encoding and AnchorGuidance](../src/predict/anchor.py) |
 | Plane pairs | [section sampling](../src/data/slice.py) |
 | Metrics and TensorBoard tags | [metrics](../src/train/metrics.py), [structure metrics](../src/evaluate/structure.py) |
-| Best LR step export | [CheckpointSelection](../src/train/selection.py), [run loop](../src/train/run/loop.py) |
+| Best step export | [CheckpointSelection](../src/train/selection.py), [run loop](../src/train/run/loop.py) |
 | Section augmentation | [auto plane policies](../src/config/train.py), [CriticAugment](../src/data/augment.py) |
 | SR bank or height coordinates | [bank validation](../src/data/bank.py), [SR assembly](../src/build/sr.py) |
 | Checkpoints or resume | [run lifecycle](../src/train/run/), [training state](../src/train/state.py) |
@@ -42,9 +42,11 @@
   sections; `group_statistics` keeps the pairs along the normals of planes one critic
   group judges within `tolerance` of each other; `mirror_balance` keeps mirrored
   diagonals equal.
-- LR runs score their EMA weights at every weights save with
-  [CheckpointSelection](../src/train/selection.py) before the archive checkpoint, so
-  a resume keeps that score; `save_weights` exports the best step as `generator.pt`.
+- LR and SR runs score their EMA weights at every weights save with
+  [CheckpointSelection](../src/train/selection.py) (`SRCheckpointSelection` for SR)
+  before the archive checkpoint, so a resume keeps that score; `save_weights` exports
+  the best step as `generator.pt`. Statistics use a fixed number of sections per plane
+  (`SECTIONS`), so their cost grows with section area, not volume size.
 - With `augmentation.auto_planes`, `auto_plane_policies` in `src/config/train.py` picks
   each plane's flips and rotations. z stays fixed (no `xz`/`yz` rotation) when height is
   enabled or no critic group judges `xy` with a side plane; z flips are off with height.
