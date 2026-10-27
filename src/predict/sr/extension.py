@@ -34,7 +34,8 @@ def coarsen_volume(high, scale, num_phases):
     return low
 
 
-@torch.inference_mode()
+# no_grad, not inference_mode: inference tensors recompile the fused norm.
+@torch.no_grad()
 def extend_hr(
     lr,
     sr,

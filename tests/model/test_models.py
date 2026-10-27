@@ -49,6 +49,30 @@ def test_apple_gpu_fused_norm_matches_the_eager_one(dtype):
         torch.testing.assert_close(fused, eager, rtol=tolerance, atol=tolerance)
 
 
+@pytest.mark.skipif(not MPS, reason="MPS unavailable")
+def test_apple_gpu_fused_norm_compiles_once_per_grad_mode():
+    # fp32 affine weights, fp16 modulation and frozen EMA weights share one
+    # kernel per grad mode instead of using up the recompile limit.
+    from torch._dynamo.utils import counters
+
+    torch._dynamo.reset()
+    counters.clear()
+    affine = ChannelNormSiLU3D(8).to("mps")
+    adaptive = ChannelNormSiLU3D(8, affine=False).to("mps")
+    x = torch.randn(2, 8, 4, 4, 4, device="mps", dtype=torch.float16)
+    modulation = torch.randn(
+        1, 8, 1, 1, 1, device="mps", dtype=torch.float16, requires_grad=True
+    )
+    for grad in (True, False):
+        with torch.set_grad_enabled(grad):
+            affine(x)
+            adaptive(x, modulation, modulation)
+    affine.requires_grad_(False)
+    with torch.no_grad():
+        affine(x)
+    assert counters["stats"]["unique_graphs"] == 2
+
+
 def _denoiser(
     *,
     checkpointing: bool = False,

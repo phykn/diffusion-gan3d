@@ -69,6 +69,13 @@ class ChannelNormSiLU3D(nn.Module):
         if scale is None:
             shape = (1, -1, 1, 1, 1)
             scale, shift = self.scale.view(shape), self.shift.view(shape)
+        # The compiled kernel recompiles for each new input dtype and
+        # requires_grad, and fp32 parameters, fp16 modulation and frozen EMA
+        # weights would otherwise use up its recompile limit. fp32 is lossless
+        # and keeps the kernel's own rounding.
+        scale, shift = scale.float(), shift.float()
+        if not torch.is_grad_enabled():
+            scale, shift = scale.detach(), shift.detach()
         norm_silu = (
             fused_channel_norm_silu() if x.device.type == "mps" else channel_norm_silu
         )

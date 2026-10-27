@@ -182,7 +182,8 @@ class SuperResolutionAPI:
             base_offset=base_offset,
         )
 
-    @torch.inference_mode()
+    # no_grad, not inference_mode: inference tensors recompile the fused norm.
+    @torch.no_grad()
     def _run(
         self,
         low: torch.Tensor,
