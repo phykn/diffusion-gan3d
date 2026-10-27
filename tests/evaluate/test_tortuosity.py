@@ -132,7 +132,7 @@ def test_pore_tortuosity_uses_phase_zero_and_thickness_axis(monkeypatch):
     assert calls == [(volume, 0, 0, torch.device("cpu"))]
 
 
-def test_unconverged_solver_reports_unavailable(monkeypatch):
+def test_unconverged_solver_reports_unavailable(monkeypatch, caplog):
     class Solver:
         converged = False
 
@@ -145,6 +145,7 @@ def test_unconverged_solver_reports_unavailable(monkeypatch):
     monkeypatch.setattr(tau, "Solver", Solver)
     volume = torch.zeros(2, 2, 2, dtype=torch.uint8)
     assert pore_tortuosity(volume, torch.device("cpu")) is None
+    assert "did not converge" in caplog.text
 
 
 @pytest.mark.parametrize(

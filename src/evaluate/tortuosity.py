@@ -1,3 +1,4 @@
+import logging
 import math
 
 import numpy as np
@@ -7,6 +8,8 @@ import torch
 from src.device import default_device
 from src.evaluate.connectivity import spanning_fractions
 from src.phase import PORE_PHASE
+
+logger = logging.getLogger(__name__)
 
 
 def tortuosity(
@@ -46,4 +49,5 @@ def pore_tortuosity(volume: torch.Tensor, device: torch.device) -> float | None:
         # reports it as a plain RuntimeError.
         if isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc):
             raise
+        logger.warning("pore tortuosity unavailable: %s", exc)
         return None
