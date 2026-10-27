@@ -6,7 +6,6 @@ import torch
 @dataclass(frozen=True)
 class RealBatch:
     images: dict[int, torch.Tensor]
-    domains: dict[int, int] = field(default_factory=dict)
     origins: dict[int, torch.Tensor] = field(default_factory=dict)
     extents: dict[int, torch.Tensor] = field(default_factory=dict)
     heights: dict[int, torch.Tensor] = field(default_factory=dict)

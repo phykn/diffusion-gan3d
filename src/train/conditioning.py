@@ -167,7 +167,7 @@ class ConditionSampler:
     ) -> RealBatch:
         if batch_domains is None:
             batch_domains = self.select_batch_domains(domain)
-        batches = RealBatch(images={}, domains=batch_domains)
+        batches = RealBatch(images={})
         for axis in self.active_axes:
             batch = self.streams[batch_domains[axis]][axis].next()
             images = batch["image"]

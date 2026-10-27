@@ -145,7 +145,7 @@ def test_transition_targets_exclude_borrowed_domain_planes():
         transition=0,
         domain=0,
         model_conditions={},
-        real=RealBatch(images={0: own, 1: borrowed}, domains={0: 0, 1: 1}),
+        real=RealBatch(images={0: own, 1: borrowed}),
     )
     loss = trainer._real_transition_loss(prepared, volume)
     assert loss == 0
@@ -236,7 +236,7 @@ def test_trainer_transition_targets_use_rotating_augmentation_planes():
         transition=0,
         domain=0,
         model_conditions={},
-        real=RealBatch(images={0: images}, domains={0: 0}),
+        real=RealBatch(images={0: images}),
     )
     volume = images[:1, :, None].expand(-1, -1, 4, -1, -1)
     assert trainer._real_transition_loss(prepared, volume) > 0
