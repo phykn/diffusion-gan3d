@@ -67,6 +67,29 @@ def test_apple_gpu_pointwise_gradients_match_the_native_convolution(bias):
 
 
 @pytest.mark.skipif(not MPS, reason="MPS unavailable")
+@pytest.mark.parametrize("kernel", [3, 1])
+def test_apple_gpu_half_precision_keeps_the_fast_gradients(kernel):
+    torch.manual_seed(0)
+    native = nn.Conv3d(3, 4, kernel, padding=kernel // 2).to("mps")
+    layer = Conv3d(3, 4, kernel, padding=kernel // 2).to("mps")
+    layer.load_state_dict(native.state_dict())
+    x = torch.randn(2, 3, 32, 32, 32, device="mps")
+    grads = []
+    for module, half in ((native, False), (layer, True)):
+        inputs = x.clone().requires_grad_()
+        with torch.autocast("mps", dtype=torch.float16, enabled=half):
+            out = module(inputs)
+        out.float().square().mean().backward()
+        grads.append([out, inputs.grad, *(p.grad for p in module.parameters())])
+    assert out.dtype == torch.float16
+    assert type(out.grad_fn).__name__ != "ConvolutionBackward0"
+    assert all(p.grad.dtype == torch.float32 for p in layer.parameters())
+    for fast, reference in zip(*grads):
+        error = (fast.float() - reference).abs().max() / reference.abs().max()
+        assert error < 2e-3
+
+
+@pytest.mark.skipif(not MPS, reason="MPS unavailable")
 def test_apple_gpu_falls_back_outside_the_fast_case():
     x = torch.randn(1, 2, 32, 32, 32, device="mps")
     strided = Conv3d(2, 3, 3, stride=2, padding=1).to("mps")

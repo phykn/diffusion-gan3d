@@ -96,8 +96,8 @@ def _restore_state(trainer, payload: dict) -> None:
     trainer.denoiser_optim.load_state_dict(payload["generator_optim"])
     for group, optimizer in trainer.critic_optims.items():
         optimizer.load_state_dict(payload["critic_optims"][group])
-    # Runs without CUDA AMP save an empty scaler state; an enabled scaler then
-    # starts from its initial scale.
+    # Runs without AMP save an empty scaler state; an enabled scaler then starts
+    # from its initial scale.
     if payload["scaler"]:
         trainer.scaler.load_state_dict(payload["scaler"])
     if trainer.selection is not None:

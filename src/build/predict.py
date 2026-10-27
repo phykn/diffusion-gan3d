@@ -6,7 +6,7 @@ from src.build.model import build_denoiser, build_diffusion
 from src.config.data import get_resolution
 from src.config.files import find_saved_config
 from src.config.train import load_train_config
-from src.device import inference_amp
+from src.device import gpu_amp
 from src.predict.generator import Generator
 from src.storage import load_model
 
@@ -59,6 +59,6 @@ def make_generator(denoiser, cfg: dict, device: torch.device, patch_size: int):
         patch_size=patch_size,
         num_phases=data["num_phases"],
         latent_channels=cfg["model"]["generator"]["latent_channels"],
-        use_amp=inference_amp(cfg["train"]["mixed_precision"], device),
+        use_amp=gpu_amp(cfg["train"]["mixed_precision"], device),
         height_data=data if cfg["conditioning"]["height_enabled"] else None,
     )

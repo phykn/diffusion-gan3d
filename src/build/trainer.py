@@ -18,7 +18,7 @@ from src.config.train import (
 )
 from src.data.provenance import fingerprint_data
 from src.data.source import fill_height_extents
-from src.device import inference_amp
+from src.device import gpu_amp
 from src.plane import PLANE_DIRECTIONS
 from src.storage import load_model
 from src.train.burn_in import BurnIn
@@ -99,7 +99,7 @@ def build_trainer(
             diffusion=build_diffusion(cfg).to(device),
             denoiser_optim=denoiser_optim,
             critic_optims=critic_optims,
-            scaler=torch.amp.GradScaler("cuda", enabled=settings.amp_enabled),
+            scaler=torch.amp.GradScaler(device.type, enabled=settings.denoiser_amp),
             device=device,
             critic_augment=critic_augment,
             coarse_bank=bank,
@@ -192,8 +192,8 @@ def _build_settings(cfg: dict, device: torch.device) -> TrainerSettings:
         domain_keep_probability=conditioning["domain_keep_probability"],
         cfg_dropout_probability=conditioning["cfg_dropout_probability"],
         latent_channels=generator["latent_channels"],
-        amp_enabled=train["mixed_precision"] and device.type == "cuda",
-        rollout_amp=inference_amp(train["mixed_precision"], device),
+        denoiser_amp=gpu_amp(train["mixed_precision"], device),
+        critic_amp=train["mixed_precision"] and device.type == "cuda",
         r2_weight=loss["r2_weight"],
         coarse_corruption_probability=conditioning["coarse_corruption_probability"],
         coarse_corruption_strength=conditioning["coarse_corruption_strength"],

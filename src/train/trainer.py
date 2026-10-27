@@ -91,9 +91,10 @@ class TrainerSettings:
     profile_settings: dict
     volume_permute_z: bool
     volume_flip_z: bool
-    amp_enabled: bool
-    # The no-grad rollout needs no GradScaler, so it also takes fp16 on MPS.
-    rollout_amp: bool
+    # fp16 for the denoiser, under the GradScaler; on CUDA and MPS.
+    denoiser_amp: bool
+    # fp16 for the critics, on CUDA only: on MPS (torch 2.14) it faults the GPU.
+    critic_amp: bool
 
 
 class Trainer:
@@ -263,7 +264,7 @@ class Trainer:
         )
         current = torch.randn(shape, device=self.device, dtype=torch.float32)
 
-        with torch.no_grad(), self.autocast(self.settings.rollout_amp):
+        with torch.no_grad(), self.autocast(self.settings.denoiser_amp):
             for index in reversed(range(transition + 1, self.diffusion.timesteps)):
                 time = self.make_time(index, current.shape[0])
                 latent = self.sample_latent(current.shape[0], current.dtype)
@@ -282,7 +283,7 @@ class Trainer:
         current = current.detach()
         time = self.make_time(transition, current.shape[0])
         latent = self.sample_latent(current.shape[0], current.dtype)
-        with self.autocast():
+        with self.autocast(self.settings.denoiser_amp):
             prediction = self.denoiser(current, time, latent, **model_conditions)
             previous = self.diffusion.sample_posterior(
                 current,
@@ -499,7 +500,7 @@ class Trainer:
                     domains[axis], fake_prev.shape[0]
                 )
 
-                autocast = self.autocast(self.settings.amp_enabled and not regularize)
+                autocast = self.autocast(self.settings.critic_amp and not regularize)
                 with autocast:
                     real_score = score_plane(
                         critic,
@@ -556,7 +557,8 @@ class Trainer:
         self.denoiser_optim.zero_grad(set_to_none=True)
         self.critics.requires_grad_(False)
         try:
-            with self.autocast():
+            # The objective scores fake pairs with the critics.
+            with self.autocast(self.settings.critic_amp):
                 losses, diagnostics = denoiser_objective(
                     batch,
                     self.critics,
@@ -594,12 +596,7 @@ class Trainer:
             dtype=dtype,
         )
 
-    def autocast(
-        self,
-        enabled: bool | None = None,
-    ) -> AbstractContextManager:
-        if enabled is None:
-            enabled = self.settings.amp_enabled
+    def autocast(self, enabled: bool) -> AbstractContextManager:
         return torch.autocast(
             device_type=self.device.type,
             dtype=torch.float16,

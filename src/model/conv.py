@@ -11,7 +11,10 @@ MIN_VOXELS = 32**3
 
 
 def conv3d_weight(x: torch.Tensor, grad: torch.Tensor, kernel: int) -> torch.Tensor:
-    """Weight gradient of a stride-1, same-padded cube convolution via im2col."""
+    """Weight gradient of a stride-1, same-padded cube convolution via im2col.
+
+    Chunks add up in at least float32, also for half-precision inputs.
+    """
     batch, channels, depth, height, width = x.shape
     out_channels = grad.shape[1]
     pad = kernel // 2
@@ -19,7 +22,8 @@ def conv3d_weight(x: torch.Tensor, grad: torch.Tensor, kernel: int) -> torch.Ten
     rows = grad.permute(0, 2, 3, 4, 1)
     slice_bytes = batch * channels * taps * height * width * x.element_size()
     step = max(1, CHUNK_BYTES // slice_bytes - 2 * pad)
-    weight = x.new_zeros(kernel, channels * taps, out_channels)
+    dtype = torch.promote_types(x.dtype, torch.float32)
+    weight = x.new_zeros(kernel, channels * taps, out_channels, dtype=dtype)
     for start in range(0, depth, step):
         size = min(step, depth - start)
         # Unfold each depth slice in-plane once; depth taps then share its columns.
@@ -38,7 +42,7 @@ def conv3d_weight(x: torch.Tensor, grad: torch.Tensor, kernel: int) -> torch.Ten
             part = cols[:, tap : tap + size].reshape(
                 batch * size, channels * taps, height * width
             )
-            weight[tap] += torch.bmm(part, chunk).sum(0)
+            weight[tap] += torch.bmm(part, chunk).sum(0, dtype=dtype)
     return weight.view(kernel, channels, kernel, kernel, out_channels).permute(
         4, 1, 0, 2, 3
     )
@@ -46,6 +50,7 @@ def conv3d_weight(x: torch.Tensor, grad: torch.Tensor, kernel: int) -> torch.Ten
 
 class _Conv3dFunction(torch.autograd.Function):
     @staticmethod
+    @torch.amp.custom_fwd(device_type="mps", cast_inputs=torch.float16)
     def forward(ctx, x, weight, bias):
         ctx.save_for_backward(x, weight)
         ctx.has_bias = bias is not None
@@ -53,6 +58,7 @@ class _Conv3dFunction(torch.autograd.Function):
 
     @staticmethod
     @once_differentiable
+    @torch.amp.custom_bwd(device_type="mps")
     def backward(ctx, grad):
         x, weight = ctx.saved_tensors
         grad = grad.contiguous()
@@ -67,7 +73,7 @@ class _Conv3dFunction(torch.autograd.Function):
         if ctx.needs_input_grad[1]:
             grad_weight = conv3d_weight(x, grad, kernel)
         if ctx.has_bias and ctx.needs_input_grad[2]:
-            grad_bias = grad.sum((0, 2, 3, 4))
+            grad_bias = grad.sum((0, 2, 3, 4), dtype=torch.float32)
         return grad_x, grad_weight, grad_bias
 
 
@@ -79,7 +85,6 @@ class Conv3d(nn.Conv3d):
             x.device.type == "mps"
             and torch.is_grad_enabled()
             and weight.requires_grad
-            and not torch.is_autocast_enabled("mps")
             and self.stride == (1, 1, 1)
             and self.dilation == (1, 1, 1)
             and self.groups == 1
@@ -91,7 +96,7 @@ class Conv3d(nn.Conv3d):
             # MPS is about six times faster than the convolution's.
             out = torch.matmul(weight.flatten(1), x.flatten(2))
             if bias is not None:
-                out = out + bias[:, None]
+                out = out + bias[:, None].to(out.dtype)
             return out.view(x.shape[0], -1, *x.shape[2:])
         if (
             self.kernel_size == (3, 3, 3)

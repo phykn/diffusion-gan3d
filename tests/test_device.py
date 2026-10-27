@@ -12,7 +12,7 @@ from src.device import (
     check_device,
     default_device,
     empty_cache,
-    inference_amp,
+    gpu_amp,
     wide_dtype,
 )
 from src.evaluate.connectivity import transition_counts, transition_tv
@@ -70,8 +70,8 @@ def test_wide_dtype_uses_single_precision_only_on_apple_gpu():
         (False, "mps", False),
     ],
 )
-def test_prediction_amp_runs_on_cuda_and_apple_gpu(mixed_precision, device, expected):
-    assert inference_amp(mixed_precision, torch.device(device)) is expected
+def test_amp_runs_on_cuda_and_apple_gpu(mixed_precision, device, expected):
+    assert gpu_amp(mixed_precision, torch.device(device)) is expected
 
 
 def test_empty_cache_releases_the_selected_gpu(monkeypatch):
@@ -247,8 +247,8 @@ def test_lr_training_step_runs_on_apple_gpu(tmp_path):
     cfg["loss"].update(r1_weight=0.01, r1_every_steps=1)
     cfg["train"].update(real_batch_size=2, slice_pairs_per_plane=2)
     trainer = build_trainer(cfg, torch.device("mps"))
-    assert not trainer.settings.amp_enabled
-    assert trainer.settings.rollout_amp
+    assert trainer.settings.denoiser_amp and not trainer.settings.critic_amp
+    assert trainer.scaler.is_enabled()
     optimizers = [trainer.denoiser_optim, *trainer.critic_optims.values()]
     assert all(optimizer.defaults["fused"] for optimizer in optimizers)
     for step in range(2):
