@@ -1,4 +1,4 @@
-"""Render the LR paper figures from evaluate_lr.py results and cached volumes."""
+"""Render the paper figures from evaluate_lr.py results and its cached volumes."""
 
 import json
 import sys
@@ -10,17 +10,29 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import ListedColormap, to_rgb
+from PIL import Image, ImageDraw
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.metrics import read_metrics
-from scripts.paper.evaluate_lr import CACHE, DISTANCES, OUTPUT, real_crops
-from scripts.paper.make_assets import OUTPUT_DIR, PHASE_RGB, draw_volume
+from scripts.paper.evaluate_lr import (
+    CACHE,
+    DISTANCES,
+    EXTERNAL_CROP,
+    OUTPUT,
+    real_crops,
+)
 from src.build.data import build_datasets
 from src.config.train import load_train_config
+from src.evaluate.structure import label_sections
 
+OUTPUT_DIR = OUTPUT.parent
+PHASE_RGB = [to_rgb(color) for color in ("#000000", "#9E9E9E")]
+ROI_COLOR = "#F97316"
+# (left, top) of the example crops drawn on the training image.
+ROI_POSITIONS = ((18, 16), EXTERNAL_CROP, (536, 24))
 # Categorical slots 1-3 of the validated default palette, in fixed order.
 SERIES = ("#2a78d6", "#eb6834", "#1baf7a")
 MUTED = "#6b7280"
@@ -32,6 +44,8 @@ def main() -> None:
     results = json.loads(OUTPUT.read_text())
     run = PROJECT_ROOT / results["run"]
     best = results["best_step"]
+    cfg = load_train_config(run / "train.yaml")
+    dataset = build_datasets(cfg)[0][0]
     plt.rcParams.update(
         {
             "font.size": 10,
@@ -44,10 +58,26 @@ def main() -> None:
         }
     )
     volumes = torch.load(CACHE / f"step{best}.pt", weights_only=True)
+    render_training_image(dataset)
     render_volume(volumes[0].numpy())
-    render_sections(volumes[0], run)
-    render_training(results, run)
+    render_sections(volumes[0], dataset)
+    render_training(results, run, cfg["burn_in"]["steps"])
     render_anchor(results)
+
+
+def render_training_image(dataset) -> None:
+    labels = dataset.decode(dataset.path_groups[0][0].resolve())
+    rgb = np.rint(255 * np.asarray(PHASE_RGB)[labels]).astype(np.uint8)
+    image = Image.fromarray(rgb, mode="RGB")
+    draw = ImageDraw.Draw(image)
+    size = dataset.crop_size
+    for left, top in ROI_POSITIONS:
+        draw.rectangle(
+            (left, top, left + size - 1, top + size - 1), outline=ROI_COLOR, width=4
+        )
+    path = OUTPUT_DIR / "01-training-data.png"
+    image.save(path)
+    print(f"Figure: {path.relative_to(PROJECT_ROOT)}")
 
 
 def render_volume(volume: np.ndarray) -> None:
@@ -56,6 +86,107 @@ def render_volume(volume: np.ndarray) -> None:
     draw_volume(panel, volume, PHASE_RGB)
     figure.subplots_adjust(left=0, right=1, bottom=0, top=1)
     save(figure, "02-generated-volume.png", pad=0.03)
+
+
+def draw_volume(
+    panel: plt.Axes,
+    volume: np.ndarray,
+    colors: list[tuple[float, float, float]],
+) -> None:
+    rgba = np.asarray([(*color, 1.0) for color in colors])
+    last = tuple(size - 1 for size in volume.shape)
+    center = tuple(size // 2 for size in volume.shape)
+
+    faces = (
+        # (axis, index, first, second, light); first the complete outer faces
+        # away from the removed camera-facing octant,
+        (0, 0, (0, last[1]), (0, last[2]), 0.88),
+        (1, last[1], (0, last[0]), (0, last[2]), 0.82),
+        (2, 0, (0, last[0]), (0, last[1]), 0.75),
+        # then the camera-facing outer faces split around the missing 1/8 corner,
+        (0, last[0], (0, last[1]), (0, center[2]), 0.88),
+        (0, last[0], (center[1], last[1]), (center[2], last[2]), 0.88),
+        (1, 0, (0, last[0]), (0, center[2]), 0.78),
+        (1, 0, (0, center[0]), (center[2], last[2]), 0.78),
+        (2, last[2], (0, center[0]), (0, last[1]), 1.08),
+        (2, last[2], (center[0], last[0]), (center[1], last[1]), 1.08),
+        # and the three internal faces exposed by removing x-high/y-low/z-high.
+        (0, center[0], (0, center[1]), (center[2], last[2]), 0.58),
+        (1, center[1], (center[0], last[0]), (center[2], last[2]), 0.66),
+        (2, center[2], (center[0], last[0]), (0, center[1]), 0.68),
+    )
+    for face in faces:
+        plot_face(panel, volume, rgba, *face)
+
+    extent = np.asarray(last, dtype=float)
+    draw_box(panel, extent)
+    panel.set_xlim(0, extent[0])
+    panel.set_ylim(0, extent[1])
+    panel.set_zlim(0, extent[2])
+    panel.set_box_aspect(extent)
+    panel.view_init(elev=23, azim=-48)
+    panel.set_proj_type("persp", focal_length=1.8)
+    panel.set_axis_off()
+
+
+def plot_face(
+    panel: plt.Axes,
+    volume: np.ndarray,
+    rgba: np.ndarray,
+    axis: int,
+    index: int,
+    first: tuple[int, int],
+    second: tuple[int, int],
+    light: float,
+) -> None:
+    other_axes = tuple(value for value in range(3) if value != axis)
+    first_cells = np.arange(first[0], first[1])
+    second_cells = np.arange(second[0], second[1])
+    first_grid, second_grid = np.meshgrid(
+        np.arange(first[0], first[1] + 1, dtype=float),
+        np.arange(second[0], second[1] + 1, dtype=float),
+        indexing="ij",
+    )
+    coordinates = [None, None, None]
+    coordinates[axis] = np.full_like(first_grid, index)
+    coordinates[other_axes[0]] = first_grid
+    coordinates[other_axes[1]] = second_grid
+    phase_slice = np.take(volume, index, axis=axis)
+    phases = phase_slice[np.ix_(first_cells, second_cells)]
+    facecolors = rgba[phases].copy()
+    if light < 1.0:
+        facecolors[..., :3] *= light
+    elif light > 1.0:
+        facecolors[..., :3] = 1.0 - (1.0 - facecolors[..., :3]) / light
+    panel.plot_surface(
+        *coordinates,
+        facecolors=facecolors,
+        rstride=1,
+        cstride=1,
+        shade=False,
+        linewidth=0,
+        antialiased=False,
+    )
+
+
+def draw_box(panel: plt.Axes, size: np.ndarray) -> None:
+    for axis in range(3):
+        others = tuple(value for value in range(3) if value != axis)
+        for first in (0.0, size[others[0]]):
+            for second in (0.0, size[others[1]]):
+                start = np.zeros(3)
+                end = np.zeros(3)
+                start[list(others)] = (first, second)
+                end[list(others)] = (first, second)
+                end[axis] = size[axis]
+                panel.plot(
+                    (start[0], end[0]),
+                    (start[1], end[1]),
+                    (start[2], end[2]),
+                    color="#64748b",
+                    linewidth=0.65,
+                    alpha=0.32,
+                )
 
 
 def show(panel, image, title=None):
@@ -70,9 +201,8 @@ def show(panel, image, title=None):
         spine.set_visible(False)
 
 
-def render_sections(volume: torch.Tensor, run: Path) -> None:
-    real = real_crops(build_datasets(load_train_config(run / "train.yaml"))[0][0])
-    labels = real.argmax(1)
+def render_sections(volume: torch.Tensor, dataset) -> None:
+    labels = label_sections(real_crops(dataset)).argmax(1)
     center = volume.shape[0] // 2
     figure, panels = plt.subplots(2, 3, figsize=(8.4, 5.8))
     for column, index in enumerate((0, 1, 2)):
@@ -88,7 +218,7 @@ def render_sections(volume: torch.Tensor, run: Path) -> None:
     save(figure, "03-generated-slices.png")
 
 
-def render_training(results, run: Path) -> None:
+def render_training(results, run: Path, burn_in: int) -> None:
     steps = results["selection"]
     x = [row["step"] for row in steps]
     best = results["best_step"]
@@ -98,7 +228,7 @@ def render_training(results, run: Path) -> None:
 
     panel = panels[0]
     panel.plot(x, [row["structure"] for row in steps], color=SERIES[0], lw=2)
-    mark_schedule(panel, best)
+    mark_schedule(panel, best, burn_in)
     panel.set_title("(a) Structure score (selection)", loc="left", color=INK)
     panel.set_xlabel("Step")
     panel.set_ylabel("Mean error / real split error")
@@ -112,7 +242,7 @@ def render_training(results, run: Path) -> None:
     for color, (key, label) in zip(SERIES, names):
         values = np.asarray([row[key] for row in steps]) / max(real[key], 1e-6)
         panel.plot(x, values, color=color, lw=2, label=label)
-    mark_schedule(panel, best)
+    mark_schedule(panel, best, burn_in)
     panel.legend(frameon=False, fontsize=9, labelcolor=INK)
     panel.set_title("(b) Components / real split error", loc="left", color=INK)
     panel.set_xlabel("Step")
@@ -137,7 +267,7 @@ def render_training(results, run: Path) -> None:
             va="center",
             fontsize=9,
         )
-    mark_schedule(panel, best)
+    mark_schedule(panel, best, burn_in)
     panel.set_title("(c) Mean critic logit", loc="left", color=INK)
     panel.set_xlabel("Step")
     panel.set_xlim(0, x[-1] * 1.22)
@@ -146,8 +276,8 @@ def render_training(results, run: Path) -> None:
     save(figure, "lr-training.png")
 
 
-def mark_schedule(panel, best):
-    panel.axvspan(0, 5000, color="#e5e7eb", alpha=0.6, lw=0)
+def mark_schedule(panel, best, burn_in):
+    panel.axvspan(0, burn_in, color="#e5e7eb", alpha=0.6, lw=0)
     panel.axvline(best, color=MUTED, lw=1, ls="--")
     panel.grid(axis="y", color="#e5e7eb", lw=0.8)
 

@@ -1,7 +1,7 @@
 """Evaluate one run's LR stage for the paper: structure, selection and anchors.
 
 Writes assets/paper/lr-results.json. Generated volumes are cached under
-checks/paper-lr/ so figures can be redrawn with --reuse.
+checks/paper-lr/; --reuse recomputes the metrics from them without sampling.
 """
 
 import argparse
@@ -16,7 +16,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.diagnostic import generate_with_baseline
-from scripts.paper.evaluate_anchor_coverage import nested_plane_order
 from src.build.data import build_datasets
 from src.build.predict import build_generator
 from src.config.files import load_yaml
@@ -50,8 +49,8 @@ ANCHOR_SEEDS = tuple(range(8))
 REFERENCE_OFFSET = 1000
 COVERAGE_SEEDS = tuple(range(4))
 COVERAGE_COUNTS = (0, 1, 2, 4, 8, 16, 32, 64)
-# The 128-pixel crop of data/sample.png used as the external anchor.
-EXTERNAL_ORIGIN = (58, 281)
+# (left, top) of the training-image crop used as the external anchor.
+EXTERNAL_CROP = (281, 58)
 DISTANCES = (0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32)
 
 
@@ -73,46 +72,36 @@ def main() -> None:
     dataset = build_datasets(cfg)[0][0]
     real = real_crops(dataset)
     real_labels = label_sections(real)
+    noise = section_errors(real_labels[0::2], real_labels[1::2])
     weights = {best: run / "generator.pt"} | {
         step: run / "checkpoints" / f"generator_{step:08d}.pt" for step in CHECKPOINTS
     }
 
-    def generator(step):
-        return build_generator(weights[step], cfg, device)
-
-    def sample(step, seed, **options):
-        with seeded_rng(seed, device):
-            return generator_cache(step).generate(guidance=settings.guidance, **options)
-
-    loaded = {}
-
-    def generator_cache(step):
-        if step not in loaded:
-            loaded.clear()
-            loaded[step] = generator(step)
-        return loaded[step]
+    def sample(step):
+        gen = build_generator(weights[step], cfg, device)
+        volumes = []
+        for seed in range(SAMPLES):
+            with seeded_rng(seed, device):
+                volumes.append(gen.generate(guidance=settings.guidance))
+        return volumes
 
     results = {
         "run": str(run.relative_to(PROJECT_ROOT)),
         "best_step": best,
         "guidance": settings.guidance,
         "anchor_strength": settings.anchor_strength,
-        "real": real_summary(real_labels),
+        "real": real_summary(real_labels, noise),
         "selection": scores["steps"],
         "steps": {},
     }
     for step in sorted(weights):
-        volumes = cached(
-            f"step{step}",
-            args.reuse,
-            lambda step=step: [sample(step, seed) for seed in range(SAMPLES)],
-        )
+        volumes = cached(f"step{step}", args.reuse, lambda step=step: sample(step))
         print(f"step {step}: {len(volumes)} volumes")
         results["steps"][str(step)] = volume_summary(
-            volumes, real_labels, full=step == best
+            volumes, real_labels, noise, full=step == best
         )
 
-    gen = generator_cache(best)
+    gen = build_generator(weights[best], cfg, device)
     results["anchor"] = anchor_experiments(gen, settings, device, dataset, args.reuse)
     OUTPUT.write_text(json.dumps(results, indent=2) + "\n")
     print(f"Results: {OUTPUT}")
@@ -139,7 +128,7 @@ def real_crops(dataset) -> torch.Tensor:
 def external_anchor(dataset) -> torch.Tensor:
     """The fixed external crop on the LR grid, as uint8 labels."""
     source = dataset.decode(dataset.path_groups[0][0].resolve())
-    top, left = EXTERNAL_ORIGIN
+    left, top = EXTERNAL_CROP
     size = dataset.crop_size
     labels = torch.from_numpy(source[top : top + size, left : left + size].copy())
     image = resize_crop(labels.long(), dataset.patch_size, dataset.num_phases)
@@ -167,22 +156,20 @@ def mean_std(values) -> dict:
     }
 
 
-def real_summary(real_labels: torch.Tensor) -> dict:
+def real_summary(real_labels: torch.Tensor, noise) -> dict:
     labels = real_labels.argmax(1)
-    halves = section_errors(real_labels[0::2], real_labels[1::2])
     return {
         "crops": len(labels),
         "phase0_fraction": mean_std((labels == 0).float().mean((1, 2))),
         "interface_density": mean_std(
             [interface_density(image, (0, 1)) for image in labels]
         ),
-        "half_split_errors": halves._asdict(),
+        "half_split_errors": noise._asdict(),
     }
 
 
-def volume_summary(volumes, real_labels, full: bool) -> dict:
+def volume_summary(volumes, real_labels, noise, full: bool) -> dict:
     real = section_statistics(real_labels)
-    noise = section_errors(real_labels[0::2], real_labels[1::2])
     planes = {}
     normalized = []
     for axis, name in enumerate(("xy", "xz", "yz")):
@@ -218,6 +205,27 @@ def volume_summary(volumes, real_labels, full: bool) -> dict:
         for name in tilt
     }
     return summary
+
+
+def nested_plane_order(size: int) -> tuple[int, ...]:
+    """Farthest-point plane order, so every prefix covers the volume broadly."""
+    selected: list[int] = []
+    remaining = set(range(size))
+    while remaining:
+        if not selected:
+            choice = size // 2
+        else:
+            choice = max(
+                remaining,
+                key=lambda index: (
+                    min(abs(index - prior) for prior in selected),
+                    -abs(index - (size - 1) / 2),
+                    -index,
+                ),
+            )
+        selected.append(choice)
+        remaining.remove(choice)
+    return tuple(selected)
 
 
 def pool_similarity(first: torch.Tensor, second: torch.Tensor, cell: int = 4) -> float:

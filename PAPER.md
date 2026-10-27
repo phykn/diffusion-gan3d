@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>Learning 3D Microstructures from 2D Sections:<br>A Two-Stage Diffusion-GAN with Posterior-Sampled Plane Anchors</h1>
+  <h1>3D Microstructures from 2D Sections<br>with a Two-Stage Diffusion-GAN</h1>
 </div>
 
 The code, settings, and scripts that reproduce every number and figure are in the

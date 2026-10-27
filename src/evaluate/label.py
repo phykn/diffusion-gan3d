@@ -36,24 +36,6 @@ def phase_labels(values, num_phases: int | None = None) -> torch.Tensor:
     return labels
 
 
-def check_labels(values) -> torch.Tensor:
-    """Validate labels chunk by chunk and return them without an int64 copy."""
-    values = torch.as_tensor(values)
-    for _ in _label_chunks(values):
-        pass
-    return values
-
-
-def phase_fraction(values, phase: int = 0) -> float:
-    if type(phase) is not int or phase < 0:
-        raise ValueError("phase must be a non-negative integer.")
-    values = torch.as_tensor(values)
-    count = torch.zeros((), dtype=torch.int64, device=values.device)
-    for labels in _label_chunks(values):
-        count += (labels == phase).sum()
-    return count.item() / values.numel()
-
-
 def phase_fractions(values, num_phases: int) -> torch.Tensor:
     values = torch.as_tensor(values)
     counts = None

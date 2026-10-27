@@ -3,7 +3,7 @@ import scipy.ndimage as ndi
 import torch
 
 from src.device import wide_dtype
-from src.evaluate.label import check_labels, phase_labels
+from src.evaluate.label import phase_labels
 
 
 def transition_counts(previous, current, num_phases: int) -> torch.Tensor:
@@ -56,16 +56,6 @@ def _transition_matrices(first, second) -> tuple[torch.Tensor, torch.Tensor]:
                 "transition counts must be finite, non-negative and nonzero."
             )
     return first, second
-
-
-def percolating_fractions(volume, phase: int = 1) -> tuple[float, float, float]:
-    labels = check_labels(volume)
-    if labels.ndim != 3 or any(size < 2 for size in labels.shape):
-        raise ValueError("volume must be a 3D array with at least two voxels per axis.")
-    mask = (labels == phase).detach().cpu().numpy()
-    if not bool(mask.any()):
-        raise ValueError(f"volume contains no voxels for phase {phase}.")
-    return spanning_fractions(mask)
 
 
 def spanning_fractions(mask: np.ndarray) -> tuple[float, float, float]:

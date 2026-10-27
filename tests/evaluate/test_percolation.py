@@ -1,90 +1,53 @@
 import numpy as np
 import pytest
-import torch
 
-from src.evaluate.connectivity import percolating_fractions
+from src.evaluate.connectivity import spanning_fractions
 
 
 @pytest.mark.parametrize("axis", (0, 1, 2))
-def test_percolating_fractions_handle_each_axis(axis: int) -> None:
-    volume = np.zeros((4, 4, 4), dtype=np.uint8)
+def test_spanning_fractions_handle_each_axis(axis: int) -> None:
+    mask = np.zeros((4, 4, 4), dtype=bool)
     selector = [2, 2, 2]
     selector[axis] = slice(None)
-    volume[tuple(selector)] = 1
-
-    fractions = percolating_fractions(volume, phase=1)
+    mask[tuple(selector)] = True
 
     expected = [0.0, 0.0, 0.0]
     expected[axis] = 1.0
-    assert fractions == pytest.approx(expected)
+    assert spanning_fractions(mask) == pytest.approx(expected)
 
 
-def test_percolating_fractions_support_phase_zero() -> None:
-    volume = np.ones((4, 4, 4), dtype=np.uint8)
-    volume[:, 2, 2] = 0
+def test_spanning_fractions_sum_all_spanning_components() -> None:
+    mask = np.zeros((3, 3, 3), dtype=bool)
+    mask[:, 0, 0] = True
+    mask[:, 2, 2] = True
+    mask[1, 1, 1] = True
 
-    assert percolating_fractions(volume, phase=0) == (1.0, 0.0, 0.0)
-
-
-def test_percolating_fractions_sum_all_spanning_components() -> None:
-    volume = np.zeros((3, 3, 3), dtype=np.uint8)
-    volume[:, 0, 0] = 1
-    volume[:, 2, 2] = 1
-    volume[1, 1, 1] = 1
-
-    assert percolating_fractions(volume) == pytest.approx((6 / 7, 0.0, 0.0))
+    assert spanning_fractions(mask) == pytest.approx((6 / 7, 0.0, 0.0))
 
 
-def test_nonpercolating_components_return_zero() -> None:
-    volume = np.zeros((3, 3, 3), dtype=np.uint8)
-    volume[0, 1, 1] = 1
-    volume[2, 1, 1] = 1
+def test_nonspanning_components_return_zero() -> None:
+    mask = np.zeros((3, 3, 3), dtype=bool)
+    mask[0, 1, 1] = True
+    mask[2, 1, 1] = True
 
-    assert percolating_fractions(volume) == (0.0, 0.0, 0.0)
-
-
-def test_corner_contact_does_not_connect_components() -> None:
-    volume = np.zeros((3, 3, 3), dtype=np.uint8)
-    volume[0, 0, 0] = 1
-    volume[1, 1, 1] = 1
-    volume[2, 2, 2] = 1
-
-    assert percolating_fractions(volume) == (0.0, 0.0, 0.0)
-
-
-def test_edge_contact_does_not_connect_components() -> None:
-    volume = np.zeros((3, 3, 3), dtype=np.uint8)
-    volume[0, 0, 1] = 1
-    volume[1, 1, 1] = 1
-    volume[2, 2, 1] = 1
-
-    assert percolating_fractions(volume) == (0.0, 0.0, 0.0)
-
-
-def test_percolation_rejects_absent_phase() -> None:
-    with pytest.raises(ValueError, match="no voxels for phase 1"):
-        percolating_fractions(np.zeros((3, 3, 3), dtype=np.uint8), phase=1)
-
-    with pytest.raises(ValueError, match="no voxels for phase 0"):
-        percolating_fractions(np.ones((3, 3, 3), dtype=np.uint8), phase=0)
-
-
-def test_percolation_preserves_torch_input() -> None:
-    volume = torch.zeros((3, 3, 3), dtype=torch.uint8)
-    volume[:, 1, 1] = 1
-    original = volume.clone()
-
-    assert percolating_fractions(volume) == (1.0, 0.0, 0.0)
-    assert torch.equal(volume, original)
+    assert spanning_fractions(mask) == (0.0, 0.0, 0.0)
 
 
 @pytest.mark.parametrize(
-    "volume",
+    "points",
     (
-        np.ones((3, 3), dtype=np.uint8),
-        np.ones((1, 3, 3), dtype=np.uint8),
+        ((0, 0, 0), (1, 1, 1), (2, 2, 2)),
+        ((0, 0, 1), (1, 1, 1), (2, 2, 1)),
     ),
+    ids=("corner", "edge"),
 )
-def test_percolation_rejects_invalid_volume_shape(volume: np.ndarray) -> None:
-    with pytest.raises(ValueError, match="3D array|at least two voxels"):
-        percolating_fractions(volume)
+def test_corner_and_edge_contacts_do_not_connect(points) -> None:
+    mask = np.zeros((3, 3, 3), dtype=bool)
+    for point in points:
+        mask[point] = True
+
+    assert spanning_fractions(mask) == (0.0, 0.0, 0.0)
+
+
+def test_empty_mask_spans_nothing() -> None:
+    assert spanning_fractions(np.zeros((3, 3, 3), dtype=bool)) == (0.0, 0.0, 0.0)
