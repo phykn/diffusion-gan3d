@@ -28,9 +28,9 @@ def test_gt_requires_a_positive_anchor_count(
     tmp_path: Path,
     count: str | None,
 ) -> None:
-    module = importlib.import_module("scripts.04_check_scale_up")
+    module = importlib.import_module("scripts.check.04_scale_up")
     argv = [
-        "04_check_scale_up.py",
+        "04_scale_up.py",
         "--weight",
         str(weight_file(tmp_path)),
         "--gt",
@@ -49,7 +49,7 @@ def test_main_prints_plan_before_scaled_generation(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    module = importlib.import_module("scripts.04_check_scale_up")
+    module = importlib.import_module("scripts.check.04_scale_up")
     plan = make_plan()
     events = []
     output_path = tmp_path / "nested" / "scaled.tiff"
@@ -101,7 +101,7 @@ def test_main_prints_plan_before_scaled_generation(
         module.sys,
         "argv",
         [
-            "04_check_scale_up.py",
+            "04_scale_up.py",
             "--weight",
             str(weights),
             "--domain",
@@ -137,7 +137,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    module = importlib.import_module("scripts.04_check_scale_up")
+    module = importlib.import_module("scripts.check.04_scale_up")
     plan = make_plan()
     events = []
 
@@ -192,7 +192,7 @@ def test_zero_anchor_strength_uses_unanchored_base_without_gt(
         module.sys,
         "argv",
         [
-            "04_check_scale_up.py",
+            "04_scale_up.py",
             "--weight",
             str(weight_file(tmp_path)),
             "--domain",

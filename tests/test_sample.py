@@ -5,7 +5,7 @@ import pytest
 from PIL import Image
 
 import run_train
-from simul.src.anode import depth_profile
+from scripts.simul.src.anode import depth_profile
 from src.config.data import describe_resolution, get_resolution
 from src.config.files import load_yaml, save_yaml
 from src.config.sample import (
@@ -153,7 +153,7 @@ def test_simulated_depth_profile_is_a_valid_vf_profile(graphite, silicon, count)
 
 
 def test_anode_simulation_config_gives_its_depth_profile():
-    spec = depth_profile(load_yaml("simul/config_anode.yaml")["geometry"])
+    spec = depth_profile(load_yaml("scripts/simul/config_anode.yaml")["geometry"])
     _, values = validate_profile(spec, 3)
     assert values[-1].tolist() == [0.48, 0.22, 0.3]
 

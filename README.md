@@ -38,10 +38,10 @@ The **SR** (super-resolution) model then refines LR volumes `sr_scale` times fin
 (64 to 128 voxels in the default sample).
 
 ```bash
-python scripts/01_check_dataset.py --sample default --no-view
+python scripts/check/01_dataset.py --sample default --no-view
 python run_train.py default --run-dir "run/my-run"
-python scripts/02_check_generated.py --weight "run/my-run-lr" --no-view
-python scripts/06_check_hr.py --weight "run/my-run-sr" --no-view
+python scripts/check/02_generated.py --weight "run/my-run-lr" --no-view
+python scripts/check/06_hr.py --weight "run/my-run-sr" --no-view
 ```
 
 `run_train.py` trains LR, then SR from frozen LR volumes. `--run-dir NAME` writes `NAME-lr`
@@ -69,14 +69,14 @@ field are in [Training options](scripts/README.md#sample-fields).
 Start the backend with an SR run, then the frontend in another terminal (Node.js 20.19+ or 22.12+):
 
 ```bash
-python backend/run.py --weight "run/my-run-sr"
+python app/backend/run.py --weight "run/my-run-sr"
 ```
 
 Each request generates an LR volume with the SR run's LR run (`--lr-weight` picks another)
 and refines it.
 
 ```bash
-cd frontend
+cd app/frontend
 npm ci
 npm run dev
 ```

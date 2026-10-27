@@ -50,7 +50,6 @@ def pack(
         else 0
     )
     volume = np.zeros((size + 2 * padding, size, size), dtype=np.uint8)
-    occupied = np.zeros_like(volume, dtype=bool)
     particles: list[Particle] = []
     region = (slice(padding, padding + size), slice(None), slice(None))
     periodic = np.array((not graded, True, True))
@@ -59,7 +58,6 @@ def pack(
         target = round(vf * size**3)
         placed = place(
             volume=volume,
-            occupied=occupied,
             particles=particles,
             label=label,
             target_voxels=target,
@@ -87,7 +85,7 @@ def check_geometry(
     big_vf: float,
     small_vf: float,
     big_elongation: float,
-    radius_gradient: tuple[float, float] = (1.0, 1.0),
+    radius_gradient: tuple[float, float],
 ) -> None:
     if type(size) is not int or size < 1:
         raise ValueError("size must be a positive integer.")
@@ -115,7 +113,6 @@ def radius_profile(size: int, padding: int, gradient) -> np.ndarray:
 
 def place(
     volume: np.ndarray,
-    occupied: np.ndarray,
     particles: list[Particle],
     label: int,
     target_voxels: int,
@@ -130,6 +127,7 @@ def place(
     """Place particles until region holds target_voxels of label; return the count.
 
     Particles wrap around periodic axes and are clipped at the other edges.
+    A voxel is occupied once it holds any nonzero label.
     """
     if target_voxels <= 0:
         return 0
@@ -168,17 +166,16 @@ def place(
         # A sparse probe rejects most overlapping candidates cheaply; the full
         # check below still decides every acceptance exactly.
         probe = locate(offsets[::PROBE_STRIDE], center, shape, periodic)
-        if occupied[tuple(probe.T)].any():
+        if volume[tuple(probe.T)].any():
             valid_centers.flat[flat] = False
             continue
         positions = locate(offsets, center, shape, periodic)
         indices = tuple(positions.T)
-        if occupied[indices].any():
+        if volume[indices].any():
             valid_centers.flat[flat] = False
             continue
 
         volume[indices] = label
-        occupied[indices] = True
         particles.append(
             Particle(
                 center=tuple(int(value) for value in center),
@@ -206,12 +203,11 @@ def make_particle_shape(
     small_radius: float,
     elongation: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    radius = big_radius if label == 2 else small_radius
     if label == 1:
-        axes = np.full(3, radius, dtype=np.float64)
+        axes = np.full(3, small_radius, dtype=np.float64)
     else:
-        short = radius / elongation ** (1.0 / 3.0)
-        long = radius * elongation ** (2.0 / 3.0)
+        short = big_radius / elongation ** (1.0 / 3.0)
+        long = big_radius * elongation ** (2.0 / 3.0)
         axes = np.asarray((long, short, short), dtype=np.float64)
     return axes, make_offsets(axes)
 

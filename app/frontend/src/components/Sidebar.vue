@@ -23,15 +23,13 @@ const emit = defineEmits(['select-file', 'generate'])
 const dragging = ref(false)
 
 function accept(files) {
-  if (props.busy) return
-  const file = files?.[0]
-  if (file) emit('select-file', file)
   dragging.value = false
+  if (!props.busy && files?.[0]) emit('select-file', files[0])
 }
 
 function selectInput(event) {
-  if (props.busy) return
   accept(event.target.files)
+  // Clear the input so choosing the same file again still fires change.
   event.target.value = ''
 }
 

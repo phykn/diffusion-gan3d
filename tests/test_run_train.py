@@ -375,7 +375,7 @@ def test_dataset_check_script_accepts_one_axis(tmp_path: Path) -> None:
     result = subprocess.run(
         [
             sys.executable,
-            str(PROJECT_ROOT / "scripts" / "01_check_dataset.py"),
+            str(PROJECT_ROOT / "scripts" / "check" / "01_dataset.py"),
             "--sample",
             str(sample),
             "--domain",

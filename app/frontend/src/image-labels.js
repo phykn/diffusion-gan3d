@@ -1,13 +1,5 @@
 const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10]
-
-function chunkName(bytes, offset) {
-  return String.fromCharCode(
-    bytes[offset],
-    bytes[offset + 1],
-    bytes[offset + 2],
-    bytes[offset + 3],
-  )
-}
+const SIZE_MISMATCH = 'PNG pixel data does not match its declared dimensions.'
 
 function joinBytes(chunks) {
   const size = chunks.reduce((total, chunk) => total + chunk.length, 0)
@@ -32,7 +24,7 @@ function parseLabelPng(buffer) {
     const dataStart = offset + 8
     const dataEnd = dataStart + length
     if (dataEnd + 4 > bytes.length) return null
-    const name = chunkName(bytes, offset + 4)
+    const name = String.fromCharCode(...bytes.subarray(offset + 4, offset + 8))
     if (name === 'IHDR' && length === 13) {
       const view = new DataView(bytes.buffer, bytes.byteOffset + dataStart, length)
       header = {
@@ -66,7 +58,7 @@ async function inflate(bytes, expectedSize) {
       if (done) break
       size += value.length
       if (size > expectedSize) {
-        throw new Error('PNG pixel data does not match its declared dimensions.')
+        throw new Error(SIZE_MISMATCH)
       }
       chunks.push(value)
     }
@@ -128,11 +120,11 @@ export async function decodePngLabels(buffer) {
   const bytesPerPixel = Math.max(1, Math.ceil(channels * png.bitDepth / 8))
   const expectedSize = (rowBytes + 1) * png.height
   if (png.width < 1 || png.height < 1 || !Number.isSafeInteger(expectedSize)) {
-    throw new Error('PNG pixel data does not match its declared dimensions.')
+    throw new Error(SIZE_MISMATCH)
   }
   const decoded = await inflate(png.compressed, expectedSize)
   if (decoded.length !== expectedSize) {
-    throw new Error('PNG pixel data does not match its declared dimensions.')
+    throw new Error(SIZE_MISMATCH)
   }
   const labels = new Uint8Array(png.width * png.height)
   let sourceOffset = 0

@@ -5,7 +5,7 @@ import anyio
 import pytest
 import torch
 
-from backend.src.response import (
+from app.backend.src.response import (
     CHUNK_BYTES,
     DownloadResponse,
     RawVolumeResponse,

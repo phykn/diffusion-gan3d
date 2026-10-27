@@ -8,12 +8,11 @@ import torch
 from matplotlib.patches import Rectangle
 from PIL import Image
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.common.cli import (
     add_generation_arguments,
-    height_options,
+    generation_options,
     prepare_check,
     save_results,
 )
@@ -89,22 +88,18 @@ def main() -> None:
             reference = generator.generate(
                 anchors=(),
                 anchor_strength=0.0,
-                guidance=args.guidance,
-                domain=args.domain,
-                **height_options(args),
-                margin=generator.default_margin,
+                **generation_options(args, generator.default_margin),
             )
             anchor_image = reference.movedim(args.axis, 0)[index]
         else:
-            train_config = load_train_config(find_saved_config(args.weight))
-            data_config = train_config["data"]
-            crop_size = int(data_config["crop_size"])
+            cfg = load_train_config(find_saved_config(args.weight))
             anchor_image, crop, source_height = load_anchor_image(
                 args.anchor,
-                crop_size,
+                int(cfg["data"]["crop_size"]),
                 generator.patch_size,
                 generator.num_phases,
             )
+            # A real xz/yz image fixes its own depth unless the options set it.
             if generator.height_data is not None and args.axis in (1, 2):
                 if args.height_origin is None:
                     args.height_origin = float(crop[0])
@@ -118,33 +113,23 @@ def main() -> None:
         anchor = PlaneAnchor(anchor_image, args.axis, index)
 
         status("Generating boundary-anchored volume")
-
         generated, baseline = generate_with_baseline(
             generator,
             (anchor,),
             args.anchor_strength,
-            guidance=args.guidance,
-            domain=args.domain,
-            margin=generator.default_margin,
-            **height_options(args),
+            **generation_options(args, generator.default_margin),
         )
 
     save_results(generated, args, generator.num_phases)
     anchor_labels = anchor_image.argmax(0) if anchor_image.ndim == 3 else anchor_image
-    print_quality(
-        generated,
-        baseline,
-        anchor_labels,
-        args.axis,
-        index,
-    )
+    print_quality(generated, baseline, anchor_labels, args.axis, index)
     render_strip(
         generated,
         anchor_labels,
         args.axis,
         args.side,
         generator.num_phases,
-        output=args.figure,
+        args.figure,
         show=not args.no_view and not args.napari,
     )
     if args.napari and not args.no_view:
@@ -167,10 +152,7 @@ def load_anchor_image(
         raise ValueError(f"anchor image must contain a {crop_size} x {crop_size} crop.")
     top = (height - crop_size) // 2
     left = (width - crop_size) // 2
-    crop = np.array(
-        values[top : top + crop_size, left : left + crop_size],
-        copy=True,
-    )
+    crop = values[top : top + crop_size, left : left + crop_size].copy()
     labels = resize_anchor(torch.from_numpy(crop), input_size, num_phases)
     return labels, (top, left, crop_size, crop_size), height
 
@@ -204,20 +186,17 @@ def render_strip(
     axis: int,
     side: str,
     num_phases: int,
-    output: Path | None,
+    output: Path,
     show: bool,
 ) -> None:
     slices = volume.movedim(axis, 0)
     if side == "end":
         slices = slices.flip(0)
-    distances = tuple(
-        distance
-        for distance in DISPLAY_DISTANCES + (len(slices) - 1,)
-        if distance < len(slices)
-    )
-    distances = tuple(dict.fromkeys(distances))
+    last = len(slices) - 1
+    distances = tuple(distance for distance in DISPLAY_DISTANCES if distance < last)
+    distances += (last,)
     images = (anchor,) + tuple(slices[distance] for distance in distances)
-    index = 0 if side == "start" else len(slices) - 1
+    index = 0 if side == "start" else last
     titles = (f"Condition input (target)\naxis {axis}, index {index}",) + tuple(
         (
             f"Generated output\naxis {axis}, index {index}"
@@ -257,10 +236,9 @@ def render_strip(
         panel.axis("off")
     figure.suptitle(f"One-sided continuation from the {side} plane")
     figure.tight_layout()
-    if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(output, dpi=160, bbox_inches="tight")
-        path_field("Figure", output.resolve())
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output, dpi=160, bbox_inches="tight")
+    path_field("Figure", output.resolve())
     if show:
         plt.show()
     plt.close(figure)

@@ -4,11 +4,11 @@ from pathlib import Path
 
 import uvicorn
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.src.app import create_app
-from backend.src.config import DEFAULT_CONFIG, ServerConfig, load_server_config
+from app.backend.src.app import create_app
+from app.backend.src.config import DEFAULT_CONFIG, ServerConfig, load_server_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,13 +27,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         choices=("cpu", "cuda", "mps"),
-        default=None,
         help="inference device; defaults to CUDA or MPS when available",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--max-inflight-downloads", type=int, default=None)
+    parser.add_argument("--max-inflight-downloads", type=int)
     return parser.parse_args()
 
 
@@ -41,6 +40,7 @@ def main() -> None:
     args = parse_args()
     config = load_server_config(args.config)
     if args.max_inflight_downloads is not None:
+        # Validate the override like a config file value.
         config = ServerConfig.model_validate(
             {
                 **config.model_dump(),

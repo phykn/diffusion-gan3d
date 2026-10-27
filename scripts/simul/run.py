@@ -2,10 +2,10 @@ import argparse
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from simul.src.export import generate
+from scripts.simul.src.export import generate
 from src.config.files import load_yaml
 from src.console import field, path_field, section
 
@@ -18,7 +18,7 @@ def main() -> None:
         "--config",
         type=Path,
         default=DEFAULT_CONFIG,
-        help="Simulation YAML (default: simul/config.yaml).",
+        help="Simulation YAML (default: scripts/simul/config.yaml).",
     )
     args = parser.parse_args()
     cfg = load_yaml(args.config)

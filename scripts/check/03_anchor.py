@@ -6,18 +6,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.common.cli import (
     add_generation_arguments,
-    height_options,
+    generation_options,
     non_negative_int,
     prepare_check,
     save_results,
 )
 from scripts.common.diagnostic import (
     anchor_accuracy,
+    format_percent,
     generate_with_baseline,
     middle_slices,
     print_anchor_effect,
@@ -65,16 +65,10 @@ def main() -> None:
     generator = load_generator(args.weight, device=device)
     if anchor_count > generator.patch_size:
         parser.error(f"--count must be at most {generator.patch_size}.")
+    options = generation_options(args, generator.default_margin)
     with seeded_rng(args.seed, device):
         status("Generating reference")
-        target = generator.generate(
-            anchors=(),
-            anchor_strength=0.0,
-            guidance=args.guidance,
-            domain=args.domain,
-            **height_options(args),
-            margin=generator.default_margin,
-        )
+        target = generator.generate(anchors=(), anchor_strength=0.0, **options)
         target_slices = target.movedim(args.axis, 0)
         indices = select_indices(target_slices.shape[0], anchor_count)
         anchors = tuple(
@@ -88,20 +82,15 @@ def main() -> None:
         status("Generating anchored sample")
 
         gen, baseline = generate_with_baseline(
-            generator,
-            anchors,
-            args.anchor_strength,
-            guidance=args.guidance,
-            domain=args.domain,
-            margin=generator.default_margin,
-            **height_options(args),
+            generator, anchors, args.anchor_strength, **options
         )
     save_results(gen, args, generator.num_phases)
     profile = measure_distance_divergence(gen, baseline, indices, args.axis)
     smoothness = measure_slice_smoothness(gen, indices, args.axis, baseline)
     section("Quality")
-    score = anchor_accuracy(gen, target, indices, args.axis)
-    metric("Anchor match", "n/a" if score is None else f"{score:.2%}")
+    metric(
+        "Anchor match", format_percent(anchor_accuracy(gen, target, indices, args.axis))
+    )
     print_anchor_effect(smoothness, profile, "anchor")
     if args.no_view:
         return
@@ -142,11 +131,13 @@ def show_result(
     for panel, (slice_idx, title) in zip(panels[1], neighbors, strict=True):
         show_labels(panel, slices[slice_idx], num_phases, title)
 
+    views = middle_slices(vol)
     orth_axes = tuple(value for value in (0, 1, 2) if value != axis)
     for panel, view_axis in zip(panels[2, :2], orth_axes, strict=True):
-        section = middle_slices(vol)[view_axis]
+        view = views[view_axis]
+        # Put the anchor axis on rows so anchor planes show as horizontal lines.
         anchor_dim = axis if axis < view_axis else axis - 1
-        oriented = section if anchor_dim == 0 else section.T
+        oriented = view if anchor_dim == 0 else view.T
         show_labels(
             panel, oriented, num_phases, f"Orthogonal view from axis {view_axis}"
         )

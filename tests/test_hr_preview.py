@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 def test_hr_preview_only_resizes_displayed_planes(tmp_path, monkeypatch):
     script = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/06_check_hr.py")
+        str(Path(__file__).resolve().parents[1] / "scripts/check/06_hr.py")
     )
     low = (torch.arange(3 * 5 * 7).reshape(3, 5, 7) % 3).long()
     high = torch.zeros(8, 12, 16, dtype=torch.uint8)

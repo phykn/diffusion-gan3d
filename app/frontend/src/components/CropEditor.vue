@@ -67,8 +67,11 @@ function point(event) {
   }
 }
 
-function clamp() {
-  Object.assign(state.crop, clampCrop(state.sourceLabels, state.crop, props.cropSize))
+function moveCrop(x, y) {
+  const next = clampCrop(state.sourceLabels, { x, y }, props.cropSize)
+  if (next.x === state.crop.x && next.y === state.crop.y) return
+  Object.assign(state.crop, next)
+  emit('change')
 }
 
 function pointerDown(event) {
@@ -79,14 +82,7 @@ function pointerDown(event) {
     && next.x <= state.crop.x + size
     && next.y >= state.crop.y
     && next.y <= state.crop.y + size
-  if (!inside) {
-    const previousX = state.crop.x
-    const previousY = state.crop.y
-    state.crop.x = next.x - size / 2
-    state.crop.y = next.y - size / 2
-    clamp()
-    if (state.crop.x !== previousX || state.crop.y !== previousY) emit('change')
-  }
+  if (!inside) moveCrop(next.x - size / 2, next.y - size / 2)
   state.drag = { x: next.x - state.crop.x, y: next.y - state.crop.y }
   canvas.value.setPointerCapture(event.pointerId)
   draw()
@@ -95,12 +91,7 @@ function pointerDown(event) {
 function pointerMove(event) {
   if (props.disabled || !state.drag) return
   const next = point(event)
-  const previousX = state.crop.x
-  const previousY = state.crop.y
-  state.crop.x = next.x - state.drag.x
-  state.crop.y = next.y - state.drag.y
-  clamp()
-  if (state.crop.x !== previousX || state.crop.y !== previousY) emit('change')
+  moveCrop(next.x - state.drag.x, next.y - state.drag.y)
   draw()
 }
 
@@ -154,9 +145,9 @@ watch(() => [props.file, props.cropSize], ([file], previous, onCleanup) => {
 })
 
 function getAnchorImage() {
-  if (!state.crop) return null
-  return cropAnchor(state.sourceLabels, state.crop, props.cropSize)
+  return state.crop && cropAnchor(state.sourceLabels, state.crop, props.cropSize)
 }
+
 onMounted(() => {
   observer = new ResizeObserver(draw)
   observer.observe(canvas.value)

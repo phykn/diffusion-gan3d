@@ -2,17 +2,16 @@ import argparse
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.common.cli import (
     add_generation_arguments,
-    height_options,
+    generation_options,
     prepare_check,
     save_results,
 )
 from scripts.common.diagnostic import show_napari, show_slices
-from simul.src.anode import depth_profile
+from scripts.simul.src.anode import depth_profile
 from src.build.predict import load_generator
 from src.config.files import load_yaml
 from src.console import field, path_field, section, status
@@ -44,19 +43,11 @@ def main() -> None:
     field("Volume", f"{' × '.join(map(str, shape))}, domain {args.domain}, {device}")
     status("Generating")
 
+    options = generation_options(args, generator.default_margin)
+    if args.vf_profile is not None:
+        options["vf_profile"] = load_vf_profile(args.vf_profile)
     with seeded_rng(args.seed, device):
-        vol = generator.generate(
-            vf=None,
-            guidance=args.guidance,
-            domain=args.domain,
-            **height_options(args),
-            **(
-                {}
-                if args.vf_profile is None
-                else {"vf_profile": load_vf_profile(args.vf_profile)}
-            ),
-            margin=generator.default_margin,
-        )
+        vol = generator.generate(**options)
     save_results(vol, args, generator.num_phases)
     if args.no_view:
         return

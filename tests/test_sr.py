@@ -8,8 +8,8 @@ import torch
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from backend.src.app import create_app
-from backend.src.config import load_server_config
+from app.backend.src.app import create_app
+from app.backend.src.config import load_server_config
 from src.build.data import build_datasets
 from src.build.model import build_denoiser
 from src.build.sr import build_sr_trainer

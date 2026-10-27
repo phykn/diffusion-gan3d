@@ -46,12 +46,12 @@ def test_boundary_continuation_defaults_to_an_unconditioned_reference(
     weights = save_model(run_dir / "generator.pt", model)
     output_path = tmp_path / "continuation.tiff"
 
-    module = _load_script("05_check_continuation.py")
+    module = _load_script("05_continuation.py")
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "05_check_continuation.py",
+            "05_continuation.py",
             "--device",
             "cpu",
             "--weight",
@@ -92,12 +92,12 @@ def test_boundary_continuation_script_uses_a_real_image_at_the_start_plane(
     output_path = tmp_path / "continuation.tiff"
     figure_path = tmp_path / "continuation.png"
 
-    module = _load_script("05_check_continuation.py")
+    module = _load_script("05_continuation.py")
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "05_check_continuation.py",
+            "05_continuation.py",
             "--device",
             "cpu",
             "--weight",
@@ -147,7 +147,7 @@ def test_continuation_anchor_keeps_indexed_phases_and_fractional_resize(
     path = tmp_path / "indexed-anchor.png"
     image.save(path)
 
-    module = _load_script("05_check_continuation.py")
+    module = _load_script("05_continuation.py")
     labels, crop, height = module.load_anchor_image(path, 4, 2, 3)
 
     assert crop == (1, 1, 4, 4)
@@ -164,12 +164,14 @@ def test_continuation_anchor_keeps_indexed_phases_and_fractional_resize(
     assert fractions.max() <= 1.0
 
 
-def test_continuation_strip_renders_every_distance(monkeypatch):
-    module = _load_script("05_check_continuation.py")
+def test_continuation_strip_renders_every_distance(monkeypatch, tmp_path):
+    module = _load_script("05_continuation.py")
     seen = []
     monkeypatch.setattr(module.plt, "show", lambda: seen.extend(plt.gcf().axes))
     volume = torch.arange(8).reshape(8, 1, 1).expand(8, 3, 3) % 2
-    module.render_strip(volume, volume[0], 0, "start", 2, None, True)
+    figure = tmp_path / "strip.png"
+    module.render_strip(volume, volume[0], 0, "start", 2, figure, True)
+    assert figure.is_file()
     populated = [panel for panel in seen if panel.images]
     assert len(populated) == 6  # anchor plus distances 0, 1, 2, 4, 7
     assert populated[-1].get_title() == "Generated d=7"
@@ -178,7 +180,7 @@ def test_continuation_strip_renders_every_distance(monkeypatch):
 def test_boundary_continuation_napari_shows_generated_volume_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = _load_script("05_check_continuation.py")
+    module = _load_script("05_continuation.py")
     layers = []
     ran = False
 
@@ -226,7 +228,7 @@ def test_anchor_check_script_runs_with_generated_reference(
     model, _ = build_models(cfg)
     weights = save_model(run_dir / "generator.pt", model)
 
-    filename = "03_check_anchor.py"
+    filename = "03_anchor.py"
     module = _load_script(filename)
     monkeypatch.setattr(
         sys,
@@ -303,7 +305,7 @@ def test_zero_strength_is_unanchored(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    module = _load_script("03_check_anchor.py")
+    module = _load_script("03_anchor.py")
     calls = []
 
     class FakeGenerator:
@@ -346,7 +348,7 @@ def test_zero_strength_is_unanchored(
         module.sys,
         "argv",
         [
-            "03_check_anchor.py",
+            "03_anchor.py",
             "--device",
             "cpu",
             "--weight",
@@ -378,7 +380,7 @@ def test_anchor_check_uses_generated_reference_and_same_rng_baseline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    module = _load_script("03_check_anchor.py")
+    module = _load_script("03_anchor.py")
     reference = torch.arange(64, dtype=torch.uint8).reshape(4, 4, 4) % 3
     calls = []
 
@@ -402,7 +404,7 @@ def test_anchor_check_uses_generated_reference_and_same_rng_baseline(
         module.sys,
         "argv",
         [
-            "03_check_anchor.py",
+            "03_anchor.py",
             "--device",
             "cpu",
             "--weight",
@@ -441,7 +443,7 @@ def test_unconditioned_check_routes_only_domain_condition(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    module = _load_script("02_check_generated.py")
+    module = _load_script("02_generated.py")
     calls = []
     output_path = tmp_path / "nested" / "generated.tiff"
 
@@ -450,8 +452,8 @@ def test_unconditioned_check_routes_only_domain_condition(
         num_phases = 3
         default_margin = 8
 
-        def generate(self, *, vf, guidance, domain, margin):
-            calls.append((vf, domain, margin))
+        def generate(self, *, guidance, domain, margin, **conditions):
+            calls.append((conditions, domain, margin))
             assert guidance == load_generation_settings().guidance
             return torch.zeros((4, 4, 4), dtype=torch.uint8)
 
@@ -461,7 +463,7 @@ def test_unconditioned_check_routes_only_domain_condition(
         module.sys,
         "argv",
         [
-            "02_check_generated.py",
+            "02_generated.py",
             "--device",
             "cpu",
             "--weight",
@@ -476,7 +478,7 @@ def test_unconditioned_check_routes_only_domain_condition(
     assert output_path.is_file()
     assert tifffile.imread(output_path).shape == (4, 4, 4)
 
-    assert calls == [(None, domain, 8)]
+    assert calls == [({}, domain, 8)]
     output = capsys.readouterr().out
     assert f"domain {domain}, cpu" in output
     assert "Anchor/VF" not in output
@@ -568,7 +570,7 @@ def test_anchor_divergence_profile_compares_same_distance_slices() -> None:
 
 
 def _load_script(filename: str):
-    return importlib.import_module(f"scripts.{Path(filename).stem}")
+    return importlib.import_module(f"scripts.check.{Path(filename).stem}")
 
 
 def _config(root: Path) -> dict:
@@ -648,10 +650,10 @@ def _config(root: Path) -> dict:
 @pytest.mark.parametrize(
     "filename",
     [
-        "02_check_generated.py",
-        "03_check_anchor.py",
-        "04_check_scale_up.py",
-        "05_check_continuation.py",
+        "02_generated.py",
+        "03_anchor.py",
+        "04_scale_up.py",
+        "05_continuation.py",
     ],
 )
 def test_weight_directory_alone_saves_manual_check_results(
@@ -683,10 +685,10 @@ def test_weight_directory_alone_saves_manual_check_results(
 @pytest.mark.parametrize(
     "filename,extra",
     [
-        ("02_check_generated.py", []),
-        ("03_check_anchor.py", ["--count", "1"]),
+        ("02_generated.py", []),
+        ("03_anchor.py", ["--count", "1"]),
         (
-            "04_check_scale_up.py",
+            "04_scale_up.py",
             [
                 "--blocks",
                 "2",
@@ -700,7 +702,7 @@ def test_weight_directory_alone_saves_manual_check_results(
                 "0",
             ],
         ),
-        ("05_check_continuation.py", []),
+        ("05_continuation.py", []),
     ],
 )
 def test_inspection_scripts_support_mixed_source_heights(

@@ -1,4 +1,5 @@
 import errno
+import tempfile
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,15 +11,17 @@ import torch
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from backend.src import app as server_module
-from backend.src import response as response_module
-from backend.src.app import create_app
-from backend.src.config import load_server_config
-from backend.src.schema import GenerateRequest
+from app.backend.src import app as server_module
+from app.backend.src import response as response_module
+from app.backend.src.app import create_app
+from app.backend.src.config import load_server_config
+from app.backend.src.schema import GenerateRequest
 from src.predict.memory import estimate_memory, select_storage
 from src.prepare.profile import validate_profile
 
-SERVER_CONFIG = Path(__file__).resolve().parents[1] / "fixtures/config/backend.yaml"
+CONFIG = load_server_config(
+    Path(__file__).resolve().parents[1] / "fixtures/config/backend.yaml"
+)
 
 
 class FakeInference:
@@ -80,9 +83,17 @@ def client(
     (assets / "app.js").write_text("", encoding="utf-8")
     monkeypatch.setattr(server_module, "FRONTEND_DIR", front)
     monkeypatch.setattr(response_module, "pore_tortuosity", lambda _volume, device: 1.5)
-    return TestClient(
-        create_app(inference=service, config=load_server_config(SERVER_CONFIG))
+    return TestClient(create_app(inference=service, config=CONFIG))
+
+
+@pytest.fixture
+def tiff_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr(
+        response_module,
+        "NamedTemporaryFile",
+        lambda **kwargs: tempfile.NamedTemporaryFile(dir=tmp_path, **kwargs),
     )
+    return tmp_path
 
 
 def test_health_reports_loaded_device(client: TestClient) -> None:
@@ -215,15 +226,8 @@ def test_busy_request_is_rejected_without_waiting_or_releasing_owner_lock(
     ],
 )
 def test_response_preparation_errors_cleanup_file_and_release_lock(
-    client, monkeypatch, tmp_path, failure, status
+    client, monkeypatch, tiff_dir, failure, status
 ):
-    import tempfile
-
-    monkeypatch.setattr(
-        response_module,
-        "NamedTemporaryFile",
-        lambda **kwargs: tempfile.NamedTemporaryFile(dir=tmp_path, **kwargs),
-    )
     original = response_module.tifffile.imwrite
 
     def fail(*args, **kwargs):
@@ -232,24 +236,17 @@ def test_response_preparation_errors_cleanup_file_and_release_lock(
     monkeypatch.setattr(response_module.tifffile, "imwrite", fail)
     response = client.post("/api/generate", json={})
     assert response.status_code == status
-    assert not list(tmp_path.glob("*.tiff"))
+    assert not list(tiff_dir.glob("*.tiff"))
     assert not client.app.state.generate_lock.locked()
     monkeypatch.setattr(response_module.tifffile, "imwrite", original)
     assert client.post("/api/generate", json={}).status_code == 200
 
 
-def test_tiff_response_removes_tempfile_after_success(client, monkeypatch, tmp_path):
-    import tempfile
-
-    monkeypatch.setattr(
-        response_module,
-        "NamedTemporaryFile",
-        lambda **kwargs: tempfile.NamedTemporaryFile(dir=tmp_path, **kwargs),
-    )
+def test_tiff_response_removes_tempfile_after_success(client, tiff_dir):
     response = client.post("/api/generate", json={})
     assert response.status_code == 200
     assert tifffile.imread(BytesIO(response.content)).shape == (4, 4, 4)
-    assert not list(tmp_path.glob("*.tiff"))
+    assert not list(tiff_dir.glob("*.tiff"))
 
 
 def test_generate_decodes_anchor_and_scale_request(
@@ -329,16 +326,14 @@ def test_generate_reports_planned_memory_limit(
 
 def test_create_app_requires_one_inference_source(service: FakeInference) -> None:
     with pytest.raises(ValueError, match="weights are required"):
-        create_app(config=load_server_config(SERVER_CONFIG))
+        create_app(config=CONFIG)
     with pytest.raises(ValueError, match="cannot be provided together"):
-        create_app(
-            "generator.pt", inference=service, config=load_server_config(SERVER_CONFIG)
-        )
+        create_app("generator.pt", inference=service, config=CONFIG)
     with pytest.raises(ValueError, match="cannot be provided together"):
         create_app(
             inference=service,
             lr_weights="generator.pt",
-            config=load_server_config(SERVER_CONFIG),
+            config=CONFIG,
         )
 
 
@@ -418,9 +413,7 @@ def test_memory_preflight_rejects_before_inference(client, service, monkeypatch)
 
 
 def test_oversized_body_is_rejected_before_json_decoding(service):
-    config = load_server_config(SERVER_CONFIG).model_copy(
-        update={"max_request_bytes": 32}
-    )
+    config = CONFIG.model_copy(update={"max_request_bytes": 32})
     client = TestClient(create_app(inference=service, config=config))
     assert client.post("/api/generate", content=b" " * 33).status_code == 413
     assert not service.calls
@@ -430,7 +423,7 @@ def test_oversized_body_is_rejected_before_json_decoding(service):
 def test_slow_downloads_bound_retained_results_without_holding_generation(
     service, format
 ):
-    app = create_app(inference=service, config=load_server_config(SERVER_CONFIG))
+    app = create_app(inference=service, config=CONFIG)
     generate = next(
         route.endpoint for route in app.routes if route.path == "/api/generate"
     )
@@ -487,9 +480,7 @@ def test_slow_downloads_bound_retained_results_without_holding_generation(
     "failure", [MemoryError("oom"), ValueError("bad input"), OSError("disk")]
 )
 def test_failed_generation_returns_download_slot(service, monkeypatch, failure):
-    cfg = load_server_config(SERVER_CONFIG).model_copy(
-        update={"max_inflight_downloads": 1}
-    )
+    cfg = CONFIG.model_copy(update={"max_inflight_downloads": 1})
     app = create_app(inference=service, config=cfg)
     client = TestClient(app)
 
@@ -517,14 +508,14 @@ def test_failed_generation_returns_download_slot(service, monkeypatch, failure):
     ],
 )
 def test_configured_limits_reject_before_generation(service, settings, payload):
-    cfg = load_server_config(SERVER_CONFIG).model_copy(update=settings)
+    cfg = CONFIG.model_copy(update=settings)
     with TestClient(create_app(inference=service, config=cfg)) as client:
         assert client.post("/api/generate", json=payload).status_code == 422
     assert not service.calls
 
 
 def test_prepare_uses_configured_image_limit(service):
-    cfg = load_server_config(SERVER_CONFIG).model_copy(update={"max_size": 2})
+    cfg = CONFIG.model_copy(update={"max_size": 2})
     with TestClient(create_app(inference=service, config=cfg)) as client:
         response = client.post("/api/prepare", json={"image": [[0, 1, 0]]})
     assert response.status_code == 422
@@ -532,11 +523,9 @@ def test_prepare_uses_configured_image_limit(service):
 
 
 def test_apps_keep_independent_download_limits(service):
-    cfg = load_server_config(SERVER_CONFIG).model_copy(
-        update={"max_inflight_downloads": 1}
-    )
+    cfg = CONFIG.model_copy(update={"max_inflight_downloads": 1})
     first = create_app(inference=service, config=cfg)
-    second = create_app(inference=service, config=load_server_config(SERVER_CONFIG))
+    second = create_app(inference=service, config=CONFIG)
     assert first.state.download_slots.acquire(blocking=False)
     assert not first.state.download_slots.acquire(blocking=False)
     assert second.state.download_slots.acquire(blocking=False)

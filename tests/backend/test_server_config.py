@@ -4,39 +4,36 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from backend.src.config import load_server_config
-from backend.src.schema import GenerateRequest, PrepareRequest
+from app.backend.src.config import load_server_config
+from app.backend.src.schema import GenerateRequest, PrepareRequest
 
-SERVER_CONFIG = Path(__file__).resolve().parents[1] / "fixtures/config/backend.yaml"
+CONFIG = load_server_config(
+    Path(__file__).resolve().parents[1] / "fixtures/config/backend.yaml"
+)
+
+
+def write_config(tmp_path, **values) -> Path:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(CONFIG.model_dump() | values), encoding="utf-8")
+    return path
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "1024"])
 def test_limits_require_positive_integers(tmp_path, value):
-    values = load_server_config(SERVER_CONFIG).model_dump()
-    values["max_size"] = value
-    path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump(values), encoding="utf-8")
     with pytest.raises(ValidationError, match="max_size"):
-        load_server_config(path)
+        load_server_config(write_config(tmp_path, max_size=value))
 
 
 def test_config_rejects_unknown_settings(tmp_path):
-    values = load_server_config(SERVER_CONFIG).model_dump()
-    values["max_szie"] = 2048
-    path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump(values), encoding="utf-8")
     with pytest.raises(ValidationError, match="max_szie"):
-        load_server_config(path)
+        load_server_config(write_config(tmp_path, max_szie=2048))
 
 
 def test_config_can_raise_limits_without_changing_request_classes(tmp_path):
-    values = load_server_config(SERVER_CONFIG).model_dump()
-    values.update(max_size=2048, max_voxels=2048**3)
-    path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump(values), encoding="utf-8")
+    path = write_config(tmp_path, max_size=2048, max_voxels=2048**3)
     request = GenerateRequest(size=1025)
     with pytest.raises(ValueError, match="server limit"):
-        request.check_limits(load_server_config(SERVER_CONFIG))
+        request.check_limits(CONFIG)
     request.check_limits(load_server_config(path))
 
 

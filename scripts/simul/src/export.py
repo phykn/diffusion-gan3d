@@ -7,8 +7,14 @@ import tifffile
 import yaml
 from PIL import Image
 
-from simul.src.anode import GRAPHITE, SILICON, check_anode, pack_anode, vf_profile
-from simul.src.geometry import check_geometry, pack
+from scripts.simul.src.anode import (
+    GRAPHITE,
+    SILICON,
+    check_anode,
+    pack_anode,
+    vf_profile,
+)
+from scripts.simul.src.geometry import check_geometry, pack
 from src.config.files import project_path
 from src.plane import AXES
 
@@ -84,13 +90,7 @@ def generate(cfg: dict) -> Export:
             }
 
         for axis in AXES:
-            paths = save_slices(
-                vol,
-                slice_dirs[axis],
-                axis=axis,
-                stem=stem,
-            )
-            slices[axis].extend(paths)
+            slices[axis].extend(save_slices(vol, slice_dirs[axis], axis, stem))
 
     if jammed:
         warnings.warn(
@@ -136,12 +136,7 @@ def make_dirs(root: Path) -> tuple[Path, dict[int, Path]]:
     return vol_dir, slice_dirs
 
 
-def save_slices(
-    vol: np.ndarray,
-    dst: Path,
-    axis: int,
-    stem: str,
-) -> list[Path]:
+def save_slices(vol: np.ndarray, dst: Path, axis: int, stem: str) -> list[Path]:
     stack = np.moveaxis(vol, axis, 0)
     paths: list[Path] = []
     for idx in range(stack.shape[0]):

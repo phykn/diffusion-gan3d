@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from backend.src.app import create_app
+from app.backend.src.app import create_app
 from src.api import LowResolutionAPI, SuperResolutionAPI
 from src.build.trainer import build_trainer
 from src.config.files import load_yaml, save_yaml
@@ -163,7 +163,7 @@ def test_stage1_to_sr_training_resume_and_cli_prediction(
         "train": {**first["config"]["train"], "total_steps": 2},
     }
     check_hr = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/06_check_hr.py")
+        str(Path(__file__).resolve().parents[1] / "scripts/check/06_hr.py")
     )["main"]
     out = tmp_path / "result"
     check_hr(

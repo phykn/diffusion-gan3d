@@ -14,6 +14,6 @@ RUN=${lr%-lr}
 [[ -f $RUN-sr/.done ]] && finish 1 "$RUN-sr is already trained. Run train_anode_1st.command for a new run."
 step "Train $RUN-sr from $RUN-lr" caffeinate -i $PY run_train.py simul_anode \
   --run-dir $RUN ${SR_STEPS:+--sr-steps=$SR_STEPS}
-step "Check SR generation" $PY scripts/06_check_hr.py --weight $RUN-sr --no-view
+step "Check SR generation" $PY scripts/check/06_hr.py --weight $RUN-sr --no-view
 
 finish 0 Done "SR model" $RUN-sr Checks checks/

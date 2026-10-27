@@ -17,8 +17,8 @@ htmlcov/
 /scripts/gt.tiff
 /temp/
 /visualize/
-/frontend/node_modules/
-/frontend/dist/
+/app/frontend/node_modules/
+/app/frontend/dist/
 
 *.bat
 *.command

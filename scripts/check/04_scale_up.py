@@ -9,12 +9,11 @@ import matplotlib.pyplot as plt
 import torch
 from matplotlib.patches import Rectangle
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.common.cli import (
     add_generation_arguments,
-    height_options,
+    generation_options,
     non_negative_int,
     positive_int,
     prepare_check,
@@ -97,8 +96,7 @@ def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Generate a base with this many anchor planes.",
     )
     add_generation_arguments(parser, anchors=True)
-    args = parser.parse_args()
-    return parser, args
+    return parser, parser.parse_args()
 
 
 def generate_base(
@@ -109,12 +107,7 @@ def generate_base(
         return BaseResult(None, None, (), None)
     if anchor_count == 0:
         status("Generating unanchored base volume")
-        base = generator.generate(
-            guidance=args.guidance,
-            domain=args.domain,
-            **height_options(args),
-            margin=args.margin,
-        )
+        base = generator.generate(**generation_options(args, args.margin))
         return BaseResult(base, None, (), None)
 
     target = load_volume(args.gt)
@@ -127,32 +120,21 @@ def generate_base(
     base = generator.generate(
         anchors=anchors,
         anchor_strength=args.anchor_strength,
-        guidance=args.guidance,
-        domain=args.domain,
-        **height_options(args),
-        margin=args.margin,
+        **generation_options(args, args.margin),
     )
     return BaseResult(
-        base,
-        target,
-        indices,
-        anchor_accuracy(base, target, indices, AXIS),
+        base, target, indices, anchor_accuracy(base, target, indices, AXIS)
     )
 
 
 def assess_result(
     volume: torch.Tensor,
     base_result: BaseResult,
-    stats: TilePlan,
+    plan: TilePlan,
     patch_size: int,
     num_phases: int,
 ) -> ScaleAssessment:
-    quality = measure_seams(
-        volume,
-        stats.seams,
-        stats.overlap,
-        num_phases,
-    )
+    quality = measure_seams(volume, plan.seams, plan.overlap, num_phases)
     vfs = phase_fractions(volume, num_phases)
     base = base_result.volume
     if base is None:
@@ -161,7 +143,7 @@ def assess_result(
     start = resolve_offset(None, volume.shape, base.shape)
     region = tuple(slice(index, index + patch_size) for index in start)
     center = volume[region]
-    shell = stats.base_shell
+    shell = plan.base_shell
     interior = tuple(
         slice(shell, -shell)
         if volume.shape[axis] > patch_size and shell
@@ -171,10 +153,7 @@ def assess_result(
     scaled_accuracy = None
     if base_result.target is not None:
         scaled_accuracy = anchor_accuracy(
-            center,
-            base_result.target,
-            base_result.indices,
-            AXIS,
+            center, base_result.target, base_result.indices, AXIS
         )
     return ScaleAssessment(
         quality,
@@ -192,7 +171,7 @@ def main() -> None:
     section("Scale-up check")
     settings = prepare_check(args, __file__)
     anchor_count = args.count if args.count is None or args.anchor_strength > 0.0 else 0
-    if anchor_count is not None and anchor_count > 0 and args.gt is None:
+    if anchor_count and args.gt is None:
         parser.error("--gt is required when --count is positive.")
     if args.gt is not None and not anchor_count:
         parser.error(
@@ -228,6 +207,7 @@ def main() -> None:
             generator.validate_height(
                 shape, args.domain, args.height_origin, args.height_extent
             )
+            # The base fills the center of the output, so it starts deeper.
             base_args.height_origin += (
                 (shape[0] - generator.patch_size)
                 // 2
@@ -242,26 +222,17 @@ def main() -> None:
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats(device)
 
-        start = perf_counter()
+        started = perf_counter()
         vol = scaled.generate(
             blocks=tuple(args.blocks),
             overlap=overlap,
-            margin=args.margin,
             base=base_result.volume,
-            vf=None,
-            guidance=args.guidance,
-            domain=args.domain,
-            **height_options(args),
+            **generation_options(args, args.margin),
         )
-    stats = scaled.stats
-    elapsed = perf_counter() - start
+    elapsed = perf_counter() - started
     save_results(vol, args, generator.num_phases)
     assessment = assess_result(
-        vol,
-        base_result,
-        stats,
-        generator.patch_size,
-        generator.num_phases,
+        vol, base_result, scaled.stats, generator.patch_size, generator.num_phases
     )
     quality = assessment.quality
     base, target = base_result.volume, base_result.target

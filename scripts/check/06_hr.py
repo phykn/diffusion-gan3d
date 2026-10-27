@@ -7,7 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.cli import (
@@ -146,7 +146,7 @@ def main(argv=None):
     weight = resolve_weights(args.weight or latest_sr())
     cfg = load_sr_export(weight)["config"]
     lr_weight = None
-    common = dict(
+    shared = dict(
         domain=args.domain,
         seed=args.seed,
         height_origin=args.height_origin,
@@ -170,7 +170,7 @@ def main(argv=None):
         validate_sr_source(cfg["data"], lr.data)
         if args.lr_guidance is None:
             args.lr_guidance = lr.settings.guidance
-        low = lr.generate_probs(guidance=args.lr_guidance, **common)
+        low = lr.generate_probs(guidance=args.lr_guidance, **shared)
         del lr
         gc.collect()
         empty_cache(device)
@@ -186,7 +186,7 @@ def main(argv=None):
         overlap=overlap,
         margin=args.margin,
         guidance=args.guidance,
-        **common,
+        **shared,
     )
     root = args.out or result_directory(__file__)
     root.mkdir(parents=True, exist_ok=True)
@@ -210,7 +210,7 @@ def main(argv=None):
         "lr_weights": str(lr_weight) if lr_weight else None,
         "input": str(args.input.resolve()) if args.input else None,
         "lr_source_verified": not args.input and not args.lr_weight,
-        **common,
+        **shared,
         "crop_size": sr.crop_size,
         "lo_res_size": sr.lo_res_size,
         "hi_res_size": sr.hi_res_size,

@@ -7,9 +7,16 @@ import pytest
 import tifffile
 import yaml
 from PIL import Image
+from scipy import ndimage
 
-from simul.src.export import generate
-from simul.src.geometry import pack, place, radius_profile
+from scripts.simul.src.anode import (
+    flake_rotation,
+    graphite_shapes,
+    make_shape,
+    silicon_shapes,
+)
+from scripts.simul.src.export import generate
+from scripts.simul.src.geometry import make_offsets, pack, place, radius_profile
 
 GEOMETRY = {
     "size": 20,
@@ -118,10 +125,6 @@ class SimulationExportTest(unittest.TestCase):
                     pack(**geometry)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def test_radius_gradient_uses_exported_height_and_clamps_context():
     profile = radius_profile(5, 3, [0.5, 1.5])
     np.testing.assert_allclose(
@@ -131,16 +134,13 @@ def test_radius_gradient_uses_exported_height_and_clamps_context():
 
 def test_placed_particle_axes_follow_height_without_overlap():
     volume = np.zeros((40,) * 3, dtype=np.uint8)
-    occupied = np.zeros_like(volume, dtype=bool)
     particles = []
     scales = radius_profile(32, 4, [0.6, 1.4])
     for label in (2, 1):
-        place(volume, occupied, particles, label, 2500, 3.0, 2.0, 2.0, scales)
+        place(volume, particles, label, 2500, 3.0, 2.0, 2.0, scales)
     assert len(particles) > 10
     # Geometry is checked for every accepted center, not inferred from random
     # section fluctuations. Reconstruct the occupancy to check non-overlap.
-    from simul.src.geometry import make_offsets
-
     reconstructed = np.zeros_like(volume, dtype=int)
     for particle in particles:
         center, axes = np.asarray(particle.center), np.asarray(particle.axes)
@@ -152,7 +152,7 @@ def test_placed_particle_axes_follow_height_without_overlap():
         inside = ((positions >= 0) & (positions < volume.shape)).all(1)
         reconstructed[tuple(positions[inside].T)] += 1
     assert reconstructed.max() == 1
-    np.testing.assert_array_equal(reconstructed.astype(bool), occupied)
+    np.testing.assert_array_equal(reconstructed.astype(bool), volume != 0)
 
 
 @pytest.mark.parametrize("gradient", [[0, 1], [-1, 2], [1], [1, float("inf")]])
@@ -202,7 +202,6 @@ def test_seeded_export_is_repeatable_and_records_measured_fractions(tmp_path):
 
 
 def test_relative_data_dir_resolves_from_project_root(tmp_path, monkeypatch):
-
     project = tmp_path / "project"
     monkeypatch.setattr("src.config.files.PROJECT_ROOT", project)
     monkeypatch.chdir(tmp_path)
@@ -251,8 +250,6 @@ def test_jam_warning_names_only_short_phases_against_their_mean_target(tmp_path)
 
 
 def test_anode_flakes_are_flat_along_thickness():
-    from simul.src.anode import graphite_shapes
-
     shapes = graphite_shapes(10, 0.3, 0.0, 0.0, 1.0, np.random.default_rng(0))
     offsets, _ = shapes[0]
     extent = offsets.max(0) - offsets.min(0)
@@ -279,10 +276,6 @@ def test_unknown_geometry_kind_is_rejected(tmp_path):
 
 
 def test_anode_shape_sections_have_no_specks():
-    from scipy import ndimage
-
-    from simul.src.anode import flake_rotation, make_shape
-
     rng = np.random.default_rng(3)
     axes = np.asarray((3.0, 10.0, 7.0))
     offsets, _ = make_shape(axes, flake_rotation(30.0, rng), 12)
@@ -296,8 +289,6 @@ def test_anode_shape_sections_have_no_specks():
 
 
 def test_anode_drops_trimmed_particles_and_rejects_an_empty_library():
-    from simul.src.anode import silicon_shapes
-
     shapes = silicon_shapes(2.0, 0.5, 9, np.random.default_rng(0))
     assert shapes and all(len(offsets) for offsets, _ in shapes)
     with pytest.raises(ValueError, match="min_section removes every silicon"):

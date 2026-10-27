@@ -100,11 +100,14 @@ def add_height_arguments(parser, origin_default=0.0):
     )
 
 
-def height_options(args):
+def generation_options(args, margin):
+    """Generator options from the shared check arguments."""
+    options = {"guidance": args.guidance, "domain": args.domain, "margin": margin}
     origin, extent = args.height_origin, args.height_extent
-    if origin in (None, 0) and extent is None:
-        return {}
-    return {"height_origin": 0.0 if origin is None else origin, "height_extent": extent}
+    if origin not in (None, 0) or extent is not None:
+        options["height_origin"] = 0.0 if origin is None else origin
+        options["height_extent"] = extent
+    return options
 
 
 def result_directory(script):

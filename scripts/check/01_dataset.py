@@ -7,8 +7,7 @@ import numpy as np
 import torch
 from matplotlib.patches import Patch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.common.cli import add_domain_seed_arguments, result_directory
 from scripts.common.diagnostic import show_labels
@@ -76,43 +75,60 @@ def main() -> None:
     if args.weight:
         config = find_saved_config(resolve_weights(args.weight))
         cfg = load_train_config(config, load_yaml(config)["stage"])
+        name = config.parent.name
     else:
         config = find_sample(args.sample)
         cfg = load_train_config(
             build_train_config(load_sample(config), "low_res"), "low_res"
         )
+        name = config.stem
     torch.manual_seed(args.seed)
-    stages = {
-        "LR": build_datasets(cfg),
-        "SR": build_datasets(cfg, high_resolution=True),
-    }
-    if args.domain not in stages["LR"]:
-        parser.error(f"--domain must be one of {list(stages['LR'])}")
-    num_phases = cfg["data"]["num_phases"]
-    planes = {label: datasets[args.domain] for label, datasets in stages.items()}
-    axes = tuple(planes["LR"])
-    crop = planes["LR"][axes[0]].crop_size
-    sizes = {label: planes[label][axes[0]].patch_size for label in stages}
-    name = config.parent.name if args.weight else config.stem
-    if len(stages["LR"]) > 1:
+    lr_domains = build_datasets(cfg)
+    sr_domains = build_datasets(cfg, high_resolution=True)
+    if args.domain not in lr_domains:
+        parser.error(f"--domain must be one of {list(lr_domains)}")
+    if len(lr_domains) > 1:
         name += f" (domain {args.domain})"
+    stages = {"LR": lr_domains[args.domain], "SR": sr_domains[args.domain]}
+    first = next(iter(stages["LR"]))
+    crop = stages["LR"][first].crop_size
+    sizes = {label: planes[first].patch_size for label, planes in stages.items()}
     section("Training crops")
     path_field("Config", config.resolve())
     for label, size in sizes.items():
         field(label, f"{crop} px -> {size}x{size} (1 cell = {crop / size:g} px)")
-    for axis in axes:
-        field(PLANES[axis], image_count(len(planes["LR"][axis])))
+    for axis, dataset in stages["LR"].items():
+        field(PLANES[axis], image_count(len(dataset)))
+    fig = crop_figure(stages, cfg["data"]["num_phases"], args.seed)
+    lr, sr = (f"{size}x{size}" for size in sizes.values())
+    fig.suptitle(
+        f"{name}: {crop} px crops, left LR {lr}, right SR {sr}",
+        y=1 - 0.08 / fig.get_figheight(),
+        va="top",
+    )
+    output = args.out or result_directory(__file__) / "crops.png"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=150)
+    path_field("Preview", output.resolve())
+    if not args.no_view:
+        plt.show()
+    plt.close(fig)
+
+
+def crop_figure(stages: dict, num_phases: int, seed: int):
+    """Rows of planes; each column pairs one random crop at the LR and SR grids."""
+    axes = tuple(stages["LR"])
     # Fixed layout in inches: a narrow gap inside each LR/SR pair, a wider one
     # between pairs, and room above each pair for its phase fractions.
     pair = 2 * PANEL + PAIR_GAP
     width = LABEL_WIDTH + SAMPLES * pair + (SAMPLES - 1) * CROP_GAP + MARGIN
     height = TITLE_HEIGHT + len(axes) * (FRACTION_HEIGHT + PANEL) + LEGEND_HEIGHT
     fig = plt.figure(figsize=(width, height))
-    rng = np.random.RandomState(args.seed)
+    rng = np.random.RandomState(seed)
     for row, axis in enumerate(axes):
         plane = PLANES[axis]
         down, right = PLANE_DIRECTIONS[plane]
-        dataset = planes["LR"][axis]
+        dataset = stages["LR"][axis]
         top = height - TITLE_HEIGHT - row * (FRACTION_HEIGHT + PANEL) - FRACTION_HEIGHT
         fig.text(
             LABEL_WIDTH / 2 / width,
@@ -125,12 +141,12 @@ def main() -> None:
             group = dataset.path_groups[rng.randint(len(dataset.path_groups))]
             path = group[rng.randint(len(group))]
             # The same seed makes both datasets cut the same source region.
-            seed = rng.randint(2**31)
+            crop_seed = rng.randint(2**31)
             images = {
-                label: planes[label][axis].sample(path, np.random.RandomState(seed))[
+                label: planes[axis].sample(path, np.random.RandomState(crop_seed))[
                     "image"
                 ]
-                for label in stages
+                for label, planes in stages.items()
             }
             left = LABEL_WIDTH + col * (pair + CROP_GAP)
             fig.text(
@@ -162,19 +178,7 @@ def main() -> None:
         ncol=num_phases,
         frameon=False,
     )
-    lr, sr = (f"{size}x{size}" for size in sizes.values())
-    fig.suptitle(
-        f"{name}: {crop} px crops, left LR {lr}, right SR {sr}",
-        y=1 - 0.08 / height,
-        va="top",
-    )
-    output = args.out or result_directory(__file__) / "crops.png"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=150)
-    path_field("Preview", output.resolve())
-    if not args.no_view:
-        plt.show()
-    plt.close(fig)
+    return fig
 
 
 if __name__ == "__main__":

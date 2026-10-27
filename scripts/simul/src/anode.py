@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 from scipy import ndimage
 
-from simul.src.geometry import (
+from scripts.simul.src.geometry import (
     PROBE_STRIDE,
     invalidate_centers,
     locate,
@@ -60,10 +60,11 @@ def pack_anode(
     volume = np.zeros((size + 2 * padding, size, size), dtype=np.uint8)
     region = (slice(padding, padding + size), slice(None), slice(None))
     periodic = np.array((False, True, True))
-    valid = np.ones(volume.shape, dtype=bool)
     inscribed: list[tuple[np.ndarray, float]] = []
+    # Both shape libraries are drawn before packing to fix the rng order.
     phases = (
         (
+            "graphite",
             GRAPHITE,
             graphite_vf,
             graphite_shapes(
@@ -76,18 +77,18 @@ def pack_anode(
             ),
         ),
         (
+            "silicon",
             SILICON,
             silicon_vf,
             silicon_shapes(silicon_radius, size_spread, min_section, rng),
         ),
     )
-    for label, vf, shapes in phases:
+    for name, label, vf, shapes in phases:
         profile = vf_profile(size, padding, vf)
-        fill(volume, valid, inscribed, label, profile * size**2, shapes, periodic, rng)
+        fill(volume, inscribed, label, profile * size**2, shapes, periodic, rng)
         reached = (volume[region] == label).mean()
         target = profile[padding : padding + size].mean()
         if reached < target - 0.005:
-            name = "graphite" if label == GRAPHITE else "silicon"
             warnings.warn(
                 f"{name} jammed at volume fraction {reached:.3f} "
                 f"before its {target:.3f} target.",
@@ -128,8 +129,8 @@ def check_anode(
     graphite_vf,
     silicon_radius,
     silicon_vf,
-    size_spread=0.0,
-    min_section=0,
+    size_spread,
+    min_section,
 ) -> None:
     if type(size) is not int or size < 1:
         raise ValueError("size must be a positive integer.")
@@ -218,32 +219,33 @@ def make_shape(axes: np.ndarray, rotation: np.ndarray, min_section: int):
                     labels, count = ndimage.label(layer)
                     if count:
                         sizes = np.bincount(labels.ravel())[1:]
-                        largest = np.argmax(sizes) + 1
-                        keep = sizes[largest - 1] >= min_section
-                        layer[...] = (labels == largest) & keep
+                        largest = np.argmax(sizes)
+                        keep = sizes[largest] >= min_section
+                        layer[...] = (labels == largest + 1) & keep
     # A sphere this size sits inside the digital shape whatever its rotation.
     return offsets[mask.ravel()], max(0.8 * axes.min() - 1.0, 0.0)
 
 
-def fill(volume, valid, inscribed, label, budget, shapes, periodic, rng):
+def fill(volume, inscribed, label, budget, shapes, periodic, rng):
     """Place random library shapes while each center slice is under budget.
 
     budget holds the target voxel count of label per z slice. Each pass tries
     one random shape at every valid center in a slice still under budget;
     passes repeat while they add volume, since a center that rejected one
-    rotation or size may accept another.
+    rotation or size may accept another. inscribed collects (center, radius)
+    of every placed particle, across phases, for pruning centers.
     """
     shape = np.asarray(volume.shape)
     counts = np.zeros(volume.shape[0])
     smallest = min(radius for _, radius in shapes)
-    valid[...] = True
+    valid = np.ones(volume.shape, dtype=bool)
     for center, radius in inscribed:
         prune(valid, center, smallest + radius, periodic)
     total = budget.sum()
     for _ in range(MAX_PASSES):
         before = counts.sum()
         open_slices = counts < budget
-        if total <= 0 or not open_slices.any():
+        if not open_slices.any():
             break
         candidates = rng.permutation(np.flatnonzero(valid & open_slices[:, None, None]))
         start = 0
@@ -254,10 +256,10 @@ def fill(volume, valid, inscribed, label, budget, shapes, periodic, rng):
             batch = candidates[start:stop]
             start = stop
             centers = np.stack(np.unravel_index(batch, volume.shape), 1)
-            # One vectorized sparse probe rejects most overlapping centers;
-            # survivors are rechecked exactly because earlier ones may land.
             keep = valid.flat[batch] & (counts[centers[:, 0]] < budget[centers[:, 0]])
-            # A few spread points first, then the denser probe on survivors.
+            # Vectorized sparse probes, a few spread points first, reject most
+            # overlapping centers; survivors are rechecked one by one because
+            # earlier survivors in the batch may land first.
             for points in (probe[:: max(1, len(probe) // COARSE_PROBE)], probe):
                 keep[keep] = ~probe_hits(volume, centers[keep], points)
             for center in centers[keep].astype(np.int32):

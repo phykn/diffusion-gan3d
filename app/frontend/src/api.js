@@ -32,8 +32,7 @@ export async function prepareImage(image, signal) {
   return (await response.json()).image
 }
 
-function readMetric(headers, name) {
-  const value = headers.get(name)
+function parseTortuosity(value) {
   if (value === null || value.trim() === '' || value === 'unavailable') return null
   // A phase without a spanning path has infinite tortuosity.
   if (value === 'inf') return Infinity
@@ -65,5 +64,5 @@ export async function generateVolume(
   }
   const values = new Uint8Array(await response.arrayBuffer())
   if (values.length !== size) throw new Error('The returned volume size does not match its header.')
-  return { shape, values, tortuosity: readMetric(response.headers, 'X-Tortuosity') }
+  return { shape, values, tortuosity: parseTortuosity(response.headers.get('X-Tortuosity')) }
 }

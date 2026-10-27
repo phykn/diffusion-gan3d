@@ -8,11 +8,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.src.config import ServerConfig, load_server_config
-from backend.src.middleware import RequestSizeLimit
-from backend.src.pipeline import HighResolutionPipeline
-from backend.src.response import DownloadResponse, volume_response
-from backend.src.schema import GenerateRequest, PrepareRequest
+from app.backend.src.config import ServerConfig, load_server_config
+from app.backend.src.middleware import RequestSizeLimit
+from app.backend.src.pipeline import HighResolutionPipeline
+from app.backend.src.response import DownloadResponse, volume_response
+from app.backend.src.schema import GenerateRequest, PrepareRequest
 from src.phase import PORE_PHASE
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"

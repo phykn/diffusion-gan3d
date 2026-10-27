@@ -2,9 +2,9 @@ import math
 from typing import Annotated, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-from backend.src.config import ServerConfig
+from app.backend.src.config import ServerConfig
 from src.predict.anchor import PlaneAnchor
 
 Dimension = Annotated[int, Field(ge=1, strict=True)]
@@ -21,21 +21,39 @@ ProbabilityImage = Annotated[
 PhaseFractions = Annotated[list[Probability], Field(min_length=1, max_length=256)]
 
 
+def image_planes(image) -> list:
+    return image if isinstance(image[0][0], list) else [image]
+
+
+def check_rectangular(image):
+    planes = image_planes(image)
+    height, width = len(planes[0]), len(planes[0][0])
+    if any(
+        len(plane) != height or any(len(row) != width for row in plane)
+        for plane in planes
+    ):
+        raise ValueError("image rows must have equal length")
+    return image
+
+
+def check_image_size(image, maximum: int) -> None:
+    if any(
+        len(plane) > maximum or any(len(row) > maximum for row in plane)
+        for plane in image_planes(image)
+    ):
+        raise ValueError("image dimensions exceed the server size limit")
+
+
 class Request(BaseModel):
     # Unknown fields are client errors, not silently ignored options.
     model_config = ConfigDict(extra="forbid")
 
 
 class AnchorRequest(Request):
-    image: LabelImage | ProbabilityImage
+    image: Annotated[LabelImage | ProbabilityImage, AfterValidator(check_rectangular)]
     axis: Annotated[int, Field(ge=0, le=2, strict=True)]
     index: Index
     position: tuple[Index, Index] | None = None
-
-    @field_validator("image")
-    @classmethod
-    def validate_image(cls, image):
-        return check_rectangular(image)
 
     def check_limits(self, cfg: ServerConfig) -> None:
         check_image_size(self.image, cfg.max_size)
@@ -101,35 +119,7 @@ class GenerateRequest(Request):
 
 
 class PrepareRequest(Request):
-    image: LabelImage
-
-    @field_validator("image")
-    @classmethod
-    def validate_image(cls, image):
-        return check_rectangular(image)
+    image: Annotated[LabelImage, AfterValidator(check_rectangular)]
 
     def check_limits(self, cfg: ServerConfig) -> None:
         check_image_size(self.image, cfg.max_size)
-
-
-def image_planes(image) -> list:
-    return image if isinstance(image[0][0], list) else [image]
-
-
-def check_rectangular(image):
-    planes = image_planes(image)
-    height, width = len(planes[0]), len(planes[0][0])
-    if any(
-        len(plane) != height or any(len(row) != width for row in plane)
-        for plane in planes
-    ):
-        raise ValueError("image rows must have equal length")
-    return image
-
-
-def check_image_size(image, maximum: int) -> None:
-    if any(
-        len(plane) > maximum or any(len(row) > maximum for row in plane)
-        for plane in image_planes(image)
-    ):
-        raise ValueError("image dimensions exceed the server size limit")

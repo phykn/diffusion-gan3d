@@ -46,19 +46,25 @@ export function useGeneration(cropEditor) {
   const gate = createRequestGate()
   const controller = new AbortController()
 
+  function heightExtentFor(value) {
+    return health.value?.height_extents?.[value] ?? null
+  }
+
   // The backend may start after the page; keep retrying until it answers.
   onMounted(async () => {
-    for (let delay = HEALTH_RETRY_MS; !controller.signal.aborted; delay = Math.min(delay * 2, HEALTH_RETRY_MAX_MS)) {
+    let delay = HEALTH_RETRY_MS
+    while (!controller.signal.aborted) {
       try {
         health.value = await getHealth(controller.signal)
         healthError.value = ''
         axis.value = health.value.height_enabled ? 1 : 0
-        heightExtent.value = health.value.height_extents?.[domain.value] ?? null
+        heightExtent.value = heightExtentFor(domain.value)
         return
       } catch {
         if (controller.signal.aborted) return
         healthError.value = 'Inference server unreachable · retrying'
         await wait(delay, controller.signal)
+        delay = Math.min(delay * 2, HEALTH_RETRY_MAX_MS)
       }
     }
   })
@@ -79,11 +85,10 @@ export function useGeneration(cropEditor) {
     cropReady.value = false
   }
 
-  watch(seed, invalidateResult)
+  watch([seed, axis, domain, heightOrigin, heightExtent], invalidateResult)
   watch(blocks, invalidateResult, { deep: true })
-  watch([axis, domain, heightOrigin, heightExtent], invalidateResult)
   watch(domain, value => {
-    heightExtent.value = health.value?.height_extents?.[value] ?? null
+    heightExtent.value = heightExtentFor(value)
   })
 
   async function generate() {

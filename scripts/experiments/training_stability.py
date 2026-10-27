@@ -49,31 +49,72 @@ def evaluate(api, crops, out, seeds):
     stats = []
     volumes = []
     for index, seed in enumerate(seeds):
-        crop = crops[index % len(crops)]
-        anchor = api.prepare_image(crop)
+        image = api.prepare_image(crops[index % len(crops)])
         vol = api.generate(
-            anchors=(PlaneAnchor(anchor, axis=1, index=api.input_size // 2),),
+            anchors=(PlaneAnchor(image, axis=1, index=api.input_size // 2),),
             seed=seed,
             guidance=1.0,
             anchor_strength=1.0,
         )
         save_volume(vol, out / f"anchor_{seed}.tiff")
         section = vol[:, api.input_size // 2, :]
-        anchor = anchor.argmax(0)
+        target = image.argmax(0)
         stats.append(
             {
                 "seed": seed,
-                "anchor_accuracy": float((section == anchor).float().mean()),
+                "anchor_accuracy": float((section == target).float().mean()),
                 "phase_and_lag_mae": float(
                     np.abs(
                         section_stats(section, api.num_phases)
-                        - section_stats(anchor, api.num_phases)
+                        - section_stats(target, api.num_phases)
                     ).mean()
                 ),
             }
         )
         volumes.append(vol)
     return stats, volumes
+
+
+def shrink(cfg):
+    """Small models and a short EMA for a bounded run."""
+    cfg["model"]["generator"].update(
+        channels=[8, 16, 32], embedding_channels=32, latent_channels=16
+    )
+    cfg["model"]["critic"].update(
+        channels=[8, 16, 32], plane_groups=[["xy", "xz", "yz"]]
+    )
+    cfg["optim"]["ema_decay"] = 0.95
+
+
+def train_variant(cfg, out, steps, continue_run, device):
+    """Train or reuse one LR variant; return its seconds and whether a restored
+    checkpoint completes the next update."""
+    out.mkdir(exist_ok=continue_run)
+    trainer = build_trainer(cfg, device)
+    checkpoint = None
+    if continue_run:
+        with contextlib.suppress(FileNotFoundError):
+            checkpoint = resolve_checkpoint(out)
+    if checkpoint is None:
+        save_yaml(out / "train.yaml", cfg)
+    else:
+        resume_training(
+            trainer, torch.load(checkpoint, map_location="cpu", weights_only=True)
+        )
+    started = time.monotonic()
+    if trainer.completed_steps < steps:
+        run_train(trainer, steps, steps, out, start_step=trainer.completed_steps)
+    # A reused run's partial time would not be comparable.
+    elapsed = None if checkpoint is not None else time.monotonic() - started
+    payload = torch.load(resolve_checkpoint(out), map_location="cpu", weights_only=True)
+    del trainer
+    restored = build_trainer(cfg, device)
+    resume_training(restored, payload)
+    restored.step(steps)
+    resumed = restored.completed_steps == steps + 1
+    del restored, payload
+    empty_cache(device)
+    return elapsed, resumed
 
 
 def main():
@@ -137,13 +178,7 @@ def main():
         domains={0: {p: [str(train_images.resolve())] for p in ("xy", "xz", "yz")}},
         num_phases=phases,
     )
-    reference["model"]["generator"].update(
-        channels=[8, 16, 32], embedding_channels=32, latent_channels=16
-    )
-    reference["model"]["critic"].update(
-        channels=[8, 16, 32], plane_groups=[["xy", "xz", "yz"]]
-    )
-    reference["optim"]["ema_decay"] = 0.95
+    shrink(reference)
     reference["train"].update(
         total_steps=args.steps,
         real_batch_size=4,
@@ -160,35 +195,9 @@ def main():
         cfg["model"]["diffusion"]["time_embedding"] = embedding
         cfg["loss"].update(r1_weight=r1, r2_weight=r2)
         out = root / name
-        out.mkdir(exist_ok=args.continue_run)
-        trainer = build_trainer(cfg, device)
-        checkpoint = None
-        if args.continue_run:
-            with contextlib.suppress(FileNotFoundError):
-                checkpoint = resolve_checkpoint(out)
-        reused = checkpoint is not None
-        if reused:
-            resume_training(
-                trainer, torch.load(checkpoint, map_location="cpu", weights_only=True)
-            )
-        else:
-            save_yaml(out / "train.yaml", cfg)
-        started = time.monotonic()
-        if trainer.completed_steps < args.steps:
-            run_train(
-                trainer, args.steps, args.steps, out, start_step=trainer.completed_steps
-            )
-        elapsed = None if reused else time.monotonic() - started
-        payload = torch.load(
-            resolve_checkpoint(out), map_location="cpu", weights_only=True
+        elapsed, resumed = train_variant(
+            cfg, out, args.steps, args.continue_run, device
         )
-        del trainer
-        restored = build_trainer(cfg, device)
-        resume_training(restored, payload)
-        restored.step(args.steps)
-        resumed = restored.completed_steps == args.steps + 1
-        del restored, payload
-        empty_cache(device)
         api = LowResolutionAPI(out / "generator.pt", device=device)
         validation, _ = evaluate(api, crops, out, [100, 101])
         del api
@@ -217,14 +226,8 @@ def main():
     base = root / "index_r1"
     sr_cfg = load_train_config(build_train_config(load_sample("default"), "sr"), "sr")
     sr_cfg["data"] = copy.deepcopy(reference["data"])
-    sr_cfg["model"]["generator"].update(
-        channels=[8, 16, 32], embedding_channels=32, latent_channels=16
-    )
-    sr_cfg["model"]["critic"].update(
-        channels=[8, 16, 32], plane_groups=[["xy", "xz", "yz"]]
-    )
+    shrink(sr_cfg)
     sr_cfg["lr_bank"]["samples_per_domain"] = 4
-    sr_cfg["optim"]["ema_decay"] = 0.95
     sr_cfg["train"].update(
         total_steps=args.sr_steps,
         weights_every_steps=args.sr_steps,

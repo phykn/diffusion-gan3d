@@ -121,11 +121,11 @@ function setVolume(values, shape) {
   }
   actor.setVisibility(true)
   resetClipDepth()
-  setDefaultView()
+  setCamera(false)
 }
 
 function updateClipDepth() {
-  clippingPlane?.setOrigin(0, 0, Number(clipDepth.value))
+  clippingPlane?.setOrigin(0, 0, clipDepth.value)
   mapper?.modified()
   renderWindow?.render()
 }
@@ -157,19 +157,18 @@ function setCamera(front) {
   renderWindow.render()
 }
 
-function setDefaultView() {
-  setCamera(false)
-}
-function reset() {
+function resetView() {
   resetClipDepth()
   setCamera(true)
 }
+
 function togglePhase(phase) {
   phaseVisibility.value = phaseVisibility.value.map(
     (visible, index) => index === phase ? !visible : visible,
   )
   updateAppearance()
 }
+
 function setPhaseColor(phase, event) {
   phaseColors.value = phaseColors.value.map(
     (color, index) => index === phase ? event.target.value : color,
@@ -246,7 +245,7 @@ onBeforeUnmount(() => {
         >
         <output>{{ clipDepth }}</output>
       </label>
-      <button type="button" :disabled="!values" @click="reset">Reset</button>
+      <button type="button" :disabled="!values" @click="resetView">Reset</button>
     </footer>
   </section>
 </template>

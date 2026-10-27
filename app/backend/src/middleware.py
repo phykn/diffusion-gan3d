@@ -13,23 +13,25 @@ class RequestSizeLimit:
             message = await receive()
             if message["type"] == "http.disconnect":
                 return
-            size += len(message.get("body", b""))
+            chunk = message.get("body", b"")
+            size += len(chunk)
             if size > self.limit:
                 response = JSONResponse(
                     status_code=413, content={"detail": "request body is too large"}
                 )
                 return await response(scope, receive, send)
-            chunks.append(message.get("body", b""))
+            chunks.append(chunk)
             if not message.get("more_body", False):
                 break
         body = b"".join(chunks)
-        del chunks
+        # This frame stays alive while the app runs; keep one copy of the body.
+        del chunks, chunk, message
 
-        async def bounded_receive():
+        async def replay_receive():
             nonlocal body
             if body is not None:
                 result, body = body, None
                 return {"type": "http.request", "body": result, "more_body": False}
             return await receive()
 
-        await self.app(scope, bounded_receive, send)
+        await self.app(scope, replay_receive, send)

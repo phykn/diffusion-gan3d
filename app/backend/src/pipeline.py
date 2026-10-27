@@ -89,7 +89,7 @@ class HighResolutionPipeline:
         height_extent=None,
         **options,
     ) -> torch.Tensor:
-        """HR uint8 labels; options are LowResolutionAPI.generate's."""
+        """HR uint8 labels; options are LowResolutionAPI.generate_probs's."""
         common = dict(
             domain=domain,
             seed=seed,

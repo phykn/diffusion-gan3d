@@ -6,24 +6,24 @@ add `--no-view` to skip the viewer in `01–06`.
 
 | Script | Purpose | Weights |
 | --- | --- | --- |
-| [01_check_dataset.py](01_check_dataset.py) | Preview the same training crops at the LR and SR grids | None (`--sample`) or a run's data (`--weight`) |
-| [02_check_generated.py](02_check_generated.py) | Generate an LR volume | LR |
-| [03_check_anchor.py](03_check_anchor.py) | Compare anchored and unanchored samples | LR |
-| [04_check_scale_up.py](04_check_scale_up.py) | Tiled generation and seams | LR |
-| [05_check_continuation.py](05_check_continuation.py) | Grow a volume from a boundary section | LR |
-| [06_check_hr.py](06_check_hr.py) | Compare LR, upsampling, and SR | SR |
-| [07_check_tilt.py](07_check_tilt.py) | Signed particle tilt balance vs real volumes | LR (optional) |
+| [01_dataset.py](check/01_dataset.py) | Preview the same training crops at the LR and SR grids | None (`--sample`) or a run's data (`--weight`) |
+| [02_generated.py](check/02_generated.py) | Generate an LR volume | LR |
+| [03_anchor.py](check/03_anchor.py) | Compare anchored and unanchored samples | LR |
+| [04_scale_up.py](check/04_scale_up.py) | Tiled generation and seams | LR |
+| [05_continuation.py](check/05_continuation.py) | Grow a volume from a boundary section | LR |
+| [06_hr.py](check/06_hr.py) | Compare LR, upsampling, and SR | SR |
+| [07_tilt.py](check/07_tilt.py) | Signed particle tilt balance vs real volumes | LR (optional) |
 
 ```bash
-python scripts/04_check_scale_up.py --weight "run/my-run-lr" --blocks 2 2 2 --no-view
-python scripts/05_check_continuation.py --weight "run/my-run-lr" --anchor data/sample.png --axis 0
+python scripts/check/04_scale_up.py --weight "run/my-run-lr" --blocks 2 2 2 --no-view
+python scripts/check/05_continuation.py --weight "run/my-run-lr" --anchor data/sample.png --axis 0
 ```
 
 - `--blocks D H W` sets the `(z, y, x)` size to `patch + (n - 1) * (patch - 2 * overlap)`,
   where `patch` is the LR `lo_res_size` (default 64); the script prints the actual tile grid. `--axis 0/1/2` selects `xy/xz/yz`.
 - `--device`, `--seed`, `--domain`, and `--napari` work in `02–06`; `--help` lists the rest.
 - `--height-origin` and `--height-extent` (`02–07`) are in source pixels along the xz/yz row direction.
-- `02 --vf-profile simul/config_anode.yaml --guidance 1.5` fixes the depth fractions to
+- `02 --vf-profile scripts/simul/config_anode.yaml --guidance 1.5` fixes the depth fractions to
   that simulation's targets (a profile YAML/JSON also works). Without it, a
   profile-conditioned model follows its training depth profile, since height alone
   flattens a strong gradient.
@@ -91,8 +91,8 @@ stages without the code defaults.
 
 ### Web backend
 
-The web backend (`backend/run.py`) serves `GET /api/health`, `POST /api/prepare`, and
-`POST /api/generate`; HTTP limits are in [backend/config.yaml](../backend/config.yaml).
+The web backend (`app/backend/run.py`) serves `GET /api/health`, `POST /api/prepare`, and
+`POST /api/generate`; HTTP limits are in [app/backend/config.yaml](../app/backend/config.yaml).
 Viewer, porosity, and tortuosity are on the HR volume, and one block is
 `lo_res_size × sr_scale` voxels per edge.
 
@@ -164,14 +164,14 @@ resume, `python run_train.py <sample> --run-dir "run/my-run-2"` reuses it and tr
 
 ## Synthetic data
 
-`python simul/run.py --config <file>` writes 3D TIFFs, per-axis slice PNGs
+`python scripts/simul/run.py --config <file>` writes 3D TIFFs, per-axis slice PNGs
 (`slices/0..2` for `xy`, `xz`, `yz`), and `simulation.yaml` (targets and measured
 fractions). The output folder must be empty.
 
-- Default `kind: particles` ([geometry.py](../simul/src/geometry.py)): elongated phase 2
+- Default `kind: particles` ([geometry.py](simul/src/geometry.py)): elongated phase 2
   and spherical phase 1 particles. y and x wrap periodically, and z does too unless
   `radius_gradient` varies with height.
-- `kind: anode` ([anode.py](../simul/src/anode.py), [config_anode.yaml](../simul/config_anode.yaml)):
+- `kind: anode` ([anode.py](simul/src/anode.py), [config_anode.yaml](simul/config_anode.yaml)):
   tilted graphite flakes (1) and silicon spheres (2) in pores (0). A `*_vf` list sets
   fractions at evenly spaced heights, enforced per slice. Order bias alone cannot
   concentrate silicon once graphite fills the pores.
@@ -181,11 +181,11 @@ both stages use height conditioning and judge `xy` apart from `xz`/`yz`; LR adds
 per-height profile, sections flip at probability 0.2, and z is never flipped or rotated.
 
 ```bash
-python simul/run.py --config simul/config_anode.yaml
-python scripts/01_check_dataset.py --sample simul_anode --no-view
+python scripts/simul/run.py --config scripts/simul/config_anode.yaml
+python scripts/check/01_dataset.py --sample simul_anode --no-view
 python run_train.py simul_anode --run-dir "run/anode"
-python scripts/02_check_generated.py --weight "run/anode-lr" --no-view
-python scripts/06_check_hr.py --weight "run/anode-sr" --no-view
+python scripts/check/02_generated.py --weight "run/anode-lr" --no-view
+python scripts/check/06_hr.py --weight "run/anode-sr" --no-view
 ```
 
 [Back to README](../README.md)

@@ -5,14 +5,13 @@ from pathlib import Path
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.common.cli import (
     add_device_argument,
     add_domain_seed_arguments,
     add_height_arguments,
-    height_options,
+    generation_options,
     non_negative_int,
     positive_int,
     result_directory,
@@ -88,7 +87,7 @@ def main() -> None:
 
     generated = [load_labels(path) for path in args.volumes]
     if args.weight is not None:
-        generated += generate(args)
+        generated += generate_volumes(args)
     real = [
         load_labels(path)[:: args.real_stride, :: args.real_stride, :: args.real_stride]
         for path in args.real
@@ -119,23 +118,17 @@ def load_labels(path: Path) -> np.ndarray:
     return np.asarray(load_volume(path))
 
 
-def generate(args: argparse.Namespace) -> list[np.ndarray]:
+def generate_volumes(args: argparse.Namespace) -> list[np.ndarray]:
     device = check_device(args.device)
-    guidance = (
-        load_generation_settings().guidance if args.guidance is None else args.guidance
-    )
+    if args.guidance is None:
+        args.guidance = load_generation_settings().guidance
     generator = load_generator(args.weight, device=device)
+    options = generation_options(args, generator.default_margin)
     volumes = []
     status(f"Generating {args.samples} samples")
     for index in range(args.samples):
         with seeded_rng(args.seed + index, device):
-            vol = generator.generate(
-                vf=None,
-                guidance=guidance,
-                domain=args.domain,
-                **height_options(args),
-                margin=generator.default_margin,
-            )
+            vol = generator.generate(**options)
         volumes.append(vol.numpy())
         emit(paint(f"  sample {index + 1}/{args.samples} done", "dim"))
     return volumes
