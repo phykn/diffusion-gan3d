@@ -114,7 +114,8 @@ def test_lr_table_matches_results() -> None:
     results = read_results("lr")
     rows = table(read_paper(), "Step")
     best, last = results["best_step"], max(map(int, results["steps"]))
-    labels = {best: " (selected)", last: " (last)"}
+    labels = {last: " (last)"}
+    labels[best] = " (selected, last)" if best == last else " (selected)"
 
     assert rows.pop("Real crops") == real_cells(results["real"])
     for step, summary in results["steps"].items():
@@ -174,11 +175,11 @@ def test_paper_text_numbers_match_results() -> None:
     lr, sr = read_results("lr"), read_results("sr")
     assert f"({lr['training_minutes']:.0f} minutes" in paper
     assert f"({sr['training_minutes'] / 60:.1f} hours)" in paper
-    for results in (lr, sr):
+    for results, text in ((lr, "within"), (sr, "by")):
         best = results["steps"][str(results["best_step"])]
         real = results["real"]["interface_density"]["mean"]
-        gap = 100 * (1 - best["interface_density"]["mean"] / real)
-        assert f"within {gap:.1f}%" in paper
+        gap = 100 * abs(1 - best["interface_density"]["mean"] / real)
+        assert f"{text} {gap:.1f}%" in paper
 
     best = lr["best_step"]
     selected = next(row for row in lr["selection"] if row["step"] == best)
@@ -200,6 +201,86 @@ def test_paper_text_numbers_match_results() -> None:
     for count, text in ((0, "no anchors"), (8, "eight planes"), (16, "sixteen")):
         whole = [r["whole"] for r in anchor["coverage"] if r["count"] == count]
         assert f"{100 * np.mean(whole):.1f}% with {text}" in paper
+
+
+def test_anode_table_matches_results() -> None:
+    results = read_results("anode")
+    rows = table(read_paper(), "Measure")
+
+    for axis in "zyx":
+        lr, sr = (results[s]["tortuosity_phase0"][axis] for s in ("lr", "sr"))
+        assert rows.pop(f"Pore tortuosity, {axis}") == [
+            spread(lr["generated"], 2),
+            f"{lr['real']['mean']:.2f}",
+            spread(sr["generated"], 2),
+            f"{sr['real']['mean']:.2f}",
+        ]
+        for phase, name in (("1", "Graphite"), ("2", "Silicon")):
+            lr, sr = (results[s]["chord_mean"][phase][axis] for s in ("lr", "sr"))
+            assert rows.pop(f"{name} chord, {axis}") == [
+                spread(lr["generated"], 2),
+                f"{lr['real']['mean']:.2f}",
+                spread(sr["generated"], 2),
+                f"{sr['real']['mean']:.2f}",
+            ]
+    for pair in ("zy", "zx", "yx"):
+        balances = [
+            f"{results[stage]['tilt_phase1'][source][pair]['balance']:.2f}".replace(
+                "-", "−"
+            )
+            for stage in ("lr", "sr")
+            for source in ("generated", "real")
+        ]
+        assert rows.pop(f"Graphite tilt balance, d{pair[0]}/d{pair[1]}") == balances
+    assert not rows
+
+
+def test_paper_numbers_match_anode_results() -> None:
+    paper = read_paper()
+    results = read_results("anode")
+    lr, sr = results["lr"], results["sr"]
+    assert f"({results['lr_training_minutes']:.0f} minutes)" in paper
+    assert f"({results['training_minutes'] / 60:.1f} hours)" in paper
+    assert f"with step {results['lr_best_step']} selected" in paper
+
+    def band(stage, phase, source):
+        return f"{stage['profile']['bands'][source][phase][-1]:.3f}"
+
+    assert f"{band(lr, 2, 'generated')} silicon against {band(lr, 2, 'real')}" in paper
+    assert f"({band(lr, 1, 'generated')} against {band(lr, 1, 'real')})" in paper
+    assert f"({band(sr, 2, 'generated')} against {band(sr, 2, 'real')})" in paper
+    silicon = sr["phase_fractions"]["2"]
+    assert (
+        f"{silicon['generated']['mean']:.3f} against {silicon['real']['mean']:.3f}"
+        in paper
+    )
+    assert f"{100 * sr['lr_agreement']['mean']:.1f}% of LR voxels" in paper
+    graphite = sr["phase_fractions"]["1"]["real_values"]
+    assert f"({graphite[0]:.3f} and {graphite[1]:.3f})" in paper
+
+    sections = lr["sections"]
+    assert (
+        f"{sections['structure_xy']:.2f} in xy and "
+        f"{sections['structure_side']:.2f} on the side planes"
+    ) in paper
+    baselines = results["baselines"]
+    assert (
+        f"SR scores {sr['sections']['structure']:.2f} at source resolution, against "
+        f"{baselines['nearest']['sections']['structure']:.2f} and "
+        f"{baselines['linear']['sections']['structure']:.2f}"
+    ) in paper
+
+    def worst(stage):
+        return 100 * max(
+            abs(entry["generated"]["mean"] / entry["real"]["mean"] - 1)
+            for entry in stage["tortuosity_phase0"].values()
+        )
+
+    assert (
+        f"at most {worst(lr):.1f}% on the LR grid and {worst(sr):.1f}% at source"
+        in paper
+    )
+    assert f"tortuosity within {worst(sr):.1f}%" in paper
 
 
 def test_readme_figures_exist() -> None:

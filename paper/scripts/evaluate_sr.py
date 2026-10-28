@@ -1,7 +1,7 @@
 """Evaluate one run's SR stage for the paper: HR structure, baselines, LR agreement.
 
 Writes paper/assets/sr-results.json. LR inputs and HR volumes are cached under
-checks/paper-sr/; --reuse recomputes the metrics from them without sampling.
+checks/paper-sr/<run>/; --reuse recomputes the metrics from them without sampling.
 """
 
 import argparse
@@ -16,7 +16,13 @@ import torch.nn.functional as F
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from paper.scripts.evaluate_lr import interface_density, mean_std
+from paper.scripts.evaluate_lr import (
+    archived_generators,
+    cache_dir,
+    cached,
+    interface_density,
+    mean_std,
+)
 from scripts.common.metrics import wall_minutes
 from src.build.data import build_datasets
 from src.build.predict import build_generator
@@ -45,7 +51,6 @@ CACHE = PROJECT_ROOT / "checks" / "paper-sr"
 REAL_SEED = 1
 REAL_CROPS = 128
 SAMPLES = 16
-CHECKPOINTS = (2500,)
 # Second SR seed per LR input, to separate what SR adds from what LR fixes.
 RESEED = 1000
 
@@ -65,7 +70,7 @@ def main() -> None:
     settings = load_generation_settings()
     scores = load_yaml(run / "selection" / "scores.yaml")
     best = int(scores["best_step"])
-    CACHE.mkdir(parents=True, exist_ok=True)
+    cache = cache_dir(CACHE, run)
 
     real = real_crops(build_datasets(cfg, high_resolution=True)[0][0])
     real_labels = label_sections(real)
@@ -79,10 +84,8 @@ def main() -> None:
                 volumes.append(gen.generate_probs(guidance=settings.guidance).cpu())
         return volumes
 
-    low = cached("lr", args.reuse, sample_lr)
-    weights = {best: run / "generator.pt"} | {
-        step: run / "checkpoints" / f"generator_{step:08d}.pt" for step in CHECKPOINTS
-    }
+    low = cached(cache / "lr.pt", args.reuse, sample_lr)
+    weights = {best: run / "generator.pt"} | archived_generators(run)
 
     def refine(step, offset=0):
         api = SuperResolutionAPI(weights[step], device)
@@ -100,7 +103,9 @@ def main() -> None:
         "baselines": {},
     }
     for step in sorted(weights):
-        volumes = cached(f"step{step}", args.reuse, lambda step=step: refine(step))
+        volumes = cached(
+            cache / f"step{step}.pt", args.reuse, lambda step=step: refine(step)
+        )
         print(f"step {step}: {len(volumes)} volumes")
         results["steps"][str(step)] = volume_summary(
             volumes, low, real_labels, noise, full=step == best
@@ -113,7 +118,9 @@ def main() -> None:
             baseline, low, real_labels, noise, full=name == "nearest"
         )
 
-    again = cached(f"step{best}-reseed", args.reuse, lambda: refine(best, RESEED))
+    again = cached(
+        cache / f"step{best}-reseed.pt", args.reuse, lambda: refine(best, RESEED)
+    )
     nearest = [upsample_nearest(v) for v in low]
     results["reseed"] = {
         "between_seeds": mean_std(
@@ -125,15 +132,6 @@ def main() -> None:
     }
     OUTPUT.write_text(json.dumps(results, indent=2) + "\n")
     print(f"Results: {OUTPUT}")
-
-
-def cached(name, reuse, make):
-    path = CACHE / f"{name}.pt"
-    if reuse and path.is_file():
-        return torch.load(path, weights_only=True)
-    value = make()
-    torch.save(value, path)
-    return value
 
 
 def real_crops(dataset) -> torch.Tensor:
@@ -174,6 +172,8 @@ def real_summary(real_labels: torch.Tensor, noise) -> dict:
             [interface_density(image, (0, 1)) for image in labels]
         ),
         "half_split_errors": noise._asdict(),
+        # Separate regions of each phase per section pixel.
+        "cluster_density": section_statistics(real_labels).clusters[0].tolist(),
     }
 
 
@@ -181,15 +181,18 @@ def volume_summary(volumes, low, real_labels, noise, full: bool) -> dict:
     real = section_statistics(real_labels)
     planes = {}
     normalized = []
+    clusters = []
     for axis, name in enumerate(("xy", "xz", "yz")):
-        fake = pick_sections(volumes, axis, real_labels.shape[1])
-        errors = compare_sections(real, section_statistics(fake))
+        fake = section_statistics(pick_sections(volumes, axis, real_labels.shape[1]))
+        errors = compare_sections(real, fake)
         planes[name] = errors._asdict()
         normalized.append(np.mean([v / n for v, n in zip(errors, noise)]))
+        clusters.append(fake.clusters[0])
     summary = {
         "samples": len(volumes),
         "planes": planes,
         "structure": float(np.mean(normalized)),
+        "cluster_density": np.mean(clusters, 0).tolist(),
         "phase0_fraction": mean_std([(v == 0).float().mean() for v in volumes]),
         "interface_density": mean_std(
             [interface_density(v, (0, 1, 2)) for v in volumes]

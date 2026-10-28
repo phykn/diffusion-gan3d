@@ -1,7 +1,7 @@
 """Evaluate one run's LR stage for the paper: structure, selection and anchors.
 
 Writes paper/assets/lr-results.json. Generated volumes are cached under
-checks/paper-lr/; --reuse recomputes the metrics from them without sampling.
+checks/paper-lr/<run>/; --reuse recomputes the metrics from them without sampling.
 """
 
 import argparse
@@ -30,6 +30,7 @@ from src.evaluate.structure import (
     label_sections,
     section_errors,
     section_statistics,
+    two_point,
 )
 from src.evaluate.tilt import tilt_balance
 from src.evaluate.tortuosity import tortuosity
@@ -45,7 +46,6 @@ CACHE = PROJECT_ROOT / "checks" / "paper-lr"
 REAL_SEED = 1
 REAL_CROPS = 128
 SAMPLES = 16
-CHECKPOINTS = (2500, 5000, 7500, 10000)
 ANCHOR_SEEDS = tuple(range(8))
 REFERENCE_OFFSET = 1000
 COVERAGE_SEEDS = tuple(range(4))
@@ -68,15 +68,13 @@ def main() -> None:
     settings = load_generation_settings()
     scores = load_yaml(run / "selection" / "scores.yaml")
     best = int(scores["best_step"])
-    CACHE.mkdir(parents=True, exist_ok=True)
+    cache = cache_dir(CACHE, run)
 
     dataset = build_datasets(cfg)[0][0]
     real = real_crops(dataset)
     real_labels = label_sections(real)
     noise = section_errors(real_labels[0::2], real_labels[1::2])
-    weights = {best: run / "generator.pt"} | {
-        step: run / "checkpoints" / f"generator_{step:08d}.pt" for step in CHECKPOINTS
-    }
+    weights = {best: run / "generator.pt"} | archived_generators(run)
 
     def sample(step):
         gen = build_generator(weights[step], cfg, device)
@@ -97,20 +95,36 @@ def main() -> None:
         "steps": {},
     }
     for step in sorted(weights):
-        volumes = cached(f"step{step}", args.reuse, lambda step=step: sample(step))
+        volumes = cached(
+            cache / f"step{step}.pt", args.reuse, lambda step=step: sample(step)
+        )
         print(f"step {step}: {len(volumes)} volumes")
         results["steps"][str(step)] = volume_summary(
             volumes, real_labels, noise, full=step == best
         )
 
     gen = build_generator(weights[best], cfg, device)
-    results["anchor"] = anchor_experiments(gen, settings, device, dataset, args.reuse)
+    results["anchor"] = anchor_experiments(
+        gen, settings, device, dataset, cache, args.reuse
+    )
     OUTPUT.write_text(json.dumps(results, indent=2) + "\n")
     print(f"Results: {OUTPUT}")
 
 
-def cached(name, reuse, make):
-    path = CACHE / f"{name}.pt"
+def cache_dir(root: Path, run: Path) -> Path:
+    """Cache folder of one run, so volumes of another run are never reused."""
+    path = root / run.name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def archived_generators(run: Path) -> dict[int, Path]:
+    """Archived EMA generators of a run by step."""
+    paths = sorted((run / "checkpoints").glob("generator_*.pt"))
+    return {int(path.stem.split("_")[1]): path for path in paths}
+
+
+def cached(path: Path, reuse: bool, make):
     if reuse and path.is_file():
         return torch.load(path, weights_only=True)
     value = make()
@@ -191,17 +205,21 @@ def volume_summary(volumes, real_labels, noise, full: bool) -> dict:
         errors = compare_sections(real, section_statistics(fake))
         planes[name] = errors._asdict()
         normalized.append(np.mean([v / n for v, n in zip(errors, noise)]))
+    fraction = mean_std([(v == 0).float().mean() for v in volumes])
     summary = {
         "samples": len(volumes),
         "planes": planes,
         "structure": float(np.mean(normalized)),
-        "phase0_fraction": mean_std([(v == 0).float().mean() for v in volumes]),
+        "phase0_fraction": fraction,
         "interface_density": mean_std(
             [interface_density(v, (0, 1, 2)) for v in volumes]
         ),
     }
     if not full:
         return summary
+    summary["two_point_from_fraction"] = fraction_offset_error(
+        real_labels, fraction["mean"]
+    )
     for phase in (0, 1):
         spans = np.asarray([spanning_fractions((v == phase).numpy()) for v in volumes])
         summary[f"percolation_phase{phase}"] = {
@@ -219,6 +237,24 @@ def volume_summary(volumes, real_labels, noise, full: bool) -> dict:
         for name in tilt
     }
     return summary
+
+
+def fraction_offset_error(real_labels: torch.Tensor, phase0: float) -> float:
+    """Two-point error a phase-fraction change alone would cause.
+
+    Keeps the real normalized correlation (S2 - p^2) / (p - p^2) of each phase
+    and moves only its fraction p, so the result is the part of the two-point
+    error explained by the fraction offset.
+    """
+    errors = []
+    for curves in two_point(real_labels):
+        moved = []
+        for curve, target in zip(curves, (phase0, 1 - phase0)):
+            p = curve[0]
+            shape = (curve - p * p) / (p - p * p)
+            moved.append(target * target + (target - target * target) * shape)
+        errors.append(float((torch.stack(moved) - curves).abs().mean()))
+    return float(np.mean(errors))
 
 
 def nested_plane_order(size: int) -> tuple[int, ...]:
@@ -290,7 +326,7 @@ def plane_metrics(anchored, baseline, plane, axis, index, reference=None) -> dic
     return row
 
 
-def anchor_experiments(gen, settings, device, dataset, reuse) -> dict:
+def anchor_experiments(gen, settings, device, dataset, cache, reuse) -> dict:
     size = gen.patch_size
     center = size // 2
     strength = settings.anchor_strength
@@ -371,9 +407,9 @@ def anchor_experiments(gen, settings, device, dataset, reuse) -> dict:
                 )
         return rows
 
-    internal_rows = cached("anchor-internal", reuse, internal)
-    external_data = cached("anchor-external", reuse, external)
-    coverage_rows = cached("anchor-coverage", reuse, coverage)
+    internal_rows = cached(cache / "anchor-internal.pt", reuse, internal)
+    external_data = cached(cache / "anchor-external.pt", reuse, external)
+    coverage_rows = cached(cache / "anchor-coverage.pt", reuse, coverage)
     print("anchor volumes ready")
 
     result = {"internal": [], "external": [], "coverage": []}
