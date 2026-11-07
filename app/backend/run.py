@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lr-weight",
         type=Path,
-        help="LR generator.pt or run directory (default: the SR run's LR source)",
+        help="LR generator.pt or run directory (default: the LR stored in the SR export)",
     )
     parser.add_argument(
         "--device",

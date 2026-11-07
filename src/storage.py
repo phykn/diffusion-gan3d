@@ -1,14 +1,10 @@
 import hashlib
-import logging
 import os
 from pathlib import Path
 
 import numpy as np
 import tifffile
 import torch
-from torch import nn
-
-SR_FORMAT = "diffusion-gan3d.sr"
 
 
 def file_hash(path: str | Path) -> str:
@@ -17,23 +13,24 @@ def file_hash(path: str | Path) -> str:
 
 
 def torch_save(payload, path: str | Path, *, overwrite: bool = True) -> Path:
-    """Write directly; callers publishing new files must track completion."""
+    """Write to a temporary file, fsync, then rename it into place.
+
+    Readers never see a partly written file. overwrite=False refuses an
+    existing path.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    file = path.open("wb" if overwrite else "xb")
+    if not overwrite and path.exists():
+        raise FileExistsError(f"{path} already exists.")
+    partial = path.with_name(f".{path.name}.partial")
     try:
-        with file:
+        with partial.open("wb") as file:
             torch.save(payload, file)
             file.flush()
             os.fsync(file.fileno())
+        os.replace(partial, path)
     except BaseException:
-        if not overwrite:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                logging.getLogger(__name__).warning(
-                    "Could not remove incomplete checkpoint %s", path, exc_info=True
-                )
+        partial.unlink(missing_ok=True)
         raise
     return path
 
@@ -67,11 +64,6 @@ def save_volume(volume: torch.Tensor, path: str | Path) -> Path:
     return path
 
 
-def load_probabilities(path: str | Path) -> torch.Tensor:
-    probs = torch.load(path, map_location="cpu", weights_only=True)
-    return validate_probabilities(probs)
-
-
 def validate_probabilities(probs: torch.Tensor) -> torch.Tensor:
     if (
         not isinstance(probs, torch.Tensor)
@@ -83,20 +75,11 @@ def validate_probabilities(probs: torch.Tensor) -> torch.Tensor:
     return probs
 
 
+def load_probabilities(path: str | Path) -> torch.Tensor:
+    probs = torch.load(path, map_location="cpu", weights_only=True)
+    return validate_probabilities(probs)
+
+
 def save_probabilities(probs: torch.Tensor, path: str | Path) -> Path:
     probs = validate_probabilities(probs)
     return torch_save(probs.detach().float().cpu(), path)
-
-
-def save_model(path: str | Path, model: nn.Module) -> Path:
-    return torch_save(model.state_dict(), path)
-
-
-def load_model(path: str | Path, model: nn.Module) -> nn.Module:
-    state = torch.load(
-        Path(path),
-        map_location="cpu",
-        weights_only=True,
-    )
-    model.load_state_dict(state, strict=True)
-    return model

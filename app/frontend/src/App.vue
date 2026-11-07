@@ -12,7 +12,6 @@ const {
   seed,
   blocks,
   axis,
-  domain,
   heightOrigin,
   heightExtent,
   busy,
@@ -34,7 +33,6 @@ const {
       v-model:seed="seed"
       v-model:blocks="blocks"
       v-model:axis="axis"
-      v-model:domain="domain"
       v-model:height-origin="heightOrigin"
       v-model:height-extent="heightExtent"
       v-model:measure-tortuosity="measureTortuosity"

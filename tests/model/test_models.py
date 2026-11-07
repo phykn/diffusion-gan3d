@@ -1,17 +1,38 @@
-import unittest
 from functools import partial
 
 import pytest
 import torch
 import torch.nn.functional as F
 
-from src.build.model import build_denoiser
-from src.config.train import load_train_config
 from src.model.critic import CriticScores, GroupNormSiLU, PairCritic2D
 from src.model.denoiser import ChannelNormSiLU3D, Denoiser3D, channel_norm_silu
 from src.model.layers import AdaptiveNorm
 
 MPS = torch.backends.mps.is_available()
+
+
+def _denoiser(**kwargs) -> Denoiser3D:
+    options = dict(
+        num_phases=3,
+        base_channels=4,
+        channel_multipliers=(1, 2),
+        embedding_channels=8,
+        latent_channels=4,
+    )
+    return Denoiser3D(**{**options, **kwargs})
+
+
+def _critic(**kwargs) -> PairCritic2D:
+    return PairCritic2D(num_phases=3, channels=(4, 8), embedding_channels=8, **kwargs)
+
+
+def _inputs(batch=1, size=(4, 4, 4), phases=3):
+    torch.manual_seed(0)
+    return (
+        torch.randn(batch, phases, *size),
+        torch.arange(batch),
+        torch.randn(batch, 4),
+    )
 
 
 def test_channel_norm_preserves_large_half_precision_features():
@@ -73,495 +94,237 @@ def test_apple_gpu_fused_norm_compiles_once_per_grad_mode():
     assert counters["stats"]["unique_graphs"] == 2
 
 
-def _denoiser(
-    *,
-    checkpointing: bool = False,
-) -> Denoiser3D:
-    return Denoiser3D(
-        num_phases=3,
-        base_channels=4,
-        channel_multipliers=(1, 2),
-        embedding_channels=8,
-        latent_channels=4,
-        num_domains=2,
-        gradient_checkpointing=checkpointing,
+def test_3d_norm_is_independent_at_each_spatial_position():
+    norm = ChannelNormSiLU3D(4)
+    inputs = torch.randn(2, 4, 3, 4, 5)
+    changed = inputs.clone()
+    changed[:, :, -1, -1, -1].add_(100.0 * torch.randn(2, 4))
+    output, changed_output = norm(inputs), norm(changed)
+    assert torch.equal(output[:, :, 0, 0, 0], changed_output[:, :, 0, 0, 0])
+    normalized = F.layer_norm(inputs.movedim(1, -1), (4,)).movedim(-1, 1)
+    assert torch.allclose(output, F.silu(normalized), atol=1.0e-6)
+    assert norm(inputs.half()).dtype == torch.float16
+
+
+def test_denoiser_rejects_a_single_normalized_channel():
+    with pytest.raises(ValueError, match="at least two"):
+        Denoiser3D(3, 1, (1, 2), 8, 4)
+
+
+def test_denoiser_has_no_domain_embedding_and_uses_channel_norm():
+    model = _denoiser()
+    assert not any("domain" in key for key in model.state_dict())
+    assert isinstance(model.encoder[0].norm1, AdaptiveNorm)
+    assert isinstance(model.encoder[0].norm1.norm, ChannelNormSiLU3D)
+    assert isinstance(model.output_norm, ChannelNormSiLU3D)
+    assert model.downsample_factor == 2
+
+
+def test_clean_output_is_a_latent_conditioned_simplex_with_gradients():
+    model = _denoiser()
+    inputs = torch.randn(2, 3, 4, 6, 8, requires_grad=True)
+    time = torch.tensor([0, 1])
+    latent = torch.ones(2, 4, requires_grad=True)
+    first = model(inputs, time, torch.zeros(2, 4))
+    clean = model(inputs, time, latent)
+    probs = (clean + 1.0) / 2.0
+    assert clean.shape == inputs.shape
+    assert -1.0 <= float(clean.detach().min()) <= float(clean.detach().max()) <= 1.0
+    torch.testing.assert_close(probs.sum(1), torch.ones_like(probs[:, 0]))
+    assert not torch.equal(first, clean)
+    clean.square().mean().backward()
+    for grad in (inputs.grad, latent.grad):
+        assert bool(torch.isfinite(grad).all()) and float(grad.abs().sum()) > 0
+
+
+def test_forward_is_the_body_of_the_embedding():
+    model = _denoiser(height_enabled=True, profile_enabled=True).eval()
+    x, time, latent = _inputs(2)
+    vf = torch.tensor([[0.2, 0.3, 0.5], [0.6, 0.2, 0.2]])
+    present = torch.tensor([True, False])
+    conditions = dict(
+        height=torch.rand(2, 1, 4, 4, 4),
+        profile=torch.full((2, 3, 4), 1 / 3),
+        profile_present=present,
     )
+    with torch.no_grad():
+        logits = model.logits(x, time, latent, vf=vf, vf_present=present, **conditions)
+        emb = model.embed(time, latent, vf, present)
+        body = model.forward_body(x, emb, **conditions)
+    torch.testing.assert_close(logits, body)
 
 
-def _critic(*, checkpointing: bool = False) -> PairCritic2D:
-    return PairCritic2D(
-        num_phases=3,
-        channels=(4, 8),
-        embedding_channels=8,
-        num_domains=2,
-        gradient_checkpointing=checkpointing,
+def test_vf_presence_mask_matches_the_null_and_conditioned_paths():
+    model = _denoiser()
+    with torch.no_grad():
+        for parameter in model.vf_mlp.parameters():
+            parameter.normal_()
+    _, time, latent = _inputs(2)
+    vf = torch.tensor([[0.2, 0.3, 0.5], [0.6, 0.2, 0.2]])
+    masked = model.embed(time, latent, vf, torch.tensor([True, False]))
+    torch.testing.assert_close(masked[0], model.embed(time, latent, vf)[0])
+    torch.testing.assert_close(masked[1], model.embed(time, latent)[1])
+
+
+def test_masked_vf_rows_receive_no_gradient():
+    model = _denoiser()
+    with torch.no_grad():
+        for parameter in model.vf_mlp.parameters():
+            parameter.normal_()
+    _, time, latent = _inputs(2)
+    vf = torch.tensor([[0.2, 0.3, 0.5], [0.6, 0.2, 0.2]], requires_grad=True)
+    model.embed(time, latent, vf, torch.tensor([True, False])).sum().backward()
+    assert float(vf.grad[0].abs().sum()) > 0
+    assert torch.equal(vf.grad[1], torch.zeros(3))
+
+
+def test_zero_initialized_vf_adapter_keeps_the_unconditioned_output():
+    model = _denoiser()
+    x, time, latent = _inputs()
+    vf = torch.tensor([[0.2, 0.3, 0.5]], requires_grad=True)
+    torch.testing.assert_close(model(x, time, latent, vf=vf), model(x, time, latent))
+    model(x, time, latent, vf=vf).square().sum().backward()
+    assert model.vf_mlp[-1].weight.grad.abs().sum() > 0
+
+
+def test_guidance_blends_the_unconditional_branch_without_vf_and_profile():
+    model = _denoiser(height_enabled=True, profile_enabled=True).eval()
+    with torch.no_grad():
+        for parameter in model.vf_mlp.parameters():
+            parameter.normal_()
+    x, time, latent = _inputs()
+    height = torch.rand(1, 1, 4, 4, 4)
+    conditioned = dict(
+        vf=torch.tensor([[0.2, 0.3, 0.5]]),
+        profile=torch.full((1, 3, 4), 1 / 3),
+        height=height,
     )
-
-
-def _domain(inputs: torch.Tensor, value: int = 0) -> torch.Tensor:
-    return torch.full(
-        (inputs.shape[0],),
-        value,
-        device=inputs.device,
-        dtype=torch.long,
-    )
-
-
-class Denoiser3DTest(unittest.TestCase):
-    def test_denoiser_rejects_a_single_normalized_channel(self):
-        with self.assertRaisesRegex(ValueError, "at least two"):
-            Denoiser3D(3, 1, (1, 2), 8, 4, 1)
-
-    def test_lr_and_sr_builders_reject_degenerate_channel_settings(self):
-        for stage in ("low_res", "sr"):
-            with self.subTest(stage=stage):
-                cfg = load_train_config(
-                    f"tests/fixtures/config/train/{stage}.yaml", stage
-                )
-                cfg["model"]["generator"]["channels"] = [1, 2]
-                with self.assertRaisesRegex(ValueError, "generator.channels"):
-                    build_denoiser(cfg)
-
-    def test_smallest_supported_channels_keep_input_gradients(self):
-        torch.manual_seed(9)
-        model = Denoiser3D(3, 2, (1, 2), 8, 4, 1)
-        inputs = torch.randn(1, 3, 4, 4, 4, requires_grad=True)
-        time, latent, domain = torch.zeros(1), torch.zeros(1, 4), _domain(inputs)
-        output = model(inputs, time, latent, domain)
-        changed = model(-inputs, time, latent, domain)
-        self.assertFalse(torch.equal(output, changed))
-        output[:, 0].mean().backward()
-        self.assertTrue(bool(torch.isfinite(inputs.grad).all()))
-        self.assertGreater(float(inputs.grad.abs().sum()), 0)
-
-    def test_profile_input_matches_scaled_first_level_channels(self):
-        model = Denoiser3D(
-            3, 2, (2, 4), 8, 4, 1, height_enabled=True, profile_enabled=True
-        )
-        inputs = torch.randn(1, 3, 4, 4, 4)
-        time, latent, domain = torch.zeros(1), torch.zeros(1, 4), _domain(inputs)
-        output = model(
-            inputs,
-            time,
-            latent,
-            domain,
-            height=torch.zeros(1, 1, 4, 4, 4),
-            profile=torch.full((1, 3, 4), 1 / 3),
-        )
-        self.assertEqual(output.shape, inputs.shape)
-
-    def test_3d_norm_is_independent_at_each_spatial_position(self):
-        norm = ChannelNormSiLU3D(4)
-        inputs = torch.randn(2, 4, 3, 4, 5)
-        changed = inputs.clone()
-        changed[:, :, -1, -1, -1].add_(100.0 * torch.randn(2, 4))
-
-        output = norm(inputs)
-        changed_output = norm(changed)
-
-        self.assertTrue(
-            torch.equal(
-                output[:, :, 0, 0, 0],
-                changed_output[:, :, 0, 0, 0],
+    with torch.no_grad():
+        conditional = model.logits(x, time, latent, **conditioned)
+        unconditional = model.logits(x, time, latent, height=height)
+        for guidance in (0.0, 0.5, 1.0, 2.0):
+            expected = unconditional + guidance * (conditional - unconditional)
+            torch.testing.assert_close(
+                model.guided_logits(x, time, latent, guidance, **conditioned),
+                expected,
             )
-        )
-        normalized = F.layer_norm(inputs.movedim(1, -1), (4,)).movedim(-1, 1)
-        self.assertTrue(torch.allclose(output, F.silu(normalized), atol=1.0e-6))
-        self.assertEqual(norm(inputs.half()).dtype, torch.float16)
-
-    def test_3d_model_uses_channel_norm(self):
-        model = _denoiser()
-
-        self.assertIsInstance(model.encoder[0].norm1, AdaptiveNorm)
-        self.assertIsInstance(model.encoder[0].norm1.norm, ChannelNormSiLU3D)
-        self.assertIsInstance(model.output_norm, ChannelNormSiLU3D)
-        self.assertEqual(model.downsample_factor, 2)
-
-    def test_clean_output_is_a_latent_conditioned_simplex_with_gradients(self):
-        model = _denoiser()
-        inputs = torch.randn(2, 3, 4, 6, 8, requires_grad=True)
-        time = torch.tensor([0.0, 1.0])
-        first_latent = torch.zeros(2, 4)
-        second_latent = torch.ones(2, 4, requires_grad=True)
-        domain = _domain(inputs)
-
-        first = model(inputs, time, first_latent, domain)
-        clean = model(inputs, time, second_latent, domain)
-        probs = (clean + 1.0) / 2.0
-
-        self.assertEqual(clean.shape, inputs.shape)
-        self.assertGreaterEqual(float(clean.detach().min()), -1.0)
-        self.assertLessEqual(float(clean.detach().max()), 1.0)
-        self.assertTrue(
-            torch.allclose(
-                probs.sum(dim=1),
-                torch.ones_like(probs[:, 0]),
-                atol=1.0e-6,
-            )
-        )
-        self.assertFalse(torch.equal(first, clean))
-
-        clean.square().mean().backward()
-
-        self.assertIsNotNone(inputs.grad)
-        self.assertIsNotNone(second_latent.grad)
-        self.assertTrue(bool(torch.isfinite(inputs.grad).all()))
-        self.assertTrue(bool(torch.isfinite(second_latent.grad).all()))
-        self.assertGreater(float(inputs.grad.abs().sum()), 0.0)
-        self.assertGreater(float(second_latent.grad.abs().sum()), 0.0)
-
-    def test_domain_conditioning_changes_the_prediction(self):
-        model = _denoiser()
-        inputs = torch.randn(1, 3, 4, 4, 4)
-        time = torch.zeros(1)
-        latent = torch.randn(1, 4)
-
-        first = model(inputs, time, latent, _domain(inputs, 0))
-        second = model(inputs, time, latent, _domain(inputs, 1))
-
-        self.assertFalse(torch.equal(first, second))
-
-    def test_negative_one_masks_the_domain_embedding(self):
-        model = _denoiser()
-        inputs = torch.randn(1, 3, 4, 4, 4)
-        time = torch.zeros(1)
-        latent = torch.randn(1, 4)
-        null_domain = _domain(inputs, -1)
-
-        first = model(inputs, time, latent, null_domain)
-        with torch.no_grad():
-            model.domain_embedding.weight.add_(100.0)
-        second = model(inputs, time, latent, null_domain)
-
-        torch.testing.assert_close(first, second)
-
-    def test_group_norm_accepts_a_single_voxel_bottleneck(self):
-        model = Denoiser3D(
-            num_phases=3,
-            base_channels=4,
-            channel_multipliers=(1, 2, 4, 8),
-            embedding_channels=8,
-            latent_channels=4,
-            num_domains=2,
-        )
-
-        output = model(
-            torch.randn(1, 3, 8, 8, 8),
-            torch.zeros(1),
-            torch.zeros(1, 4),
-            _domain(torch.empty(1)),
-        )
-
-        self.assertEqual(output.shape, torch.Size([1, 3, 8, 8, 8]))
-
-    def test_logit_guidance_preserves_default_and_combines_conditions(self):
-        model = _denoiser()
-        inputs = torch.randn(1, 3, 4, 4, 4)
-        time = torch.ones(1)
-        latent = torch.randn(1, 4)
-        vf = torch.tensor([[0.2, 0.3, 0.5]])
-        domain = _domain(inputs)
-        with torch.no_grad():
-            model.vf_mlp[-1].weight.fill_(0.25)
-            model.vf_mlp[-1].bias.fill_(0.1)
-
-        unconditional = model.compute_logits(inputs, time, latent, domain)
-        conditional = model.compute_logits(inputs, time, latent, domain, vf=vf)
-        expected = model.decode(unconditional + 2.0 * (conditional - unconditional))
-
-        default_logits = model.apply_guidance_logits(
-            inputs,
-            time,
-            latent,
-            guidance=1.0,
-            domain=domain,
-            vf=vf,
-        )
-        default = model.decode(default_logits)
-        guided_logits = model.apply_guidance_logits(
-            inputs,
-            time,
-            latent,
-            guidance=2.0,
-            domain=domain,
-            vf=vf,
-        )
-        guided = model.decode(guided_logits)
-        disabled_logits = model.apply_guidance_logits(
-            inputs,
-            time,
-            latent,
-            guidance=0.0,
-            domain=domain,
-            vf=vf,
-        )
-        disabled = model.decode(disabled_logits)
-
-        self.assertTrue(
-            torch.equal(default, model(inputs, time, latent, domain, vf=vf))
-        )
-        torch.testing.assert_close(guided, expected)
+        # Without vf and profile there is nothing to drop.
         torch.testing.assert_close(
-            guided_logits,
-            unconditional + 2.0 * (conditional - unconditional),
+            model.guided_logits(x, time, latent, 0.0, height=height), unconditional
         )
-        self.assertTrue(torch.equal(disabled, model.decode(unconditional)))
 
-    def test_guidance_passes_share_stochastic_inputs(self):
-        model = _denoiser()
-        inputs = torch.randn(1, 3, 4, 4, 4)
-        time = torch.ones(1)
-        latent = torch.randn(1, 4)
-        vf = torch.tensor([[0.2, 0.3, 0.5]])
-        domain = _domain(inputs)
-        calls: list[
-            tuple[
-                torch.Tensor,
-                torch.Tensor,
-                torch.Tensor,
-                torch.Tensor | None,
-                torch.Tensor | None,
-                torch.Tensor | None,
-            ]
-        ] = []
-        original = model.compute_logits
 
-        def traced(
-            x_current: torch.Tensor,
-            timestep: torch.Tensor,
-            style: torch.Tensor,
-            domain: torch.Tensor,
-            vf: torch.Tensor | None = None,
-            vf_present: torch.Tensor | None = None,
-            height: torch.Tensor | None = None,
-            profile: torch.Tensor | None = None,
-            profile_present: torch.Tensor | None = None,
-            coarse: torch.Tensor | None = None,
-            corruption_level: torch.Tensor | None = None,
-        ) -> torch.Tensor:
-            calls.append((x_current, timestep, style, domain, vf, vf_present))
-            return original(
-                x_current,
-                timestep,
-                style,
-                domain,
-                vf=vf,
-                vf_present=vf_present,
-                height=height,
-                profile=profile,
-                profile_present=profile_present,
-                coarse=coarse,
-                corruption_level=corruption_level,
-            )
+def test_guidance_takes_one_pass_without_a_guided_condition(monkeypatch):
+    model = _denoiser()
+    calls = []
+    original = model.logits
+    monkeypatch.setattr(
+        model, "logits", lambda *a, **k: calls.append(1) or original(*a, **k)
+    )
+    x, time, latent = _inputs()
+    model.guided_logits(x, time, latent, 0.9)
+    model.guided_logits(x, time, latent, 1.0, vf=torch.full((1, 3), 1 / 3))
+    assert len(calls) == 2
 
-        model.compute_logits = traced
-        model.apply_guidance_logits(
-            inputs,
+
+def test_sr_denoiser_takes_coarse_fractions_and_rejects_lr_conditions():
+    model = _denoiser(coarse_enabled=True).eval()
+    x, time, latent = _inputs()
+    coarse = torch.full_like(x, 1 / 3)
+    with torch.no_grad():
+        clean = model(x, time, latent, coarse=coarse)
+        corrupted = model(
+            x, time, latent, coarse=coarse, corruption_level=torch.tensor([0.5])
+        )
+    assert clean.shape == x.shape and not torch.equal(clean, corrupted)
+    assert model.vf_mlp is None
+    with pytest.raises(ValueError, match="volume fractions"):
+        model(x, time, latent, coarse=coarse, vf=torch.full((1, 3), 1 / 3))
+    with pytest.raises(ValueError, match="coarse"):
+        model(x, time, latent)
+    with pytest.raises(ValueError, match="coarse conditioning requires"):
+        _denoiser()(x, time, latent, coarse=coarse)
+
+
+def test_height_and_profile_inputs_are_checked():
+    model = _denoiser(height_enabled=True, profile_enabled=True)
+    x, time, latent = _inputs()
+    with pytest.raises(ValueError, match="height field"):
+        model(x, time, latent)
+    with pytest.raises(ValueError, match="profile must match"):
+        model(
+            x,
             time,
             latent,
-            guidance=1.5,
-            domain=domain,
-            vf=vf,
+            height=torch.zeros(1, 1, 4, 4, 4),
+            profile=torch.full((1, 3, 5), 1 / 3),
         )
+    with pytest.raises(ValueError, match="height conditioning is disabled"):
+        _denoiser()(x, time, latent, height=torch.zeros(1, 1, 4, 4, 4))
+    with pytest.raises(ValueError, match="profile conditioning is disabled"):
+        _denoiser()(x, time, latent, profile=torch.full((1, 3, 4), 1 / 3))
 
-        self.assertEqual(len(calls), 2)
-        for index in range(4):
-            self.assertIs(calls[0][index], calls[1][index])
-        self.assertIsNone(calls[0][4])
-        self.assertIsNone(calls[0][5])
-        self.assertIs(calls[1][4], vf)
-        self.assertIsNone(calls[1][5])
 
-    def test_vf_presence_mask_matches_exact_null_and_conditioned_paths(self):
-        model = _denoiser()
-        inputs = torch.randn(3, 3, 4, 4, 4)
-        time = torch.tensor([0.0, 0.5, 1.0])
-        latent = torch.randn(3, 4)
-        vf = torch.tensor(
+def test_single_voxel_bottleneck_is_supported():
+    model = _denoiser(channel_multipliers=(1, 2, 4, 8))
+    output = model(torch.randn(1, 3, 8, 8, 8), torch.zeros(1), torch.zeros(1, 4))
+    assert output.shape == (1, 3, 8, 8, 8)
+
+
+def test_critic_keeps_spatial_group_norm_and_has_no_domain():
+    critic = _critic()
+    assert isinstance(critic.blocks[0].norm1.norm, GroupNormSiLU)
+    assert not any("domain" in key for key in critic.state_dict())
+
+
+def test_critic_scores_pairs_at_every_pyramid_level():
+    critic = _critic(pyramid_min_size=4)
+    previous = torch.randn(2, 3, 16, 16, requires_grad=True)
+    current = torch.randn(2, 3, 16, 16, requires_grad=True)
+    time = torch.tensor([0, 9])
+    scores = critic(previous, current, time)
+    assert isinstance(scores, CriticScores)
+    assert scores.logits_global.shape == (2,)
+    assert [level.logits_global.shape for level in scores.levels] == [(2,)] * 3
+    assert not torch.equal(
+        scores.logits_global, critic(previous, current, time.flip(0)).logits_global
+    )
+    sum(level.logits_global.sum() for level in scores.levels).backward()
+    assert float(current.grad.abs().sum()) > 0
+
+
+def test_critic_requires_two_feature_levels():
+    with pytest.raises(ValueError, match="two levels"):
+        PairCritic2D(3, (4,), 8)
+
+
+def test_height_critic_scores_xy_sections_without_a_height_field():
+    critic = _critic(height_channels=1)
+    x = torch.randn(1, 3, 8, 8)
+    time = torch.zeros(1, dtype=torch.long)
+    plain = critic(x, x, time).logits_global
+    assert plain.shape == (1,)
+    assert not torch.equal(
+        plain, critic(x, x, time, torch.rand(1, 1, 8, 8)).logits_global
+    )
+
+
+def test_gradient_checkpointing_keeps_outputs_and_gradients():
+    torch.manual_seed(0)
+    results = []
+    for checkpointing in (False, True):
+        torch.manual_seed(1)
+        model = _denoiser(gradient_checkpointing=checkpointing).train()
+        critic = _critic(gradient_checkpointing=checkpointing).train()
+        x, time, latent = _inputs()
+        out = model(x, time, latent)
+        scores = critic(out[:, :, 0], out[:, :, 1], time)
+        scores.logits_global.sum().backward()
+        results.append(
             [
-                [0.2, 0.3, 0.5],
-                [0.5, 0.25, 0.25],
-                [0.1, 0.7, 0.2],
+                out.detach(),
+                *(p.grad.clone() for p in model.parameters() if p.grad is not None),
             ]
         )
-        domain = _domain(inputs)
-        with torch.no_grad():
-            model.vf_mlp[-1].weight.fill_(0.25)
-            model.vf_mlp[-1].bias.fill_(0.1)
-
-        plain = model.compute_logits(inputs, time, latent, domain)
-        conditioned = model.compute_logits(inputs, time, latent, domain, vf=vf)
-        mixed = model.compute_logits(
-            inputs,
-            time,
-            latent,
-            domain,
-            vf=vf,
-            vf_present=torch.tensor([False, True, False]),
-        )
-        all_false = model.compute_logits(
-            inputs,
-            time,
-            latent,
-            domain,
-            vf=vf,
-            vf_present=torch.zeros(3, dtype=torch.bool),
-        )
-        all_true = model.compute_logits(
-            inputs,
-            time,
-            latent,
-            domain,
-            vf=vf,
-            vf_present=torch.ones(3, dtype=torch.bool),
-        )
-
-        self.assertTrue(torch.equal(mixed[0], plain[0]))
-        self.assertTrue(torch.equal(mixed[1], conditioned[1]))
-        self.assertTrue(torch.equal(mixed[2], plain[2]))
-        self.assertTrue(torch.equal(all_false, plain))
-        self.assertTrue(torch.equal(all_true, conditioned))
-        self.assertFalse(torch.equal(conditioned, plain))
-
-    def test_masked_vf_rows_receive_no_gradient(self):
-        model = _denoiser()
-        inputs = torch.randn(2, 3, 4, 4, 4)
-        time = torch.zeros(2)
-        latent = torch.randn(2, 4)
-        domain = _domain(inputs)
-        vf = torch.tensor(
-            [[0.2, 0.3, 0.5], [0.5, 0.25, 0.25]],
-            requires_grad=True,
-        )
-        first = model.vf_mlp[0]
-        output = model.vf_mlp[-1]
-        with torch.no_grad():
-            first.weight.zero_()
-            first.bias.zero_()
-            first.weight[:3].copy_(torch.eye(3))
-            output.weight.zero_()
-            output.bias.zero_()
-            output.weight[:3, :3].copy_(torch.eye(3))
-
-        embedding = model.embed(
-            inputs,
-            time,
-            latent,
-            domain,
-            vf,
-            vf_present=torch.tensor([True, False]),
-        )
-        embedding[:, :3].sum().backward()
-
-        self.assertIsNotNone(vf.grad)
-        self.assertGreater(float(vf.grad[0].abs().sum()), 0.0)
-        self.assertEqual(float(vf.grad[1].abs().sum()), 0.0)
-
-    def test_vf_adapter_preserves_none_path_and_receives_gradients(self):
-        model = _denoiser()
-        inputs = torch.randn(1, 3, 4, 4, 4)
-        time = torch.zeros(1)
-        latent = torch.randn(1, 4)
-        vf = torch.tensor([[0.25, 0.5, 0.25]])
-        domain = _domain(inputs)
-        output_layer = model.vf_mlp[-1]
-
-        self.assertEqual(int(torch.count_nonzero(output_layer.weight)), 0)
-        self.assertEqual(int(torch.count_nonzero(output_layer.bias)), 0)
-
-        plain = model.compute_logits(inputs, time, latent, domain)
-        conditioned = model.compute_logits(
-            inputs,
-            time,
-            latent,
-            domain,
-            vf=vf,
-        )
-        self.assertTrue(torch.equal(plain, conditioned))
-
-        predicted = conditioned.softmax(dim=1).mean(dim=(2, 3, 4))
-        loss = (predicted - vf).abs().sum(dim=1).mean()
-        loss.backward()
-
-        gradient = output_layer.weight.grad
-        self.assertIsNotNone(gradient)
-        self.assertTrue(bool(torch.isfinite(gradient).all()))
-        self.assertGreater(float(gradient.abs().sum()), 0.0)
-
-        with torch.no_grad():
-            output_layer.bias.fill_(0.5)
-        learned_plain = model.compute_logits(inputs, time, latent, domain)
-        self.assertTrue(torch.equal(plain, learned_plain))
-
-
-class PairCritic2DTest(unittest.TestCase):
-    def test_2d_critic_keeps_spatial_group_norm(self):
-        model = _critic()
-
-        self.assertIsInstance(model.blocks[0].norm1, AdaptiveNorm)
-        self.assertIsInstance(model.blocks[0].norm1.norm, GroupNormSiLU)
-        self.assertIsInstance(model.output_norm, torch.nn.GroupNorm)
-
-    def test_pair_and_time_conditioning_return_global_logits(self):
-        model = _critic()
-        previous = torch.randn(2, 3, 6, 8, requires_grad=True)
-        current = torch.randn(2, 3, 6, 8, requires_grad=True)
-        domain = _domain(previous)
-
-        first = model(previous, current, torch.zeros(2), domain)
-        scores = model(previous, current, torch.ones(2), domain)
-        other = model(previous, current, torch.zeros(2), _domain(previous, 1))
-
-        self.assertIsInstance(scores, CriticScores)
-        self.assertEqual(scores.logits_global.shape, torch.Size([2]))
-        self.assertFalse(torch.equal(first.logits_global, scores.logits_global))
-        self.assertFalse(torch.equal(first.logits_global, other.logits_global))
-
-        scores.logits_global.mean().backward()
-
-        self.assertIsNotNone(previous.grad)
-        self.assertIsNotNone(current.grad)
-        self.assertIsNotNone(model.output.weight.grad)
-        self.assertTrue(bool(torch.isfinite(previous.grad).all()))
-        self.assertTrue(bool(torch.isfinite(current.grad).all()))
-        self.assertGreater(float(previous.grad.abs().sum()), 0.0)
-        self.assertGreater(float(current.grad.abs().sum()), 0.0)
-        self.assertGreater(float(model.output.weight.grad.abs().sum()), 0.0)
-
-    def test_requires_two_feature_levels(self):
-        with self.assertRaisesRegex(ValueError, "at least two levels"):
-            PairCritic2D(
-                num_phases=3,
-                channels=(4,),
-                embedding_channels=8,
-                num_domains=2,
-            )
-
-
-class GradientCheckpointingTest(unittest.TestCase):
-    def test_denoiser_and_critic_forward_backward(self):
-        denoiser = _denoiser(checkpointing=True).train()
-        inputs = torch.randn(1, 3, 4, 4, 4, requires_grad=True)
-        latent = torch.randn(1, 4, requires_grad=True)
-        clean = denoiser(inputs, torch.zeros(1), latent, _domain(inputs))
-        clean.square().mean().backward()
-
-        self.assertEqual(clean.shape, inputs.shape)
-        self.assertGreater(float(inputs.grad.abs().sum()), 0.0)
-        self.assertGreater(float(latent.grad.abs().sum()), 0.0)
-
-        critic = _critic(checkpointing=True).train()
-        previous = torch.randn(1, 3, 4, 4, requires_grad=True)
-        current = torch.randn(1, 3, 4, 4, requires_grad=True)
-        scores = critic(previous, current, torch.zeros(1), _domain(previous))
-        loss = scores.logits_global.mean()
-        loss.backward()
-
-        self.assertEqual(scores.logits_global.shape, torch.Size([1]))
-        self.assertGreater(float(previous.grad.abs().sum()), 0.0)
-        self.assertGreater(float(current.grad.abs().sum()), 0.0)
-        self.assertGreater(float(critic.output.weight.grad.abs().sum()), 0.0)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    for plain, checkpointed in zip(*results, strict=True):
+        torch.testing.assert_close(plain, checkpointed)

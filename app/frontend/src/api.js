@@ -41,11 +41,11 @@ function parseTortuosity(value) {
 }
 
 export async function generateVolume(
-  { image, axis, seed, blocks, domain, heightOrigin, heightExtent, tortuosity }, signal,
+  { image, axis, seed, blocks, heightOrigin, heightExtent, tortuosity }, signal,
 ) {
   const response = await request('/api/generate', {
-    anchors: [{ image, axis, index: 0, position: [0, 0] }],
-    domain,
+    // position null: the server centers the crop on the first section.
+    anchors: [{ image, axis, index: 0, position: null }],
     ...(heightOrigin === undefined ? {} : { height_origin: heightOrigin, height_extent: heightExtent }),
     seed,
     ...(blocks.some(value => value > 1) ? { blocks } : {}),

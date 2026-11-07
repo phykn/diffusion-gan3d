@@ -10,8 +10,8 @@ RUN=run/$(date +%Y%m%d-%H%M)-default
 step "Check training crops" $PY scripts/check/01_dataset.py --sample default --no-view
 step "Train $RUN-lr, then $RUN-sr" caffeinate -i $PY train.py default \
   --run-dir $RUN ${STEPS:+--steps=$STEPS} ${SR_STEPS:+--sr-steps=$SR_STEPS}
-step "Check LR generation" $PY scripts/check/02_generated.py --weight $RUN-lr --no-view
+step "Check LR generation" $PY scripts/check/02_generate.py --weight $RUN-lr --no-view
 step "Check anchors" $PY scripts/check/03_anchor.py --weight $RUN-lr --no-view
-step "Check SR generation" $PY scripts/check/06_hr.py --weight $RUN-sr --no-view
+step "Check SR generation" $PY scripts/check/04_hr.py --weight $RUN-sr --no-view
 
 finish 0 Done "LR model" $RUN-lr "SR model" $RUN-sr Checks checks/

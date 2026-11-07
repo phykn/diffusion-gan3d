@@ -1,11 +1,11 @@
 """Burn-in schedule for optimizer, regularization and EMA settings (R3GAN).
 
-Over the first `steps` steps a cosine curve moves the learning rates, Adam β2,
-the R1/R2 weights and the EMA half-life from their start values to their end
-values; afterwards they stay at the end values. Large early steps need a low
-β2, and a smaller learning rate and weaker regularization later slow the critic
-down once the generator has the structure (Huang et al., The GAN is dead; long
-live the GAN!, 2024, Appendix D).
+Over the first `steps` steps a cosine curve moves the learning rates, Adam
+beta2, the R1/R2 weights and the EMA half-life from their start values to their
+end values; afterwards they stay at the end values. Large early steps need a
+low beta2, and a smaller learning rate and weaker regularization later slow
+the critic down once the generator has the structure (Huang et al., The GAN is
+dead; long live the GAN!, 2024, Appendix D).
 """
 
 import math
@@ -31,6 +31,20 @@ class BurnIn:
     lr_scale: float
     beta2: float
     regularization_scale: float
+
+    @classmethod
+    def from_config(cls, config) -> "BurnIn":
+        optim, burn_in = config.optim, config.burn_in
+        return cls(
+            steps=burn_in.steps,
+            generator_lr=optim.generator_lr,
+            critic_lr=optim.critic_lr,
+            betas=tuple(optim.adam_betas),
+            ema_decay=optim.ema_decay,
+            lr_scale=burn_in.lr_scale,
+            beta2=burn_in.beta2,
+            regularization_scale=burn_in.regularization_scale,
+        )
 
     def progress(self, step: int) -> float:
         """0 at step 0, rising along a cosine to 1 at `steps` and after."""

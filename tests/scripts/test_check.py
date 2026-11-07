@@ -1,0 +1,148 @@
+"""Smoke tests: each check script on tiny runs writes its SPEC output files."""
+
+import importlib.util
+import json
+from pathlib import Path
+
+import matplotlib
+import pytest
+
+ROOT = Path(__file__).parents[2]
+CHECK = ROOT / "scripts" / "check"
+IMAGE = ROOT / "tests" / "fixtures" / "tiny" / "default" / "sample.png"
+# v1 06_hr report keys without domain and sr_guidance (SPEC Check scripts).
+HR_REPORT = {
+    "sr_weights",
+    "lr_weights",
+    "input",
+    "lr_source_verified",
+    "seed",
+    "height_origin",
+    "height_extent",
+    "crop_size",
+    "lo_res_size",
+    "hi_res_size",
+    "source_pixels_per_hr_voxel",
+    "lr_shape",
+    "hr_shape",
+    "tile_size",
+    "overlap",
+    "margin",
+    "lr_guidance",
+    "lr_phase_fractions",
+    "hr_label_phase_fractions",
+    "hr_label_coarse_mae",
+    "has_measured_3d_reference",
+}
+
+
+@pytest.fixture(autouse=True)
+def no_window():
+    matplotlib.use("Agg")
+
+
+def run(script: str, *args) -> None:
+    spec = importlib.util.spec_from_file_location(script, CHECK / f"{script}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.main([str(value) for value in args])
+
+
+def files(folder: Path) -> set[str]:
+    return {path.name for path in folder.iterdir()}
+
+
+def test_dataset(tiny_sample, tiny_lr_run, tmp_path):
+    run("01_dataset", "--sample", tiny_sample, "--no-view", "--out", tmp_path / "a")
+    assert files(tmp_path / "a") == {"crops.png"}
+    run("01_dataset", "--weight", tiny_lr_run, "--no-view", "--out", tmp_path / "b")
+    assert files(tmp_path / "b") == {"crops.png"}
+
+
+def test_generate(tiny_lr_run, tmp_path):
+    common = ("--weight", tiny_lr_run, "--device", "cpu", "--no-view")
+    run("02_generate", *common, "--out", tmp_path / "one")
+    assert files(tmp_path / "one") == {"volume.tiff", "volume.png", "volume.json"}
+    run("02_generate", *common, "--blocks", 2, 1, 2, "--out", tmp_path / "tiled")
+    assert "seams.json" in files(tmp_path / "tiled")
+    seams = json.loads((tmp_path / "tiled" / "seams.json").read_text())
+    assert seams["transition_tv"][1] is None
+    assert seams["transition_tv"][0] is not None
+
+
+def test_anchor(tiny_lr_run, tmp_path):
+    common = ("--weight", tiny_lr_run, "--device", "cpu", "--no-view")
+    run("03_anchor", *common, "--count", 2, "--out", tmp_path / "inside")
+    assert files(tmp_path / "inside") == {
+        "volume.tiff",
+        "volume.png",
+        "volume.json",
+        "anchor.json",
+    }
+    assert json.loads((tmp_path / "inside" / "anchor.json").read_text())["indices"] == [
+        4,
+        12,
+    ]
+    run(
+        "03_anchor",
+        *common,
+        "--anchor",
+        IMAGE,
+        "--side",
+        "end",
+        "--axis",
+        1,
+        "--out",
+        tmp_path / "outside",
+    )
+    assert "volume_continuation.png" in files(tmp_path / "outside")
+    report = json.loads((tmp_path / "outside" / "anchor.json").read_text())
+    assert report["indices"] == [15] and report["boundary"] is not None
+
+
+def test_hr(tiny_sr_run, tmp_path):
+    run(
+        "04_hr",
+        "--weight",
+        tiny_sr_run,
+        "--device",
+        "cpu",
+        "--no-view",
+        "--out",
+        tmp_path,
+    )
+    assert files(tmp_path) == {
+        "lr.tiff",
+        "hr.tiff",
+        "lr_probs.pt",
+        "comparison.png",
+        "report.json",
+    }
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report.keys() == HR_REPORT
+    assert report["hr_shape"] == [32, 32, 32]
+
+
+def test_tilt(tiny_lr_run, tiny_anode, tiny_anode_lr_run, tmp_path):
+    common = ("--device", "cpu", "--samples", 2)
+    run("05_tilt", "--weight", tiny_lr_run, *common, "--out", tmp_path / "default")
+    assert files(tmp_path / "default") == {"report.json"}
+    real = tiny_anode.parent / "data" / "volumes" / "volume_000.tiff"
+    for origin in (0, 32):
+        out = tmp_path / f"anode-{origin}"
+        run(
+            "05_tilt",
+            "--weight",
+            tiny_anode_lr_run,
+            *common,
+            "--real",
+            real,
+            "--real-stride",
+            2,
+            "--height-origin",
+            origin,
+            "--out",
+            out,
+        )
+        report = json.loads((out / "report.json").read_text())
+        assert all("real" in entry for entry in report["phases"].values())

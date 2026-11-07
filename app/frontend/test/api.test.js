@@ -2,15 +2,14 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { generateVolume, prepareImage } from '../src/api.js'
 
-const OPTIONS = { image: [[0]], axis: 0, seed: 0, blocks: [1, 1, 1], domain: 0, tortuosity: true }
+const OPTIONS = { image: [[0]], axis: 0, seed: 0, blocks: [1, 1, 1], tortuosity: true }
 
 test('generation sends a prepared boundary anchor and decodes volume metadata', async t => {
   const image = [[[0.25]], [[0.75]]]
   t.mock.method(globalThis, 'fetch', async (path, options) => {
     assert.equal(path, '/api/generate')
     assert.deepEqual(JSON.parse(options.body), {
-      anchors: [{ image, axis: 0, index: 0, position: [0, 0] }],
-      domain: 0,
+      anchors: [{ image, axis: 0, index: 0, position: null }],
       seed: 7,
       blocks: [2, 1, 1],
       format: 'raw',
@@ -52,14 +51,14 @@ test('side-section request preserves the physical crop origin in a tiled volume'
   const image = [[[0.25]], [[0.75]]]
   t.mock.method(globalThis, 'fetch', async (path, options) => {
     const body = JSON.parse(options.body)
-    assert.deepEqual(body.anchors, [{ image, axis: 2, index: 0, position: [0, 0] }])
-    assert.equal(body.domain, 1)
+    assert.deepEqual(body.anchors, [{ image, axis: 2, index: 0, position: null }])
+    assert.equal('domain' in body, false)
     assert.equal(body.height_origin, 23)
     assert.equal(body.height_extent, 512)
     return new Response(new Uint8Array([0]), { headers: { 'X-Volume-Shape': '1,1,1' } })
   })
   await generateVolume({
-    ...OPTIONS, image, axis: 2, blocks: [2, 2, 2], domain: 1, heightOrigin: 23, heightExtent: 512,
+    ...OPTIONS, image, axis: 2, blocks: [2, 2, 2], heightOrigin: 23, heightExtent: 512,
   })
 })
 

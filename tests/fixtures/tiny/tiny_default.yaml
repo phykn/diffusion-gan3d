@@ -1,0 +1,43 @@
+# Tiny default sample for tests: a 64 x 64 piece of data/sample.png,
+# crop 32 -> LR 16 -> SR x2, with small networks and few steps.
+images:
+  xy: tests/fixtures/tiny/default
+  xz: tests/fixtures/tiny/default
+  yz: tests/fixtures/tiny/default
+
+resolution:
+  crop_size: 32
+  lo_res_size: 16
+  sr_scale: 2
+
+structure:
+  isotropic: true
+  depth_gradient: false
+  mirror_symmetric: true
+
+tune:
+  lr:
+    model:
+      generator: {channels: [8, 16, 32, 32], embedding_channels: 32, latent_channels: 16}
+      critic: {channels: [8, 16, 32, 32]}
+    train:
+      total_steps: 2
+      real_batch_size: 2
+      slice_pairs_per_plane: 2
+      weights_every_steps: 1
+      archive_every_steps: 2
+      structure_every_steps: 1
+    selection: {samples: 1}
+  sr:
+    model:
+      generator: {channels: [8, 16, 32, 32], embedding_channels: 32, latent_channels: 16}
+      critic: {channels: [8, 16, 32]}
+    lr_bank: {samples_per_domain: 2, refresh_every_steps: 1}
+    train:
+      total_steps: 2
+      real_batch_size: 2
+      slice_pairs_per_plane: 2
+      weights_every_steps: 1
+      archive_every_steps: 2
+      structure_every_steps: 1
+    selection: {samples: 1}

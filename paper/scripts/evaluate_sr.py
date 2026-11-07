@@ -1,10 +1,3 @@
-"""Evaluate one run's SR stage for the paper: HR structure, baselines, LR agreement.
-
-Writes paper/assets/sr-results.json. LR inputs and HR volumes are cached under
-checks/paper-sr/<run>/; --reuse recomputes the metrics from them without sampling.
-"""
-
-import argparse
 import json
 import sys
 from pathlib import Path
@@ -16,84 +9,73 @@ import torch.nn.functional as F
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from paper.scripts.evaluate_lr import (
+from paper.scripts.common import (
     archived_generators,
     cache_dir,
     cached,
-    interface_density,
     mean_std,
+    parse_args,
+    real_crops,
+    wall_minutes,
 )
-from scripts.common.metrics import wall_minutes
-from src.build.data import build_datasets
-from src.build.predict import build_generator
-from src.config.files import load_yaml
-from src.config.generation import load_generation_settings
-from src.config.train import load_train_config
-from src.device import default_device
-from src.evaluate.connectivity import spanning_fractions
-from src.evaluate.structure import (
+from paper.scripts.evaluate_lr import normalized
+from src.api import SuperResolutionAPI
+from src.config.io import load_generation_settings, load_yaml, stored_path
+from src.data.crops import downsample
+from src.stats.sections import (
     compare_sections,
     label_sections,
     section_errors,
     section_statistics,
 )
-from src.evaluate.tortuosity import tortuosity
-from src.predict.sr.inference import SuperResolutionAPI, load_sr_export
-from src.prepare.resize import downsample
-from src.random import seeded_rng
-from src.train.run.source import frozen_source_weights
+from src.stats.volume import interface_density, spanning_fractions, tortuosity
 from src.train.selection import lr_mse, pick_sections
 
-OUTPUT = PROJECT_ROOT / "paper" / "assets" / "sr-results.json"
-CACHE = PROJECT_ROOT / "checks" / "paper-sr"
-# Same crops and LR seeds as evaluate_lr.py: independent of the selection
-# reference (seed 0), and the LR inputs are the selected LR step's volumes.
-REAL_SEED = 1
-REAL_CROPS = 128
+DESCRIPTION = (
+    "Evaluate one run's SR stage for the paper: HR structure, baselines and LR "
+    "agreement. Writes sr-results.json to --out and caches the LR inputs and HR "
+    "volumes in its cache/<run>/; --reuse recomputes the metrics from them "
+    "without sampling."
+)
+# The same LR seeds as evaluate_lr.py; the LR inputs come from the LR model
+# inside the SR export.
 SAMPLES = 16
+SMOKE_SAMPLES = 2
 # Second SR seed per LR input, to separate what SR adds from what LR fixes.
 RESEED = 1000
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run", type=Path, required=True, help="SR run directory.")
-    parser.add_argument("--device", default=default_device())
-    parser.add_argument("--reuse", action="store_true")
-    args = parser.parse_args()
-
-    run = args.run.resolve()
-    device = torch.device(args.device)
-    cfg = load_sr_export(run / "generator.pt")["config"]
-    lr_weights = frozen_source_weights(cfg["source"])
-    lr_cfg = load_train_config(lr_weights.parent / "train.yaml")
+def main(argv=None) -> None:
+    args = parse_args(DESCRIPTION, "SR run directory.", argv)
+    run = args.run
+    samples = SMOKE_SAMPLES if args.smoke else SAMPLES
+    api = SuperResolutionAPI(run, args.device)
+    config = api.config
+    scale = api.scale_factor
     settings = load_generation_settings()
     scores = load_yaml(run / "selection" / "scores.yaml")
     best = int(scores["best_step"])
-    cache = cache_dir(CACHE, run)
+    cache = cache_dir(args.out, run, args.smoke)
 
-    real = real_crops(build_datasets(cfg, high_resolution=True)[0][0])
-    real_labels = label_sections(real)
+    real_labels = label_sections(real_crops(config, config.data.hi_res_size))
     noise = section_errors(real_labels[0::2], real_labels[1::2])
 
     def sample_lr():
-        gen = build_generator(lr_weights, lr_cfg, device)
-        volumes = []
-        for seed in range(SAMPLES):
-            with seeded_rng(seed, device):
-                volumes.append(gen.generate_probs(guidance=settings.guidance).cpu())
-        return volumes
+        return [
+            api.lr.generate_probs(seed=seed, guidance=settings.guidance)
+            for seed in range(samples)
+        ]
 
     low = cached(cache / "lr.pt", args.reuse, sample_lr)
     weights = {best: run / "generator.pt"} | archived_generators(run)
 
     def refine(step, offset=0):
-        api = SuperResolutionAPI(weights[step], device)
-        return [api.refine(v, seed=offset + i).cpu() for i, v in enumerate(low)]
+        sr = SuperResolutionAPI(weights[step], args.device)
+        return [sr.refine(v, seed=offset + i) for i, v in enumerate(low)]
 
     results = {
-        "run": str(run.relative_to(PROJECT_ROOT)),
-        "lr_run": str(lr_weights.parent.relative_to(PROJECT_ROOT)),
+        "run": stored_path(run),
+        "lr_run": config.source.lr_run,
         "best_step": best,
         "training_minutes": wall_minutes(run / "tensorboard"),
         "lr_guidance": settings.guidance,
@@ -113,7 +95,7 @@ def main() -> None:
         if step == best:
             high = volumes
     for name, upsample in (("nearest", upsample_nearest), ("linear", upsample_linear)):
-        baseline = [upsample(v) for v in low]
+        baseline = [upsample(v, scale) for v in low]
         results["baselines"][name] = volume_summary(
             baseline, low, real_labels, noise, full=name == "nearest"
         )
@@ -121,7 +103,7 @@ def main() -> None:
     again = cached(
         cache / f"step{best}-reseed.pt", args.reuse, lambda: refine(best, RESEED)
     )
-    nearest = [upsample_nearest(v) for v in low]
+    nearest = [upsample_nearest(v, scale) for v in low]
     results["reseed"] = {
         "between_seeds": mean_std(
             [(a != b).float().mean() for a, b in zip(high, again)]
@@ -130,28 +112,20 @@ def main() -> None:
             [(a != b).float().mean() for a, b in zip(high, nearest)]
         ),
     }
-    OUTPUT.write_text(json.dumps(results, indent=2) + "\n")
-    print(f"Results: {OUTPUT}")
+    output = args.out / "sr-results.json"
+    output.write_text(json.dumps(results, indent=2) + "\n")
+    print(f"Results: {output}")
 
 
-def real_crops(dataset) -> torch.Tensor:
-    """Phase fractions of fixed random crops at the source resolution."""
-    rng = np.random.RandomState(REAL_SEED)
-    path = dataset.path_groups[0][0]
-    return torch.stack(
-        [dataset.sample(path, rng)["image"] for _ in range(REAL_CROPS)]
-    ).float()
-
-
-def upsample_nearest(low: torch.Tensor) -> torch.Tensor:
+def upsample_nearest(low: torch.Tensor, scale: int) -> torch.Tensor:
     labels = low.argmax(0)
     for dim in range(3):
-        labels = labels.repeat_interleave(2, dim)
+        labels = labels.repeat_interleave(scale, dim)
     return labels.to(torch.uint8)
 
 
-def upsample_linear(low: torch.Tensor) -> torch.Tensor:
-    probs = F.interpolate(low[None], scale_factor=2, mode="trilinear")
+def upsample_linear(low: torch.Tensor, scale: int) -> torch.Tensor:
+    probs = F.interpolate(low[None], scale_factor=scale, mode="trilinear")
     return probs[0].argmax(0).to(torch.uint8)
 
 
@@ -180,18 +154,18 @@ def real_summary(real_labels: torch.Tensor, noise) -> dict:
 def volume_summary(volumes, low, real_labels, noise, full: bool) -> dict:
     real = section_statistics(real_labels)
     planes = {}
-    normalized = []
+    structure = []
     clusters = []
     for axis, name in enumerate(("xy", "xz", "yz")):
         fake = section_statistics(pick_sections(volumes, axis, real_labels.shape[1]))
         errors = compare_sections(real, fake)
         planes[name] = errors._asdict()
-        normalized.append(np.mean([v / n for v, n in zip(errors, noise)]))
+        structure.append(normalized(errors, noise))
         clusters.append(fake.clusters[0])
     summary = {
         "samples": len(volumes),
         "planes": planes,
-        "structure": float(np.mean(normalized)),
+        "structure": float(np.mean(structure)),
         "cluster_density": np.mean(clusters, 0).tolist(),
         "phase0_fraction": mean_std([(v == 0).float().mean() for v in volumes]),
         "interface_density": mean_std(

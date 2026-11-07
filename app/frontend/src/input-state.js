@@ -19,6 +19,12 @@ export function normalizeBlocks(values, maximum) {
   return Array.from({ length: 3 }, (_, index) => normalizeBlock(values?.[index], maximum))
 }
 
+// The server centers the anchor crop on the first section of a larger volume.
+export function anchorNote(blocks, cropSize) {
+  if (!Array.isArray(blocks) || blocks.every(value => value === 1)) return null
+  return `Anchor covers the center ${cropSize}×${cropSize} of the first section`
+}
+
 // Inputs changed after begin() make that request's result stale.
 export function createRequestGate() {
   let revision = 0

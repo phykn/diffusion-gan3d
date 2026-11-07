@@ -1,17 +1,22 @@
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 
-from src.config.files import dump_yaml, find_saved_config, load_yaml
-from src.config.sample import STAGE_NAMES, build_train_config, load_sample
-from src.config.train import load_train_config
-from src.console import path_field, section, success, warning
-from src.device import default_device
-from src.train.checkpoint import resolve_checkpoint
-from src.train.run.low_res import run_low_res_train
-from src.train.run.sr import match_source, run_sr_train
-
-DONE = ".done"
+from src.config.io import dump_yaml
+from src.config.sample import build_stage_configs, load_sample
+from src.config.schema import to_dict, update
+from src.console import path_field, section, success
+from src.device import check_device, default_device
+from src.export import check_lr_source
+from src.train.checkpoint import load_checkpoint, resolve_checkpoint
+from src.train.run import (
+    is_done,
+    new_run_name,
+    resume_stage,
+    stage_dir,
+    train_stage,
+)
 
 
 def positive_int(value: str) -> int:
@@ -33,15 +38,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--show",
         action="store_true",
-        help="Print the LR and SR training settings built from the sample and exit.",
+        help="Print the full LR and SR settings built from the sample and exit.",
     )
     parser.add_argument(
         "--run-dir",
         type=Path,
         help=(
-            "Run path such as run/NAME: trains NAME-lr then NAME-sr and reuses a "
-            "finished stage (default: new run/MMDDHHMM_low_res_<sample> and "
-            "run/MMDDHHMM_sr_<sample> directories)."
+            "Run name such as run/NAME: trains NAME-lr then NAME-sr and reuses a "
+            "finished stage (default: run/<YYYYMMDD-HHMM>-<sample>)."
         ),
     )
     parser.add_argument(
@@ -52,14 +56,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--steps", type=positive_int, help="LR total steps.")
     parser.add_argument("--sr-steps", type=positive_int, help="SR total steps.")
     parser.add_argument(
-        "--bank-size", type=positive_int, help="Frozen LR samples per domain for SR."
+        "--bank-size", type=positive_int, help="Frozen LR volumes the SR stage uses."
     )
     parser.add_argument(
         "--resume",
         type=Path,
         help=(
-            "Continue one interrupted stage from a checkpoint file, a run "
-            "directory, or its checkpoints/; --steps sets its total steps."
+            "Continue one stage from a checkpoint file, a run folder or its "
+            "checkpoints/ into a new --run-dir; --steps sets its total steps."
         ),
     )
     parser.add_argument(
@@ -67,10 +71,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs=2,
         action="append",
         metavar=("OLD", "NEW"),
-        help=(
-            "Relocate saved path prefixes on resume; OLD is the absolute saved "
-            "prefix as written. Repeat for multiple roots."
-        ),
+        help="Replace the saved path prefix OLD with NEW on resume (repeatable).",
     )
     parser.add_argument(
         "--device",
@@ -84,6 +85,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("--resume uses the saved settings; omit the sample.")
         if args.sr_steps is not None or args.bank_size is not None:
             parser.error("--resume continues one stage; set its total with --steps.")
+        if args.run_dir is None:
+            parser.error("--resume needs --run-dir NAME for the continued run.")
         args.resume = args.resume.expanduser()
     elif args.path_map:
         parser.error("--path-map requires --resume.")
@@ -100,102 +103,94 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def stage_configs(args: argparse.Namespace) -> dict:
+    configs = build_stage_configs(load_sample(args.sample or "default"))
+    if args.steps is not None:
+        configs["lr"] = update(configs["lr"], "train.total_steps", args.steps)
+    if args.sr_steps is not None:
+        configs["sr"] = update(configs["sr"], "train.total_steps", args.sr_steps)
+    if args.bank_size is not None:
+        configs["sr"] = update(
+            configs["sr"], "lr_bank.samples_per_domain", args.bank_size
+        )
+    return configs
+
+
+def show(configs: dict, run_name: Path | None) -> None:
+    sr = configs["sr"]
+    if run_name is not None:
+        lr_run = str(stage_dir(run_name, "lr"))
+        sr = replace(sr, source=replace(sr.source, lr_run=lr_run))
+    for stage, config in (("lr", configs["lr"]), ("sr", sr)):
+        print(f"# {stage}\n{dump_yaml(to_dict(config))}")
+
+
+def stage_dirs(name: Path) -> tuple[Path, Path]:
+    """NAME-lr and NAME-sr; an unfinished one stops with how to continue it."""
+    dirs = stage_dir(name, "lr"), stage_dir(name, "sr")
+    for path in dirs:
+        if path.exists() and not is_done(path):
+            try:
+                resolve_checkpoint(path)
+            except FileNotFoundError:
+                sys.exit(f"{path} exists but saved no checkpoint; delete it: {path}")
+            sys.exit(
+                f"{path} exists but did not finish. Continue it with "
+                f"python train.py --resume {path}/checkpoints --run-dir <new name>, "
+                f"or delete it: {path}"
+            )
+    return dirs
+
+
+def resume(args: argparse.Namespace) -> None:
+    device = check_device(args.device)
+    stage = load_checkpoint(resolve_checkpoint(args.resume))["stage"]
+    lr_dir, sr_dir = stage_dirs(args.run_dir)
+    run_dir = lr_dir if stage == "lr" else sr_dir
+    stage, run_dir = resume_stage(
+        args.resume, device, run_dir, steps=args.steps, path_map=args.path_map
+    )
+    success(f"{stage.upper()} training finished: {run_dir}")
+    if stage == "lr":
+        path_field("Next", f"python train.py <sample> --run-dir {args.run_dir}  (SR)")
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     if args.resume is not None:
         resume(args)
         return
-    sample = load_sample(args.sample or "default")
-    configs = {stage: build_train_config(sample, stage) for stage in STAGE_NAMES}
+    configs = stage_configs(args)
     if args.show:
-        for stage, cfg in configs.items():
-            print(f"# {stage}\n{dump_yaml(cfg)}")
+        show(configs, args.run_dir)
         return
-    # SR checks these against the trained LR model; fail before LR trains.
-    match_source(
-        load_train_config(configs["sr"], "sr"), load_train_config(configs["low_res"])
+    device = check_device(args.device)
+    # Both stages are checked before LR starts, so a bad SR setting leaves no run.
+    check_lr_source(configs["lr"], configs["sr"])
+    name = (
+        args.run_dir
+        if args.run_dir is not None
+        else new_run_name(configs["lr"].nickname)
     )
-    lr_dir, sr_dir = get_stage_dirs(args.run_dir)
-    if not args.lr_only and is_done(sr_dir):
-        section("SR training")
-        path_field("Finished", sr_dir)
-        return
+    lr_dir, sr_dir = stage_dirs(name)
     if is_done(lr_dir):
         section("LR training")
         path_field("Reuse finished", lr_dir)
-        if args.steps is not None:
-            warning("--steps applies to a new LR stage; resume this one instead.")
     else:
-        lr_dir = run_low_res_train(
-            args.device, config=configs["low_res"], run_dir=lr_dir, steps=args.steps
-        )
-        mark_done(lr_dir)
+        train_stage(configs["lr"], device, lr_dir)
     if args.lr_only:
-        report_done(lr_dir)
+        success(f"LR training finished: {lr_dir}")
         return
-    sr_dir = run_sr_train(
-        args.device,
-        base_weights=lr_dir,
-        config=configs["sr"],
-        run_dir=sr_dir,
-        steps=args.sr_steps,
-        bank_size=args.bank_size,
-    )
-    mark_done(sr_dir)
-    report_done(lr_dir, sr_dir)
-
-
-def resume(args: argparse.Namespace) -> None:
-    stage = load_yaml(find_saved_config(resolve_checkpoint(args.resume)))["stage"]
-    lr_dir, sr_dir = get_stage_dirs(args.run_dir)
-    options = dict(resume=args.resume, steps=args.steps, path_map=args.path_map)
-    if stage == "low_res":
-        if args.run_dir is None:
-            sys.exit(
-                "An LR --resume needs --run-dir NAME; SR then continues from NAME-lr."
-            )
-        run_dir = run_low_res_train(args.device, run_dir=lr_dir, **options)
-        mark_done(run_dir)
-        report_done(run_dir)
-        path_field("Next", f"python train.py <sample> --run-dir {args.run_dir}  (SR)")
+    if is_done(sr_dir):
+        section("SR training")
+        path_field("Reuse finished", sr_dir)
     else:
-        run_dir = run_sr_train(args.device, run_dir=sr_dir, **options)
-        mark_done(run_dir)
-        report_done(sr_dir=run_dir)
-
-
-def report_done(lr_dir: Path | None = None, sr_dir: Path | None = None) -> None:
-    print()
-    success("Training finished")
-    for label, path in (("LR model", lr_dir), ("SR model", sr_dir)):
-        if path is not None:
-            path_field(label, path)
-
-
-def get_stage_dirs(run_dir: Path | None) -> tuple[Path | None, Path | None]:
-    if run_dir is None:
-        return None, None
-    lr_dir, sr_dir = (Path(f"{run_dir}-{name}") for name in STAGE_NAMES.values())
-    for path in (lr_dir, sr_dir):
-        if path.exists() and not is_done(path):
-            try:
-                resolve_checkpoint(path)
-            except FileNotFoundError:
-                sys.exit(f"{path} exists but saved no checkpoint; delete it.")
-            sys.exit(
-                f"{path} exists but did not finish. Continue it with --resume "
-                f"{path}/checkpoints --run-dir <new name>, or delete it."
-            )
-    return lr_dir, sr_dir
-
-
-def is_done(path: Path | None) -> bool:
-    return path is not None and (path / DONE).is_file()
-
-
-def mark_done(path: Path) -> None:
-    (path / DONE).touch()
+        train_stage(configs["sr"], device, sr_dir, lr_dir=lr_dir)
+    success(f"Training finished: {lr_dir}, {sr_dir}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)

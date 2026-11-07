@@ -45,8 +45,7 @@ def test_phase_ids_keep_the_uint8_contract():
 @pytest.mark.parametrize(
     "values",
     [
-        {"domain": True},
-        {"domain": "1"},
+        {"domain": 0},
         {"overlap": 2.0},
         {"progress": True},
         {"include_metrics": True},

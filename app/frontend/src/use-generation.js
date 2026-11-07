@@ -31,7 +31,6 @@ export function useGeneration(cropEditor) {
   const seed = ref(0)
   const blocks = ref([1, 1, 1])
   const axis = ref(0)
-  const domain = ref(0)
   const heightOrigin = ref(0)
   const heightExtent = ref(null)
   const busy = ref(false)
@@ -46,10 +45,6 @@ export function useGeneration(cropEditor) {
   const gate = createRequestGate()
   const controller = new AbortController()
 
-  function heightExtentFor(value) {
-    return health.value?.height_extents?.[value] ?? null
-  }
-
   // The backend may start after the page; keep retrying until it answers.
   onMounted(async () => {
     let delay = HEALTH_RETRY_MS
@@ -58,7 +53,7 @@ export function useGeneration(cropEditor) {
         health.value = await getHealth(controller.signal)
         healthError.value = ''
         axis.value = health.value.height_enabled ? 1 : 0
-        heightExtent.value = heightExtentFor(domain.value)
+        heightExtent.value = health.value.height_extent ?? null
         return
       } catch (reason) {
         if (controller.signal.aborted) return
@@ -88,11 +83,8 @@ export function useGeneration(cropEditor) {
     cropReady.value = false
   }
 
-  watch([seed, axis, domain, heightOrigin, heightExtent], invalidateResult)
+  watch([seed, axis, heightOrigin, heightExtent], invalidateResult)
   watch(blocks, invalidateResult, { deep: true })
-  watch(domain, value => {
-    heightExtent.value = heightExtentFor(value)
-  })
 
   async function generate() {
     if (!ready.value) return
@@ -108,7 +100,6 @@ export function useGeneration(cropEditor) {
         axis: axis.value,
         seed: normalizeSeed(seed.value),
         blocks: normalizeBlocks(blocks.value, health.value.max_axis_blocks),
-        domain: domain.value,
         tortuosity: measureTortuosity.value,
       }
       if (health.value.height_enabled) {
@@ -140,7 +131,6 @@ export function useGeneration(cropEditor) {
     seed,
     blocks,
     axis,
-    domain,
     heightOrigin,
     heightExtent,
     busy,

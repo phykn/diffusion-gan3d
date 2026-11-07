@@ -34,3 +34,6 @@ report.md
 
 # Local Claude Code instructions
 CLAUDE.md
+
+/.reference/
+/.venv

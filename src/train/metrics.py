@@ -1,122 +1,103 @@
-from dataclasses import dataclass, field, fields, is_dataclass
+"""TensorBoard scalars of a training step and the structure metrics."""
 
+import math
+from itertools import combinations
+
+import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from src.device import wide_dtype
-from src.plane import PLANES
-from src.train.batch import DenoiserUpdate, StepPreparation
+from src.phase import PORE_PHASE
+from src.plane import AXIS_NAMES, PLANES
+from src.stats.sections import label_sections, section_errors, two_point
+from src.stats.volume import spanning_fractions, tilt_balance
 
 
-@dataclass(frozen=True)
-class Metrics:
-    generator: float
-    generator_total: float
-    critic: float
-    r1: float | None
-    transition: int
-    domain: int
-    critic_axes: tuple[float | None, float | None, float | None]
-    vf_loss: float = 0.0
-    vf_active: bool = False
-    vf_active_fraction: float = 0.0
-    real_transition_ramp: float = 0.0
-    diagnostics: dict = field(default_factory=dict)
-
-
-def collect_metrics(
-    diagnostics: dict,
-    prepared: StepPreparation,
-    denoiser_update: DenoiserUpdate,
-    critic_vals: list[float | None],
-    r1: float | None,
-) -> Metrics:
-    return materialize_metrics(
-        Metrics(
-            generator=denoiser_update.adversarial,
-            generator_total=denoiser_update.total,
-            critic=sum(value for value in critic_vals if value is not None),
-            r1=r1,
-            transition=prepared.transition,
-            domain=prepared.domain,
-            critic_axes=tuple(critic_vals),
-            real_transition_ramp=prepared.real_transition_ramp,
-            vf_loss=denoiser_update.vf,
-            vf_active=prepared.vf_present.any(),
-            vf_active_fraction=prepared.vf_present.to(torch.float32).mean(),
-            diagnostics=dict(diagnostics),
-        )
-    )
-
-
-def materialize_metrics(value):
-    tensors = []
-
-    def collect(item):
-        if isinstance(item, torch.Tensor):
-            tensors.append(item.detach())
-        elif is_dataclass(item):
-            for field in fields(item):
-                collect(getattr(item, field.name))
-        elif isinstance(item, dict):
-            for child in item.values():
-                collect(child)
-        elif isinstance(item, (tuple, list)):
-            for child in item:
-                collect(child)
-
-    collect(value)
-    if not tensors:
-        return value
-    device = tensors[0].device
-    dtype = wide_dtype(device)
-    values = iter(
-        torch.stack([t.to(device=device, dtype=dtype) for t in tensors]).cpu().tolist()
-    )
-
-    def rebuild(item):
-        if isinstance(item, torch.Tensor):
-            result = next(values)
-            if item.dtype == torch.bool:
-                return bool(result)
-            return float(result) if item.dtype.is_floating_point else int(result)
-        if is_dataclass(item):
-            return type(item)(
-                **{
-                    field.name: rebuild(getattr(item, field.name))
-                    for field in fields(item)
-                }
-            )
-        if isinstance(item, dict):
-            return {key: rebuild(child) for key, child in item.items()}
-        if isinstance(item, (tuple, list)):
-            return type(item)(rebuild(child) for child in item)
-        return item
-
-    return rebuild(value)
-
-
-def write_metrics(writer: SummaryWriter, step: int, metrics: Metrics) -> None:
-    scalars = {
-        "loss/generator": metrics.generator,
-        "loss/generator_total": metrics.generator_total,
-        "loss/critic": metrics.critic,
-        "loss/r1": metrics.r1,
-        "loss/vf": metrics.vf_loss,
-        "conditioning/vf_active": metrics.vf_active,
-        "conditioning/vf_fraction": metrics.vf_active_fraction,
-        "loss/real_transition_ramp": metrics.real_transition_ramp,
-        "sampling/transition": metrics.transition,
-        "sampling/domain": metrics.domain,
-        f"timestep/{metrics.transition}/generator": metrics.generator,
-        f"timestep/{metrics.transition}/critic": metrics.critic,
-        **{
-            f"critic_plane/{PLANES[axis]}": value
-            for axis, value in enumerate(metrics.critic_axes)
-        },
-        **metrics.diagnostics,
-    }
-
-    for tag, value in scalars.items():
+def write_metrics(writer: SummaryWriter, step: int, metrics: dict) -> None:
+    for tag, value in metrics.items():
         # Unavailable measurements remain visible as gaps at their recorded steps.
-        writer.add_scalar(tag, float("nan") if value is None else value, step)
+        if value is None:
+            value = math.nan
+        writer.add_scalar(tag, float(value), step)
+
+
+@torch.no_grad()
+def structure_metrics(probs, real: dict, groups: dict) -> dict:
+    """structure/* tags of [B, K, D, H, W] predictions against real sections."""
+    # One scheduled transfer; never called from a diffusion or critic inner loop.
+    probs = probs.detach().float().cpu()
+    phases = probs.shape[1]
+    labels = probs.argmax(1).numpy()
+    metrics = {}
+    percolation = np.zeros((phases, 3))
+    for phase in range(phases):
+        span, lower = [], []
+        for volume in labels:
+            mask = volume == phase
+            total = max(int(mask.sum()), 1)
+            span.append(spanning_fractions(mask))
+            lower.append(
+                [
+                    float(mask.all(axis=axis).sum() * mask.shape[axis] / total)
+                    for axis in range(3)
+                ]
+            )
+        percolation[phase] = np.mean(span, axis=0)
+        # Percolation is transport along an axis, named z/y/x.
+        for axis, name in enumerate(AXIS_NAMES):
+            metrics[f"structure/phase_{phase}/percolation_{name}"] = percolation[
+                phase, axis
+            ]
+            metrics[f"structure/phase_{phase}/percolation_lower_bound_{name}"] = float(
+                np.mean(lower, axis=0)[axis]
+            )
+        if phase == PORE_PHASE:
+            continue
+        # Per-particle tilt sign; a mirror-symmetric structure stays near zero.
+        for name, stats in tilt_balance(labels, phase).items():
+            metrics[f"structure/phase_{phase}/tilt_balance_{name}"] = stats["balance"]
+    generated_curves = {}
+    for axis, images in real.items():
+        images = label_sections(images.detach().cpu())
+        planes = probs.movedim(axis + 2, 1).flatten(0, 1)
+        indices = torch.linspace(0, len(planes) - 1, len(images)).long()
+        fake = label_sections(
+            planes[indices][..., : images.shape[-2], : images.shape[-1]]
+        )
+        for name, value in section_errors(images, fake)._asdict().items():
+            metrics[f"structure/{PLANES[axis]}/{name}"] = value
+        generated_curves[axis] = two_point(fake)
+    for group, axes in groups.items():
+        pairs = list(combinations([a for a in axes if a in generated_curves], 2))
+        if not pairs:
+            continue
+        metrics[f"structure/{group}/percolation_axis_gap"] = float(
+            np.mean(
+                [np.abs(percolation[:, a] - percolation[:, b]).mean() for a, b in pairs]
+            )
+        )
+        metrics[f"structure/{group}/two_point_axis_gap"] = float(
+            np.mean(
+                [
+                    np.mean(
+                        [
+                            float((x - y).abs().mean())
+                            for x, y in zip(
+                                generated_curves[a], generated_curves[b], strict=True
+                            )
+                        ]
+                    )
+                    for a, b in pairs
+                ]
+            )
+        )
+    return metrics
+
+
+def selection_metrics(entry: dict, best: dict) -> dict:
+    """selection/* tags of one scored step."""
+    values = {
+        f"selection/{name}": value for name, value in entry.items() if name != "step"
+    }
+    values["selection/best_step"] = best["step"]
+    return values

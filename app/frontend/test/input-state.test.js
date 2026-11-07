@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  anchorNote,
   createRequestGate,
   normalizeBlocks,
   normalizeSeed,
@@ -29,4 +30,10 @@ test('an input change rejects an in-flight response', () => {
 
   assert.equal(gate.accepts(request), false)
   assert.equal(gate.accepts(gate.begin()), true)
+})
+
+test('the anchor note appears only for more than one block', () => {
+  assert.equal(anchorNote([1, 1, 1], 128), null)
+  assert.equal(anchorNote([1, 2, 1], 128), 'Anchor covers the center 128×128 of the first section')
+  assert.equal(anchorNote([3, 1, 1], 96), 'Anchor covers the center 96×96 of the first section')
 })

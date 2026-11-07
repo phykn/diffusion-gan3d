@@ -6,7 +6,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.simul.src.export import generate
-from src.config.files import load_yaml
+from src.config.io import load_yaml
 from src.console import field, path_field, section
 
 DEFAULT_CONFIG = Path(__file__).resolve().with_name("config.yaml")

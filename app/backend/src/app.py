@@ -44,7 +44,6 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict:
-        generator = inference.generator
         try:
             max_axis_blocks = _axis_block_limit(inference, config)
         except ValueError as exc:
@@ -54,9 +53,8 @@ def create_app(
             "device": str(inference.device),
             "crop_size": inference.crop_size,
             "num_phases": inference.num_phases,
-            "num_domains": generator.num_domains,
-            "height_enabled": generator.height_data is not None,
-            "height_extents": (generator.height_data or {}).get("height_extents", {}),
+            "height_enabled": inference.height_enabled,
+            "height_extent": inference.height_extent,
             "pore_phase": PORE_PHASE,
             "max_axis_blocks": max_axis_blocks,
         }
@@ -153,11 +151,14 @@ def _axis_block_limit(inference: HighResolutionPipeline, config: ServerConfig) -
 def _generate_volume(
     inference: HighResolutionPipeline, request: GenerateRequest, config: ServerConfig
 ) -> torch.Tensor:
+    anchors = tuple(anchor.to_anchor() for anchor in request.anchors)
     estimate = inference.estimate_memory(
         blocks=request.blocks,
         shape=request.shape,
         size=request.size,
         overlap=request.overlap,
+        anchors=anchors,
+        guidance=request.guidance,
     )
     if (
         max(estimate.shape) > config.max_size
@@ -174,12 +175,11 @@ def _generate_volume(
         )
     inference.check_memory(estimate, storage=request.storage)
     return inference.generate(
-        anchors=tuple(anchor.to_anchor() for anchor in request.anchors),
+        anchors=anchors,
         blocks=request.blocks,
         shape=request.shape,
         size=request.size,
         vf=request.vf,
-        domain=request.domain,
         seed=request.seed,
         guidance=request.guidance,
         anchor_strength=request.anchor_strength,

@@ -14,6 +14,11 @@ def _stats_dtype(values: torch.Tensor) -> torch.dtype:
 
 
 class Diffusion(nn.Module):
+    """Variance-preserving schedule with a clean-prediction posterior.
+
+    Noise is always passed in: every random draw comes from src.rng.
+    """
+
     def __init__(
         self,
         timesteps: int,
@@ -36,12 +41,7 @@ class Diffusion(nn.Module):
                 "beta_min/beta_max must be finite with 0 <= beta_min < beta_max."
             )
 
-        time = torch.linspace(
-            0.0,
-            1.0,
-            timesteps + 1,
-            dtype=torch.float64,
-        )
+        time = torch.linspace(0.0, 1.0, timesteps + 1, dtype=torch.float64)
         log_alpha_bars = -0.5 * (beta_max - beta_min) * time.square() - beta_min * time
         alpha_bars = log_alpha_bars.exp()
         alphas = torch.ones_like(alpha_bars)
@@ -70,35 +70,24 @@ class Diffusion(nn.Module):
         self,
         clean: torch.Tensor,
         state: int | torch.Tensor,
-        noise: torch.Tensor | None = None,
+        noise: torch.Tensor,
     ) -> torch.Tensor:
-        states = self.prepare_time(
-            state,
-            clean,
-            self.timesteps,
-            "state",
-        )
+        states = self.prepare_time(state, clean, self.timesteps, "state")
         return self.mix_noise(clean, states, noise)
 
     def sample_pair(
         self,
         clean: torch.Tensor,
         transition: int | torch.Tensor,
-        previous_noise: torch.Tensor | None = None,
-        step_noise: torch.Tensor | None = None,
+        previous_noise: torch.Tensor,
+        step_noise: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Draw (x_t, x_t+1) for transition t from a clean volume."""
         transitions = self.prepare_time(
-            transition,
-            clean,
-            self.timesteps - 1,
-            "transition",
+            transition, clean, self.timesteps - 1, "transition"
         )
         previous = self.mix_noise(clean, transitions, previous_noise)
-        if step_noise is None:
-            step_noise = torch.randn_like(clean)
-        else:
-            step_noise = self.validate_shape("step_noise", step_noise, clean)
-
+        step_noise = self.validate_shape("step_noise", step_noise, clean)
         states = transitions + 1
         dtype = _stats_dtype(clean)
         alpha = self.extract(self.alphas, states, clean, dtype=dtype)
@@ -116,84 +105,30 @@ class Diffusion(nn.Module):
         transition: int | torch.Tensor,
         noise: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Step x_t+1 to x_t; transition 0 returns the prediction itself."""
         pred = self.validate_shape("pred", pred, current)
         transitions = self.prepare_time(
-            transition,
-            current,
-            self.timesteps - 1,
-            "transition",
+            transition, current, self.timesteps - 1, "transition"
         )
         if isinstance(transition, int) and transition == 0:
             return pred
         if transitions.device.type == "cpu" and not bool(transitions.any()):
             return pred
-        mean, variance = self.get_posterior(
-            current,
-            pred,
-            transitions,
-        )
-        active = transitions != 0
         if noise is None:
-            noise = torch.randn_like(current)
-        else:
-            noise = self.validate_shape("noise", noise, current)
-
-        active = active.reshape((-1,) + (1,) * (current.ndim - 1))
+            raise ValueError("noise is required for transitions above zero.")
+        noise = self.validate_shape("noise", noise, current)
+        mean, variance = self.get_posterior(current, pred, transitions)
+        active = (transitions != 0).reshape((-1,) + (1,) * (current.ndim - 1))
         sample = mean + variance.sqrt().to(current.dtype) * noise
         return torch.where(active, sample, pred)
-
-    @torch.no_grad()
-    def sample(
-        self,
-        model: nn.Module,
-        initial_noise: torch.Tensor,
-        latent_channels: int,
-        conditions: dict[str, object] | None = None,
-        guide=None,
-    ) -> torch.Tensor:
-        """guide(model, current, time, latent, **conditions) returns the clean
-        prediction and a step to subtract from each later noisy state."""
-        current = initial_noise
-        cond = {} if conditions is None else conditions
-
-        for transition in reversed(range(self.timesteps)):
-            time = torch.full(
-                (current.shape[0],),
-                transition,
-                device=current.device,
-                dtype=torch.long,
-            )
-            latent = torch.randn(
-                current.shape[0],
-                latent_channels,
-                device=current.device,
-                dtype=current.dtype,
-            )
-            # The last step returns the clean prediction, so it takes no guide step.
-            if guide is None or transition == 0:
-                pred = model(current, time, latent, **cond)
-            else:
-                pred, step = guide(model, current, time, latent, **cond)
-            current = self.sample_posterior(
-                current,
-                pred,
-                transition,
-            )
-            if guide is not None and transition:
-                current = current - step
-        return current
 
     def mix_noise(
         self,
         clean: torch.Tensor,
         states: torch.Tensor,
-        noise: torch.Tensor | None,
+        noise: torch.Tensor,
     ) -> torch.Tensor:
-        if noise is None:
-            noise = torch.randn_like(clean)
-        else:
-            noise = self.validate_shape("noise", noise, clean)
-
+        noise = self.validate_shape("noise", noise, clean)
         alpha_bar = self.extract(self.alpha_bars, states, clean)
         std = self.extract(self.noise_std, states, clean)
         return alpha_bar.sqrt() * clean + std * noise
@@ -231,7 +166,7 @@ class Diffusion(nn.Module):
         values: torch.Tensor,
         ref: torch.Tensor,
     ) -> torch.Tensor:
-        if values.shape != ref.shape:
+        if values is None or values.shape != ref.shape:
             raise ValueError(f"{name} must have shape {tuple(ref.shape)}.")
         return values
 

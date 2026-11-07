@@ -81,21 +81,19 @@ test('unmount cancels pending network work and prevents publication', async t =>
   assert.equal(state.error.value, '')
 })
 
-test('height-conditioned sections send source geometry and the selected domain', async t => {
+test('height-conditioned sections send source geometry', async t => {
   let body
   const { state } = await mount(t, async options => {
     body = JSON.parse(options.body)
     return volume()
-  }, { height_enabled: true, num_domains: 2, height_extents: { 0: null, 1: 768 } })
+  }, { height_enabled: true, height_extent: 768 })
   assert.equal(state.axis.value, 1)
-  state.domain.value = 1
-  await nextTick()
   assert.equal(state.heightExtent.value, 768)
   await state.generate()
   assert.equal(body.anchors[0].axis, 1)
   assert.equal(body.height_origin, 23)
   assert.equal(body.height_extent, 512)
-  assert.equal(body.domain, 1)
+  assert.equal('domain' in body, false)
   state.axis.value = 0
   state.heightOrigin.value = 10
   await nextTick()

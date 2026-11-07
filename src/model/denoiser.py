@@ -7,16 +7,12 @@ from torch import nn
 
 from src.model.conv import Conv3d
 from src.model.layers import (
-    INV_SQRT_THREE,
     INV_SQRT_TWO,
-    NULL_DOMAIN,
     AdaptiveResBlock,
     SinusoidalEmbedding,
-    embed_domain,
     embedding_mlp,
     run_block,
 )
-from src.prepare.profile import profile_field
 
 
 def channel_norm_silu(
@@ -87,16 +83,18 @@ class Upsample3D(nn.Module):
         super().__init__()
         self.conv = Conv3d(in_channels, out_channels, 3, padding=1)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        size: tuple[int, int, int],
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, size: tuple[int, int, int]) -> torch.Tensor:
         # Convolving before enlarging costs an eighth of convolving after.
         return F.interpolate(self.conv(x), size=size, mode="nearest")
 
 
 class Denoiser3D(nn.Module):
+    """3D U-Net that predicts clean phase values from a noisy state.
+
+    LR models take volume fractions (vf), a height field and a depth profile;
+    SR models take coarse phase fractions and a corruption level instead.
+    """
+
     def __init__(
         self,
         num_phases: int,
@@ -104,32 +102,26 @@ class Denoiser3D(nn.Module):
         channel_multipliers: Sequence[int],
         embedding_channels: int,
         latent_channels: int,
-        num_domains: int,
         gradient_checkpointing: bool = False,
-        time_scale: float = 1.0,
         height_enabled: bool = False,
         profile_enabled: bool = False,
         coarse_enabled: bool = False,
     ) -> None:
         super().__init__()
-        multipliers = tuple(channel_multipliers)
-
-        channels = tuple(base_channels * scale for scale in multipliers)
+        channels = tuple(base_channels * scale for scale in channel_multipliers)
         if not channels or any(channel < 2 for channel in channels):
             raise ValueError(
                 "denoiser channels must be at least two for channel normalization."
             )
-        levels = len(channels)
-        self.downsample_factor = 2 ** (levels - 1)
+        if coarse_enabled and profile_enabled:
+            raise ValueError("SR denoisers do not accept a depth profile.")
+        self.downsample_factor = 2 ** (len(channels) - 1)
         self.gradient_checkpointing = gradient_checkpointing
         self.coarse_enabled = coarse_enabled
 
         self.time_emb = SinusoidalEmbedding(embedding_channels)
-        self.time_scale = time_scale
         self.time_mlp = embedding_mlp(embedding_channels, embedding_channels)
         self.latent_mlp = embedding_mlp(latent_channels, embedding_channels)
-        self.num_domains = num_domains
-        self.domain_embedding = nn.Embedding(num_domains, embedding_channels)
         self.input = Conv3d(num_phases, channels[0], 3, padding=1)
         self.profile_input = (
             Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
@@ -186,25 +178,29 @@ class Denoiser3D(nn.Module):
             embedding_mlp(1, embedding_channels) if coarse_enabled else None
         )
 
+    @property
+    def profile_enabled(self) -> bool:
+        return self.profile_input is not None
+
+    @property
+    def height_enabled(self) -> bool:
+        return self.height_input is not None
+
     def forward(
         self,
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
-        domain: torch.Tensor,
         **conditions: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Predict clean phase values in [-1, 1]; see compute_logits for conditions."""
-        return self.decode(
-            self.compute_logits(x_current, time, latent, domain, **conditions)
-        )
+        """Predict clean phase values in [-1, 1]; see logits for conditions."""
+        return self.decode(self.logits(x_current, time, latent, **conditions))
 
-    def compute_logits(
+    def logits(
         self,
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
-        domain: torch.Tensor,
         vf: torch.Tensor | None = None,
         vf_present: torch.Tensor | None = None,
         height: torch.Tensor | None = None,
@@ -213,19 +209,66 @@ class Denoiser3D(nn.Module):
         coarse: torch.Tensor | None = None,
         corruption_level: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.coarse_enabled and (vf is not None or vf_present is not None):
+            raise ValueError("SR denoisers do not accept volume fractions.")
+        emb = self.embed(
+            time.to(device=x_current.device),
+            latent.to(x_current),
+            vf=None if vf is None else vf.to(x_current),
+            vf_present=vf_present,
+        )
+        return self.forward_body(
+            x_current,
+            emb,
+            height=height,
+            profile=profile,
+            profile_present=profile_present,
+            coarse=coarse,
+            corruption_level=corruption_level,
+        )
+
+    def embed(
+        self,
+        time: torch.Tensor,
+        latent: torch.Tensor,
+        vf: torch.Tensor | None = None,
+        vf_present: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Time and latent embeddings averaged by 1/sqrt(2), plus present vf."""
+        time_emb = self.time_mlp(
+            self.time_emb(time.to(latent.device)).to(dtype=latent.dtype)
+        )
+        emb = (time_emb + self.latent_mlp(latent)) * INV_SQRT_TWO
+        if vf is None:
+            return emb
+        if self.vf_mlp is None:
+            raise ValueError("SR denoisers do not accept volume fractions.")
+        vf_emb = self.vf_mlp(vf.to(device=latent.device, dtype=latent.dtype))
+        if vf_present is None:
+            return emb + vf_emb
+        vf_present = vf_present.to(device=latent.device)
+        return torch.where(vf_present[:, None], emb + vf_emb, emb)
+
+    def forward_body(
+        self,
+        x_current: torch.Tensor,
+        emb: torch.Tensor,
+        height: torch.Tensor | None = None,
+        profile: torch.Tensor | None = None,
+        profile_present: torch.Tensor | None = None,
+        coarse: torch.Tensor | None = None,
+        corruption_level: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Logits for an embedding; SR adds the corruption level to it here."""
         if self.coarse_enabled:
-            if any(
-                value is not None
-                for value in (vf, vf_present, profile, profile_present)
-            ):
-                raise ValueError("SR denoisers do not accept volume fractions.")
+            if profile is not None or profile_present is not None:
+                raise ValueError("SR denoisers do not accept a depth profile.")
             if coarse is None or coarse.shape != x_current.shape:
                 raise ValueError(
                     "SR requires coarse phase fractions on the output grid."
                 )
         elif coarse is not None or corruption_level is not None:
             raise ValueError("coarse conditioning requires an SR denoiser.")
-        emb = self.embed(x_current, time, latent, domain, vf, vf_present)
         x = self.input(x_current)
         if self.coarse_enabled:
             if corruption_level is None:
@@ -238,10 +281,12 @@ class Denoiser3D(nn.Module):
             if height is None:
                 raise ValueError("height-conditioned denoiser requires a height field.")
             x = x + self.height_input(height.to(x_current))
+        elif height is not None:
+            raise ValueError("height conditioning is disabled.")
         if profile is not None:
             if self.profile_input is None:
                 raise ValueError("profile conditioning is disabled.")
-            field = profile_field(profile.to(x_current), x_current.shape[-3:]) * 2 - 1
+            field = _profile_field(profile.to(x_current), x_current.shape[-3:]) * 2 - 1
             if profile_present is not None:
                 field = field * profile_present.to(field).reshape(-1, 1, 1, 1, 1)
             x = x + self.profile_input(field)
@@ -257,10 +302,7 @@ class Denoiser3D(nn.Module):
             x = run_block(block, x, emb, checkpointing)
 
         for upsample, block, skip in zip(
-            self.upsample,
-            self.decoder,
-            reversed(skips),
-            strict=True,
+            self.upsample, self.decoder, reversed(skips), strict=True
         ):
             # Adding the skip instead of concatenating it keeps the full-resolution
             # decoder at its own width, which dominates the step time.
@@ -269,57 +311,34 @@ class Denoiser3D(nn.Module):
 
         return self.output(self.output_norm(x))
 
-    def apply_guidance_logits(
+    def guided_logits(
         self,
         x_current: torch.Tensor,
         time: torch.Tensor,
         latent: torch.Tensor,
         guidance: float,
-        domain: torch.Tensor,
-        vf: torch.Tensor | None = None,
-        vf_present: torch.Tensor | None = None,
-        height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
-        profile_present: torch.Tensor | None = None,
-        coarse: torch.Tensor | None = None,
-        corruption_level: torch.Tensor | None = None,
+        **conditions: torch.Tensor | None,
     ) -> torch.Tensor:
-        conditions = dict(
-            vf=vf,
-            vf_present=vf_present,
-            height=height,
-            profile=profile,
-            profile_present=profile_present,
-            coarse=coarse,
-            corruption_level=corruption_level,
-        )
-        if self.coarse_enabled:
-            # SR CFG drops domain, retaining coarse material and height.
-            unconditional_domain = torch.full_like(domain, NULL_DOMAIN)
-            unconditional_conditions = conditions
-        else:
-            if coarse is not None or corruption_level is not None:
-                raise ValueError("coarse conditioning requires an SR denoiser.")
-            if vf is None and profile is None:
-                return self.compute_logits(
-                    x_current, time, latent, domain, height=height
-                )
-            # LR CFG drops measured conditions, retaining domain and height.
-            unconditional_domain = domain
-            unconditional_conditions = dict(height=height)
+        """Classifier-free guidance over vf and the depth profile (LR only).
 
-        if guidance == 1.0:
-            return self.compute_logits(x_current, time, latent, domain, **conditions)
-        unconditional = self.compute_logits(
-            x_current,
-            time,
-            latent,
-            unconditional_domain,
-            **unconditional_conditions,
-        )
+        The unconditional branch drops vf and the profile and keeps the height.
+        Without either condition, and at guidance 1, this is one forward pass.
+        SR models have no guided condition and always take one pass.
+        """
+        measured = ("vf", "vf_present", "profile", "profile_present")
+        if (
+            self.coarse_enabled
+            or guidance == 1.0
+            or (conditions.get("vf") is None and conditions.get("profile") is None)
+        ):
+            return self.logits(x_current, time, latent, **conditions)
+        unconditional_conditions = {
+            key: value for key, value in conditions.items() if key not in measured
+        }
+        unconditional = self.logits(x_current, time, latent, **unconditional_conditions)
         if guidance == 0.0:
             return unconditional
-        conditional = self.compute_logits(x_current, time, latent, domain, **conditions)
+        conditional = self.logits(x_current, time, latent, **conditions)
         baseline = unconditional.float()
         return baseline + guidance * (conditional.float() - baseline)
 
@@ -327,33 +346,8 @@ class Denoiser3D(nn.Module):
     def decode(logits: torch.Tensor) -> torch.Tensor:
         return 2.0 * logits.softmax(dim=1) - 1.0
 
-    def embed(
-        self,
-        inputs: torch.Tensor,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        domain: torch.Tensor,
-        vf: torch.Tensor | None,
-        vf_present: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        time = time.to(device=inputs.device)
-        latent = latent.to(device=inputs.device, dtype=inputs.dtype)
-        time_emb = self.time_mlp(
-            self.time_emb(time * self.time_scale).to(dtype=inputs.dtype)
-        )
-        latent_emb = self.latent_mlp(latent)
-        domain_emb = embed_domain(
-            self.domain_embedding,
-            domain,
-            inputs.dtype,
-        )
-        emb = (time_emb + latent_emb + domain_emb) * INV_SQRT_THREE
-        if vf is not None:
-            vf = vf.to(device=inputs.device, dtype=inputs.dtype)
-            vf_emb = self.vf_mlp(vf)
-            if vf_present is None:
-                emb = emb + vf_emb
-            else:
-                vf_present = vf_present.to(device=inputs.device)
-                emb = torch.where(vf_present[:, None], emb + vf_emb, emb)
-        return emb
+
+def _profile_field(profile: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
+    if profile.ndim != 3 or profile.shape[-1] != shape[0]:
+        raise ValueError("profile must match the volume depth.")
+    return profile[..., None, None].expand(-1, -1, *shape)

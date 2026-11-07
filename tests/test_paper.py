@@ -6,12 +6,9 @@ import numpy as np
 import pytest
 import torch
 
-from paper.scripts.evaluate_lr import (
-    interface_density,
-    nested_plane_order,
-    pool_similarity,
-)
+from paper.scripts.evaluate_lr import nested_plane_order, pool_similarity
 from paper.scripts.evaluate_sr import lr_agreement, upsample_linear, upsample_nearest
+from src.stats.volume import interface_density
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -294,10 +291,11 @@ def test_upsampling_baselines_keep_lr_labels() -> None:
     low = torch.nn.functional.one_hot(torch.randint(2, (4, 4, 4)), 2)
     low = low.movedim(-1, 0).float()
 
-    nearest = upsample_nearest(low)
+    nearest = upsample_nearest(low, 2)
     assert nearest.shape == (8, 8, 8)
     assert lr_agreement(nearest, low) == 1.0
-    assert upsample_linear(low).shape == (8, 8, 8)
+    assert upsample_linear(low, 2).shape == (8, 8, 8)
+    assert upsample_nearest(low, 3).shape == (12, 12, 12)
 
 
 def test_nested_plane_order_covers_every_plane_in_nested_prefixes() -> None:

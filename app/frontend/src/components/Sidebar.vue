@@ -1,6 +1,6 @@
 <script setup>
-import { ref } from 'vue'
-import { MIN_BLOCKS, normalizeBlock, normalizeSeed } from '../input-state.js'
+import { computed, ref } from 'vue'
+import { MIN_BLOCKS, anchorNote, normalizeBlock, normalizeSeed } from '../input-state.js'
 
 const props = defineProps({
   file: File,
@@ -15,12 +15,12 @@ const props = defineProps({
 const seed = defineModel('seed', { type: Number })
 const blocks = defineModel('blocks', { type: Array })
 const axis = defineModel('axis', { type: Number })
-const domain = defineModel('domain', { type: Number })
 const heightOrigin = defineModel('heightOrigin', { type: Number })
 const heightExtent = defineModel('heightExtent', { type: Number })
 const measureTortuosity = defineModel('measureTortuosity', { type: Boolean })
 const emit = defineEmits(['select-file', 'generate'])
 const dragging = ref(false)
+const blockNote = computed(() => anchorNote(blocks.value, props.health?.crop_size))
 
 function accept(files) {
   dragging.value = false
@@ -77,12 +77,6 @@ function setBlock(index, event) {
         <option :value="2">YZ · rows Z</option>
       </select>
     </label>
-    <label v-if="health?.num_domains > 1" class="number-control">
-      <span>Domain</span>
-      <select v-model.number="domain" :disabled="busy">
-        <option v-for="n in health.num_domains" :key="n" :value="n - 1">{{ n - 1 }}</option>
-      </select>
-    </label>
     <template v-if="health?.height_enabled && axis === 0">
       <label class="number-control">
         <span>Z origin (px)</span>
@@ -109,6 +103,7 @@ function setBlock(index, event) {
         >
       </label>
     </div>
+    <p v-if="blockNote" class="status">{{ blockNote }}</p>
     <label class="number-control">
       <span>Seed</span>
       <input :value="seed" type="number" min="0" step="1" :disabled="busy" @change="setSeed">

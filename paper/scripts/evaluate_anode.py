@@ -1,15 +1,3 @@
-"""Evaluate the simulated-anode runs for the paper against the real 3D volumes.
-
-LR volumes are generated over the whole depth and width of the real volumes,
-conditioned on the training depth profile, and refined by SR. Both are compared
-with the real volumes on their own grid: LR with the real volumes
-area-downsampled to the LR grid, SR with them at source resolution.
-
-Writes paper/assets/anode-results.json. Volumes are cached under
-checks/paper-anode/<SR run>/; --reuse recomputes the metrics from them.
-"""
-
-import argparse
 import json
 import sys
 from pathlib import Path
@@ -20,82 +8,93 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from paper.scripts.evaluate_lr import cache_dir, cached, interface_density, mean_std
-from paper.scripts.evaluate_sr import lr_agreement, upsample_linear, upsample_nearest
-from scripts.common.metrics import wall_minutes
-from src.config.files import load_yaml
-from src.config.train import load_train_config
-from src.device import default_device
-from src.evaluate.connectivity import spanning_fractions
-from src.evaluate.structure import (
-    compare_sections,
-    label_sections,
-    section_statistics,
+from paper.scripts.common import (
+    TILT_KEYS,
+    cache_dir,
+    cached,
+    mean_std,
+    parse_args,
+    wall_minutes,
 )
-from src.evaluate.tilt import component_slopes, tilt_balance
-from src.evaluate.tortuosity import tortuosity
-from src.predict.inference import LowResolutionAPI
-from src.predict.sr.inference import SuperResolutionAPI, load_sr_export
-from src.prepare.resize import downsample, phase_channels
+from paper.scripts.evaluate_sr import lr_agreement, upsample_linear, upsample_nearest
+from src.api import SuperResolutionAPI
+from src.config.io import load_yaml, project_path, stored_path
+from src.data.crops import downsample, phase_channels
+from src.stats.sections import compare_sections, label_sections, section_statistics
+from src.stats.volume import (
+    chord_mean,
+    component_slopes,
+    interface_density,
+    spanning_fractions,
+    tilt_balance,
+    tortuosity,
+)
 from src.storage import load_volume
-from src.train.run.source import frozen_source_weights
 from src.train.selection import pick_sections
 
-OUTPUT = PROJECT_ROOT / "paper" / "assets" / "anode-results.json"
-CACHE = PROJECT_ROOT / "checks" / "paper-anode"
+DESCRIPTION = (
+    "Evaluate the simulated-anode runs for the paper against the real 3D volumes. "
+    "LR volumes are generated over the whole depth and width of the real volumes, "
+    "conditioned on the training depth profile, and refined by SR. Both are "
+    "compared with the real volumes on their own grid: LR with the real volumes "
+    "area-downsampled to the LR grid, SR with them at source resolution. Writes "
+    "anode-results.json to --out and caches the volumes in its cache/<SR run>/; "
+    "--reuse recomputes the metrics from them."
+)
 SAMPLES = 8
 HR_SAMPLES = 4
+SMOKE_SAMPLES = 2
+SMOKE_HR_SAMPLES = 2
 GRAPHITE = 1
 PLANES = ("xy", "xz", "yz")
 AXES = "zyx"
 BANDS = 8
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run", type=Path, required=True, help="SR run directory.")
-    parser.add_argument("--device", default=default_device())
-    parser.add_argument("--reuse", action="store_true")
-    args = parser.parse_args()
+def main(argv=None) -> None:
+    args = parse_args(DESCRIPTION, "SR run directory.", argv)
+    run = args.run
+    samples, hr_samples = (
+        (SMOKE_SAMPLES, SMOKE_HR_SAMPLES) if args.smoke else (SAMPLES, HR_SAMPLES)
+    )
+    api = SuperResolutionAPI(run, args.device)
+    lr_run = project_path(api.config.source.lr_run)
+    data = api.lr.config.data
+    phases = data.num_phases
+    scale = data.crop_size // data.lo_res_size
+    cache = cache_dir(args.out, run, args.smoke)
 
-    run = args.run.resolve()
-    device = torch.device(args.device)
-    cfg = load_sr_export(run / "generator.pt")["config"]
-    lr_weights = frozen_source_weights(cfg["source"])
-    lr_run = lr_weights.parent
-    lr_cfg = load_train_config(lr_run / "train.yaml")
-    phases = lr_cfg["data"]["num_phases"]
-    scale = lr_cfg["data"]["crop_size"] // lr_cfg["data"]["lo_res_size"]
-    cache = cache_dir(CACHE, run)
-
-    real = [
-        load_volume(path).to(torch.uint8) for path in real_volume_paths(lr_cfg["data"])
-    ]
+    real = [load_volume(path).to(torch.uint8) for path in real_volume_paths(data)]
+    if len(real) < 2:
+        raise ValueError(
+            f"need two or more real volumes to split, found {len(real)} beside "
+            "the training slices."
+        )
     real_low = [lr_grid(volume, scale, phases) for volume in real]
     shape = tuple(real_low[0].shape)
 
     def sample_lr():
-        api = LowResolutionAPI(lr_weights, device)
-        return [api.generate_probs(shape=shape, seed=seed) for seed in range(SAMPLES)]
+        return [
+            api.lr.generate_probs(shape=shape, seed=seed) for seed in range(samples)
+        ]
 
     probs = cached(cache / "lr.pt", args.reuse, sample_lr)
     low = [p.argmax(0).to(torch.uint8) for p in probs]
     print(f"LR: {len(low)} volumes of {shape}")
 
     def refine():
-        api = SuperResolutionAPI(run / "generator.pt", device)
         tile_size, overlap = api.default_tiling()
         return [
             api.refine(p, seed=seed, tile_size=tile_size, overlap=overlap)
-            for seed, p in enumerate(probs[:HR_SAMPLES])
+            for seed, p in enumerate(probs[:hr_samples])
         ]
 
     high = cached(cache / "hr.pt", args.reuse, refine)
     print(f"SR: {len(high)} volumes of {tuple(high[0].shape)}")
 
     results = {
-        "run": str(run.relative_to(PROJECT_ROOT)),
-        "lr_run": str(lr_run.relative_to(PROJECT_ROOT)),
+        "run": stored_path(run),
+        "lr_run": api.config.source.lr_run,
         "best_step": load_yaml(run / "selection" / "scores.yaml")["best_step"],
         "lr_best_step": load_yaml(lr_run / "selection" / "scores.yaml")["best_step"],
         "training_minutes": wall_minutes(run / "tensorboard"),
@@ -108,17 +107,18 @@ def main() -> None:
         "baselines": {},
     }
     for name, upsample in (("nearest", upsample_nearest), ("linear", upsample_linear)):
-        volumes = [upsample(p) for p in probs[:HR_SAMPLES]]
+        volumes = [upsample(p, scale) for p in probs[:hr_samples]]
         results["baselines"][name] = summary(
             volumes, real, phases, full=name == "nearest"
         )
-    OUTPUT.write_text(json.dumps(results, indent=2) + "\n")
-    print(f"Results: {OUTPUT}")
+    output = args.out / "anode-results.json"
+    output.write_text(json.dumps(results, indent=2) + "\n")
+    print(f"Results: {output}")
 
 
-def real_volume_paths(data: dict) -> list[Path]:
+def real_volume_paths(data) -> list[Path]:
     """Ground-truth volumes saved beside the slices the sample trains on."""
-    slices = PROJECT_ROOT / data["domains"][0]["xy"][0]
+    slices = project_path(data.images["xy"][0])
     paths = sorted((slices.parents[1] / "volumes").glob("*.tiff"))
     if not paths:
         raise FileNotFoundError(f"no real volumes beside {slices}.")
@@ -250,15 +250,6 @@ def profile_summary(volumes, real, phases: int) -> dict:
     }
 
 
-def chord_mean(volume: torch.Tensor, phase: int, axis: int) -> float:
-    """Mean length of runs of phase along axis, in voxels."""
-    lines = np.moveaxis(volume.numpy() == phase, axis, -1)
-    lines = lines.reshape(-1, lines.shape[-1])
-    edges = np.diff(np.pad(lines, ((0, 0), (1, 1))).astype(np.int8), axis=1)
-    runs = int((edges == 1).sum())
-    return float(lines.sum() / max(runs, 1))
-
-
 def tilt_summary(volumes) -> dict:
     labels = [v.numpy() for v in volumes]
     balance = tilt_balance(labels, GRAPHITE)
@@ -266,9 +257,9 @@ def tilt_summary(volumes) -> dict:
     result = {}
     for name, stats in balance.items():
         values = np.concatenate([s[name] for s in slopes])
-        result[name] = {
-            key: stats[key] for key in ("count", "balance", "mean", "sem")
-        } | {"mean_abs": float(np.abs(values).mean())}
+        result[name] = {key: stats[key] for key in TILT_KEYS} | {
+            "mean_abs": float(np.abs(values).mean())
+        }
     return result
 
 

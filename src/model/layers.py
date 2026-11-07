@@ -5,28 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from src.device import assert_all
-
 INV_SQRT_TWO = 1.0 / math.sqrt(2.0)
-INV_SQRT_THREE = 1.0 / math.sqrt(3.0)
-NULL_DOMAIN = -1
-
-
-def embed_domain(
-    embedding: nn.Embedding,
-    domain: torch.Tensor,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    if domain.ndim != 1:
-        raise ValueError("domain must have shape [B].")
-    if domain.dtype == torch.bool or domain.is_floating_point() or domain.is_complex():
-        raise ValueError("domain must contain integer IDs.")
-    domain = domain.to(device=embedding.weight.device, dtype=torch.long)
-    valid = ((domain >= NULL_DOMAIN) & (domain < embedding.num_embeddings)).all()
-    assert_all(valid, "domain contains an invalid ID.")
-    present = domain != NULL_DOMAIN
-    values = embedding(domain.clamp_min(0)).to(dtype=dtype)
-    return values * present[:, None].to(dtype=dtype)
 
 
 class SinusoidalEmbedding(nn.Module):
@@ -63,11 +42,7 @@ class AdaptiveNorm(nn.Module):
         self.norm = norm(channels, affine=False)
         self.affine = nn.Linear(embedding_channels, 2 * channels)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        emb: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         scale, shift = self.affine(F.silu(emb)).chunk(2, dim=1)
         dims = (1,) * (x.ndim - 2)
         scale = scale.reshape(scale.shape + dims)
@@ -95,11 +70,7 @@ class AdaptiveResBlock(nn.Module):
             else conv(in_channels, out_channels, 1)
         )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        emb: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         h = self.conv1(self.norm1(x, emb))
         h = self.conv2(self.norm2(h, emb))
         return (self.skip(x) + h) * INV_SQRT_TWO

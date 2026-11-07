@@ -2,7 +2,6 @@ import pytest
 import torch
 
 from src.model.diffusion import Diffusion
-from src.model.layers import embed_domain
 
 
 def _extract(
@@ -200,109 +199,46 @@ def test_add_noise_accepts_one_state_per_batch_item() -> None:
     assert sample[1].mean() < sample[2].mean()
 
 
-def test_sample_preserves_shape_and_refreshes_latent() -> None:
-    class LatentRecorder(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.latents: list[torch.Tensor] = []
-
-        def forward(
-            self,
-            current: torch.Tensor,
-            timestep: torch.Tensor,
-            latent: torch.Tensor,
-        ) -> torch.Tensor:
-            del timestep
-            self.latents.append(latent.detach().clone())
-            latent_value = latent.mean(dim=1).reshape(
-                current.shape[0],
-                *([1] * (current.ndim - 1)),
-            )
-            return torch.tanh(0.1 * current + latent_value)
-
-    process = Diffusion(3)
-    model = LatentRecorder()
-    initial_noise = torch.randn(2, 1, 4, 4, 4)
-
-    result = process.sample(
-        model,
-        initial_noise,
-        8,
-    )
-
-    assert result.shape == initial_noise.shape
-    assert all(latent.shape == (2, 8) for latent in model.latents)
-    assert not torch.equal(model.latents[0], model.latents[1])
-
-
-def test_sample_forwards_fixed_conditions_at_every_step() -> None:
-    class ConditionRecorder(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.calls: list[tuple[torch.Tensor, torch.Tensor]] = []
-
-        def forward(
-            self,
-            current: torch.Tensor,
-            timestep: torch.Tensor,
-            latent: torch.Tensor,
-            *,
-            domain: torch.Tensor,
-            vf: torch.Tensor,
-        ) -> torch.Tensor:
-            del timestep, latent
-            self.calls.append((domain, vf))
-            return current.tanh()
-
-    process = Diffusion(3)
-    model = ConditionRecorder()
-    initial_noise = torch.randn(1, 2, 4, 4, 4)
-    domain = torch.zeros(1, dtype=torch.long)
-    vf = torch.full((1, 2), 0.5)
-
-    process.sample(model, initial_noise, 4, conditions={"domain": domain, "vf": vf})
-
-    assert len(model.calls) == process.timesteps
-    assert all(value is domain for value, _ in model.calls)
-    assert all(value is vf for _, value in model.calls)
-
-
 def test_invalid_state_and_transition_ranges_are_rejected() -> None:
     process = Diffusion(3)
     values = torch.zeros(2, 1, 4, 4)
 
     with pytest.raises(ValueError, match="state must be between"):
-        process.add_noise(values, 4)
+        process.add_noise(values, 4, values)
     with pytest.raises(ValueError, match="transition must be between"):
-        process.sample_pair(values, 3)
+        process.sample_pair(values, 3, values, values)
     with pytest.raises(ValueError, match="transition must be between"):
-        process.sample_posterior(values, values, torch.tensor([0, -1]))
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_cuda_posterior_and_domain_validation_do_not_read_host_scalars():
-    device = torch.device("cuda")
-    diffusion = Diffusion(2).to(device)
-    current = torch.randn(1, 2, 4, 4, 4, device=device)
-    embedding = torch.nn.Embedding(2, 4).to(device)
-    time = torch.tensor([1], device=device)
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CPU]
-    ) as profile:
-        diffusion.sample_posterior(current, current, time)
-        embed_domain(embedding, time, torch.float32)
-    assert not any(
-        event.key == "aten::_local_scalar_dense" for event in profile.key_averages()
-    )
+        process.sample_posterior(values, values, torch.tensor([0, -1]), values)
 
 
 @pytest.mark.parametrize("state", [True, 0.5, torch.tensor([0.5, 1.5])])
 def test_diffusion_rejects_non_integer_states(state):
+    values = torch.zeros(2, 1, 2, 2)
     with pytest.raises(ValueError, match="integer"):
-        Diffusion(3).add_noise(torch.zeros(2, 1, 2, 2), state)
+        Diffusion(3).add_noise(values, state, values)
 
 
-@pytest.mark.parametrize("domain", [torch.tensor([0.5]), torch.tensor([True])])
-def test_domain_embedding_rejects_non_integer_ids(domain):
-    with pytest.raises(ValueError, match="integer"):
-        embed_domain(torch.nn.Embedding(2, 4), domain, torch.float32)
+def test_noise_is_required_above_transition_zero():
+    # Every draw comes from src.rng, so the schedule never draws its own noise.
+    process = Diffusion(3)
+    values = torch.zeros(2, 1, 2, 2)
+    with pytest.raises(ValueError, match="noise is required"):
+        process.sample_posterior(values, values, 1)
+    with pytest.raises(ValueError, match="noise must have shape"):
+        process.add_noise(values, 1, None)
+    assert process.sample_posterior(values, values, 0) is values
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_posterior_does_not_read_host_scalars():
+    device = torch.device("cuda")
+    diffusion = Diffusion(2).to(device)
+    current = torch.randn(1, 2, 4, 4, 4, device=device)
+    time = torch.tensor([1], device=device)
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU]
+    ) as profile:
+        diffusion.sample_posterior(current, current, time, torch.zeros_like(current))
+    assert not any(
+        event.key == "aten::_local_scalar_dense" for event in profile.key_averages()
+    )

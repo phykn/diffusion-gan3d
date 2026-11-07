@@ -15,7 +15,7 @@ from scripts.simul.src.anode import (
     vf_profile,
 )
 from scripts.simul.src.geometry import check_geometry, pack
-from src.config.files import project_path
+from src.config.io import project_path
 from src.plane import AXES
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253

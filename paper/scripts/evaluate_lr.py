@@ -1,13 +1,7 @@
-"""Evaluate one run's LR stage for the paper: structure, selection and anchors.
-
-Writes paper/assets/lr-results.json. Generated volumes are cached under
-checks/paper-lr/<run>/; --reuse recomputes the metrics from them without sampling.
-"""
-
-import argparse
 import json
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -15,82 +9,90 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.diagnostic import generate_with_baseline
-from scripts.common.metrics import wall_minutes
-from src.build.data import build_datasets
-from src.build.predict import build_generator
-from src.config.files import load_yaml
-from src.config.generation import load_generation_settings
-from src.config.train import load_train_config
-from src.device import default_device
-from src.evaluate.anchor import measure_boundaries, measure_slice_smoothness
-from src.evaluate.connectivity import spanning_fractions
-from src.evaluate.structure import (
+from paper.scripts.common import (
+    TILT_KEYS,
+    archived_generators,
+    cache_dir,
+    cached,
+    first_image,
+    mean_std,
+    parse_args,
+    real_crops,
+    wall_minutes,
+)
+from src.api import LowResolutionAPI, PlaneAnchor
+from src.config.io import load_config, load_generation_settings, load_yaml, stored_path
+from src.data.crops import phase_channels, resize_phases
+from src.stats.anchor import measure_boundaries, measure_slice_smoothness
+from src.stats.sections import (
     compare_sections,
     label_sections,
     section_errors,
     section_statistics,
     two_point,
 )
-from src.evaluate.tilt import tilt_balance
-from src.evaluate.tortuosity import tortuosity
-from src.predict.anchor import PlaneAnchor
-from src.prepare.resize import phase_channels, resize_crop, resize_phases
-from src.random import seeded_rng
+from src.stats.volume import (
+    interface_density,
+    spanning_fractions,
+    tilt_balance,
+    tortuosity,
+)
 from src.train.selection import pick_sections
 
-OUTPUT = PROJECT_ROOT / "paper" / "assets" / "lr-results.json"
-CACHE = PROJECT_ROOT / "checks" / "paper-lr"
-# Independent of the selection reference (seed 0), so the best step is not
-# scored on the crops that chose it.
-REAL_SEED = 1
-REAL_CROPS = 128
-SAMPLES = 16
-ANCHOR_SEEDS = tuple(range(8))
+DESCRIPTION = (
+    "Evaluate one run's LR stage for the paper: structure, selection and anchors. "
+    "Writes lr-results.json to --out and caches the generated volumes in its "
+    "cache/<run>/; --reuse recomputes the metrics from them without sampling."
+)
 REFERENCE_OFFSET = 1000
-COVERAGE_SEEDS = tuple(range(4))
-COVERAGE_COUNTS = (0, 1, 2, 4, 8, 16, 32, 64)
-# (left, top) of the training-image crop used as the external anchor.
-EXTERNAL_CROP = (281, 58)
 DISTANCES = (0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run", type=Path, required=True, help="LR run directory.")
-    parser.add_argument("--device", default=default_device())
-    parser.add_argument("--reuse", action="store_true")
-    args = parser.parse_args()
+class Budget(NamedTuple):
+    samples: int
+    anchor_seeds: tuple[int, ...]
+    coverage_seeds: tuple[int, ...]
+    coverage_counts: tuple[int, ...]
+    # (left, top) of the training-image crop used as the external anchor.
+    external_crop: tuple[int, int]
 
-    run = args.run.resolve()
-    device = torch.device(args.device)
-    cfg = load_train_config(run / "train.yaml")
+
+FULL = Budget(
+    16, tuple(range(8)), tuple(range(4)), (0, 1, 2, 4, 8, 16, 32, 64), (281, 58)
+)
+SMOKE = Budget(2, (0,), (0,), (0, 1), (0, 0))
+
+
+def main(argv=None) -> None:
+    args = parse_args(DESCRIPTION, "LR run directory.", argv)
+    run = args.run
+    budget = SMOKE if args.smoke else FULL
+    config = load_config(run / "train.yaml")
     settings = load_generation_settings()
     scores = load_yaml(run / "selection" / "scores.yaml")
     best = int(scores["best_step"])
-    cache = cache_dir(CACHE, run)
+    cache = cache_dir(args.out, run, args.smoke)
 
-    dataset = build_datasets(cfg)[0][0]
-    real = real_crops(dataset)
-    real_labels = label_sections(real)
+    real_labels = label_sections(real_crops(config, config.data.lo_res_size))
     noise = section_errors(real_labels[0::2], real_labels[1::2])
     weights = {best: run / "generator.pt"} | archived_generators(run)
+    source = first_image(config)[1]
 
     def sample(step):
-        gen = build_generator(weights[step], cfg, device)
-        volumes = []
-        for seed in range(SAMPLES):
-            with seeded_rng(seed, device):
-                volumes.append(gen.generate(guidance=settings.guidance))
-        return volumes
+        api = LowResolutionAPI(weights[step], args.device)
+        return [
+            api.generate(seed=seed, guidance=settings.guidance)
+            for seed in range(budget.samples)
+        ]
 
     results = {
-        "run": str(run.relative_to(PROJECT_ROOT)),
+        "run": stored_path(run),
         "best_step": best,
         "training_minutes": wall_minutes(run / "tensorboard"),
         "guidance": settings.guidance,
         "anchor_strength": settings.anchor_strength,
-        "real": real_summary(real_labels, noise) | {"tilt_phase1": real_tilt(dataset)},
+        "real": real_summary(real_labels, noise)
+        | {"tilt_phase1": real_tilt(source, config)},
         "selection": scores["steps"],
         "steps": {},
     }
@@ -103,85 +105,33 @@ def main() -> None:
             volumes, real_labels, noise, full=step == best
         )
 
-    gen = build_generator(weights[best], cfg, device)
+    api = LowResolutionAPI(weights[best], args.device)
     results["anchor"] = anchor_experiments(
-        gen, settings, device, dataset, cache, args.reuse
+        api, settings, source, budget, cache, args.reuse
     )
-    OUTPUT.write_text(json.dumps(results, indent=2) + "\n")
-    print(f"Results: {OUTPUT}")
+    output = args.out / "lr-results.json"
+    output.write_text(json.dumps(results, indent=2) + "\n")
+    print(f"Results: {output}")
 
 
-def cache_dir(root: Path, run: Path) -> Path:
-    """Cache folder of one run, so volumes of another run are never reused."""
-    path = root / run.name
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def archived_generators(run: Path) -> dict[int, Path]:
-    """Archived EMA generators of a run by step."""
-    paths = sorted((run / "checkpoints").glob("generator_*.pt"))
-    return {int(path.stem.split("_")[1]): path for path in paths}
-
-
-def cached(path: Path, reuse: bool, make):
-    if reuse and path.is_file():
-        return torch.load(path, weights_only=True)
-    value = make()
-    torch.save(value, path)
-    return value
-
-
-def real_crops(dataset) -> torch.Tensor:
-    """LR phase fractions of fixed random crops of the training image."""
-    rng = np.random.RandomState(REAL_SEED)
-    path = dataset.path_groups[0][0]
-    return torch.stack(
-        [dataset.sample(path, rng)["image"] for _ in range(REAL_CROPS)]
-    ).float()
-
-
-def external_anchor(dataset) -> torch.Tensor:
-    """The fixed external crop on the LR grid, as uint8 labels."""
-    source = dataset.decode(dataset.path_groups[0][0].resolve())
-    left, top = EXTERNAL_CROP
-    size = dataset.crop_size
-    labels = torch.from_numpy(source[top : top + size, left : left + size].copy())
-    image = resize_crop(labels.long(), dataset.patch_size, dataset.num_phases)
+def external_anchor(api: LowResolutionAPI, source: np.ndarray, crop) -> torch.Tensor:
+    """The external crop of the training image on the LR grid, as uint8 labels."""
+    left, top = crop
+    size = api.crop_size
+    labels = torch.tensor(source[top : top + size, left : left + size]).long()
+    image = api.prepare_image(labels)
     return label_sections(image[None])[0].argmax(0).to(torch.uint8)
 
 
-def real_tilt(dataset) -> dict:
+def real_tilt(source: np.ndarray, config) -> dict:
     """Solid tilt balance of the whole training image on the LR grid."""
-    source = torch.from_numpy(dataset.decode(dataset.path_groups[0][0].resolve()))
-    shape = tuple(n * dataset.patch_size // dataset.crop_size for n in source.shape)
-    probs = resize_phases(
-        phase_channels(source.long()[None], dataset.num_phases), shape
-    )
+    data = config.data
+    shape = tuple(n * data.lo_res_size // data.crop_size for n in source.shape)
+    labels = torch.tensor(source).long()[None]
+    probs = resize_phases(phase_channels(labels, data.num_phases), shape)
     labels = label_sections(probs)[0].argmax(0).numpy()
     tilt = tilt_balance([labels[None]], phase=1)["yx"]
-    return {key: tilt[key] for key in ("count", "balance", "mean", "sem")}
-
-
-def interface_density(labels: torch.Tensor, dims) -> float:
-    values = [
-        (
-            labels.narrow(dim, 1, labels.shape[dim] - 1)
-            != labels.narrow(dim, 0, labels.shape[dim] - 1)
-        )
-        .float()
-        .mean()
-        for dim in dims
-    ]
-    return float(torch.stack(values).mean())
-
-
-def mean_std(values) -> dict:
-    values = np.asarray(values, dtype=float)
-    return {
-        "mean": float(values.mean()),
-        "std": float(values.std(ddof=1)) if len(values) > 1 else 0.0,
-    }
+    return {key: tilt[key] for key in TILT_KEYS}
 
 
 def real_summary(real_labels: torch.Tensor, noise) -> dict:
@@ -196,20 +146,25 @@ def real_summary(real_labels: torch.Tensor, noise) -> dict:
     }
 
 
+def normalized(errors, noise) -> float:
+    """Mean of the errors over the real half-split errors, as selection scores."""
+    return float(np.mean([v / max(n, 1e-6) for v, n in zip(errors, noise)]))
+
+
 def volume_summary(volumes, real_labels, noise, full: bool) -> dict:
     real = section_statistics(real_labels)
     planes = {}
-    normalized = []
+    structure = []
     for axis, name in enumerate(("xy", "xz", "yz")):
         fake = pick_sections(volumes, axis, real_labels.shape[1])
         errors = compare_sections(real, section_statistics(fake))
         planes[name] = errors._asdict()
-        normalized.append(np.mean([v / n for v, n in zip(errors, noise)]))
+        structure.append(normalized(errors, noise))
     fraction = mean_std([(v == 0).float().mean() for v in volumes])
     summary = {
         "samples": len(volumes),
         "planes": planes,
-        "structure": float(np.mean(normalized)),
+        "structure": float(np.mean(structure)),
         "phase0_fraction": fraction,
         "interface_density": mean_std(
             [interface_density(v, (0, 1, 2)) for v in volumes]
@@ -233,8 +188,7 @@ def volume_summary(volumes, real_labels, noise, full: bool) -> dict:
     }
     tilt = tilt_balance([v.numpy() for v in volumes], phase=1)
     summary["tilt_phase1"] = {
-        name: {key: tilt[name][key] for key in ("count", "balance", "mean", "sem")}
-        for name in tilt
+        name: {key: tilt[name][key] for key in TILT_KEYS} for name in tilt
     }
     return summary
 
@@ -296,9 +250,7 @@ def plane_metrics(anchored, baseline, plane, axis, index, reference=None) -> dic
     boundary = measure_boundaries(anchored, (index,), axis)
     base_boundary = measure_boundaries(baseline, (index,), axis)
     smooth = measure_slice_smoothness(anchored, (index,), axis, baseline)
-    size = got.shape[0]
-    positions = torch.arange(size)
-    distance = (positions - index).abs()
+    distance = (torch.arange(got.shape[0]) - index).abs()
     row = {
         "exact": float((got[index] == plane).float().mean()),
         "exact_baseline": float((base[index] == plane).float().mean()),
@@ -326,24 +278,26 @@ def plane_metrics(anchored, baseline, plane, axis, index, reference=None) -> dic
     return row
 
 
-def anchor_experiments(gen, settings, device, dataset, cache, reuse) -> dict:
-    size = gen.patch_size
+def anchor_experiments(api, settings, source, budget, cache, reuse) -> dict:
+    size = api.input_size
     center = size // 2
     strength = settings.anchor_strength
+    guidance = settings.guidance
 
     def anchored_pair(seed, anchors):
-        with seeded_rng(seed, device):
-            return generate_with_baseline(
-                gen, anchors, strength, guidance=settings.guidance
-            )
+        # The same seed gives the same noise, so the baseline shows what the
+        # anchors changed.
+        anchored = api.generate(
+            anchors, seed=seed, anchor_strength=strength, guidance=guidance
+        )
+        return anchored, api.generate(seed=seed, guidance=guidance)
 
     def reference(seed):
-        with seeded_rng(REFERENCE_OFFSET + seed, device):
-            return gen.generate(guidance=settings.guidance)
+        return api.generate(seed=REFERENCE_OFFSET + seed, guidance=guidance)
 
     def internal():
         rows = []
-        for seed in ANCHOR_SEEDS:
+        for seed in budget.anchor_seeds:
             ref = reference(seed)
             for axis in range(3):
                 plane = ref.movedim(axis, 0)[center]
@@ -362,9 +316,10 @@ def anchor_experiments(gen, settings, device, dataset, cache, reuse) -> dict:
         return rows
 
     def external():
-        plane = external_anchor(dataset)
+        crop = budget.external_crop
+        plane = external_anchor(api, source, crop)
         rows = []
-        for seed in ANCHOR_SEEDS:
+        for seed in budget.anchor_seeds:
             for index in (center, 0):
                 anchored, baseline = anchored_pair(
                     seed, (PlaneAnchor(image=plane, axis=0, index=index),)
@@ -377,25 +332,25 @@ def anchor_experiments(gen, settings, device, dataset, cache, reuse) -> dict:
                         "baseline": baseline,
                     }
                 )
-        return {"plane": plane, "rows": rows}
+        return {"crop": list(crop), "plane": plane, "rows": rows}
 
     def coverage():
         order = nested_plane_order(size)
         rows = []
-        for seed in COVERAGE_SEEDS:
+        for seed in budget.coverage_seeds:
             ref = reference(seed)
-            for count in COVERAGE_COUNTS:
+            for count in budget.coverage_counts:
                 indices = order[:count]
                 anchors = tuple(
                     PlaneAnchor(image=ref[index], axis=0, index=index)
                     for index in indices
                 )
-                with seeded_rng(seed, device):
-                    volume = gen.generate(
-                        anchors=anchors,
-                        anchor_strength=strength if count else 0.0,
-                        guidance=settings.guidance,
-                    )
+                volume = api.generate(
+                    anchors,
+                    seed=seed,
+                    anchor_strength=strength if count else 0.0,
+                    guidance=guidance,
+                )
                 rows.append(
                     {
                         "seed": seed,
