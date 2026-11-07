@@ -144,7 +144,9 @@ python train.py --resume "run/my-run-lr" --steps 30000 --run-dir "run/my-run-2"
 Resume continues the stage the checkpoint belongs to with its saved settings, so it takes
 no sample, `--sr-steps`, or `--bank-size`; `--steps` is that stage's total, including
 completed steps. It writes a new run directory named by `--run-dir`, which it requires
-(here `run/my-run-2-lr`), and continues the saved random state. After an LR resume,
+(here `run/my-run-2-lr`), and continues the saved random state: on CPU its losses equal
+those of an unbroken run; on MPS they agree to about 1e-4, as two unbroken MPS runs
+do, since MPS kernels are not bitwise deterministic. After an LR resume,
 `python train.py <sample> --run-dir "run/my-run-2"` reuses it and trains SR. Pass
 `--path-map OLD NEW` (repeatable) when the training images or the LR run have moved.
 OLD is matched as written against the absolute paths the run saved, so give it in full
