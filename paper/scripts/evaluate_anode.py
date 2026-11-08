@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy import ndimage as ndi
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -179,11 +180,27 @@ def summary(volumes, real, phases: int, full: bool = True) -> dict:
         }
         for phase in range(phases)
     }
+    result["largest_component"] = {
+        str(phase): pair(
+            [largest_component(v, phase) for v in volumes],
+            [largest_component(v, phase) for v in real],
+        )
+        for phase in range(phases)
+    }
     result["tilt_phase1"] = {
         "generated": tilt_summary(volumes),
         "real": tilt_summary(real),
     }
     return result
+
+
+def largest_component(volume: torch.Tensor, phase: int) -> float:
+    """Fraction of a phase in its largest 6-connected component."""
+    components, count = ndi.label(volume.numpy() == phase)
+    if not count:
+        return 0.0
+    sizes = np.bincount(components.ravel())[1:]
+    return float(sizes.max() / sizes.sum())
 
 
 def pair(generated, real) -> dict:
@@ -258,7 +275,10 @@ def tilt_summary(volumes) -> dict:
     for name, stats in balance.items():
         values = np.concatenate([s[name] for s in slopes])
         result[name] = {key: stats[key] for key in TILT_KEYS} | {
-            "mean_abs": float(np.abs(values).mean())
+            "mean_abs": float(np.abs(values).mean()),
+            "per_volume": [
+                tilt_balance([v], GRAPHITE)[name]["balance"] for v in labels
+            ],
         }
     return result
 

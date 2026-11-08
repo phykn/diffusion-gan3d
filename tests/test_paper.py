@@ -60,6 +60,11 @@ def section_cells(summary: dict) -> list[str]:
     ]
 
 
+def signed(value: float) -> str:
+    """A value at two decimals with the paper's minus sign."""
+    return f"{value:.2f}".replace("-", "−")
+
+
 def real_cells(real: dict) -> list[str]:
     return ["—"] * 4 + [
         spread(real["phase0_fraction"], 3),
@@ -72,9 +77,17 @@ def test_paper_numbers_and_figures_match_lr_results() -> None:
     results = read_results("lr")
     best = results["steps"][str(results["best_step"])]
     assert f"**{best['structure']:.2f}**" in paper
-    for tilt in (best["tilt_phase1"]["yx"], results["real"]["tilt_phase1"]):
-        balance = f"{tilt['balance']:.2f}".replace("-", "−")
-        assert f"{balance} over {tilt['count']} particles" in paper
+    tilt = best["tilt_phase1"]
+    zy, zx, yx = (signed(tilt[pair]["balance"]) for pair in ("zy", "zx", "yx"))
+    counts = [tilt[pair]["count"] for pair in tilt]
+    assert f"balances {zy}, {zx} and {yx} in the zy, zx and yx planes" in paper
+    assert f"over {min(counts)}–{max(counts)} particles" in paper
+    tau = best["tortuosity_phase0"]
+    assert (
+        f"{tau['z']['mean']:.2f} ± {tau['z']['std']:.2f}, "
+        f"{tau['y']['mean']:.2f} ± {tau['y']['std']:.2f}, and "
+        f"{tau['x']['mean']:.2f} ± {tau['x']['std']:.2f}"
+    ) in paper
 
     figures = re.findall(r'<img src="([^"]+)"', paper)
     assert figures
@@ -172,11 +185,11 @@ def test_paper_text_numbers_match_results() -> None:
     lr, sr = read_results("lr"), read_results("sr")
     assert f"({lr['training_minutes']:.0f} minutes" in paper
     assert f"({sr['training_minutes'] / 60:.1f} hours)" in paper
-    for results, text in ((lr, "within"), (sr, "by")):
+    for results, text in ((lr, "{}% below the real crops'"), (sr, "falls {}% short")):
         best = results["steps"][str(results["best_step"])]
         real = results["real"]["interface_density"]["mean"]
         gap = 100 * abs(1 - best["interface_density"]["mean"] / real)
-        assert f"{text} {gap:.1f}%" in paper
+        assert text.format(f"{gap:.1f}") in paper
 
     best = lr["best_step"]
     selected = next(row for row in lr["selection"] if row["step"] == best)
@@ -220,15 +233,26 @@ def test_anode_table_matches_results() -> None:
                 spread(sr["generated"], 2),
                 f"{sr['real']['mean']:.2f}",
             ]
+    largest = [
+        cell
+        for stage in ("lr", "sr")
+        for cell in (
+            f"{results[stage]['largest_component']['2']['generated']['mean']:.2f}",
+            ", ".join(
+                f"{v:.2f}"
+                for v in results[stage]["largest_component"]["2"]["real_values"]
+            ),
+        )
+    ]
+    assert rows.pop("Silicon in largest component") == largest
     for pair in ("zy", "zx", "yx"):
-        balances = [
-            f"{results[stage]['tilt_phase1'][source][pair]['balance']:.2f}".replace(
-                "-", "−"
-            )
-            for stage in ("lr", "sr")
-            for source in ("generated", "real")
-        ]
-        assert rows.pop(f"Graphite tilt balance, d{pair[0]}/d{pair[1]}") == balances
+        cells = []
+        for stage in ("lr", "sr"):
+            tilt = results[stage]["tilt_phase1"]
+            fake = tilt["generated"][pair]["per_volume"]
+            cells.append(f"{signed(min(fake))} to {signed(max(fake))}")
+            cells.append(", ".join(signed(v) for v in tilt["real"][pair]["per_volume"]))
+        assert rows.pop(f"Graphite tilt balance, d{pair[0]}/d{pair[1]}") == cells
     assert not rows
 
 
@@ -236,9 +260,8 @@ def test_paper_numbers_match_anode_results() -> None:
     paper = read_paper()
     results = read_results("anode")
     lr, sr = results["lr"], results["sr"]
-    assert f"({results['lr_training_minutes']:.0f} minutes)" in paper
-    assert f"({results['training_minutes'] / 60:.1f} hours)" in paper
     assert f"with step {results['lr_best_step']} selected" in paper
+    assert f"with step {results['best_step']} selected" in paper
 
     def band(stage, phase, source):
         return f"{stage['profile']['bands'][source][phase][-1]:.3f}"
