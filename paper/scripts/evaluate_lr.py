@@ -14,8 +14,10 @@ from paper.scripts.common import (
     archived_generators,
     cache_dir,
     cached,
+    connectivity,
     first_image,
     mean_std,
+    normalized,
     parse_args,
     real_crops,
     wall_minutes,
@@ -33,9 +35,7 @@ from src.stats.sections import (
 )
 from src.stats.volume import (
     interface_density,
-    spanning_fractions,
     tilt_balance,
-    tortuosity,
 )
 from src.train.selection import pick_sections
 
@@ -146,11 +146,6 @@ def real_summary(real_labels: torch.Tensor, noise) -> dict:
     }
 
 
-def normalized(errors, noise) -> float:
-    """Mean of the errors over the real half-split errors, as selection scores."""
-    return float(np.mean([v / max(n, 1e-6) for v, n in zip(errors, noise)]))
-
-
 def volume_summary(volumes, real_labels, noise, full: bool) -> dict:
     real = section_statistics(real_labels)
     planes = {}
@@ -175,17 +170,7 @@ def volume_summary(volumes, real_labels, noise, full: bool) -> dict:
     summary["two_point_from_fraction"] = fraction_offset_error(
         real_labels, fraction["mean"]
     )
-    for phase in (0, 1):
-        spans = np.asarray([spanning_fractions((v == phase).numpy()) for v in volumes])
-        summary[f"percolation_phase{phase}"] = {
-            axis: mean_std(spans[:, index]) for index, axis in enumerate("zyx")
-        }
-    taus = np.asarray(
-        [[tortuosity(v, 0, axis, device="cpu") for axis in range(3)] for v in volumes]
-    )
-    summary["tortuosity_phase0"] = {
-        axis: mean_std(taus[:, index]) for index, axis in enumerate("zyx")
-    }
+    summary |= connectivity(volumes)
     tilt = tilt_balance([v.numpy() for v in volumes], phase=1)
     summary["tilt_phase1"] = {
         name: {key: tilt[name][key] for key in TILT_KEYS} for name in tilt

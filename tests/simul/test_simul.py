@@ -1,4 +1,4 @@
-"""scripts/simul against the v1 reference bytes (SPEC Parity checks: simul)."""
+"""scripts/simul against the v1 reference bytes."""
 
 import tempfile
 from pathlib import Path

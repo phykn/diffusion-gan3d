@@ -1,12 +1,3 @@
-"""Export the step whose sections best match the real data, not the last one.
-
-Only 2D sections of the real material exist, so a step is judged by how well
-the sections of its volumes match fixed real crops: two-point correlation,
-chord lengths, and how each phase splits into clusters. The last carries what
-sections reveal of 3D connectivity. LR scores unanchored volumes; SR scores its
-refinements of fixed LR bank volumes at the HR resolution.
-"""
-
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +5,6 @@ import torch
 
 from src.config.io import save_yaml
 from src.data.crops import downsample
-from src.device import gpu_amp
 from src.export import write_export
 from src.rng import make_generator
 from src.sampling.conditions import LRConditions, SRConditions
@@ -70,14 +60,8 @@ def pick_sections(volumes: list[torch.Tensor], axis: int, phases: int):
 
 
 def ema_predictor(trainer) -> Predictor:
-    config = trainer.config
-    return Predictor(
-        model=trainer.ema,
-        diffusion=trainer.diffusion,
-        device=trainer.device,
-        num_phases=config.data.num_phases,
-        latent_channels=config.model.generator.latent_channels,
-        amp=gpu_amp(config.train.mixed_precision, trainer.device),
+    return Predictor.from_config(
+        trainer.ema, trainer.diffusion, trainer.config, trainer.device
     )
 
 
@@ -92,6 +76,15 @@ def lr_mse(high: torch.Tensor, low: torch.Tensor) -> float:
 
 
 class CheckpointSelection:
+    """Export the step whose sections best match the real data, not the last one.
+
+    Only 2D sections of the real material exist, so a step is judged by how well
+    the sections of its volumes match fixed real crops: two-point correlation,
+    chord lengths, and how each phase splits into clusters. The last carries what
+    sections reveal of 3D connectivity. LR scores unanchored volumes; SR scores its
+    refinements of fixed LR bank volumes at the HR resolution.
+    """
+
     def __init__(self, reference: dict, samples: int, height_enabled: bool) -> None:
         self.reference = reference
         self.samples = samples

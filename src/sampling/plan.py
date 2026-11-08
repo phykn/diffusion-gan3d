@@ -1,5 +1,3 @@
-"""Tile layout of one generation: margins, tiles and their fusion windows."""
-
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass

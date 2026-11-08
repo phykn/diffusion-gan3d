@@ -1,4 +1,4 @@
-"""Training losses against the v1 reference (SPEC Parity checks: losses)."""
+"""Training losses against the v1 reference."""
 
 import ast
 from pathlib import Path
@@ -130,9 +130,7 @@ def test_mirror_balance():
 def test_spatial_profile():
     case = CASES["spatial_profile"]
     leaf = _leaf(case["logits"])
-    value = profile_loss(
-        leaf.softmax(1), case["target"], torch.tensor([True, True]), 4, 30.0
-    )
+    value = profile_loss(leaf.softmax(1), case["target"], 4, 30.0)
     _close(value.detach(), case["value"])
     _close(_grad(value, leaf)[0], case["grad"])
 

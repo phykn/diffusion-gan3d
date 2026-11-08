@@ -178,14 +178,6 @@ class Denoiser3D(nn.Module):
             embedding_mlp(1, embedding_channels) if coarse_enabled else None
         )
 
-    @property
-    def profile_enabled(self) -> bool:
-        return self.profile_input is not None
-
-    @property
-    def height_enabled(self) -> bool:
-        return self.height_input is not None
-
     def forward(
         self,
         x_current: torch.Tensor,

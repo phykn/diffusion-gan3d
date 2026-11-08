@@ -1,10 +1,3 @@
-"""Phase-pair tables: the one implementation the losses and evaluation share.
-
-A pair table at separation o holds, for phases p and q, the mean of
-probs[p](x) * probs[q](x + o). Fractions stay continuous, so the tables are
-differentiable.
-"""
-
 import torch
 
 

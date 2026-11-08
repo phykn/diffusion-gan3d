@@ -1,4 +1,4 @@
-"""SR stage: tags, exports, resume without the LR run, SR source checks (T11)."""
+"""SR stage: tags, exports, resume without the LR run, SR source checks."""
 
 import shutil
 from pathlib import Path

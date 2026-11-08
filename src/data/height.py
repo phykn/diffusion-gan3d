@@ -1,5 +1,3 @@
-"""Height coordinates and depth profiles along z (the row direction of xz/yz)."""
-
 import math
 from collections.abc import Mapping
 
@@ -56,10 +54,7 @@ def side_images(planes: Mapping) -> list[np.ndarray]:
 
 def height_extent(planes: Mapping) -> int | None:
     """Side-image height when all side images share it, else null."""
-    images = side_images(planes)
-    if not images:
-        raise ValueError("height conditioning requires xz or yz images.")
-    sizes = {image.shape[0] for image in images}
+    sizes = {image.shape[0] for image in side_images(planes)}
     return sizes.pop() if len(sizes) == 1 else None
 
 
@@ -111,12 +106,11 @@ def rebin_profile(values: torch.Tensor, size: int) -> torch.Tensor:
     return (integral.diff(dim=-1) / (depth / size)).float()
 
 
-def image_profile(images: torch.Tensor, bins: int | None = None) -> torch.Tensor:
+def image_profile(images: torch.Tensor, bins: int) -> torch.Tensor:
     """Row-mean phase fractions of [B, K, H, W] side sections: [B, K, H]."""
     if images.ndim != 4 or images.numel() == 0:
         raise ValueError("images must have non-empty shape [B,K,H,W].")
-    values = images.float().mean(dim=3)
-    return values if bins is None else rebin_profile(values, bins)
+    return rebin_profile(images.float().mean(dim=3), bins)
 
 
 def validate_profile(spec, phases):

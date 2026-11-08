@@ -1,4 +1,4 @@
-"""Measure one generation's peak memory (SPEC Memory limit); run as a script.
+"""Measure one generation's peak memory; run as a script.
 
     python tests/sampling/memory_probe.py EXPORT DEVICE JSON_OPTIONS
 

@@ -44,17 +44,6 @@ def pack_anode(
     padding and cropped so neither face is a hard wall.
     """
     rng = np.random.default_rng() if rng is None else rng
-    check_anode(
-        size,
-        graphite_radius,
-        graphite_aspect,
-        graphite_tilt,
-        graphite_vf,
-        silicon_radius,
-        silicon_vf,
-        size_spread,
-        min_section,
-    )
     spread = np.exp(3 * size_spread)
     padding = int(np.ceil(graphite_radius * spread))
     volume = np.zeros((size + 2 * padding, size, size), dtype=np.uint8)

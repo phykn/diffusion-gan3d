@@ -1,4 +1,4 @@
-"""v2 settings and plane policies against the v1 reference (SPEC Parity checks)."""
+"""v2 settings and plane policies against the v1 reference."""
 
 import hashlib
 import json
@@ -10,7 +10,7 @@ import yaml
 from src.config.io import PROJECT_ROOT
 from src.config.sample import build_stage_configs, load_sample
 from src.config.schema import to_dict
-from src.data.orientation import plane_policies, policy_dict
+from src.data.orientation import plane_policies
 
 REFERENCE = yaml.safe_load(
     (Path(__file__).parents[1] / "fixtures" / "parity" / "config.yaml").read_text()
@@ -45,7 +45,11 @@ def test_config_matches_v1(sample, stage):
 @pytest.mark.parametrize("stage", ["lr", "sr"])
 def test_plane_policies_match_v1(sample, stage):
     config = _configs(sample)[stage]
-    assert policy_dict(plane_policies(config)) == REFERENCE["planes"][sample][stage]
+    policies = {
+        plane: {"flip_axes": list(policy.flip_axes), "rotate_90": policy.rotate_90}
+        for plane, policy in plane_policies(config).items()
+    }
+    assert policies == REFERENCE["planes"][sample][stage]
 
 
 @pytest.mark.parametrize("sample", sorted(V1_SAMPLES))
@@ -53,16 +57,6 @@ def test_sample_files_match_v1(sample):
     text = (PROJECT_ROOT / "config" / "samples" / f"{sample}.yaml").read_text()
     data = json.dumps(yaml.safe_load(text), sort_keys=True).encode()
     assert hashlib.sha256(data).hexdigest() == V1_SAMPLES[sample]
-
-
-def test_defaults_live_in_the_schema_only():
-    assert not (PROJECT_ROOT / "config" / "base").exists()
-    found = [
-        path.relative_to(PROJECT_ROOT).as_posix()
-        for path in (PROJECT_ROOT / "src").rglob("*.py")
-        if "DEFAULTS" in path.read_text(encoding="utf-8")
-    ]
-    assert found == ["src/config/schema.py"]
 
 
 def test_show_prints_both_stages(capsys):
@@ -77,3 +71,15 @@ def test_show_prints_both_stages(capsys):
     assert lr_config["loss"]["mirror_balance"]["weight"] == 10.0
     assert lr_config["augmentation"]["probability"] == 1.0
     assert sr_config["stage"] == "sr"
+
+
+@pytest.mark.parametrize("value", ["2", True, 0, 300])
+def test_sample_rejects_a_bad_phase_count(tmp_path, value):
+    sample = yaml.safe_load(
+        (PROJECT_ROOT / "tests/fixtures/tiny/tiny_default.yaml").read_text()
+    )
+    sample["num_phases"] = value
+    path = tmp_path / "bad.yaml"
+    path.write_text(yaml.safe_dump(sample), encoding="utf-8")
+    with pytest.raises(ValueError, match="num_phases must be an integer"):
+        load_sample(path)

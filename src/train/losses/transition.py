@@ -1,6 +1,3 @@
-"""LR real_transition: in-plane pair tables of transition-0 predictions match
-those of the real crops at equal LR-grid separations."""
-
 import torch
 
 from src.plane import PLANE_DIRECTIONS, PLANES

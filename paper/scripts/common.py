@@ -10,6 +10,7 @@ from src.config.io import PROJECT_ROOT, project_path
 from src.data.crops import phase_channels, resize_phases
 from src.data.images import list_images, read_labels
 from src.device import default_device
+from src.stats.volume import spanning_fractions, tortuosity
 from src.storage import torch_save
 
 # Independent of the selection reference (seed 0), so the best step is not
@@ -68,6 +69,8 @@ def cache_dir(root: Path, run: Path, smoke: bool | None = None) -> Path:
             raise SystemExit(f"{path} holds {kind} volumes; pass another --out.")
         if smoke:
             marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
     return path
 
 
@@ -91,6 +94,28 @@ def mean_std(values) -> dict:
         "mean": float(values.mean()),
         "std": float(values.std(ddof=1)) if len(values) > 1 else 0.0,
     }
+
+
+def normalized(errors, noise) -> float:
+    """Mean of the errors over the real half-split errors, as selection scores."""
+    return float(np.mean([v / max(n, 1e-6) for v, n in zip(errors, noise)]))
+
+
+def connectivity(volumes) -> dict:
+    """Spanning fractions of both phases and phase-0 tortuosity along z, y, x."""
+    result = {}
+    for phase in (0, 1):
+        spans = np.asarray([spanning_fractions((v == phase).numpy()) for v in volumes])
+        result[f"percolation_phase{phase}"] = {
+            axis: mean_std(spans[:, index]) for index, axis in enumerate("zyx")
+        }
+    taus = np.asarray(
+        [[tortuosity(v, 0, axis, device="cpu") for axis in range(3)] for v in volumes]
+    )
+    result["tortuosity_phase0"] = {
+        axis: mean_std(taus[:, index]) for index, axis in enumerate("zyx")
+    }
+    return result
 
 
 def first_image(config) -> tuple[Path, np.ndarray]:

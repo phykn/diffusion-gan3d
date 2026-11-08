@@ -1,4 +1,4 @@
-"""Every key used: each schema field is read somewhere (SPEC Every key used)."""
+"""Each schema field is read somewhere."""
 
 import re
 from dataclasses import fields, is_dataclass
@@ -7,9 +7,6 @@ from src.config.io import PROJECT_ROOT
 from src.config.schema import LRConfig, SRConfig
 
 ROOTS = ("train.py", "src", "scripts", "paper/scripts", "app/backend")
-
-# Fields no code reads yet, with the task that starts reading them.
-PENDING: dict[str, str] = {}
 
 
 def _leaf_paths(cls, prefix=()):
@@ -49,10 +46,5 @@ def _unread() -> set[str]:
     return unread
 
 
-def test_every_key_is_read_or_pending():
-    unread = _unread()
-    assert unread <= set(PENDING), sorted(unread - set(PENDING))
-
-
-def test_pending_keys_are_still_unread():
-    assert set(PENDING) <= _unread(), sorted(set(PENDING) - _unread())
+def test_every_key_is_read():
+    assert not _unread(), sorted(_unread())

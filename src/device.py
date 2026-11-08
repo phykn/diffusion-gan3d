@@ -25,7 +25,7 @@ def check_device(device: str | torch.device) -> torch.device:
 
 def gpu_amp(mixed_precision: bool, device: torch.device) -> bool:
     # Prediction and the training denoiser; MPS fp16 sampling is faster at equal
-    # labels. Training critics keep fp32 on MPS (see src/train/trainer.py).
+    # labels. Training critics keep fp32 on MPS (see Trainer in src/train/core.py).
     return mixed_precision and device.type in {"cuda", "mps"}
 
 

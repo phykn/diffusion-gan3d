@@ -1,5 +1,3 @@
-"""Tile seams: transition TV and continuity across seam bands."""
-
 from dataclasses import dataclass
 
 import numpy as np

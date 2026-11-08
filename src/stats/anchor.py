@@ -1,5 +1,3 @@
-"""Anchor quality: boundary change rate, distance divergence, slice flicker."""
-
 from dataclasses import dataclass
 
 import torch

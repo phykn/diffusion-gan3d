@@ -20,11 +20,11 @@ python scripts/check/03_anchor.py --weight "run/my-run-lr" --anchor data/sample.
 - `--blocks D H W` sets the `(z, y, x)` size to `patch + (n - 1) * (patch - 2 * overlap)`,
   where `patch` is the LR `lo_res_size` (default 64); the script prints the actual tile
   grid. With more than one block, `02` writes `seams.json`: the phase-transition change
-  across each inner seam against ordinary neighboring sections. `--axis 0/1/2` selects
-  `xy/xz/yz`.
+  across each inner seam against ordinary neighboring sections.
 - `03` anchors `--count` evenly spread sections of a generated reference (default 3), or,
   with `--anchor PNG`, the center crop of a real label image on the `--side start|end`
-  boundary plane. Both compare the anchored sample with the same noise unanchored.
+  boundary plane, normal to `--axis 0/1/2` (`xy/xz/yz`). Both compare the anchored sample
+  with the same noise unanchored.
 - `--seed` works in `01–05`, `--device` in `02–05`, and `--napari` in `02–04`;
   `--help` lists the rest.
 - `--height-origin` and `--height-extent` (`02–05`) are in source pixels along the xz/yz
@@ -67,9 +67,9 @@ learning rates to `burn_in.lr_scale` (0.25) of `optim.*_lr`, Adam β2 from
 `burn_in.regularization_scale` (0.1; the default sample keeps 0.5) of
 `loss.r1_weight`/`r2_weight`, and the EMA half-life from zero to that of
 `optim.ema_decay`, as in R3GAN. TensorBoard logs them under `burn_in/*`.
-The device is CUDA, then MPS, then CPU unless `--device` is given; mixed precision runs
-in training on CUDA and MPS (on MPS for the denoiser only; its critics stay fp32) unless
-`train.mixed_precision: false`, and in LR and SR prediction on CUDA and MPS. Gradient
+The device is CUDA, then MPS, then CPU unless `--device` is given.
+`train.mixed_precision` (default on) uses fp16 on CUDA and MPS in training and
+prediction; on MPS the training critics stay fp32. Gradient
 checkpointing is off; when memory is short, `model.gradient_checkpointing: true` under
 `tune.lr` or `tune.sr` trades some step time for less peak memory.
 
@@ -234,6 +234,6 @@ take `--run` and write their result JSON and generated volumes to `--out` (defau
 `--reuse` recomputes the metrics from that cache. `evaluate_anode.py` takes the SR run.
 `--smoke` evaluates a few volumes for tests, and a smoke cache is never reused by a full
 evaluation. `make_figures.py --results DIR --out DIR` draws the figures from one folder
-holding all three results. `paper/assets/` holds the v1 results the paper cites.
+holding all three results. `paper/assets/` holds the results the paper cites.
 
 [Back to README](../README.md)

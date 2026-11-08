@@ -1,11 +1,3 @@
-"""Plane anchors: validation, placement in the tiles and the DPS guide step.
-
-The denoiser never sees an anchor. Each reverse step but the last moves the
-noisy state down the gradient of the clean prediction's squared error on the
-anchor voxels, so nearby sections follow the anchor instead of meeting it at a
-seam (Chung et al., Diffusion Posterior Sampling, 2023).
-"""
-
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -189,7 +181,13 @@ def _crop(anchor: _Placed, tile: Tile) -> _Placed | None:
 
 @dataclass(frozen=True)
 class AnchorGuide:
-    """One tile's anchor target and the DPS guide step toward it."""
+    """One tile's anchor target and the DPS guide step toward it.
+
+    The denoiser never sees an anchor. Each reverse step but the last moves the
+    noisy state down the gradient of the clean prediction's squared error on the
+    anchor voxels, so nearby sections follow the anchor instead of meeting it at a
+    seam (Chung et al., Diffusion Posterior Sampling, 2023).
+    """
 
     image: torch.Tensor
     mask: torch.Tensor
@@ -200,13 +198,8 @@ class AnchorGuide:
         with torch.enable_grad():
             state = values.detach().clone().requires_grad_(True)
             pred = predictor(state, time, latent, guidance, **conditions)
-            error = (pred.float() - self.image).square().mul(self.mask).sum()
-            gradient = None
-            if error.requires_grad:
-                (gradient,) = torch.autograd.grad(error, state, allow_unused=True)
-        if gradient is None:
-            # A prediction that ignores the noisy state leaves nothing to steer.
-            gradient = torch.zeros_like(state)
+            error = (pred - self.image).square().mul(self.mask).sum()
+            (gradient,) = torch.autograd.grad(error, state)
         # The RMS anchor error, not its norm, keeps the per-voxel step
         # independent of how much anchor area a volume or tile holds.
         rms = (error.detach() / self.mask.sum().clamp_min(1)).sqrt().clamp_min(1e-8)

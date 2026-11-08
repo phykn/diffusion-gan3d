@@ -1,5 +1,3 @@
-"""Training checkpoints: write, mark complete, find, check for resume, relocate."""
-
 import os
 import re
 from collections.abc import Mapping
@@ -251,4 +249,3 @@ def restore(trainer, payload: Mapping) -> None:
         trainer.selection.load_state_dict(payload["selection"])
     trainer.completed_steps = payload["step"]
     trainer.path_maps = list(payload["path_maps"])
-    trainer.load_stage_state(payload)

@@ -14,6 +14,7 @@ from paper.scripts.common import (
     cache_dir,
     cached,
     mean_std,
+    normalized,
     parse_args,
     wall_minutes,
 )
@@ -226,9 +227,7 @@ def section_summary(volumes, real, phases: int) -> dict:
         planes[name] = {
             "errors": errors._asdict(),
             "real_split": split._asdict(),
-            "structure": float(
-                np.mean([e / max(s, 1e-6) for e, s in zip(errors, split)])
-            ),
+            "structure": normalized(errors, split),
         }
     side = [planes[name]["structure"] for name in ("xz", "yz")]
     return {

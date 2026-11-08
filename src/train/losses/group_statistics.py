@@ -1,5 +1,3 @@
-"""Pair tables along the normals of the planes one critic judges must agree."""
-
 from itertools import combinations
 
 import torch

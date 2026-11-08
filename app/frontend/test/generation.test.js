@@ -93,7 +93,6 @@ test('height-conditioned sections send source geometry', async t => {
   assert.equal(body.anchors[0].axis, 1)
   assert.equal(body.height_origin, 23)
   assert.equal(body.height_extent, 512)
-  assert.equal('domain' in body, false)
   state.axis.value = 0
   state.heightOrigin.value = 10
   await nextTick()

@@ -1,5 +1,3 @@
-"""Sample YAML files (config/samples/*.yaml) and their two stage configs."""
-
 import copy
 from collections.abc import Mapping
 from pathlib import Path
@@ -11,6 +9,7 @@ from src.config.schema import (
     build_config,
     to_dict,
 )
+from src.phase import validate_num_phases
 from src.plane import PLANES
 
 SAMPLES_DIR = PROJECT_ROOT / "config" / "samples"
@@ -71,6 +70,8 @@ def load_sample(sample: str | Path) -> dict:
     for name in STRUCTURE:
         if type(cfg["structure"].get(name)) is not bool:
             raise ValueError(f"structure.{name} must be true or false; see {TEMPLATE}.")
+    if cfg.get("num_phases") is not None:
+        validate_num_phases(cfg["num_phases"])
     cfg["images"] = sample_images(cfg)
     cfg["name"] = path.stem
     return cfg
@@ -143,8 +144,6 @@ def merge(base: dict, override: Mapping) -> None:
 
 def stage_values(sample: Mapping, stage: str, num_phases: int) -> dict:
     """Schema input for one stage: data, then structure flags, then tune."""
-    if stage not in STAGES:
-        raise ValueError(f"stage must be one of {', '.join(STAGES)}.")
     resolution = sample["resolution"]
     values = {
         "stage": stage,

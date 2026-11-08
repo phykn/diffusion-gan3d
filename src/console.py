@@ -1,8 +1,3 @@
-"""Aligned, colored terminal output for the training and check commands.
-
-Color is used only on a terminal; NO_COLOR turns it off and FORCE_COLOR on.
-"""
-
 import os
 import sys
 

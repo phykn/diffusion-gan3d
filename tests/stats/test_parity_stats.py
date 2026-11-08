@@ -1,4 +1,4 @@
-"""src/stats against the v1 reference (SPEC Parity checks: stats)."""
+"""src/stats against the v1 reference."""
 
 from pathlib import Path
 

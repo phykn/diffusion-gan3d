@@ -1,6 +1,3 @@
-"""Random crops of the label images, resized by area to the model grid."""
-
-import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -77,15 +74,12 @@ def _resize_fraction_axis(probs, axis, size):
         return (values.movedim(axis, -1) @ overlap.to(values.dtype).T).movedim(-1, axis)
 
 
-def resize_crop(labels: torch.Tensor, size: int, num_phases: int) -> torch.Tensor:
+def resize_anchor(labels: torch.Tensor, size: int, num_phases: int) -> torch.Tensor:
     """[*S] labels to [K, size, ...] fractions; ties stay fractional."""
     probs = phase_channels(labels.unsqueeze(0), num_phases)
-    return resize_phases(probs, (size,) * labels.ndim).squeeze(0)
-
-
-def resize_anchor(labels: torch.Tensor, size: int, num_phases: int) -> torch.Tensor:
+    probs = resize_phases(probs, (size,) * labels.ndim).squeeze(0)
     # Area resizing can round a full cell to 1 + eps; anchors require [0, 1].
-    return resize_crop(labels, size, num_phases).clamp_(0.0, 1.0)
+    return probs.clamp_(0.0, 1.0)
 
 
 def downsample(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
@@ -120,17 +114,6 @@ def coarse_region(
     )
     high = F.interpolate(low, scale_factor=scale, mode="trilinear", align_corners=False)
     return high[(slice(None), slice(None), *(slice(scale, scale + n) for n in shape))]
-
-
-def scaled_size(size: int, scale: float) -> int:
-    if isinstance(size, bool) or not isinstance(size, int) or size < 1:
-        raise ValueError("size must be a positive integer.")
-    value = size * scale
-    if not math.isfinite(value) or not math.isclose(
-        value, round(value), abs_tol=1e-8, rel_tol=0
-    ):
-        raise ValueError("size * scale must be an integer; sizes are never rounded.")
-    return round(value)
 
 
 @dataclass(frozen=True)

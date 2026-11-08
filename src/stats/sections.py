@@ -1,5 +1,3 @@
-"""Statistics of 2D sections: two-point, chords, clusters and their errors."""
-
 from typing import NamedTuple
 
 import numpy as np

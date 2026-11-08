@@ -1,4 +1,4 @@
-"""Smoke tests: the paper scripts on tiny runs write v1's result keys and figures."""
+"""Smoke tests: the paper scripts on tiny runs write the asset keys and figures."""
 
 import json
 from pathlib import Path
@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from paper.scripts import evaluate_anode, evaluate_lr, evaluate_sr, make_figures
+from paper.scripts.common import cache_dir
 
 ROOT = Path(__file__).parents[2]
 ASSETS = ROOT / "paper" / "assets"
@@ -50,7 +51,7 @@ def results(tiny_lr_run, tiny_sr_run, tiny_anode_sr_run, tmp_path_factory) -> Pa
 
 
 @pytest.mark.parametrize("stage", ["lr", "sr", "anode"])
-def test_smoke_results_have_the_v1_keys(results, stage):
+def test_smoke_results_have_the_asset_keys(results, stage):
     name = f"{stage}-results.json"
     written = json.loads((results / name).read_text(encoding="utf-8"))
     expected = json.loads((ASSETS / name).read_text(encoding="utf-8"))
@@ -122,3 +123,14 @@ def test_the_real_crops_are_those_behind_the_assets():
             actual |= {"tilt_phase1": evaluate_lr.real_tilt(source, config)}
         expected = json.loads((ASSETS / f"{stage}-results.json").read_text())["real"]
         close(actual, expected, (stage,))
+
+
+def test_a_full_evaluation_clears_the_smoke_marker(tmp_path):
+    run = tmp_path / "run"
+    cache = cache_dir(tmp_path, run, smoke=True)
+    cache_dir(tmp_path, run, smoke=False)
+    (cache / "lr.pt").touch()
+    # The full volumes now in the cache open as full volumes again.
+    assert cache_dir(tmp_path, run, smoke=False) == cache
+    with pytest.raises(SystemExit, match="holds full volumes"):
+        cache_dir(tmp_path, run, smoke=True)

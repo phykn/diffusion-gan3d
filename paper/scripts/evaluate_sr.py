@@ -13,12 +13,14 @@ from paper.scripts.common import (
     archived_generators,
     cache_dir,
     cached,
+    connectivity,
     mean_std,
+    normalized,
     parse_args,
     real_crops,
     wall_minutes,
 )
-from paper.scripts.evaluate_lr import normalized
+from paper.scripts.evaluate_lr import FULL, SMOKE
 from src.api import SuperResolutionAPI
 from src.config.io import load_generation_settings, load_yaml, stored_path
 from src.data.crops import downsample
@@ -28,7 +30,7 @@ from src.stats.sections import (
     section_errors,
     section_statistics,
 )
-from src.stats.volume import interface_density, spanning_fractions, tortuosity
+from src.stats.volume import interface_density
 from src.train.selection import lr_mse, pick_sections
 
 DESCRIPTION = (
@@ -37,10 +39,6 @@ DESCRIPTION = (
     "volumes in its cache/<run>/; --reuse recomputes the metrics from them "
     "without sampling."
 )
-# The same LR seeds as evaluate_lr.py; the LR inputs come from the LR model
-# inside the SR export.
-SAMPLES = 16
-SMOKE_SAMPLES = 2
 # Second SR seed per LR input, to separate what SR adds from what LR fixes.
 RESEED = 1000
 
@@ -48,7 +46,9 @@ RESEED = 1000
 def main(argv=None) -> None:
     args = parse_args(DESCRIPTION, "SR run directory.", argv)
     run = args.run
-    samples = SMOKE_SAMPLES if args.smoke else SAMPLES
+    # The same LR seeds as evaluate_lr.py; the LR inputs come from the LR model
+    # inside the SR export.
+    samples = (SMOKE if args.smoke else FULL).samples
     api = SuperResolutionAPI(run, args.device)
     config = api.config
     scale = api.scale_factor
@@ -176,17 +176,7 @@ def volume_summary(volumes, low, real_labels, noise, full: bool) -> dict:
     }
     if not full:
         return summary
-    for phase in (0, 1):
-        spans = np.asarray([spanning_fractions((v == phase).numpy()) for v in volumes])
-        summary[f"percolation_phase{phase}"] = {
-            axis: mean_std(spans[:, index]) for index, axis in enumerate("zyx")
-        }
-    taus = np.asarray(
-        [[tortuosity(v, 0, axis, device="cpu") for axis in range(3)] for v in volumes]
-    )
-    summary["tortuosity_phase0"] = {
-        axis: mean_std(taus[:, index]) for index, axis in enumerate("zyx")
-    }
+    summary |= connectivity(volumes)
     return summary
 
 

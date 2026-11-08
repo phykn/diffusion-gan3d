@@ -1,5 +1,3 @@
-"""KL of the target phase fractions to the predicted volume's fractions."""
-
 import torch
 
 

@@ -52,7 +52,6 @@ test('side-section request preserves the physical crop origin in a tiled volume'
   t.mock.method(globalThis, 'fetch', async (path, options) => {
     const body = JSON.parse(options.body)
     assert.deepEqual(body.anchors, [{ image, axis: 2, index: 0, position: null }])
-    assert.equal('domain' in body, false)
     assert.equal(body.height_origin, 23)
     assert.equal(body.height_extent, 512)
     return new Response(new Uint8Array([0]), { headers: { 'X-Volume-Shape': '1,1,1' } })

@@ -1,5 +1,3 @@
-"""RpGAN critic loss and the R1/R2 gradient penalties (R3GAN)."""
-
 from collections.abc import Sequence
 from dataclasses import dataclass
 

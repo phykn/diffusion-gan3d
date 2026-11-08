@@ -1,5 +1,3 @@
-"""TensorBoard scalars of a training step and the structure metrics."""
-
 import math
 from itertools import combinations
 

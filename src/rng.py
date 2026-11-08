@@ -1,12 +1,3 @@
-"""Run random state: every draw comes from a saved torch.Generator.
-
-Small draws come from CPU generators and move to the device, so a seed gives
-the same crops, choices and latents on every device. Diffusion noise volumes
-come from a generator on the training device: drawn on the CPU, they took
-about 7% of an SR step on MPS. Its state is saved too, so a resume on the
-same device type repeats the run exactly.
-"""
-
 import hashlib
 
 import numpy as np
@@ -24,6 +15,15 @@ def make_generator(seed: int) -> torch.Generator:
 
 
 class RunRandom:
+    """Run random state: every draw comes from a saved torch.Generator.
+
+    Small draws come from CPU generators and move to the device, so a seed gives
+    the same crops, choices and latents on every device. Diffusion noise volumes
+    come from a generator on the training device: drawn on the CPU, they took
+    about 7% of an SR step on MPS. Its state is saved too, so a resume on the
+    same device type repeats the run exactly.
+    """
+
     def __init__(self, seed: int, device: torch.device | str = "cpu") -> None:
         children = np.random.SeedSequence(seed).spawn(len(STREAMS) + 1)
         seeds = [int(child.generate_state(1, np.uint64)[0] >> 1) for child in children]

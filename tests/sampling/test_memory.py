@@ -21,7 +21,7 @@ GPU = (
 
 
 def probe(export: Path, device: str, options: dict) -> dict:
-    """One generation in a fresh process, measured as in SPEC Memory limit."""
+    """Peak memory of one generation, measured in a fresh process."""
     result = subprocess.run(
         [sys.executable, str(PROBE), str(export), device, json.dumps(options)],
         cwd=ROOT,

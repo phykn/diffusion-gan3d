@@ -1,5 +1,3 @@
-"""Training label images: discovery, decoding and the phase count."""
-
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,10 +54,6 @@ class PlaneImages:
     folders: tuple[Path, ...]
     paths: tuple[tuple[Path, ...], ...]
     images: tuple[tuple[np.ndarray, ...], ...]
-
-    @property
-    def axis(self) -> int:
-        return PLANES.index(self.plane)
 
     def all_images(self) -> list[np.ndarray]:
         return [image for group in self.images for image in group]

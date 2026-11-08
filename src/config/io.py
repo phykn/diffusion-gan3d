@@ -19,7 +19,7 @@ def stored_path(path: str | Path) -> str:
     """Path as saved in settings: project-relative inside the root, else absolute."""
     resolved = project_path(path)
     try:
-        return resolved.relative_to(PROJECT_ROOT).as_posix() or "."
+        return resolved.relative_to(PROJECT_ROOT).as_posix()
     except ValueError:
         return str(resolved)
 
@@ -76,8 +76,8 @@ class GenerationSettings:
     overlap: int
 
 
-def load_generation_settings(path: str | Path | None = None) -> GenerationSettings:
-    path = PROJECT_ROOT / "config" / "gen.yaml" if path is None else Path(path)
+def load_generation_settings() -> GenerationSettings:
+    path = PROJECT_ROOT / "config" / "gen.yaml"
     section = load_yaml(path)
     names = {item.name for item in fields(GenerationSettings)}
     unknown = set(section) - names

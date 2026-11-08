@@ -1,4 +1,4 @@
-"""Checkpoints, exact resume, interrupts and run-name collisions (T8)."""
+"""Checkpoints, exact resume, interrupts and run-name collisions."""
 
 import os
 import shutil

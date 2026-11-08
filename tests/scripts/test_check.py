@@ -1,4 +1,4 @@
-"""Smoke tests: each check script on tiny runs writes its SPEC output files."""
+"""Smoke tests: each check script on tiny runs writes its output files."""
 
 import importlib.util
 import json
@@ -10,7 +10,7 @@ import pytest
 ROOT = Path(__file__).parents[2]
 CHECK = ROOT / "scripts" / "check"
 IMAGE = ROOT / "tests" / "fixtures" / "tiny" / "default" / "sample.png"
-# v1 06_hr report keys without domain and sr_guidance (SPEC Check scripts).
+# 04_hr report.json keys.
 HR_REPORT = {
     "sr_weights",
     "lr_weights",

@@ -1,5 +1,3 @@
-"""Flags, result folders, figures and summaries shared by the check scripts."""
-
 import argparse
 import json
 import sys
@@ -15,11 +13,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config.io import PROJECT_ROOT, load_generation_settings  # noqa: E402
-from src.console import metric, path_field  # noqa: E402
+from src.console import path_field  # noqa: E402
 from src.device import default_device  # noqa: E402
 from src.export import resolve_export  # noqa: E402
 from src.plane import PLANES  # noqa: E402
-from src.stats.labels import voxel_accuracy  # noqa: E402
 from src.storage import save_volume  # noqa: E402
 
 DIFF_CMAP = ListedColormap(("#f7f7f7", "#e63946"))
@@ -95,7 +92,9 @@ def add_height_arguments(parser, origin_default: float | None = 0.0) -> None:
     )
 
 
-def add_generation_arguments(parser, *, anchors: bool = False) -> None:
+def add_generation_arguments(
+    parser, *, anchors: bool = False, origin_default: float | None = 0.0
+) -> None:
     """Flags shared by the LR checks; unset guidance comes from config/gen.yaml."""
     parser.add_argument(
         "--weight",
@@ -119,7 +118,7 @@ def add_generation_arguments(parser, *, anchors: bool = False) -> None:
     add_out_argument(parser)
     add_view_arguments(parser)
     add_device_argument(parser)
-    add_height_arguments(parser)
+    add_height_arguments(parser, origin_default)
 
 
 def generation_options(args) -> dict:
@@ -187,77 +186,10 @@ def save_results(volume: torch.Tensor, args, num_phases: int, name="volume") -> 
     path_field("Preview", path.with_suffix(".png"))
 
 
-# Anchors -----------------------------------------------------------------
-
-
-def select_indices(size: int, count: int) -> tuple[int, ...]:
-    """count section indices spread evenly over size."""
-    if count < 0 or count > size:
-        raise ValueError("count must be between 0 and the volume depth.")
-    return tuple((2 * index + 1) * size // (2 * count) for index in range(count))
-
-
-def select_display_index(size: int, indices: tuple[int, ...]) -> int:
-    center = size // 2
-    if not indices:
-        return center
-    return min(indices, key=lambda index: (abs(index - center), index))
-
-
-def anchor_accuracy(vol, target, indices: tuple[int, ...], axis: int):
-    """Voxel accuracy on the anchored planes only."""
-    if not indices:
-        return None
-    index = torch.tensor(indices, dtype=torch.long)
-    actual = vol.movedim(axis, 0).index_select(0, index)
-    expected = target.movedim(axis, 0).index_select(0, index)
-    return voxel_accuracy(actual, expected)
-
-
-def format_percent(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2%}"
-
-
 def format_phases(values) -> str:
     return "  ".join(
         f"phase {phase}: {float(value):.2%}" for phase, value in enumerate(values)
     )
-
-
-def format_ratio(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2f}x"
-
-
-def format_profile(values, near_label: str) -> str:
-    valid = [(d, value) for d, value in enumerate(values) if value is not None]
-    if not valid:
-        return "n/a"
-    mean = sum(value for _, value in valid) / len(valid)
-    distance, farthest = valid[-1]
-    return (
-        f"{near_label} {format_percent(valid[0][1])}, mean {format_percent(mean)}, "
-        f"farthest {format_percent(farthest)} at distance {distance}"
-    )
-
-
-def print_anchor_effect(smoothness, profile, label: str) -> None:
-    peak = ""
-    if smoothness.peak_anchor_distance is not None:
-        peak = f" at distance {smoothness.peak_anchor_distance}"
-    metric(
-        "Smoothness",
-        f"p95 {format_ratio(smoothness.p95_ratio)}, "
-        f"peak {format_ratio(smoothness.max_ratio)}{peak}",
-    )
-    if smoothness.reversal_rate is not None:
-        metric(
-            "Surface bumps",
-            f"{smoothness.reversal_rate:.2%} vs baseline "
-            f"{format_percent(smoothness.baseline_reversal_rate)} "
-            f"({format_ratio(smoothness.reversal_ratio)})",
-        )
-    if profile:
-        metric("Anchor effect", format_profile(profile, label))
 
 
 # Figures -----------------------------------------------------------------

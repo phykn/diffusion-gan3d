@@ -1,5 +1,3 @@
-"""SR: the downsampled HR prediction must follow the LR input."""
-
 import torch
 
 from src.data.crops import downsample

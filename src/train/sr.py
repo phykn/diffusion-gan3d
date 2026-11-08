@@ -1,12 +1,3 @@
-"""SR stage: the frozen LR bank, coarse corruption and the SR objective.
-
-SR learns to refine volumes the frozen LR model makes, so it trains on a bank
-of them rather than on downsampled real data. Each volume takes its height and
-depth profile from a random real side crop; one volume is replaced every
-lr_bank.refresh_every_steps. The bank and the LR export travel in the
-checkpoint, so a resume needs neither the LR run nor its images.
-"""
-
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -14,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import trange
 
+from src.api import LowResolutionAPI
 from src.config.schema import SRConfig
 from src.data.crops import CropSampler, phase_channels, resize_phases
 from src.data.height import image_profile
@@ -24,8 +16,6 @@ from src.rng import rand, randint
 from src.stats.labels import phase_profile
 from src.train.core import StepInputs, Trainer
 from src.train.losses.consistency import consistency_loss
-from src.train.losses.group_statistics import group_statistics_loss
-from src.train.lr import schedule_ramp
 
 
 def corrupt_coarse(low, probability: float, strength: float, generator):
@@ -98,6 +88,13 @@ def crop_profile(image: torch.Tensor, origin, extent, crop_size, bins) -> dict:
 
 
 class SRTrainer(Trainer):
+    """SR learns to refine volumes the frozen LR model makes, so it trains on a bank
+    of them rather than on downsampled real data. Each volume takes its height and
+    depth profile from a random real side crop; one volume is replaced every
+    lr_bank.refresh_every_steps. The bank and the LR export travel in the
+    checkpoint, so a resume needs neither the LR run nor its images.
+    """
+
     config: SRConfig
 
     def __init__(
@@ -113,7 +110,6 @@ class SRTrainer(Trainer):
         self.lr_config = export_config(self.lr_export)
         check_lr_source(self.lr_config, config)
         self.symmetries = bank_symmetries(config)
-        self.height = config.conditioning.height_enabled
         # LR-grid side crops: the conditions of each bank volume.
         self.side_samplers = (
             {
@@ -129,8 +125,6 @@ class SRTrainer(Trainer):
             if self.height
             else {}
         )
-        if self.height and not self.side_samplers:
-            raise ValueError("SR height conditioning needs xz or yz images.")
         self._lr_api = None
         self.bank = self.create_bank() if bank is None else bank
 
@@ -138,8 +132,6 @@ class SRTrainer(Trainer):
 
     def lr_api(self):
         if self._lr_api is None:
-            from src.api import LowResolutionAPI
-
             self._lr_api = LowResolutionAPI(self.lr_export, self.device)
         return self._lr_api
 
@@ -221,9 +213,6 @@ class SRTrainer(Trainer):
     def stage_state(self) -> dict:
         return {"lr": self.lr_export, "bank": self.bank.state_dict()}
 
-    def load_stage_state(self, payload) -> None:
-        self.bank = Bank.from_state(payload["bank"])
-
     def step(self, step: int, transition: int | None = None) -> dict:
         self.refresh_bank(step)
         return super().step(step, transition)
@@ -232,7 +221,7 @@ class SRTrainer(Trainer):
         config = self.config
         batch = config.train.volume_batch_size
         generator = self.random["bank"]
-        real = self.real_crops(side_heights=self.height)
+        real = self.real_crops()
         indices = randint(len(self.bank.volumes), (batch,), generator)
         low = self.bank.volumes[indices].to(self.device)
         low = augment_volumes(low, self.symmetries, generator)
@@ -251,17 +240,14 @@ class SRTrainer(Trainer):
             conditions["height"] = self.volume_height(
                 self.bank.height_origins[indices], self.bank.height_extents[indices]
             )
-        statistics = config.loss.group_statistics
         return StepInputs(
+            step=step,
             transition=self.sample_transition() if transition is None else transition,
             real=real,
             conditions=conditions,
             extra={
                 "low": low,
                 "coarse_mask": (coarse == low).all(1, keepdim=True),
-                "group_statistics_ramp": schedule_ramp(
-                    step, statistics.start_step, statistics.ramp_steps
-                ),
             },
             diagnostics={
                 "coarse_corruption_mse": (coarse - low).square().mean(),
@@ -269,28 +255,13 @@ class SRTrainer(Trainer):
             },
         )
 
-    def objective(self, inputs, clean_probs, fake, real, diagnose):
+    def objective(self, inputs, clean_probs):
         loss = self.config.loss
         extra = inputs.extra
         low = extra["low"]
         diagnostics = {}
         total = clean_probs.sum(dtype=torch.float32) * 0.0
-        statistics = loss.group_statistics
-        ramp = extra["group_statistics_ramp"]
-        if statistics.weight > 0 and inputs.transition == 0 and ramp > 0:
-            # Differences the LR input already has are allowed on top.
-            value, values = group_statistics_loss(
-                clean_probs,
-                self.groups,
-                statistics.max_gap,
-                statistics.tolerance,
-                self.height,
-                low,
-            )
-            total = total + statistics.weight * ramp * value
-            diagnostics.update(values)
-            diagnostics["loss/group_statistics"] = value.detach()
-            diagnostics["group_statistics/ramp"] = value.new_tensor(ramp)
+        total = self.add_group_statistics(total, inputs, clean_probs, diagnostics, low)
         consistency, error = consistency_loss(
             clean_probs, low, loss.downsample_mse_tolerance, extra["coarse_mask"]
         )

@@ -233,7 +233,7 @@ where RMS is the root-mean-square anchor error, so the step does not depend on h
 
 ## Code availability
 
-Code, settings, the training image, the anode simulation, and the evaluation scripts are available at https://github.com/phykn/diffusion-gan3d. The reported runs used the `default` and `simul_anode` samples of v2 (commit cb99772); the second runs differ only in `train.seed`. `paper/scripts/evaluate_lr.py --run <LR run>`, `evaluate_sr.py --run <SR run>` and `evaluate_anode.py --run <anode SR run>` write the reported numbers to `paper/assets/lr-results.json`, `sr-results.json` and `anode-results.json`, and `make_figures.py` draws the figures from them. The anode follow-ups resumed the SR run with `train.py --resume <checkpoint> --steps 10000` and set `tune.lr.model.critic.plane_groups: [[xy], [xz], [yz]]`; their numbers are not in `paper/assets/`. The v1 results are under the `v1` tag.
+Code, settings, the training image, the anode simulation, and the evaluation scripts are available at https://github.com/phykn/diffusion-gan3d. The reported runs used the `default` and `simul_anode` samples of v2 (commit cb99772); the second runs differ only in `train.seed`. `paper/scripts/evaluate_lr.py --run <LR run>`, `evaluate_sr.py --run <SR run>` and `evaluate_anode.py --run <anode SR run>` write the reported numbers to `lr-results.json`, `sr-results.json` and `anode-results.json` in one `--out` folder (copied to `paper/assets/`), and `make_figures.py` draws the figures from them. The anode follow-ups resumed the SR run with `train.py --resume <checkpoint> --run-dir <name> --steps 10000` and set `tune.lr.model.critic.plane_groups: [[xy], [xz], [yz]]`; their numbers are not in `paper/assets/`. The v1 results are under the `v1` tag.
 
 ## References
 

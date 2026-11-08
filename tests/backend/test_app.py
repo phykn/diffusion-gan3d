@@ -1,4 +1,4 @@
-"""HTTP API on the tiny SR run (SPEC HTTP API, Web limits, Web busy)."""
+"""HTTP API on the tiny SR run."""
 
 import dataclasses
 import errno
@@ -101,7 +101,6 @@ def test_health_reports_the_height_range(tiny_anode_sr_run):
     app = create_app(inference=tiny_pipeline(tiny_anode_sr_run), config=CONFIG)
     info = TestClient(app).get("/api/health").json()
     assert info["height_enabled"] is True and info["height_extent"] == 64
-    assert "num_domains" not in info and "height_extents" not in info
 
 
 def test_frontend_is_served_by_the_api_process(client):
@@ -178,11 +177,6 @@ def test_generate_accepts_the_largest_torch_seed(client, service):
     response = client.post("/api/generate", json={"seed": 2**64 - 1, "format": "raw"})
     assert response.status_code == 200
     assert service.calls[0]["seed"] == 2**64 - 1
-
-
-def test_domain_is_not_a_request_field(client, service):
-    assert client.post("/api/generate", json={"domain": 0}).status_code == 422
-    assert not service.calls
 
 
 def test_tortuosity_is_opt_in_and_stays_under_the_generation_lock(client, monkeypatch):

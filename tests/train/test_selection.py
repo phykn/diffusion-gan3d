@@ -1,4 +1,4 @@
-"""Best-step selection (SPEC Run directory: selection/)."""
+"""Best-step selection."""
 
 import yaml
 

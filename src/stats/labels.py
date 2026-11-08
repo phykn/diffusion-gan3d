@@ -1,5 +1,3 @@
-"""Label checks, phase fractions, voxel agreement and adjacent-section tables."""
-
 import torch
 
 from src.data.height import rebin_profile

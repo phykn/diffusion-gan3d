@@ -1,15 +1,8 @@
-"""Stage settings as frozen dataclasses.
-
-DEFAULTS live here and nowhere else: every default is a dataclass field
-default below. src/config/sample.py layers the structure flags and the
-sample's tune section over them, and src/config/io.py reads and writes them.
-"""
-
 import math
 import types
 import typing
 from collections.abc import Mapping
-from dataclasses import MISSING, dataclass, field, fields, is_dataclass, replace
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 
 from src.phase import validate_num_phases
 from src.plane import PLANES
@@ -36,10 +29,6 @@ def _fraction(default):
     return _number(default, maximum=1.0, exclusive=True)
 
 
-def _tuple(default):
-    return field(default=default)
-
-
 @dataclass(frozen=True, kw_only=True)
 class Data:
     images: Mapping[str, tuple[str, ...]]
@@ -53,21 +42,21 @@ class Data:
 
 @dataclass(frozen=True, kw_only=True)
 class Generator:
-    channels: tuple[int, ...] = _tuple((16, 32, 64, 64))
+    channels: tuple[int, ...] = (16, 32, 64, 64)
     embedding_channels: int = _integer(128)
     latent_channels: int = _integer(64)
 
 
 @dataclass(frozen=True, kw_only=True)
 class Critic:
-    channels: tuple[int, ...] = _tuple((32, 64, 128, 256))
-    plane_groups: tuple[tuple[str, ...], ...] = _tuple((("xy", "xz", "yz"),))
+    channels: tuple[int, ...] = (32, 64, 128, 256)
+    plane_groups: tuple[tuple[str, ...], ...] = (("xy", "xz", "yz"),)
     pyramid_min_size: int = _integer(16, minimum=2)
 
 
 @dataclass(frozen=True, kw_only=True)
 class SRCritic(Critic):
-    channels: tuple[int, ...] = _tuple((32, 64, 128))
+    channels: tuple[int, ...] = (32, 64, 128)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -151,7 +140,7 @@ class Optim:
     generator_lr: float = _number(0.00016)
     critic_lr: float = _number(0.0001)
     ema_decay: float = _fraction(0.999)
-    adam_betas: tuple[float, float] = _tuple((0.5, 0.9))
+    adam_betas: tuple[float, float] = (0.5, 0.9)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -434,8 +423,6 @@ def _join(path, key):
 
 def validate(config: StageConfig) -> None:
     """Rules that relate several settings of one stage."""
-    if config.stage != CONFIG_TYPES_BY_CLASS[type(config)]:
-        raise ValueError(f"stage must be {CONFIG_TYPES_BY_CLASS[type(config)]}.")
     nickname = config.nickname.strip()
     if nickname != config.nickname or (
         nickname.endswith(".")
@@ -494,9 +481,6 @@ def validate(config: StageConfig) -> None:
             raise ValueError(
                 "conditioning.spatial_profile requires conditioning.height_enabled."
             )
-    else:
-        if not math.isfinite(config.lr_bank.guidance):
-            raise ValueError("lr_bank.guidance must be finite.")
 
 
 def _check_plane_groups(groups, planes):
@@ -523,11 +507,3 @@ def plane_groups(config: StageConfig) -> dict[str, tuple[int, ...]]:
         axes = tuple(sorted(PLANES.index(plane) for plane in group))
         groups["_".join(PLANES[axis] for axis in axes)] = axes
     return dict(sorted(groups.items(), key=lambda item: item[1]))
-
-
-def with_data(config: StageConfig, **values) -> StageConfig:
-    """Replace data fields, for values measured from the images."""
-    return replace(config, data=replace(config.data, **values))
-
-
-CONFIG_TYPES_BY_CLASS = {cls: stage for stage, cls in CONFIG_TYPES.items()}

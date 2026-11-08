@@ -1,11 +1,11 @@
-"""generator.pt: a self-contained export of one stage's EMA denoiser."""
-
 from collections.abc import Mapping
 from pathlib import Path
 
 import torch
 
 from src.config.schema import StageConfig, build_config, to_dict
+from src.model.denoiser import Denoiser3D
+from src.model.diffusion import Diffusion
 from src.storage import torch_save
 
 FORMAT = "diffusion-gan3d.export"
@@ -85,10 +85,8 @@ def export_config(payload: Mapping) -> StageConfig:
     return build_config(payload["config"])
 
 
-def build_denoiser(config: StageConfig):
+def build_denoiser(config: StageConfig) -> Denoiser3D:
     """The stage's denoiser, untrained, from its settings."""
-    from src.model.denoiser import Denoiser3D
-
     channels = config.model.generator.channels
     return Denoiser3D(
         num_phases=config.data.num_phases,
@@ -103,16 +101,14 @@ def build_denoiser(config: StageConfig):
     )
 
 
-def build_diffusion(config: StageConfig):
-    from src.model.diffusion import Diffusion
-
+def build_diffusion(config: StageConfig) -> Diffusion:
     diffusion = config.model.diffusion
     return Diffusion(diffusion.num_steps, diffusion.beta_min, diffusion.beta_max)
 
 
-def load_denoiser(payload: Mapping):
+def load_denoiser(payload: Mapping, config: StageConfig) -> Denoiser3D:
     """EMA denoiser of an export, in eval mode on the CPU."""
-    model = build_denoiser(export_config(payload))
+    model = build_denoiser(config)
     model.load_state_dict(payload["model"], strict=True)
     return model.eval().requires_grad_(False)
 

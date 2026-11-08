@@ -1,9 +1,3 @@
-"""Orientation policy: which flips and rotations keep a section realistic.
-
-plane_policies() is the one place this is decided; critic augmentation and
-SR bank augmentation both read it.
-"""
-
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import permutations
@@ -29,6 +23,8 @@ def fixed_z(config) -> bool:
 
 
 def plane_policies(config) -> dict[str, PlanePolicy]:
+    """Which flips and rotations keep each section realistic: the one place
+    this is decided, read by critic and SR bank augmentation."""
     height = config.conditioning.height_enabled
     fixed = fixed_z(config)
     return {
@@ -37,14 +33,6 @@ def plane_policies(config) -> dict[str, PlanePolicy]:
             rotate_90=not (fixed and "z" in axes),
         )
         for plane, axes in PLANE_DIRECTIONS.items()
-    }
-
-
-def policy_dict(policies: Mapping[str, PlanePolicy]) -> dict:
-    """The v1 augmentation.planes form of the policies."""
-    return {
-        plane: {"flip_axes": list(policy.flip_axes), "rotate_90": policy.rotate_90}
-        for plane, policy in policies.items()
     }
 
 

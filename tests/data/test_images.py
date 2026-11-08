@@ -1,4 +1,4 @@
-"""Label images, phase count, height and depth profile (SPEC Label images)."""
+"""Label images, phase count, height and depth profile."""
 
 from pathlib import Path
 

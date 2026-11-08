@@ -1,4 +1,4 @@
-"""T3: the thinnest LR path, train -> export -> generate."""
+"""The thinnest LR path, train -> export -> generate."""
 
 import pytest
 import torch

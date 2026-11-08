@@ -1,10 +1,3 @@
-"""Public generation API: LR volumes from an LR export, HR from an SR export.
-
-Guidance is classifier-free guidance over vf and the depth profile. With
-neither condition, or with guidance == 1, it has no effect and each step runs
-one forward pass. SR models have no guided condition.
-"""
-
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -13,7 +6,7 @@ import torch
 
 from src.config.io import GenerationSettings, load_generation_settings
 from src.data.crops import phase_channels, resize_anchor
-from src.device import check_device, default_device, gpu_amp
+from src.device import check_device, default_device
 from src.export import (
     build_diffusion,
     check_lr_source,
@@ -33,7 +26,7 @@ from src.sampling.plan import (
 )
 from src.sampling.sampler import Predictor, TileSampler
 
-__all__ = ["LowResolutionAPI", "PlaneAnchor", "SuperResolutionAPI", "output_shape"]
+__all__ = ["LowResolutionAPI", "PlaneAnchor", "SuperResolutionAPI"]
 
 
 def output_shape(blocks, shape, size, patch: int, overlap: int) -> tuple[int, ...]:
@@ -57,31 +50,22 @@ def output_shape(blocks, shape, size, patch: int, overlap: int) -> tuple[int, ..
     return result
 
 
-def predictor(model, diffusion, config, device) -> Predictor:
-    return Predictor(
-        model=model,
-        diffusion=diffusion,
-        device=device,
-        num_phases=config.data.num_phases,
-        latent_channels=config.model.generator.latent_channels,
-        amp=gpu_amp(config.train.mixed_precision, device),
-    )
-
-
 class LowResolutionAPI:
     def __init__(self, weights: str | Path | Mapping, device=None):
         self.device = check_device(default_device() if device is None else device)
-        self.payload = read_export(weights, "lr")
-        self.config = export_config(self.payload)
-        self.model = load_denoiser(self.payload).to(self.device)
-        self.diffusion = build_diffusion(self.config).to(self.device)
+        payload = read_export(weights, "lr")
+        self.config = export_config(payload)
+        model = load_denoiser(payload, self.config).to(self.device)
+        diffusion = build_diffusion(self.config).to(self.device)
         data = self.config.data
         self.crop_size = data.crop_size
         self.input_size = data.lo_res_size
         self.num_phases = data.num_phases
-        self.default_margin = self.model.downsample_factor
+        self.default_margin = model.downsample_factor
         self.settings: GenerationSettings = load_generation_settings()
-        self.predictor = predictor(self.model, self.diffusion, self.config, self.device)
+        self.predictor = Predictor.from_config(
+            model, diffusion, self.config, self.device
+        )
 
     def prepare_image(self, image: torch.Tensor) -> torch.Tensor:
         if image.shape != (self.crop_size, self.crop_size):
@@ -91,13 +75,12 @@ class LowResolutionAPI:
         return resize_anchor(image, self.input_size, self.num_phases)
 
     def plan(self, *, blocks=None, shape=None, size=None, overlap=None, margin=None):
-        """The tile plan of a request; see SPEC Margin and tiles."""
+        """The tile plan of a request. margin (default: the denoiser's
+        downsample factor) is generated around the output and cropped off."""
         overlap = check_non_negative(
             self.settings.overlap if overlap is None else overlap, "overlap"
         )
-        margin = check_non_negative(
-            self.default_margin if margin is None else margin, "margin"
-        )
+        margin = self.default_margin if margin is None else margin
         patch = self.input_size
         return make_plan(
             output_shape(blocks, shape, size, patch, overlap), patch, margin, overlap
@@ -201,7 +184,7 @@ class LowResolutionAPI:
             plan,
             seed=seed,
             conditions=conditions,
-            guidance=guidance if conditions.guided else 1.0,
+            guidance=guidance,
             guide=anchors if anchors.active else None,
             probabilities=probabilities,
             storage=storage,
@@ -239,10 +222,10 @@ class SuperResolutionAPI:
         lr_weights: str | Path | Mapping | None = None,
     ):
         self.device = check_device(default_device() if device is None else device)
-        self.payload = read_export(weights, "sr")
-        self.config = export_config(self.payload)
-        self.model = load_denoiser(self.payload).to(self.device)
-        self.diffusion = build_diffusion(self.config).to(self.device)
+        payload = read_export(weights, "sr")
+        self.config = export_config(payload)
+        model = load_denoiser(payload, self.config).to(self.device)
+        diffusion = build_diffusion(self.config).to(self.device)
         data = self.config.data
         self.crop_size = data.crop_size
         self.lo_res_size = data.lo_res_size
@@ -250,11 +233,11 @@ class SuperResolutionAPI:
         self.scale_factor = self.config.scale_factor
         self.num_phases = data.num_phases
         self.default_margin = sr_margin(self.scale_factor)
-        self.settings: GenerationSettings = load_generation_settings()
-        self.predictor = predictor(self.model, self.diffusion, self.config, self.device)
-        self.lr_weights = lr_weights
+        self.predictor = Predictor.from_config(
+            model, diffusion, self.config, self.device
+        )
         self.lr = LowResolutionAPI(
-            self.payload["lr"] if lr_weights is None else lr_weights, self.device
+            payload["lr"] if lr_weights is None else lr_weights, self.device
         )
         check_lr_source(self.lr.config, self.config)
 

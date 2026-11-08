@@ -1,11 +1,3 @@
-"""The one volume reverse-diffusion loop, for LR and SR, tiled or not.
-
-Tiles are visited in z/y/x order. Their clean predictions (and anchor guide
-steps) are blended with the plan's windows into a slab one tile deep; once
-the next z layer starts, no later tile reads the finished part of the slab,
-so its posterior step is taken there and then.
-"""
-
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,6 +5,7 @@ from dataclasses import dataclass
 import torch
 from tqdm import tqdm
 
+from src.device import gpu_amp
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.rng import make_generator, randn
@@ -20,8 +13,7 @@ from src.sampling.plan import Tile, TilePlan, tile_window
 
 LABEL_CHUNK_VOXELS = 1024**2
 # The reverse-diffusion state between steps. An fp16 state scored the same
-# but cut the measured peak by only 1-2%, the device heap dwarfing the state
-# (checks/rebuild/state_precision.py, SPEC Decisions).
+# but cut the measured peak by only 1-2%, the device heap dwarfing the state.
 STATE_DTYPE = torch.float32
 
 # conditions(index, tile) -> model conditions for that tile
@@ -63,6 +55,17 @@ class Predictor:
     latent_channels: int
     amp: bool
 
+    @classmethod
+    def from_config(cls, model, diffusion, config, device) -> "Predictor":
+        return cls(
+            model=model,
+            diffusion=diffusion,
+            device=device,
+            num_phases=config.data.num_phases,
+            latent_channels=config.model.generator.latent_channels,
+            amp=gpu_amp(config.train.mixed_precision, device),
+        )
+
     def __call__(self, values, time, latent, guidance=1.0, **conditions):
         conditions = {k: v for k, v in conditions.items() if v is not None}
         with torch.autocast(
@@ -96,26 +99,28 @@ class _Slab:
             start = end
 
     def add(self, tile: Tile, window, pred, step=None):
-        sums = [(self.pred, pred)] + ([(self.step, step)] if step is not None else [])
-        weight = window.to(self.weight.device)
-        for total, values in sums:
-            staged = (values.float() * window).to(total.device)
-            for global_region, local in self.regions(tile.source):
-                start = global_region[0].start - tile.source[0].start
-                stop = global_region[0].stop - tile.source[0].start
-                total[(slice(None), slice(None), *local)].add_(staged[:, :, start:stop])
+        staged = [(self.pred, pred.float() * window), (self.weight, window)]
+        if step is not None:
+            staged.append((self.step, step.float() * window))
+        staged = [(total, values.to(total.device)) for total, values in staged]
         for global_region, local in self.regions(tile.source):
             start = global_region[0].start - tile.source[0].start
             stop = global_region[0].stop - tile.source[0].start
-            self.weight[(slice(None), slice(None), *local)].add_(
-                weight[:, :, start:stop]
-            )
+            for total, values in staged:
+                total[(slice(None), slice(None), *local)].add_(values[:, :, start:stop])
 
 
 class TileSampler:
-    def __init__(self, predictor: Predictor, state_dtype=STATE_DTYPE) -> None:
+    """The one volume reverse-diffusion loop, for LR and SR, tiled or not.
+
+    Tiles are visited in z/y/x order. Their clean predictions (and anchor guide
+    steps) are blended with the plan's windows into a slab one tile deep; once
+    the next z layer starts, no later tile reads the finished part of the slab,
+    so its posterior step is taken there and then.
+    """
+
+    def __init__(self, predictor: Predictor) -> None:
         self.predictor = predictor
-        self.state_dtype = state_dtype
 
     @torch.no_grad()
     def sample(
@@ -123,7 +128,7 @@ class TileSampler:
         plan: TilePlan,
         *,
         seed: int | None,
-        conditions: TileConditions | None = None,
+        conditions: TileConditions,
         guidance: float = 1.0,
         guide: TileGuide | None = None,
         probabilities: bool = False,
@@ -140,13 +145,11 @@ class TileSampler:
             int(torch.randint(2**63 - 1, ())) if seed is None else seed
         )
         store = device if storage == "cuda" else torch.device("cpu")
-        state = torch.empty(
-            (1, phases, *plan.shape), device=store, dtype=self.state_dtype
-        )
+        state = torch.empty((1, phases, *plan.shape), device=store, dtype=STATE_DTYPE)
         for tile in plan.tiles:
             shape = (1, phases, *(r.stop - r.start for r in tile.target))
             state[(slice(None), slice(None), *tile.target)] = randn(
-                shape, generator, store, self.state_dtype
+                shape, generator, store, STATE_DTYPE
             )
         output = torch.empty(
             (phases, *plan.output_shape) if probabilities else plan.output_shape,
@@ -164,9 +167,7 @@ class TileSampler:
                     values = state[(slice(None), slice(None), *tile.source)].to(
                         device=device, dtype=torch.float32
                     )
-                    tile_conditions = (
-                        {} if conditions is None else conditions(index, tile)
-                    )
+                    tile_conditions = conditions(index, tile)
                     tile_guide = None if guide is None or final else guide(index, tile)
                     step = None
                     if tile_guide is None:

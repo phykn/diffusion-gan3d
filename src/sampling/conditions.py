@@ -1,5 +1,3 @@
-"""Per-tile model conditions: height, depth profile, vf and SR coarse input."""
-
 import math
 from collections.abc import Mapping, Sequence
 
@@ -39,9 +37,12 @@ def prepare_vf(vf: Sequence[float] | None, num_phases: int, device) -> torch.Ten
 class HeightRange:
     """Source-pixel height coordinates of a generation along z."""
 
-    def __init__(self, config: StageConfig, origin: float, extent: float | None):
+    def __init__(
+        self, config: StageConfig, plan: TilePlan, origin: float, extent: float | None
+    ):
         self.enabled = config.conditioning.height_enabled
         self.spacing = grid_spacing(config.data.crop_size, config.patch_size)
+        self.margin = plan.margin
         if not self.enabled:
             if extent is not None:
                 raise ValueError("height_extent requires a height-conditioned model.")
@@ -57,12 +58,8 @@ class HeightRange:
         if isinstance(origin, bool) or not isinstance(origin, (int, float)):
             raise ValueError("height_origin must be a number (source pixels).")
         self.origin = float(origin)
-
-    def check(self, depth: int) -> None:
-        """The output depth at this origin must lie inside the source height."""
-        if not self.enabled:
-            return
-        length = depth * self.spacing
+        # The output depth at this origin must lie inside the source height.
+        length = plan.output_shape[0] * self.spacing
         if (
             not math.isfinite(self.origin)
             or self.origin < 0
@@ -72,8 +69,13 @@ class HeightRange:
                 "height_origin places the volume outside the source image height."
             )
 
-    def tile_origin(self, plan: TilePlan, tile: Tile) -> float:
-        return self.origin + (tile.source[0].start - plan.margin) * self.spacing
+    def tile_origin(self, tile: Tile) -> float:
+        return self.origin + (tile.source[0].start - self.margin) * self.spacing
+
+    def field(self, tile: Tile, device) -> torch.Tensor:
+        return height_field(
+            tile.shape, self.tile_origin(tile), self.spacing, self.extent, device
+        )
 
 
 class LRConditions:
@@ -90,11 +92,9 @@ class LRConditions:
         height_origin: float = 0.0,
         height_extent: float | None = None,
     ):
-        self.plan = plan
         self.device = device
         self.num_phases = config.data.num_phases
-        self.height = HeightRange(config, height_origin, height_extent)
-        self.height.check(plan.output_shape[0])
+        self.height = HeightRange(config, plan, height_origin, height_extent)
         profile_enabled = config.profile_enabled
         if vf_profile is None and vf is None and profile_enabled:
             # Height alone flattens strong depth gradients; use the training one.
@@ -131,12 +131,9 @@ class LRConditions:
     def __call__(self, index: int, tile: Tile) -> dict:
         result = {"vf": self.vf}
         if self.height.enabled:
-            origin = self.height.tile_origin(self.plan, tile)
-            result["height"] = height_field(
-                tile.shape, origin, self.height.spacing, self.height.extent, self.device
-            )
+            result["height"] = self.height.field(tile, self.device)
             if self.vf_profile is not None:
-                profile = self._profile(tile.shape[0], origin)
+                profile = self._profile(tile.shape[0], self.height.tile_origin(tile))
                 result.update(profile=profile, vf=profile.mean(-1))
         return result
 
@@ -158,12 +155,7 @@ class SRConditions:
         height_origin: float = 0.0,
         height_extent: float | None = None,
     ):
-        self.plan = plan
         self.scale = config.scale_factor
-        if plan.margin % self.scale:
-            raise ValueError(
-                f"margin must be a multiple of the LR/HR scale ({self.scale})."
-            )
         expected = tuple(n // self.scale for n in plan.output_shape)
         if low.ndim != 4 or tuple(low.shape[1:]) != expected:
             raise ValueError(f"LR fractions must have shape [C, {expected}].")
@@ -171,16 +163,12 @@ class SRConditions:
         low = low.detach().to("cpu", torch.float32)[None]
         self.low = F.pad(low, (pad,) * 6, mode="replicate") if pad else low
         self.device = device
-        self.height = HeightRange(config, height_origin, height_extent)
-        self.height.check(plan.output_shape[0])
+        self.height = HeightRange(config, plan, height_origin, height_extent)
 
     def __call__(self, index: int, tile: Tile) -> dict:
         start = tuple(region.start for region in tile.source)
         coarse = coarse_region(self.low, start, tile.shape, self.scale)
         result = {"coarse": coarse.to(self.device, torch.float32)}
         if self.height.enabled:
-            origin = self.height.tile_origin(self.plan, tile)
-            result["height"] = height_field(
-                tile.shape, origin, self.height.spacing, self.height.extent, self.device
-            )
+            result["height"] = self.height.field(tile, self.device)
         return result

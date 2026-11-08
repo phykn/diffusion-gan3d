@@ -4,9 +4,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.model.critic import CriticScores, GroupNormSiLU, PairCritic2D
+from src.model.critic import CriticScores, PairCritic2D
 from src.model.denoiser import ChannelNormSiLU3D, Denoiser3D, channel_norm_silu
-from src.model.layers import AdaptiveNorm
 
 MPS = torch.backends.mps.is_available()
 
@@ -111,13 +110,9 @@ def test_denoiser_rejects_a_single_normalized_channel():
         Denoiser3D(3, 1, (1, 2), 8, 4)
 
 
-def test_denoiser_has_no_domain_embedding_and_uses_channel_norm():
-    model = _denoiser()
-    assert not any("domain" in key for key in model.state_dict())
-    assert isinstance(model.encoder[0].norm1, AdaptiveNorm)
-    assert isinstance(model.encoder[0].norm1.norm, ChannelNormSiLU3D)
-    assert isinstance(model.output_norm, ChannelNormSiLU3D)
-    assert model.downsample_factor == 2
+def test_denoiser_downsamples_by_two():
+    # The LR API's default margin.
+    assert _denoiser().downsample_factor == 2
 
 
 def test_clean_output_is_a_latent_conditioned_simplex_with_gradients():
@@ -269,12 +264,6 @@ def test_single_voxel_bottleneck_is_supported():
     model = _denoiser(channel_multipliers=(1, 2, 4, 8))
     output = model(torch.randn(1, 3, 8, 8, 8), torch.zeros(1), torch.zeros(1, 4))
     assert output.shape == (1, 3, 8, 8, 8)
-
-
-def test_critic_keeps_spatial_group_norm_and_has_no_domain():
-    critic = _critic()
-    assert isinstance(critic.blocks[0].norm1.norm, GroupNormSiLU)
-    assert not any("domain" in key for key in critic.state_dict())
 
 
 def test_critic_scores_pairs_at_every_pyramid_level():

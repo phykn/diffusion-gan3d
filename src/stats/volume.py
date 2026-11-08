@@ -1,5 +1,3 @@
-"""Statistics of 3D label volumes: connectivity, tortuosity, tilt, chords."""
-
 import logging
 import math
 
@@ -38,7 +36,6 @@ def tortuosity(
     phase: int = 0,
     axis: int = 0,
     device: torch.device | str | None = None,
-    convergence: float = 1e-3,
 ) -> float:
     import taufactor as tau
 
@@ -53,7 +50,7 @@ def tortuosity(
     conductive = conductive.astype(np.uint8)
     selected_device = torch.device(default_device() if device is None else device)
     solver = tau.Solver(conductive, device=str(selected_device))
-    solver.solve(verbose=False, conv_crit=convergence)
+    solver.solve(verbose=False, conv_crit=1e-3)
     if not solver.converged:
         raise RuntimeError("tortuosity solver did not converge.")
     result = float(np.asarray(solver.tau).reshape(-1)[0])

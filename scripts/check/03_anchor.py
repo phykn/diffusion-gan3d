@@ -11,23 +11,12 @@ from matplotlib.patches import Rectangle
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.check.common import (
-    add_device_argument,
-    add_height_arguments,
-    add_out_argument,
-    add_seed_argument,
-    add_view_arguments,
-    anchor_accuracy,
-    format_percent,
-    format_ratio,
+    add_generation_arguments,
     generation_options,
     middle_slices,
-    non_negative_float,
     non_negative_int,
     prepare_check,
-    print_anchor_effect,
     save_results,
-    select_display_index,
-    select_indices,
     show_difference,
     show_labels,
     show_napari,
@@ -46,14 +35,76 @@ from src.stats.labels import voxel_accuracy
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
 
 
+def select_indices(size: int, count: int) -> tuple[int, ...]:
+    """count section indices spread evenly over size."""
+    if count < 0 or count > size:
+        raise ValueError("count must be between 0 and the volume depth.")
+    return tuple((2 * index + 1) * size // (2 * count) for index in range(count))
+
+
+def select_display_index(size: int, indices: tuple[int, ...]) -> int:
+    center = size // 2
+    if not indices:
+        return center
+    return min(indices, key=lambda index: (abs(index - center), index))
+
+
+def anchor_accuracy(vol, target, indices: tuple[int, ...], axis: int):
+    """Voxel accuracy on the anchored planes only."""
+    if not indices:
+        return None
+    index = torch.tensor(indices, dtype=torch.long)
+    actual = vol.movedim(axis, 0).index_select(0, index)
+    expected = target.movedim(axis, 0).index_select(0, index)
+    return voxel_accuracy(actual, expected)
+
+
+def format_percent(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2%}"
+
+
+def format_ratio(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f}x"
+
+
+def format_profile(values, near_label: str) -> str:
+    valid = [(d, value) for d, value in enumerate(values) if value is not None]
+    if not valid:
+        return "n/a"
+    mean = sum(value for _, value in valid) / len(valid)
+    distance, farthest = valid[-1]
+    return (
+        f"{near_label} {format_percent(valid[0][1])}, mean {format_percent(mean)}, "
+        f"farthest {format_percent(farthest)} at distance {distance}"
+    )
+
+
+def print_anchor_effect(smoothness, profile, label: str) -> None:
+    peak = ""
+    if smoothness.peak_anchor_distance is not None:
+        peak = f" at distance {smoothness.peak_anchor_distance}"
+    metric(
+        "Smoothness",
+        f"p95 {format_ratio(smoothness.p95_ratio)}, "
+        f"peak {format_ratio(smoothness.max_ratio)}{peak}",
+    )
+    if smoothness.reversal_rate is not None:
+        metric(
+            "Surface bumps",
+            f"{smoothness.reversal_rate:.2%} vs baseline "
+            f"{format_percent(smoothness.baseline_reversal_rate)} "
+            f"({format_ratio(smoothness.reversal_ratio)})",
+        )
+    if profile:
+        metric("Anchor effect", format_profile(profile, label))
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         description="Guide an LR sample with anchor planes: sections of a "
         "generated reference, or one boundary plane from a real image."
     )
-    parser.add_argument(
-        "--weight", type=Path, required=True, help="LR generator.pt or its run folder."
-    )
+    add_generation_arguments(parser, anchors=True, origin_default=None)
     parser.add_argument(
         "--axis",
         type=int,
@@ -78,21 +129,6 @@ def parse_args(argv):
         choices=("start", "end"),
         help="Boundary plane of --anchor (default: start).",
     )
-    add_seed_argument(parser)
-    parser.add_argument(
-        "--guidance",
-        type=float,
-        help="Classifier-free guidance scale (default: config/gen.yaml).",
-    )
-    parser.add_argument(
-        "--anchor-strength",
-        type=non_negative_float,
-        help="Anchor guide step scale; 0 ignores anchors (default: config/gen.yaml).",
-    )
-    add_out_argument(parser)
-    add_view_arguments(parser)
-    add_device_argument(parser)
-    add_height_arguments(parser, origin_default=None)
     args = parser.parse_args(argv)
     if args.side is not None and args.anchor is None:
         parser.error("--side needs --anchor.")

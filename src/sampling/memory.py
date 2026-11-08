@@ -1,11 +1,3 @@
-"""Memory a generation needs, from its tile plan, checked before sampling.
-
-The activation constants are v1 src/predict/memory.py; on MPS they overstate
-large tiles about threefold, which is safe. MPS_HEAP, HOST_RUNTIME and the
-flush scratch come from measuring this Mac (SPEC Memory limit);
-tests/sampling/test_memory.py repeats that measurement.
-"""
-
 import math
 from dataclasses import dataclass
 
@@ -17,6 +9,9 @@ from src.sampling.sampler import STATE_DTYPE
 
 # The fraction of free memory a generation may use.
 BUDGET = 0.8
+# The activation constants below overstate large MPS tiles about threefold,
+# which is safe. MPS_HEAP, HOST_RUNTIME and the flush scratch were measured on
+# Apple silicon; tests/sampling/test_memory.py repeats that measurement.
 # Least activation reserve: allocator blocks and kernels outside the volume.
 MIN_RESERVE = 256 * 1024**2
 STATE_BYTES = torch.finfo(STATE_DTYPE).bits // 8

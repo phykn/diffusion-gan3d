@@ -1,4 +1,4 @@
-"""Scores and TensorBoard tags against the v1 reference (SPEC Parity checks)."""
+"""Scores and TensorBoard tags against the v1 reference."""
 
 import re
 from pathlib import Path
@@ -13,7 +13,7 @@ from src.train.run import train_stage
 from src.train.selection import CheckpointSelection
 
 PARITY = Path(__file__).parents[1] / "fixtures" / "parity"
-# Tags v2 drops on purpose (SPEC Parity checks: tags_lr, tags_sr).
+# Tags v2 drops on purpose.
 DROPPED = {
     "lr": {"sampling/domain"},
     "sr": {

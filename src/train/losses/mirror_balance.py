@@ -1,5 +1,3 @@
-"""LR mirror_balance: mirrored diagonal pair tables must agree."""
-
 import torch
 
 from src.stats.pairs import mirror_differences, pair_correlations

@@ -1,5 +1,3 @@
-"""Run folders and the training loop: saves, checkpoints, interrupts, resume."""
-
 import signal
 from contextlib import contextmanager
 from datetime import datetime
@@ -24,7 +22,14 @@ from src.train.checkpoint import (
     save_checkpoint,
     saved_config,
 )
+from src.train.lr import LRTrainer
 from src.train.metrics import selection_metrics, write_metrics
+from src.train.selection import (
+    CheckpointSelection,
+    SRCheckpointSelection,
+    build_reference,
+)
+from src.train.sr import Bank, SRTrainer
 
 DONE = ".done"
 
@@ -33,9 +38,9 @@ def stage_dir(name: Path, stage: str) -> Path:
     return name.with_name(f"{name.name}-{stage}")
 
 
-def new_run_name(nickname: str, root: Path | None = None) -> Path:
+def new_run_name(nickname: str) -> Path:
     """run/<YYYYMMDD-HHMM>-<nickname>, with _NN when that name is taken."""
-    root = PROJECT_ROOT / "run" if root is None else root
+    root = PROJECT_ROOT / "run"
     stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M")
     base = f"{stamp}-{nickname}" if nickname else stamp
     sequence = 1
@@ -70,14 +75,6 @@ def build_trainer(
     SR needs its frozen LR export: lr for a new run, which also builds the
     bank, or payload, a checkpoint whose LR export and bank it resumes.
     """
-    from src.train.lr import LRTrainer
-    from src.train.selection import (
-        CheckpointSelection,
-        SRCheckpointSelection,
-        build_reference,
-    )
-    from src.train.sr import Bank, SRTrainer
-
     planes = training_images(config) if planes is None else planes
     if config.stage == "lr":
         trainer = LRTrainer(config, device, planes)
@@ -106,17 +103,13 @@ def current_payload(trainer) -> dict:
     return trainer.export_payload(trainer.completed_steps, trainer.ema.state_dict())
 
 
-def save_export(trainer, path: Path, *, overwrite=True) -> Path:
-    return write_export(path, current_payload(trainer), overwrite=overwrite)
-
-
 def save_weights(trainer, root: Path) -> None:
     """generator.pt: the best scored step with selection, else the latest."""
     selection = trainer.selection
     if selection is not None and selection.best() is not None:
         write_export(root / "generator.pt", selection.best_payload(trainer))
     else:
-        save_export(trainer, root / "generator.pt")
+        write_export(root / "generator.pt", current_payload(trainer))
 
 
 def select_step(trainer, root: Path, writer) -> None:

@@ -1,25 +1,14 @@
-"""LR stage: conditions from real crops and the LR generator objective."""
-
 import torch
 
 from src.config.schema import LRConfig
 from src.data.height import image_profile, rebin_profile
 from src.data.pairs import sample_pairs
 from src.stats.labels import phase_profile
-from src.train.core import StepInputs, Trainer
-from src.train.losses.group_statistics import group_statistics_loss
+from src.train.core import StepInputs, Trainer, schedule_ramp
 from src.train.losses.mirror_balance import mirror_balance_loss
 from src.train.losses.spatial_profile import profile_loss
 from src.train.losses.transition import real_transition_loss
 from src.train.losses.volume_fraction import vf_loss
-
-
-def schedule_ramp(step: int, start: int, ramp: int) -> float:
-    if step < start:
-        return 0.0
-    if ramp == 0:
-        return 1.0
-    return min((step - start + 1) / ramp, 1.0)
 
 
 class LRTrainer(Trainer):
@@ -28,10 +17,10 @@ class LRTrainer(Trainer):
     def prepare(self, step: int, transition: int | None) -> StepInputs:
         config = self.config
         conditioning = config.conditioning
-        height = conditioning.height_enabled
+        height = self.height
         profile_enabled = conditioning.spatial_profile.enabled
         batch = config.train.volume_batch_size
-        real = self.real_crops(side_heights=height)
+        real = self.real_crops()
         # Height, profile and vf of a volume share one side crop.
         side = next((axis for axis in self.axes if axis != 0), None) if height else None
         if side is None:
@@ -68,28 +57,20 @@ class LRTrainer(Trainer):
                 vf=target_vf,
             )
             extra["profile"] = profile
-        extra.update(
-            target_vf=target_vf,
-            vf_present=vf_present,
-            real_transition_ramp=schedule_ramp(
-                step,
-                config.loss.real_transition.start_step,
-                config.loss.real_transition.ramp_steps,
-            ),
-            group_statistics_ramp=schedule_ramp(
-                step,
-                config.loss.group_statistics.start_step,
-                config.loss.group_statistics.ramp_steps,
-            ),
-        )
+        extra.update(target_vf=target_vf, vf_present=vf_present)
         return StepInputs(
+            step=step,
             transition=self.sample_transition() if transition is None else transition,
             real=real,
             conditions=conditions,
             extra=extra,
+            diagnostics={
+                "conditioning/vf_active": vf_present.any(),
+                "conditioning/vf_fraction": vf_present.float().mean(),
+            },
         )
 
-    def objective(self, inputs, clean_probs, fake, real, diagnose):
+    def objective(self, inputs, clean_probs):
         loss = self.config.loss
         extra = inputs.extra
         diagnostics = {}
@@ -97,25 +78,15 @@ class LRTrainer(Trainer):
         diagnostics["loss/vf"] = vf.detach()
         total = loss.volume_fraction_weight * vf
         real_transition = loss.real_transition
+        ramp = schedule_ramp(
+            inputs.step, real_transition.start_step, real_transition.ramp_steps
+        )
+        diagnostics["loss/real_transition_ramp"] = ramp
         if real_transition.weight > 0 and inputs.transition == 0:
             value = self.real_transition(inputs, clean_probs, diagnostics)
             diagnostics["loss/real_transition"] = value.detach()
-            ramp = extra["real_transition_ramp"]
             total = total + ramp * real_transition.weight * value
-        group_statistics = loss.group_statistics
-        ramp = extra["group_statistics_ramp"]
-        if group_statistics.weight > 0 and inputs.transition == 0 and ramp > 0:
-            value, values = group_statistics_loss(
-                clean_probs,
-                self.groups,
-                group_statistics.max_gap,
-                group_statistics.tolerance,
-                self.config.conditioning.height_enabled,
-            )
-            total = total + group_statistics.weight * ramp * value
-            diagnostics.update(values)
-            diagnostics["loss/group_statistics"] = value.detach()
-            diagnostics["group_statistics/ramp"] = value.new_tensor(ramp)
+        total = self.add_group_statistics(total, inputs, clean_probs, diagnostics)
         mirror_balance = loss.mirror_balance
         if mirror_balance.weight > 0:
             # The x0 prediction of every transition must keep the mirror symmetry.
@@ -143,7 +114,6 @@ class LRTrainer(Trainer):
                 clean_probs,
                 axis,
                 self.config.train.slice_pairs_per_plane,
-                tuple(crops.images.shape[-2:]),
                 self.random["pairs"],
                 height=height,
             )
@@ -151,8 +121,6 @@ class LRTrainer(Trainer):
             if height is not None:
                 real_heights[axis] = crops.heights
                 fake_heights[axis] = sampled[2]
-        if not fake:
-            return clean_probs.sum(dtype=torch.float32) * 0.0
         value, values = real_transition_loss(
             real,
             fake,
@@ -171,7 +139,6 @@ class LRTrainer(Trainer):
         value = profile_loss(
             clean_probs,
             target,
-            torch.ones(len(target), dtype=torch.bool, device=target.device),
             config.conditioning.spatial_profile.num_bins,
             config.loss.spatial_profile_weight,
         )
@@ -186,11 +153,3 @@ class LRTrainer(Trainer):
             }
         )
         return value
-
-    def stage_metrics(self, inputs: StepInputs) -> dict:
-        present = inputs.extra["vf_present"]
-        return {
-            "conditioning/vf_active": present.any(),
-            "conditioning/vf_fraction": present.float().mean(),
-            "loss/real_transition_ramp": inputs.extra["real_transition_ramp"],
-        }

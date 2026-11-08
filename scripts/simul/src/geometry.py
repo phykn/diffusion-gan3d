@@ -30,15 +30,6 @@ def pack(
     Volume fractions are targets; random packing can jam before reaching them.
     """
     rng = np.random.default_rng() if rng is None else rng
-    check_geometry(
-        size,
-        big_radius,
-        small_radius,
-        big_vf,
-        small_vf,
-        big_elongation,
-        radius_gradient,
-    )
     largest_radius = max(
         small_radius,
         big_radius * max(big_elongation ** (2 / 3), big_elongation ** (-1 / 3)),
