@@ -1,6 +1,7 @@
 """v2 settings and plane policies against the v1 reference (SPEC Parity checks)."""
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -14,10 +15,11 @@ from src.data.orientation import plane_policies, policy_dict
 REFERENCE = yaml.safe_load(
     (Path(__file__).parents[1] / "fixtures" / "parity" / "config.yaml").read_text()
 )
-# sha256 of the sample files at v1 commit 0608ab8, which v2 trains unchanged.
+# sha256 of the parsed sample files (comments ignored) at v1 commit 0608ab8,
+# which v2 trains unchanged.
 V1_SAMPLES = {
-    "default": "c47f098fbc7d23072727fc71ac6ad6b4dd9a6853acc1828a959584ade07c78de",
-    "simul_anode": "a38348953fa5c2294cf7e135ed893d568ede80ff0b46df13bcacaace1c8501a1",
+    "default": "5e9a136ad40564ba954f89604179fe319da58adbf7b54d37d35a00ca1d915ecb",
+    "simul_anode": "bfdfe0dbf5174e1a2ab3d0a3f016ecdf7cee3fde7a13bc1bcd50c683124e6b04",
 }
 
 
@@ -48,7 +50,8 @@ def test_plane_policies_match_v1(sample, stage):
 
 @pytest.mark.parametrize("sample", sorted(V1_SAMPLES))
 def test_sample_files_match_v1(sample):
-    data = (PROJECT_ROOT / "config" / "samples" / f"{sample}.yaml").read_bytes()
+    text = (PROJECT_ROOT / "config" / "samples" / f"{sample}.yaml").read_text()
+    data = json.dumps(yaml.safe_load(text), sort_keys=True).encode()
     assert hashlib.sha256(data).hexdigest() == V1_SAMPLES[sample]
 
 

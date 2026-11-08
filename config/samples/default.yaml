@@ -15,10 +15,9 @@ structure:
 
 tune:
   lr:
-    # The LR critic memorizes the one image too: after burn-in its real scores
-    # climb while fake scores stay flat, and two-point error rises again past
-    # 6500 steps. Same fix as SR. At 0.3 of the R1/R2 weights after burn-in
-    # the real-fake score gap still widened to the end, so keep 0.5.
+    # Same settings as SR. R1/R2 end at 0.5 of their weights: at 0.3 the
+    # real-fake critic score gap still widened to the end, and back at full
+    # weight the late selection score was 15% worse.
     augmentation:
       probability: 1.0
     loss:
