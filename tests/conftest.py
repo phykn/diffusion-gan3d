@@ -56,7 +56,7 @@ def random_export(tmp_path_factory):
 
 @pytest.fixture(scope="session")
 def tiny_lr_run(tiny_configs, tmp_path_factory) -> Path:
-    """A finished two-step tiny LR run on the CPU."""
+    """A finished one-step tiny LR run on the CPU."""
     from src.train.run import train_stage
 
     torch.manual_seed(0)
@@ -66,7 +66,7 @@ def tiny_lr_run(tiny_configs, tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session")
 def tiny_sr_run(tiny_configs, tiny_lr_run, tmp_path_factory) -> Path:
-    """A finished two-step tiny SR run on top of tiny_lr_run."""
+    """A finished one-step tiny SR run on top of tiny_lr_run."""
     from src.train.run import train_stage
 
     torch.manual_seed(0)
@@ -106,7 +106,7 @@ def tiny_anode(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session")
 def tiny_anode_lr_run(tiny_anode, tmp_path_factory) -> Path:
-    """A finished two-step LR run of tiny_anode on the CPU."""
+    """A finished one-step LR run of tiny_anode on the CPU."""
     from src.train.run import train_stage
 
     torch.manual_seed(0)
@@ -117,7 +117,7 @@ def tiny_anode_lr_run(tiny_anode, tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session")
 def tiny_anode_sr_run(tiny_anode, tiny_anode_lr_run, tmp_path_factory) -> Path:
-    """A finished two-step SR run of tiny_anode on top of tiny_anode_lr_run."""
+    """A finished one-step SR run of tiny_anode on top of tiny_anode_lr_run."""
     from src.train.run import train_stage
 
     torch.manual_seed(0)

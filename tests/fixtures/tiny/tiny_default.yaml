@@ -1,5 +1,6 @@
 # Tiny default sample for tests: a 64 x 64 piece of data/sample.png,
-# crop 32 -> LR 16 -> SR x2, with small networks and few steps.
+# crop 32 -> LR 16 -> SR x2, with small networks, two diffusion steps and one
+# training step that takes every lazy (R1/R2, diagnostic) path.
 images:
   xy: tests/fixtures/tiny/default
   xz: tests/fixtures/tiny/default
@@ -19,25 +20,29 @@ tune:
   lr:
     model:
       generator: {channels: [8, 16, 32, 32], embedding_channels: 32, latent_channels: 16}
+      diffusion: {num_steps: 2}
       critic: {channels: [8, 16, 32, 32]}
     train:
-      total_steps: 2
+      total_steps: 1
       real_batch_size: 2
       slice_pairs_per_plane: 2
       weights_every_steps: 1
-      archive_every_steps: 2
+      archive_every_steps: 1
       structure_every_steps: 1
+    loss: {r1_every_steps: 1}
     selection: {samples: 1}
   sr:
     model:
       generator: {channels: [8, 16, 32, 32], embedding_channels: 32, latent_channels: 16}
+      diffusion: {num_steps: 2}
       critic: {channels: [8, 16, 32]}
     lr_bank: {samples_per_domain: 2, refresh_every_steps: 1}
     train:
-      total_steps: 2
+      total_steps: 1
       real_batch_size: 2
       slice_pairs_per_plane: 2
       weights_every_steps: 1
-      archive_every_steps: 2
+      archive_every_steps: 1
       structure_every_steps: 1
+    loss: {r1_every_steps: 1}
     selection: {samples: 1}

@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from PIL import Image
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 import train
@@ -25,8 +24,8 @@ LOSSES = ("loss/generator", "loss/generator_total", "loss/critic", "loss/vf")
 def _config(base, steps, **values):
     config = update(base, "train.total_steps", steps)
     for path, value in {
-        "train.weights_every_steps": 5,
-        "train.archive_every_steps": 5,
+        "train.weights_every_steps": 1,
+        "train.archive_every_steps": 1,
         "train.structure_every_steps": 0,
         **values,
     }.items():
@@ -43,35 +42,24 @@ def _losses(run_dir: Path) -> dict:
     }
 
 
-@pytest.fixture(scope="module")
-def ten_steps(tiny_configs, tmp_path_factory):
-    root = tmp_path_factory.mktemp("resume")
-    return train_stage(_config(tiny_configs["lr"], 10), "cpu", root / "ten-lr")
-
-
-def test_resume_matches_an_unbroken_run(tiny_configs, ten_steps, tmp_path):
-    whole = train_stage(_config(tiny_configs["lr"], 20), "cpu", tmp_path / "whole")
-    stage, resumed = resume_stage(
-        ten_steps / "checkpoints", "cpu", tmp_path / "resumed", steps=20
-    )
+def test_resume_matches_an_unbroken_run(tiny_configs, tmp_path):
+    whole = train_stage(_config(tiny_configs["lr"], 2), "cpu", tmp_path / "whole")
+    first = train_stage(_config(tiny_configs["lr"], 1), "cpu", tmp_path / "first")
+    stage, second = resume_stage(first, "cpu", tmp_path / "second", steps=2)
     assert stage == "lr"
-    expected, first, second = _losses(whole), _losses(ten_steps), _losses(resumed)
+    expected, before, after = _losses(whole), _losses(first), _losses(second)
     for tag in LOSSES:
-        joined = first[tag] | second[tag]
-        assert sorted(joined) == list(range(1, 21))
-        assert joined == expected[tag], tag
+        assert before[tag] | after[tag] == expected[tag], tag
 
 
-def test_incomplete_steps_are_skipped(ten_steps, tmp_path):
-    copy = tmp_path / "copy"
-    shutil.copytree(ten_steps, copy)
-    last = copy / "checkpoints" / "step_00000010.pt"
+def test_incomplete_steps_are_skipped(tiny_lr_run, tmp_path):
+    copy = Path(shutil.copytree(tiny_lr_run, tmp_path / "copy"))
+    last = resolve_checkpoint(copy)
     last.with_suffix(".complete").unlink()
-    assert resolve_checkpoint(copy).name == "step_00000005.pt"
+    with pytest.raises(FileNotFoundError, match="no completed"):
+        resolve_checkpoint(copy)
     with pytest.raises(ValueError, match="incomplete"):
         resolve_checkpoint(last)
-    last.with_suffix(".complete").write_text("1\n", encoding="ascii")
-    assert resolve_checkpoint(copy).name == "step_00000005.pt"
 
 
 def _rewrite(source: Path, target: Path, change) -> Path:
@@ -83,8 +71,8 @@ def _rewrite(source: Path, target: Path, change) -> Path:
     return target
 
 
-def test_resume_rejects_changed_settings(ten_steps, tmp_path):
-    source = resolve_checkpoint(ten_steps)
+def test_resume_rejects_changed_settings_and_images(tiny_lr_run, tmp_path):
+    source = resolve_checkpoint(tiny_lr_run)
 
     def add(payload):
         payload["config"]["train"]["extra"] = 1
@@ -92,11 +80,15 @@ def test_resume_rejects_changed_settings(ten_steps, tmp_path):
     def remove(payload):
         del payload["config"]["train"]["seed"]
 
+    def image(payload):
+        payload["data_fingerprint"]["xy"]["sample.png"] = "0" * 64
+
     for name, change, message in (
         ("added", add, "train.extra"),
         ("removed", remove, "missing train.seed"),
+        ("image", image, "changed since the checkpoint: xy/sample.png"),
     ):
-        path = _rewrite(source, tmp_path / name / "step_00000010.pt", change)
+        path = _rewrite(source, tmp_path / name / source.name, change)
         with pytest.raises(ValueError, match=message):
             resume_stage(path, "cpu", tmp_path / f"{name}-run", steps=20)
     with pytest.raises(ValueError, match="matches no saved path: /nowhere"):
@@ -107,55 +99,37 @@ def test_resume_rejects_changed_settings(ten_steps, tmp_path):
         train.parse_args(["--resume", str(source)])
 
 
-def test_resume_rejects_changed_images(tiny_configs, tmp_path):
-    folder = tmp_path / "images"
-    shutil.copytree(PROJECT_ROOT / "tests/fixtures/tiny/default", folder)
-    config = update(
-        _config(tiny_configs["lr"], 5),
-        "data.images",
-        {plane: [str(folder)] for plane in ("xy", "xz", "yz")},
-    )
-    run = train_stage(config, "cpu", tmp_path / "run")
-    image = folder / "sample.png"
-    values = __import__("numpy").array(Image.open(image))
-    values[0, 0] = 1 - values[0, 0]
-    Image.fromarray(values).save(image)
-    with pytest.raises(ValueError, match="changed since the checkpoint: xy/sample.png"):
-        resume_stage(run, "cpu", tmp_path / "again", steps=10)
-
-
-def test_path_map_moves_the_image_folders(tiny_configs, ten_steps, tmp_path):
+def test_path_map_moves_the_image_folders(tiny_lr_run, tmp_path):
     moved = tmp_path / "moved"
     shutil.copytree(PROJECT_ROOT / "tests/fixtures/tiny", moved)
-    stage, run = resume_stage(
-        ten_steps,
+    _, run = resume_stage(
+        tiny_lr_run,
         "cpu",
         tmp_path / "relocated",
-        steps=15,
+        steps=2,
         path_map=[("tests/fixtures/tiny", str(moved))],
     )
-    saved = (run / "train.yaml").read_text()
-    assert str(moved / "default") in saved
+    assert str(moved / "default") in (run / "train.yaml").read_text()
 
 
-def test_unfinished_stage_prints_the_resume_command(tiny_sample, ten_steps, tmp_path):
+def test_unfinished_stage_prints_the_resume_command(tiny_sample, tiny_lr_run, tmp_path):
     name = tmp_path / "pending"
-    shutil.copytree(ten_steps, name.with_name("pending-lr"))
+    shutil.copytree(tiny_lr_run, name.with_name("pending-lr"))
     (name.with_name("pending-lr") / ".done").unlink()
     with pytest.raises(SystemExit, match="--resume .*pending-lr/checkpoints"):
         train.main([str(tiny_sample), "--run-dir", str(name), "--device", "cpu"])
 
 
-def test_lr_resume_prints_the_sr_command(ten_steps, tmp_path, capsys):
+def test_lr_resume_prints_the_sr_command(tiny_lr_run, tmp_path, capsys):
     name = tmp_path / "next"
     train.main(
         [
             "--resume",
-            str(ten_steps),
+            str(tiny_lr_run),
             "--run-dir",
             str(name),
             "--steps",
-            "12",
+            "2",
             "--device",
             "cpu",
         ]

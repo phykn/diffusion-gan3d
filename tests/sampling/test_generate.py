@@ -20,9 +20,9 @@ def height_api(tiny_height_configs, random_export) -> LowResolutionAPI:
 
 
 def test_size_and_shape_give_the_same_volume(tiny_api):
-    by_size = tiny_api.generate(size=64, seed=3)
-    by_shape = tiny_api.generate(shape=(64, 64, 64), seed=3)
-    assert by_size.shape == (64, 64, 64)
+    by_size = tiny_api.generate(size=24, seed=3)
+    by_shape = tiny_api.generate(shape=(24, 24, 24), seed=3)
+    assert by_size.shape == (24, 24, 24)
     assert torch.equal(by_size, by_shape)
 
 

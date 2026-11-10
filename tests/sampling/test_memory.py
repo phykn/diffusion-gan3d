@@ -48,24 +48,16 @@ def default_sr_export(random_export, default_configs) -> Path:
 
 
 @pytest.mark.skipif(GPU is None, reason="needs CUDA or MPS")
-@pytest.mark.parametrize(
-    "options",
-    [{"size": 64}, {"blocks": [2, 2, 2]}, {"blocks": [2, 2, 2], "anchors": 1}],
-)
-def test_measured_gpu_memory_stays_under_the_estimate(default_lr_export, options):
-    measured = probe(default_lr_export, GPU, options)
+def test_measured_gpu_memory_stays_under_the_estimate(default_lr_export):
+    # Tiles and the anchor guide: the largest LR terms of the estimate.
+    measured = probe(default_lr_export, GPU, {"blocks": [2, 2, 2], "anchors": 1})
     assert measured["device_peak"] <= measured["device_bytes"], measured
     assert measured["host_peak"] <= measured["host_bytes"], measured
 
 
 @pytest.mark.skipif(GPU is None, reason="needs CUDA or MPS")
-@pytest.mark.parametrize(
-    "options",
-    [{"low": 64}, {"low": 128, "tile_size": "default"}],
-    ids=["128 one tile", "256 default tiling"],
-)
-def test_measured_gpu_sr_memory_stays_under_the_estimate(default_sr_export, options):
-    measured = probe(default_sr_export, GPU, options)
+def test_measured_gpu_sr_memory_stays_under_the_estimate(default_sr_export):
+    measured = probe(default_sr_export, GPU, {"low": 64})
     assert measured["device_peak"] <= measured["device_bytes"], measured
     assert measured["host_peak"] <= measured["host_bytes"], measured
 

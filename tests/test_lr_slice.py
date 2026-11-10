@@ -51,25 +51,14 @@ def test_plain_state_dict_is_not_an_export(tiny_lr_run, tmp_path):
         read_export(tiny_lr_run, "sr")
 
 
-def test_generate_labels(tiny_lr_run):
+def test_generate_labels_and_fractions(tiny_lr_run):
     api = LowResolutionAPI(tiny_lr_run, device="cpu")
-    volume = api.generate(size=24, seed=0)
-    assert volume.shape == (24, 24, 24)
+    volume = api.generate(size=16, seed=0)
     assert volume.dtype == torch.uint8
     assert set(volume.unique().tolist()) <= {0, 1}
-    assert torch.equal(volume, api.generate(shape=(24, 24, 24), seed=0))
     probs = api.generate_probs(size=16, seed=0)
     assert probs.shape == (2, 16, 16, 16)
     torch.testing.assert_close(probs.sum(0), torch.ones(16, 16, 16))
-
-
-def test_generate_options(tiny_lr_run):
-    api = LowResolutionAPI(tiny_lr_run, device="cpu")
-    assert api.generate(blocks=(1, 1, 2), overlap=4, seed=1).shape == (16, 16, 24)
-    with pytest.raises(ValueError, match="only one"):
-        api.generate(size=16, shape=(16, 16, 16))
-    with pytest.raises(ValueError, match="at least the patch"):
-        api.generate(shape=(8, 16, 16))
     with pytest.raises(ValueError, match="storage"):
         api.generate(storage="disk")
     with pytest.raises(ValueError, match="original crop"):

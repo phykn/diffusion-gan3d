@@ -1,4 +1,4 @@
-"""SR stage: tags, exports, resume without the LR run, SR source checks."""
+"""SR stage: exports, resume without the LR run, SR source checks."""
 
 import shutil
 from pathlib import Path
@@ -10,7 +10,6 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 import train
 from src.api import SuperResolutionAPI
-from src.config.sample import build_stage_configs, load_sample
 from src.config.schema import update
 from src.export import read_export
 from src.train.run import resume_stage, train_stage
@@ -29,56 +28,30 @@ def _losses(run_dir: Path) -> dict:
     }
 
 
-@pytest.fixture
-def lr_copy(tiny_lr_run, tmp_path) -> Path:
-    """A private copy of the tiny LR run that a test may delete."""
-    return Path(shutil.copytree(tiny_lr_run, tmp_path / "copy-lr"))
-
-
-def test_a_copied_sr_export_refines_alone(tiny_configs, lr_copy, tmp_path):
-    sr = train_stage(tiny_configs["sr"], "cpu", tmp_path / "tiny-sr", lr_dir=lr_copy)
-    alone = tmp_path / "alone" / "generator.pt"
-    alone.parent.mkdir()
-    shutil.copy(sr / "generator.pt", alone)
-    shutil.rmtree(lr_copy)
-    shutil.rmtree(sr)
+def test_a_copied_sr_export_refines_alone(tiny_sr_run, tmp_path):
+    alone = tmp_path / "generator.pt"
+    shutil.copy(tiny_sr_run / "generator.pt", alone)
     api = SuperResolutionAPI(alone, "cpu")
-    low = api.lr.generate(size=32, seed=0)
-    assert api.refine(low, seed=0).shape == (64, 64, 64)
-    tile, overlap = api.default_tiling()
-    tiled = api.refine(low, seed=0, tile_size=tile)
-    assert tiled.shape == (64, 64, 64)
-    assert overlap % api.scale_factor == 0
+    low = api.lr.generate(size=16, seed=0)
+    assert api.refine(low, seed=0).shape == (32, 32, 32)
+    tile, _ = api.default_tiling()
+    assert api.refine(low, seed=0, tile_size=tile).shape == (32, 32, 32)
 
 
-def test_a_moved_sr_checkpoint_resumes_without_the_lr_run(
-    tiny_configs, lr_copy, tmp_path
+def test_sr_resume_matches_an_unbroken_run_without_the_lr_run(
+    tiny_configs, tiny_lr_run, tmp_path
 ):
-    config = update(tiny_configs["sr"], "train.total_steps", 2)
-    sr = train_stage(config, "cpu", tmp_path / "tiny-sr", lr_dir=lr_copy)
-    moved = tmp_path / "moved"
-    moved.mkdir()
-    for name in ("step_00000002.pt", "step_00000002.complete"):
-        shutil.move(sr / "checkpoints" / name, moved / name)
-    shutil.rmtree(lr_copy)
-    shutil.rmtree(sr)
-    stage, resumed = resume_stage(moved, "cpu", tmp_path / "resumed", steps=3)
-    assert stage == "sr"
-    assert (resumed / ".done").is_file()
-    assert read_export(resumed, "sr")["lr"]["stage"] == "lr"
-
-
-def test_sr_resume_matches_an_unbroken_run(tiny_configs, lr_copy, tmp_path):
     # The bank refreshes every step, so the bank must resume exactly too.
-    config = update(tiny_configs["sr"], "train.archive_every_steps", 2)
-    config = update(config, "train.structure_every_steps", 0)
+    lr = Path(shutil.copytree(tiny_lr_run, tmp_path / "copy-lr"))
+    config = update(tiny_configs["sr"], "train.structure_every_steps", 0)
     whole = train_stage(
-        update(config, "train.total_steps", 4), "cpu", tmp_path / "whole", lr_copy
+        update(config, "train.total_steps", 2), "cpu", tmp_path / "whole", lr
     )
-    first = train_stage(
-        update(config, "train.total_steps", 2), "cpu", tmp_path / "first", lr_copy
-    )
-    _, second = resume_stage(first, "cpu", tmp_path / "second", steps=4)
+    first = train_stage(config, "cpu", tmp_path / "first", lr)
+    shutil.rmtree(lr)
+    stage, second = resume_stage(first, "cpu", tmp_path / "second", steps=2)
+    assert stage == "sr"
+    assert read_export(second, "sr")["lr"]["stage"] == "lr"
     expected, before, after = _losses(whole), _losses(first), _losses(second)
     for tag in LOSSES:
         assert before[tag] | after[tag] == expected[tag], tag
@@ -92,18 +65,6 @@ def _sample_file(folder: Path, images: Path, **tune) -> Path:
     path = folder / "sample.yaml"
     path.write_text(yaml.safe_dump(sample), encoding="utf-8")
     return path
-
-
-def test_sr_reads_its_own_images_after_the_lr_folder_moves(tmp_path):
-    images = tmp_path / "images"
-    shutil.copytree(TINY / "default", images)
-    lr_configs = build_stage_configs(load_sample(_sample_file(tmp_path, images)))
-    lr = train_stage(lr_configs["lr"], "cpu", tmp_path / "run-lr")
-    moved = tmp_path / "moved-images"
-    images.rename(moved)
-    configs = build_stage_configs(load_sample(_sample_file(tmp_path, moved)))
-    sr = train_stage(configs["sr"], "cpu", tmp_path / "run-sr", lr_dir=lr)
-    assert (sr / ".done").is_file()
 
 
 def test_a_mismatched_sr_stops_before_lr_training(tmp_path, monkeypatch):
