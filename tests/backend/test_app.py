@@ -25,11 +25,19 @@ CONFIG = load_server_config(
 )
 
 
-class Recorder:
-    """A pipeline that records what each request asks it to generate."""
+SIZE_OPTIONS = ("blocks", "shape", "size", "overlap", "anchors", "guidance")
 
-    def __init__(self, pipeline: HighResolutionPipeline) -> None:
+
+class Recorder:
+    """A pipeline that records what each request asks it to generate.
+
+    Unless real is set, it returns zeros of the planned shape: most tests
+    check the HTTP layer, not the volume.
+    """
+
+    def __init__(self, pipeline: HighResolutionPipeline, real: bool = False) -> None:
         self.pipeline = pipeline
+        self.real = real
         self.calls: list[dict] = []
 
     def __getattr__(self, name):
@@ -37,7 +45,11 @@ class Recorder:
 
     def generate(self, **kwargs) -> torch.Tensor:
         self.calls.append(kwargs)
-        return self.pipeline.generate(**kwargs)
+        if self.real:
+            return self.pipeline.generate(**kwargs)
+        options = {key: kwargs[key] for key in SIZE_OPTIONS if key in kwargs}
+        shape = self.pipeline.estimate_memory(**options).shape
+        return torch.zeros(shape, dtype=torch.uint8)
 
 
 def tiny_pipeline(run: Path) -> HighResolutionPipeline:
@@ -122,14 +134,15 @@ def test_generate_returns_a_tiff_volume(client, service):
     assert service.calls[0]["anchors"] == ()
 
 
-def test_the_same_seed_gives_the_same_volume(client):
+def test_the_same_seed_gives_the_same_volume(client, service):
+    service.real = True
     first = client.post("/api/generate", json={"seed": 5, "format": "raw"})
     second = client.post("/api/generate", json={"seed": 5, "format": "raw"})
     assert first.content == second.content
 
 
 def test_generate_forwards_a_profile_and_height(tiny_anode_sr_run):
-    service = Recorder(tiny_pipeline(tiny_anode_sr_run))
+    service = Recorder(tiny_pipeline(tiny_anode_sr_run), real=True)
     client = TestClient(create_app(inference=service, config=CONFIG))
     spec = {
         "axis": "z",
@@ -265,7 +278,8 @@ def test_a_centered_anchor_and_blocks_reach_the_generator(client, service):
     assert call["anchor_strength"] == 0.8
 
 
-def test_a_prepared_crop_anchors_the_first_section(client, pipeline):
+def test_a_prepared_crop_anchors_the_first_section(client, service, pipeline):
+    service.real = True
     image = (torch.arange(32 * 32).reshape(32, 32) // 7 % 2).tolist()
     prepared = client.post("/api/prepare", json={"image": image})
     assert prepared.status_code == 200

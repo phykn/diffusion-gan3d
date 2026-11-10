@@ -1,7 +1,10 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-p no:napari"
+addopts = "-p no:napari -m 'not gpu_memory'"
+markers = [
+    "gpu_memory: measures real generations on CUDA/MPS against the memory estimate; run with -m gpu_memory after changing src/sampling/memory.py",
+]
 
 [tool.ruff]
 line-length = 88
