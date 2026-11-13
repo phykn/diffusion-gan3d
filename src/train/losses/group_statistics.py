@@ -7,13 +7,13 @@ from src.stats.pairs import volume_pairs
 
 
 def group_statistics_loss(
-    probs: torch.Tensor,
-    groups: dict[str, tuple[int, ...]],
-    max_gap: int,
-    tolerance: float,
-    preserve_height: bool = False,
-    coarse: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    probs,
+    groups,
+    max_gap,
+    tolerance,
+    preserve_height=False,
+    coarse=None,
+):
     """Penalize per-volume phase-pair differences between plane normals beyond
     tolerance (plus, for SR, the difference the coarse input already has)."""
     zero = probs.sum(dtype=torch.float32) * 0.0

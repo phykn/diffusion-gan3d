@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 import torch
 
@@ -28,7 +26,7 @@ SEED = 0
 SECTIONS = 2 * REFERENCE_CROPS
 
 
-def build_reference(samplers: dict) -> dict:
+def build_reference(samplers):
     """Real crops per plane axis, identical for every run on this data."""
     generator = make_generator(SEED)
     reference = {}
@@ -42,11 +40,11 @@ def build_reference(samplers: dict) -> dict:
     return reference
 
 
-def weights_path(root: Path, step: int) -> Path:
+def weights_path(root, step):
     return root / "selection" / f"generator_{step:08d}.pt"
 
 
-def pick_sections(volumes: list[torch.Tensor], axis: int, phases: int):
+def pick_sections(volumes, axis, phases):
     """One-hot sections along axis, evenly spaced over all volumes' slices."""
     depth = volumes[0].shape[axis]
     total = len(volumes) * depth
@@ -59,13 +57,13 @@ def pick_sections(volumes: list[torch.Tensor], axis: int, phases: int):
     return torch.nn.functional.one_hot(labels.long(), phases).movedim(-1, 1).float()
 
 
-def ema_predictor(trainer) -> Predictor:
+def ema_predictor(trainer):
     return Predictor.from_config(
         trainer.ema, trainer.diffusion, trainer.config, trainer.device
     )
 
 
-def lr_mse(high: torch.Tensor, low: torch.Tensor) -> float:
+def lr_mse(high, low):
     """MSE between downsampled HR labels and the LR fractions they refine."""
     shape = tuple(low.shape[-3:])
     coarse = torch.cat(
@@ -85,7 +83,7 @@ class CheckpointSelection:
     refinements of fixed LR bank volumes at the HR resolution.
     """
 
-    def __init__(self, reference: dict, samples: int, height_enabled: bool) -> None:
+    def __init__(self, reference, samples, height_enabled):
         self.reference = reference
         self.samples = samples
         self.height_enabled = height_enabled
@@ -100,7 +98,7 @@ class CheckpointSelection:
             self.real[axis] = section_statistics(images)
             self.noise[axis] = half_split_errors(images)
 
-    def heights(self) -> list[dict]:
+    def heights(self):
         """Height condition of each scored volume, cycling over side crops."""
         if not self.height_enabled:
             return [{}] * self.samples
@@ -119,7 +117,7 @@ class CheckpointSelection:
         return heights
 
     @torch.no_grad()
-    def evaluate(self, trainer) -> dict[str, float]:
+    def evaluate(self, trainer):
         config = trainer.config
         patch = config.patch_size
         plan = make_plan((patch,) * 3, patch, trainer.ema.downsample_factor, 0)
@@ -130,7 +128,7 @@ class CheckpointSelection:
             volumes.append(sampler.sample(plan, seed=index, conditions=conditions))
         return self.score(volumes)
 
-    def score(self, volumes: list[torch.Tensor]) -> dict[str, float]:
+    def score(self, volumes):
         """Section errors of uint8 label volumes against the reference."""
         errors = {name: [] for name in SectionErrors._fields}
         structure = []
@@ -152,12 +150,12 @@ class CheckpointSelection:
             "structure": float(np.mean(structure)),
         }
 
-    def best(self) -> dict | None:
+    def best(self):
         if not self.history:
             return None
         return min(self.history, key=lambda entry: entry["structure"])
 
-    def update(self, trainer, root: Path) -> dict:
+    def update(self, trainer, root):
         """Score the current EMA weights, keeping them only while they are best."""
         previous = self.best()
         entry = {"step": trainer.completed_steps, **self.evaluate(trainer)}
@@ -173,27 +171,27 @@ class CheckpointSelection:
         self.save_report(root)
         return entry
 
-    def best_payload(self, trainer) -> dict:
+    def best_payload(self, trainer):
         return trainer.export_payload(self.best()["step"], self.best_state)
 
-    def save_best(self, trainer, root: Path) -> None:
+    def save_best(self, trainer, root):
         path = weights_path(root, self.best()["step"])
         write_export(path, self.best_payload(trainer), overwrite=False)
 
-    def save_report(self, root: Path) -> None:
+    def save_report(self, root):
         save_yaml(
             root / "selection" / "scores.yaml",
             {"best_step": self.best()["step"], "steps": self.history},
         )
 
-    def restore(self, trainer, root: Path) -> None:
+    def restore(self, trainer, root):
         """Write a resumed run's best weights and scores into its new directory."""
         if self.best() is None:
             return
         self.save_best(trainer, root)
         self.save_report(root)
 
-    def state_dict(self) -> dict:
+    def state_dict(self):
         best = self.best()
         return {
             "history": [dict(entry) for entry in self.history],
@@ -201,7 +199,7 @@ class CheckpointSelection:
             "best_state": self.best_state,
         }
 
-    def load_state_dict(self, state: dict) -> None:
+    def load_state_dict(self, state):
         self.history = [dict(entry) for entry in state["history"]]
         self.best_state = state["best_state"]
 
@@ -209,12 +207,12 @@ class CheckpointSelection:
 class SRCheckpointSelection(CheckpointSelection):
     """Score refinements of fixed LR inputs; the bank itself is refreshed."""
 
-    def __init__(self, reference: dict, samples: int, inputs: dict) -> None:
+    def __init__(self, reference, samples, inputs):
         super().__init__(reference, samples, inputs["height_origins"] is not None)
         self.inputs = inputs
 
     @classmethod
-    def from_bank(cls, reference: dict, samples: int, bank) -> "SRCheckpointSelection":
+    def from_bank(cls, reference, samples, bank):
         """Keep the first bank volumes; scoring cycles over them when fewer."""
         heights = bank.height_origins is not None
         inputs = {
@@ -228,7 +226,7 @@ class SRCheckpointSelection(CheckpointSelection):
         }
         return cls(reference, samples, inputs)
 
-    def heights(self) -> list[dict]:
+    def heights(self):
         if not self.height_enabled:
             return [{}] * self.samples
         count = len(self.inputs["volumes"])
@@ -242,7 +240,7 @@ class SRCheckpointSelection(CheckpointSelection):
         ]
 
     @torch.no_grad()
-    def evaluate(self, trainer) -> dict[str, float]:
+    def evaluate(self, trainer):
         config = trainer.config
         patch = config.patch_size
         plan = make_plan((patch,) * 3, patch, sr_margin(config.scale_factor), 0)
@@ -259,9 +257,9 @@ class SRCheckpointSelection(CheckpointSelection):
         # LR input, so following it exactly is not the goal.
         return {**self.score(volumes), "lr_mse": float(np.mean(errors))}
 
-    def state_dict(self) -> dict:
+    def state_dict(self):
         return {**super().state_dict(), "inputs": self.inputs}
 
-    def load_state_dict(self, state: dict) -> None:
+    def load_state_dict(self, state):
         super().load_state_dict(state)
         self.inputs = state["inputs"]

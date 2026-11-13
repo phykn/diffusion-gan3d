@@ -5,18 +5,17 @@ from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import torch
 from matplotlib.colors import ListedColormap
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.axes import PLANES  # noqa: E402
 from src.config.io import PROJECT_ROOT, load_generation_settings  # noqa: E402
 from src.console import path_field  # noqa: E402
 from src.device import default_device  # noqa: E402
 from src.export import resolve_export  # noqa: E402
-from src.plane import PLANES  # noqa: E402
 from src.storage import save_volume  # noqa: E402
 
 DIFF_CMAP = ListedColormap(("#f7f7f7", "#e63946"))
@@ -25,28 +24,28 @@ DIFF_CMAP = ListedColormap(("#f7f7f7", "#e63946"))
 # Flags -------------------------------------------------------------------
 
 
-def non_negative_float(value: str) -> float:
+def non_negative_float(value):
     parsed = float(value)
     if not 0.0 <= parsed < float("inf"):
         raise argparse.ArgumentTypeError("value must be finite and non-negative")
     return parsed
 
 
-def positive_int(value: str) -> int:
+def positive_int(value):
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be positive")
     return parsed
 
 
-def non_negative_int(value: str) -> int:
+def non_negative_int(value):
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("value must be non-negative")
     return parsed
 
 
-def add_device_argument(parser) -> None:
+def add_device_argument(parser):
     parser.add_argument(
         "--device",
         choices=("cpu", "cuda", "mps"),
@@ -55,13 +54,13 @@ def add_device_argument(parser) -> None:
     )
 
 
-def add_seed_argument(parser) -> None:
+def add_seed_argument(parser):
     parser.add_argument(
         "--seed", type=int, default=0, help="Reproducible seed (default: 0)."
     )
 
 
-def add_out_argument(parser) -> None:
+def add_out_argument(parser):
     parser.add_argument(
         "--out",
         type=Path,
@@ -69,7 +68,7 @@ def add_out_argument(parser) -> None:
     )
 
 
-def add_view_arguments(parser) -> None:
+def add_view_arguments(parser):
     parser.add_argument(
         "--napari", action="store_true", help="Show the 3D phase volume in Napari."
     )
@@ -78,7 +77,7 @@ def add_view_arguments(parser) -> None:
     )
 
 
-def add_height_arguments(parser, origin_default: float | None = 0.0) -> None:
+def add_height_arguments(parser, origin_default=0.0):
     text = "Output z origin in source pixels"
     if origin_default is None:
         text += "; real xz/yz crops infer it when omitted."
@@ -92,9 +91,7 @@ def add_height_arguments(parser, origin_default: float | None = 0.0) -> None:
     )
 
 
-def add_generation_arguments(
-    parser, *, anchors: bool = False, origin_default: float | None = 0.0
-) -> None:
+def add_generation_arguments(parser, *, anchors=False, origin_default=0.0):
     """Flags shared by the LR checks; unset guidance comes from config/gen.yaml."""
     parser.add_argument(
         "--weight",
@@ -121,8 +118,7 @@ def add_generation_arguments(
     add_height_arguments(parser, origin_default)
 
 
-def generation_options(args) -> dict:
-    """generate() options from the shared flags."""
+def generation_options(args):
     options = {"guidance": args.guidance}
     origin, extent = args.height_origin, args.height_extent
     if origin not in (None, 0) or extent is not None:
@@ -134,25 +130,19 @@ def generation_options(args) -> dict:
 # Results -----------------------------------------------------------------
 
 
-def result_directory(script: str) -> Path:
-    name = datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_" + Path(script).stem
-    return PROJECT_ROOT / "checks" / name
-
-
-def prepare_output(args, script: str) -> Path:
-    """The results folder: --out, or a new folder under checks/."""
+def prepare_output(args, script):
     if getattr(args, "no_view", False):
         plt.switch_backend("Agg")
-    out = result_directory(script) if args.out is None else args.out
-    args.out = out.expanduser().resolve()
+    if args.out is None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        args.out = PROJECT_ROOT / "checks" / f"{stamp}_{Path(script).stem}"
+    args.out = args.out.expanduser().resolve()
     args.out.mkdir(parents=True, exist_ok=True)
     path_field("Results", args.out)
     return args.out
 
 
-def prepare_check(args, script: str):
-    """Results folder, the export path and the unset generation options;
-    returns the config/gen.yaml settings."""
+def prepare_check(args, script):
     prepare_output(args, script)
     args.weight = resolve_export(args.weight).resolve()
     path_field("Weights", args.weight)
@@ -164,14 +154,15 @@ def prepare_check(args, script: str):
     return settings
 
 
-def write_json(path: Path, data) -> Path:
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+def write_json(path, data):
+    with path.open("w", encoding="utf-8") as stream:
+        json.dump(data, stream, indent=2)
+        stream.write("\n")
     return path
 
 
-def save_results(volume: torch.Tensor, args, num_phases: int, name="volume") -> None:
-    """name.tiff, a middle-slice name.png and the options as name.json."""
-    path = args.out / f"{name}.tiff"
+def save_results(volume, args, num_phases):
+    path = args.out / "volume.tiff"
     save_volume(volume, path)
     path_field("Volume", path)
     fig = slice_figure(volume, num_phases)
@@ -186,7 +177,7 @@ def save_results(volume: torch.Tensor, args, num_phases: int, name="volume") -> 
     path_field("Preview", path.with_suffix(".png"))
 
 
-def format_phases(values) -> str:
+def format_phases(values):
     return "  ".join(
         f"phase {phase}: {float(value):.2%}" for phase, value in enumerate(values)
     )
@@ -195,13 +186,13 @@ def format_phases(values) -> str:
 # Figures -----------------------------------------------------------------
 
 
-def middle_slices(volume: torch.Tensor) -> tuple[torch.Tensor, ...]:
+def middle_slices(volume):
     """Center xy, xz and yz sections."""
     middle = tuple(size // 2 for size in volume.shape)
     return volume[middle[0]], volume[:, middle[1]], volume[:, :, middle[2]]
 
 
-def show_labels(panel, image: torch.Tensor, num_phases: int, title: str) -> None:
+def show_labels(panel, image, num_phases, title):
     panel.imshow(
         image.numpy(),
         cmap="gray",
@@ -213,7 +204,7 @@ def show_labels(panel, image: torch.Tensor, num_phases: int, title: str) -> None
     panel.axis("off")
 
 
-def show_difference(panel, mask: torch.Tensor, title: str, **options) -> None:
+def show_difference(panel, mask, title, **options):
     panel.imshow(
         mask.numpy(), cmap=DIFF_CMAP, vmin=0, vmax=1, interpolation="nearest", **options
     )
@@ -221,7 +212,7 @@ def show_difference(panel, mask: torch.Tensor, title: str, **options) -> None:
     panel.axis("off")
 
 
-def slice_figure(volume: torch.Tensor, num_phases: int):
+def slice_figure(volume, num_phases):
     fig, panels = plt.subplots(1, 3, figsize=(10, 4))
     for panel, plane, image in zip(panels, PLANES, middle_slices(volume), strict=True):
         show_labels(panel, image, num_phases, plane)
@@ -229,14 +220,14 @@ def slice_figure(volume: torch.Tensor, num_phases: int):
     return fig
 
 
-def show_slices(volume: torch.Tensor, num_phases: int, title: str) -> None:
+def show_slices(volume, num_phases, title):
     fig = slice_figure(volume, num_phases)
     fig.suptitle(title)
     fig.tight_layout()
     plt.show()
 
 
-def show_napari(volume: torch.Tensor, name: str = "Generated output") -> None:
+def show_napari(volume, name="Generated output"):
     import napari
 
     viewer = napari.Viewer()
@@ -245,7 +236,7 @@ def show_napari(volume: torch.Tensor, name: str = "Generated output") -> None:
     napari.run()
 
 
-def show(volume: torch.Tensor, args, num_phases: int, title: str) -> None:
+def show(volume, args, num_phases, title):
     """The viewer the flags ask for; nothing with --no-view."""
     if args.no_view:
         return

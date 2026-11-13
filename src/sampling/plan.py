@@ -16,7 +16,7 @@ class Tile:
     margins: tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
 
     @property
-    def shape(self) -> tuple[int, int, int]:
+    def shape(self):
         return tuple(region.stop - region.start for region in self.source)
 
 
@@ -37,11 +37,11 @@ class TilePlan:
     seams: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
 
     @property
-    def tile_count(self) -> int:
+    def tile_count(self):
         return math.prod(self.grid)
 
     @cached_property
-    def tiles(self) -> tuple[Tile, ...]:
+    def tiles(self):
         """Tiles in z, y, x order; built on first use, so counting and
         estimating a huge request stay cheap."""
         tiles = []
@@ -69,10 +69,10 @@ class TilePlan:
         return tuple(tiles)
 
     @property
-    def grid(self) -> tuple[int, int, int]:
+    def grid(self):
         return tuple(len(axis) for axis in self.starts)
 
-    def output_seams(self) -> tuple[tuple[int, ...], ...]:
+    def output_seams(self):
         """Tile seams in output coordinates (inside the output only)."""
         return tuple(
             tuple(
@@ -84,12 +84,12 @@ class TilePlan:
         )
 
 
-def sr_margin(scale: int) -> int:
+def sr_margin(scale):
     """Default SR margin: 8 HR voxels, rounded up to whole LR cells."""
     return math.lcm(8, scale)
 
 
-def parse_shape(value: int | Sequence[int], name: str = "shape") -> tuple[int, ...]:
+def parse_shape(value, name="shape"):
     if isinstance(value, int) and not isinstance(value, bool):
         shape = (value, value, value)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
@@ -104,18 +104,18 @@ def parse_shape(value: int | Sequence[int], name: str = "shape") -> tuple[int, .
     return shape
 
 
-def check_non_negative(value, name: str) -> int:
+def check_non_negative(value, name):
     if type(value) is not int or value < 0:
         raise ValueError(f"{name} must be a non-negative integer.")
     return value
 
 
 def make_plan(
-    output_shape: Sequence[int],
-    patch: int | Sequence[int],
-    margin: int,
-    overlap: int,
-) -> TilePlan:
+    output_shape,
+    patch,
+    margin,
+    overlap,
+):
     output_shape = parse_shape(output_shape, "output shape")
     patch = parse_shape(patch, "patch")
     check_non_negative(margin, "margin")
@@ -144,18 +144,14 @@ def make_plan(
     )
 
 
-def _axis_starts(size: int, edge: int, stride: int) -> tuple[int, ...]:
+def _axis_starts(size, edge, stride):
     if size == edge:
         return (0,)
-    count = math.ceil((size - edge) / stride) + 1
-    starts = [index * stride for index in range(count - 1)]
-    starts.append(size - edge)
-    return tuple(starts)
+    last = size - edge
+    return (*range(0, last, stride), last)
 
 
-def axis_window(
-    length: int, overlap: int, left: int, right: int, device=None
-) -> torch.Tensor:
+def axis_window(length, overlap, left, right, device=None):
     """1 inside a tile, a sin^2 ramp over `overlap` voxels on each seam side."""
     axis = torch.ones(length, device=device, dtype=torch.float32)
     if not overlap:
@@ -169,7 +165,7 @@ def axis_window(
     return axis
 
 
-def tile_window(tile: Tile, overlap: int, device=None) -> torch.Tensor:
+def tile_window(tile, overlap, device=None):
     axes = [
         axis_window(length, overlap, left, right, device)
         for length, (left, right) in zip(tile.shape, tile.margins, strict=True)

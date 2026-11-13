@@ -1,16 +1,10 @@
 """HTTP API on the tiny SR run."""
 
 import dataclasses
-import errno
-import tempfile
-from io import BytesIO
 from pathlib import Path
 
-import anyio
 import pytest
-import tifffile
 import torch
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.backend.src import app as server_module
@@ -18,14 +12,13 @@ from app.backend.src import response as response_module
 from app.backend.src.app import create_app
 from app.backend.src.config import load_server_config
 from app.backend.src.pipeline import HighResolutionPipeline
-from app.backend.src.schema import GenerateRequest
 
 CONFIG = load_server_config(
     Path(__file__).resolve().parents[1] / "fixtures/config/backend.yaml"
 )
 
 
-SIZE_OPTIONS = ("blocks", "shape", "size", "overlap", "anchors", "guidance")
+SIZE_OPTIONS = ("blocks", "shape", "anchors")
 
 
 class Recorder:
@@ -35,7 +28,7 @@ class Recorder:
     check the HTTP layer, not the volume.
     """
 
-    def __init__(self, pipeline: HighResolutionPipeline, real: bool = False) -> None:
+    def __init__(self, pipeline, real=False):
         self.pipeline = pipeline
         self.real = real
         self.calls: list[dict] = []
@@ -43,7 +36,7 @@ class Recorder:
     def __getattr__(self, name):
         return getattr(self.pipeline, name)
 
-    def generate(self, **kwargs) -> torch.Tensor:
+    def generate(self, **kwargs):
         self.calls.append(kwargs)
         if self.real:
             return self.pipeline.generate(**kwargs)
@@ -52,7 +45,7 @@ class Recorder:
         return torch.zeros(shape, dtype=torch.uint8)
 
 
-def tiny_pipeline(run: Path) -> HighResolutionPipeline:
+def tiny_pipeline(run):
     pipeline = HighResolutionPipeline(run, device="cpu")
     # config/gen.yaml's overlap 8 cannot tile the tiny 16-voxel LR patch.
     pipeline.lr.settings = dataclasses.replace(pipeline.lr.settings, overlap=4)
@@ -60,17 +53,17 @@ def tiny_pipeline(run: Path) -> HighResolutionPipeline:
 
 
 @pytest.fixture(scope="session")
-def pipeline(tiny_sr_run) -> HighResolutionPipeline:
+def pipeline(tiny_sr_run):
     return tiny_pipeline(tiny_sr_run)
 
 
 @pytest.fixture
-def service(pipeline) -> Recorder:
+def service(pipeline):
     return Recorder(pipeline)
 
 
 @pytest.fixture
-def client(service, tmp_path, monkeypatch) -> TestClient:
+def client(service, tmp_path, monkeypatch):
     front = tmp_path / "dist"
     assets = front / "assets"
     assets.mkdir(parents=True)
@@ -82,16 +75,6 @@ def client(service, tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setattr(server_module, "FRONTEND_DIR", front)
     monkeypatch.setattr(response_module, "pore_tortuosity", lambda _volume, device: 1.5)
     return TestClient(create_app(inference=service, config=CONFIG))
-
-
-@pytest.fixture
-def tiff_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setattr(
-        response_module,
-        "NamedTemporaryFile",
-        lambda **kwargs: tempfile.NamedTemporaryFile(dir=tmp_path, **kwargs),
-    )
-    return tmp_path
 
 
 def test_health_reports_the_loaded_model(client, pipeline):
@@ -122,57 +105,40 @@ def test_frontend_is_served_by_the_api_process(client):
     assert "/assets/" in page.text
 
 
-def test_generate_returns_a_tiff_volume(client, service):
+def test_generate_returns_raw_labels_and_metadata(client, service):
     response = client.post("/api/generate", json={"seed": 3, "tortuosity": True})
     assert response.status_code == 200
-    assert response.headers["content-type"] == "image/tiff"
+    assert response.headers["content-type"] == "application/octet-stream"
     assert response.headers["x-volume-shape"] == "32,32,32"
     assert response.headers["x-tortuosity"] == "1.5"
-    volume = tifffile.imread(BytesIO(response.content))
-    assert volume.shape == (32, 32, 32) and volume.dtype.name == "uint8"
+    assert len(response.content) == 32**3
     assert service.calls[0]["seed"] == 3
     assert service.calls[0]["anchors"] == ()
 
 
 def test_the_same_seed_gives_the_same_volume(client, service):
     service.real = True
-    first = client.post("/api/generate", json={"seed": 5, "format": "raw"})
-    second = client.post("/api/generate", json={"seed": 5, "format": "raw"})
+    first = client.post("/api/generate", json={"seed": 5})
+    second = client.post("/api/generate", json={"seed": 5})
     assert first.content == second.content
 
 
-def test_generate_forwards_a_profile_and_height(tiny_anode_sr_run):
+def test_generate_forwards_height(tiny_anode_sr_run):
     service = Recorder(tiny_pipeline(tiny_anode_sr_run), real=True)
     client = TestClient(create_app(inference=service, config=CONFIG))
-    spec = {
-        "axis": "z",
-        "points": [[0, [0.2, 0.3, 0.5]], [1, [0.6, 0.2, 0.2]]],
-        "interpolation": "linear",
-    }
     response = client.post(
-        "/api/generate",
-        json={"vf_profile": spec, "height_origin": 16, "format": "raw"},
+        "/api/generate", json={"height_origin": 16, "height_extent": 64}
     )
     assert response.status_code == 200
-    assert service.calls[0]["vf_profile"] == {
-        "axis": "z",
-        "points": [(0.0, [0.2, 0.3, 0.5]), (1.0, [0.6, 0.2, 0.2])],
-        "interpolation": "linear",
-    }
+    assert service.calls[0]["height_origin"] == 16
+    assert service.calls[0]["height_extent"] == 64
     response = client.post("/api/generate", json={"height_origin": 48})
     assert response.status_code == 422
     assert "outside the source image height" in response.json()["detail"]
 
 
-def test_generate_can_return_raw_labels(client):
-    response = client.post("/api/generate", json={"format": "raw"})
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "application/octet-stream"
-    assert len(response.content) == 32**3
-
-
 def test_raw_blocks_match_the_volume_shape_header(client):
-    response = client.post("/api/generate", json={"blocks": [1, 2, 2], "format": "raw"})
+    response = client.post("/api/generate", json={"blocks": [1, 2, 2]})
     assert response.status_code == 200
     shape = tuple(map(int, response.headers["x-volume-shape"].split(",")))
     # Two LR blocks of 16 sharing 2 * 4 voxels: 24, then x2.
@@ -187,7 +153,7 @@ def test_generate_rejects_an_invalid_seed_before_inference(client, service, seed
 
 
 def test_generate_accepts_the_largest_torch_seed(client, service):
-    response = client.post("/api/generate", json={"seed": 2**64 - 1, "format": "raw"})
+    response = client.post("/api/generate", json={"seed": 2**64 - 1})
     assert response.status_code == 200
     assert service.calls[0]["seed"] == 2**64 - 1
 
@@ -201,10 +167,10 @@ def test_tortuosity_is_opt_in_and_stays_under_the_generation_lock(client, monkey
         return None
 
     monkeypatch.setattr(response_module, "pore_tortuosity", measure)
-    response = client.post("/api/generate", json={"format": "raw"})
+    response = client.post("/api/generate", json={})
     assert response.status_code == 200 and not calls
     assert "x-tortuosity" not in response.headers
-    response = client.post("/api/generate", json={"format": "raw", "tortuosity": True})
+    response = client.post("/api/generate", json={"tortuosity": True})
     assert len(calls) == 1 and response.headers["x-tortuosity"] == "unavailable"
     assert not client.app.state.generate_lock.locked()
 
@@ -213,47 +179,14 @@ def test_a_busy_request_is_rejected_without_waiting(client, service):
     lock = client.app.state.generate_lock
     lock.acquire()
     try:
-        response = client.post("/api/generate", json={"format": "raw"})
+        response = client.post("/api/generate", json={})
         assert response.status_code == 503
         assert response.headers["retry-after"] == "1"
         assert lock.locked()
         assert not service.calls
     finally:
         lock.release()
-    assert client.post("/api/generate", json={"format": "raw"}).status_code == 200
-
-
-@pytest.mark.parametrize(
-    ("failure", "status"),
-    [
-        (MemoryError("serialize allocation"), 413),
-        (OSError(errno.ENOSPC, "disk full"), 507),
-        (OSError(errno.EACCES, "cannot write"), 500),
-        (ValueError("encoder rejected the volume"), 500),
-    ],
-)
-def test_response_preparation_errors_clean_up_and_release_the_lock(
-    client, monkeypatch, tiff_dir, failure, status
-):
-    original = response_module.tifffile.imwrite
-
-    def fail(*args, **kwargs):
-        raise failure
-
-    monkeypatch.setattr(response_module.tifffile, "imwrite", fail)
-    response = client.post("/api/generate", json={})
-    assert response.status_code == status
-    assert not list(tiff_dir.glob("*.tiff"))
-    assert not client.app.state.generate_lock.locked()
-    monkeypatch.setattr(response_module.tifffile, "imwrite", original)
     assert client.post("/api/generate", json={}).status_code == 200
-
-
-def test_tiff_response_removes_its_temporary_file(client, tiff_dir):
-    response = client.post("/api/generate", json={})
-    assert response.status_code == 200
-    assert tifffile.imread(BytesIO(response.content)).shape == (32, 32, 32)
-    assert not list(tiff_dir.glob("*.tiff"))
 
 
 def test_a_centered_anchor_and_blocks_reach_the_generator(client, service):
@@ -264,8 +197,6 @@ def test_a_centered_anchor_and_blocks_reach_the_generator(client, service):
                 {"image": [[0, 1], [1, 0]], "axis": 0, "index": 0, "position": None}
             ],
             "blocks": [2, 2, 2],
-            "anchor_strength": 0.8,
-            "format": "raw",
         },
     )
     assert response.status_code == 200
@@ -275,7 +206,6 @@ def test_a_centered_anchor_and_blocks_reach_the_generator(client, service):
     anchor = call["anchors"][0]
     assert (anchor.axis, anchor.index, anchor.position) == (0, 0, None)
     assert anchor.image.tolist() == [[0, 1], [1, 0]]
-    assert call["anchor_strength"] == 0.8
 
 
 def test_a_prepared_crop_anchors_the_first_section(client, service, pipeline):
@@ -290,7 +220,6 @@ def test_a_prepared_crop_anchors_the_first_section(client, service, pipeline):
         json={
             "anchors": [{"image": fractions, "axis": 0, "index": 0}],
             "blocks": [1, 2, 2],
-            "format": "raw",
         },
     )
     assert response.status_code == 200
@@ -313,7 +242,7 @@ def test_generate_rejects_a_non_rectangular_anchor(client):
 def test_generate_reports_inference_validation(client):
     response = client.post("/api/generate", json={"blocks": 2, "shape": 16})
     assert response.status_code == 422
-    assert "only one of blocks, shape and size" in response.json()["detail"]
+    assert "only one of blocks and shape" in response.json()["detail"]
 
 
 def test_generate_reports_a_memory_error(client, service, monkeypatch):
@@ -363,23 +292,11 @@ def test_cpu_cuda_and_apple_gpu_oom_return_413(client, service, monkeypatch, exc
         {"blocks": [64, 64, 64]},
         {"shape": [-1, 32, 32]},
         {"shape": True},
-        {"anchors": [{"image": [[0]], "axis": 0, "index": 0}] * 33},
+        {"anchors": [{"image": [[0]], "axis": 0, "index": 0}] * 2},
         {"anchors": [{"image": [[0] * 1025], "axis": 0, "index": 0}]},
-        {"vf_profile": {"axis": "z", "interpolation": "linear", "points": [[0, [1]]]}},
-        {
-            "vf_profile": {
-                "axis": "z",
-                "interpolation": "linear",
-                "points": [[i / 256, [1.0]] for i in range(257)],
-            }
-        },
-        {
-            "vf_profile": {
-                "axis": "x",
-                "interpolation": "linear",
-                "points": [[0, [1]], [1, [1]]],
-            }
-        },
+        {"vf_profile": {}},
+        {"format": "tiff"},
+        {"guidance": 2.0},
     ],
 )
 def test_request_limits_reject_before_inference(client, service, payload):
@@ -390,15 +307,6 @@ def test_request_limits_reject_before_inference(client, service, payload):
 def test_resolved_blocks_are_bounded_before_inference(client, service):
     # 64 LR blocks along z make 2 * (16 + 63 * 8) = 1040 HR voxels.
     assert client.post("/api/generate", json={"blocks": [64, 1, 1]}).status_code == 422
-    assert not service.calls
-
-
-def test_a_large_overlap_cannot_expand_a_request_into_millions_of_tiles(
-    client, service
-):
-    response = client.post("/api/generate", json={"shape": 256, "overlap": 15})
-    assert response.status_code == 422
-    assert "LR tiles exceed" in response.json()["detail"]
     assert not service.calls
 
 
@@ -413,103 +321,21 @@ def test_memory_preflight_rejects_before_inference(client, service, monkeypatch)
     assert not service.calls
 
 
-def test_preflight_counts_anchors_and_guidance(client, service, monkeypatch):
+def test_preflight_counts_anchors(client, service, monkeypatch):
     seen = []
     monkeypatch.setattr(
         service, "check_memory", lambda estimate, **_: seen.append(estimate)
     )
     anchor = {"image": [[0, 1], [1, 0]], "axis": 0, "index": 0}
-    client.post("/api/generate", json={"guidance": 1.0, "format": "raw"})
+    client.post("/api/generate", json={})
     client.post(
         "/api/generate",
-        json={"guidance": 2.0, "anchors": [anchor], "format": "raw"},
+        json={"anchors": [anchor]},
     )
     plain, guided = (estimate.low for estimate in seen)
     assert (
         guided.host_bytes + guided.device_bytes > plain.host_bytes + plain.device_bytes
     )
-
-
-def test_an_oversized_body_is_rejected_before_json_decoding(service):
-    config = CONFIG.model_copy(update={"max_request_bytes": 32})
-    client = TestClient(create_app(inference=service, config=config))
-    assert client.post("/api/generate", content=b" " * 33).status_code == 413
-    assert not service.calls
-
-
-@pytest.mark.parametrize("format", ["raw", "tiff"])
-def test_slow_downloads_bound_retained_results_without_holding_generation(
-    service, format
-):
-    app = create_app(inference=service, config=CONFIG)
-    generate = next(
-        route.endpoint for route in app.routes if route.path == "/api/generate"
-    )
-    scope = {"type": "http", "method": "POST", "headers": []}
-
-    async def exercise():
-        first_body = anyio.Event()
-        finish_first = anyio.Event()
-        first_done = anyio.Event()
-
-        async def receive():
-            await anyio.sleep_forever()
-
-        async def slow_send(message):
-            if message["type"] == "http.response.body":
-                first_body.set()
-                await finish_first.wait()
-
-        async def send(message):
-            pass
-
-        first = generate(GenerateRequest(format=format))
-
-        async def download_first():
-            await first(scope, receive, slow_send)
-            first_done.set()
-
-        async with anyio.create_task_group() as group:
-            group.start_soon(download_first)
-            with anyio.fail_after(60):
-                await first_body.wait()
-                assert not app.state.generate_lock.locked()
-                second = generate(GenerateRequest(format=format))
-                assert len(service.calls) == 2
-                with pytest.raises(HTTPException) as error:
-                    generate(GenerateRequest(format=format))
-                assert error.value.status_code == 503
-                assert error.value.headers["Retry-After"] == "1"
-                assert len(service.calls) == 2
-                finish_first.set()
-                await first_done.wait()
-                third = generate(GenerateRequest(format=format))
-                await second(scope, receive, send)
-                await third(scope, receive, send)
-        assert not app.state.generate_lock.locked()
-        assert app.state.download_slots.acquire(blocking=False)
-        assert app.state.download_slots.acquire(blocking=False)
-        assert not app.state.download_slots.acquire(blocking=False)
-
-    anyio.run(exercise)
-
-
-@pytest.mark.parametrize(
-    "failure", [MemoryError("oom"), ValueError("bad input"), OSError("disk")]
-)
-def test_failed_generation_returns_the_download_slot(service, monkeypatch, failure):
-    cfg = CONFIG.model_copy(update={"max_inflight_downloads": 1})
-    app = create_app(inference=service, config=cfg)
-    client = TestClient(app)
-
-    def fail(**kwargs):
-        raise failure
-
-    monkeypatch.setattr(service, "generate", fail)
-    for _ in range(3):
-        assert client.post("/api/generate", json={}).status_code in (413, 422, 500)
-    assert app.state.download_slots.acquire(blocking=False)
-    assert not app.state.download_slots.acquire(blocking=False)
 
 
 @pytest.mark.parametrize(
@@ -519,10 +345,6 @@ def test_failed_generation_returns_the_download_slot(service, monkeypatch, failu
         ({"max_voxels": 63}, {}),
         ({"max_blocks": 1}, {"blocks": [2, 1, 1]}),
         ({"max_tiles": 1}, {"blocks": [3, 1, 1]}),
-        (
-            {"max_anchors": 1},
-            {"anchors": [{"image": [[0]], "axis": 0, "index": 0}] * 2},
-        ),
     ],
 )
 def test_configured_limits_reject_before_generation(service, settings, payload):
@@ -568,14 +390,3 @@ def test_prepare_uses_the_configured_image_limit(service):
         response = client.post("/api/prepare", json={"image": [[0, 1, 0]]})
     assert response.status_code == 422
     assert "image dimensions" in response.json()["detail"]
-
-
-def test_apps_keep_independent_download_limits(service):
-    cfg = CONFIG.model_copy(update={"max_inflight_downloads": 1})
-    first = create_app(inference=service, config=cfg)
-    second = create_app(inference=service, config=CONFIG)
-    assert first.state.download_slots.acquire(blocking=False)
-    assert not first.state.download_slots.acquire(blocking=False)
-    assert second.state.download_slots.acquire(blocking=False)
-    assert second.state.download_slots.acquire(blocking=False)
-    assert not second.state.download_slots.acquire(blocking=False)

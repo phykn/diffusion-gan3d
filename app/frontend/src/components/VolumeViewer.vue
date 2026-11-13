@@ -18,42 +18,18 @@ const props = defineProps({
   numPhases: { type: Number, default: 2 },
 })
 const host = ref(null)
-const defaultPhaseColors = ['#25282a', '#d98266', '#5f8d8a', '#d6a84f', '#8c6bb1', '#77945a']
-const phaseVisibility = ref([])
-const phaseColors = ref([])
+const palette = ['#25282a', '#d98266', '#5f8d8a', '#d6a84f', '#8c6bb1', '#77945a']
+const phases = ref([])
 const clipDepth = ref(0)
 const clipDepthMax = computed(() => Math.max(0, (props.shape?.[0] ?? 1) - 1))
-let view
-let renderer
-let renderWindow
-let actor
-let mapper
-let imageData
-let clippingPlane
-let colorTransfer
-let opacityTransfer
-let resizeObserver
+let scene
 
-function ensurePhaseState() {
-  const count = Math.max(1, Math.floor(Number(props.numPhases) || 2))
-  phaseVisibility.value = Array.from(
-    { length: count }, (_, index) => phaseVisibility.value[index] ?? true,
-  )
-  phaseColors.value = Array.from(
-    { length: count },
-    (_, index) => phaseColors.value[index] ?? defaultPhaseColors[index % defaultPhaseColors.length],
-  )
-}
-
-function initialize() {
-  view = vtkGenericRenderWindow.newInstance({
+function createScene(container) {
+  const view = vtkGenericRenderWindow.newInstance({
     background: [.973, .965, .941],
     listenWindowResize: false,
   })
-  view.setContainer(host.value)
-  renderer = view.getRenderer()
-  renderWindow = view.getRenderWindow()
-  mapper = vtkVolumeMapper.newInstance({
+  const mapper = vtkVolumeMapper.newInstance({
     sampleDistance: .45,
     imageSampleDistance: .7,
     autoAdjustSampleDistances: false,
@@ -61,136 +37,105 @@ function initialize() {
     initialInteractionScale: 1,
     interactionSampleDistanceFactor: 1,
   })
-  // Keep z >= depth so the cut face points toward both camera presets on -z.
-  clippingPlane = vtkPlane.newInstance({ normal: [0, 0, 1], origin: [0, 0, 0] })
-  mapper.addClippingPlane(clippingPlane)
-  actor = vtkVolume.newInstance()
+  // Keep the exposed cut face toward both camera positions on the negative z side.
+  const clip = vtkPlane.newInstance({ normal: [0, 0, 1], origin: [0, 0, 0] })
+  const color = vtkColorTransferFunction.newInstance()
+  const opacity = vtkPiecewiseFunction.newInstance()
+  const actor = vtkVolume.newInstance()
+  mapper.addClippingPlane(clip)
   actor.setMapper(mapper)
-  configureAppearance()
-  renderer.addVolume(actor)
-  resizeObserver = new ResizeObserver(() => view.resize())
-  resizeObserver.observe(host.value)
-  view.resize()
-}
-
-function configureAppearance() {
-  ensurePhaseState()
-  colorTransfer ??= vtkColorTransferFunction.newInstance()
-  colorTransfer.removeAllPoints()
-  opacityTransfer ??= vtkPiecewiseFunction.newInstance()
-  opacityTransfer.removeAllPoints()
-  const lastPhase = phaseColors.value.length - 1
-  for (let phase = 0; phase <= lastPhase; phase += 1) {
-    const start = phase === 0 ? 0 : phase - .35
-    const end = phase === lastPhase ? lastPhase : phase + .35
-    const color = hexToRgb(phaseColors.value[phase])
-    const opacity = phaseVisibility.value[phase] ? 1 : 0
-    colorTransfer.addRGBPoint(start, ...color)
-    colorTransfer.addRGBPoint(end, ...color)
-    opacityTransfer.addPoint(start, opacity)
-    opacityTransfer.addPoint(end, opacity)
-  }
-
+  actor.setVisibility(false)
   const property = actor.getProperty()
-  property.setRGBTransferFunction(0, colorTransfer)
-  property.setScalarOpacity(0, opacityTransfer)
+  property.setRGBTransferFunction(0, color)
+  property.setScalarOpacity(0, opacity)
   property.setScalarOpacityUnitDistance(0, .85)
   property.setInterpolationTypeToNearest()
   property.setShade(true)
   property.setAmbient(.72)
   property.setDiffuse(.36)
   property.setSpecular(0)
+
+  view.setContainer(container)
+  const renderer = view.getRenderer()
+  renderer.addVolume(actor)
+  const resize = new ResizeObserver(() => view.resize())
+  resize.observe(container)
+  view.resize()
+  return { view, mapper, clip, color, opacity, actor, renderer, resize, data: null }
 }
 
-function hexToRgb(hex) {
-  const value = Number.parseInt(hex.slice(1), 16)
-  return [(value >> 16) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255]
+function render() {
+  scene.view.getRenderWindow().render()
 }
 
-function updateAppearance() {
-  configureAppearance()
-  renderWindow?.render()
+function syncPhases() {
+  const count = Math.max(1, Math.floor(Number(props.numPhases) || 2))
+  phases.value = Array.from({ length: count }, (_, i) => phases.value[i] ?? {
+    color: palette[i % palette.length], visible: true,
+  })
+  if (scene) paintPhases()
+}
+
+function paintPhases() {
+  const { color, opacity } = scene
+  color.removeAllPoints()
+  opacity.removeAllPoints()
+  const last = phases.value.length - 1
+  phases.value.forEach((phase, i) => {
+    const rgb = [1, 3, 5].map(offset => parseInt(phase.color.slice(offset, offset + 2), 16) / 255)
+    for (const label of [i === 0 ? 0 : i - .35, i === last ? i : i + .35]) {
+      color.addRGBPoint(label, ...rgb)
+      opacity.addPoint(label, Number(phase.visible))
+    }
+  })
+  render()
 }
 
 function setVolume(values, shape) {
-  imageData = replaceVolumeData(mapper, imageData, values, shape)
-  if (!values || !shape) {
-    actor?.setVisibility(false)
-    renderWindow?.render()
-    return
-  }
-  actor.setVisibility(true)
-  resetClipDepth()
-  setCamera(false)
+  if (!scene) return
+  scene.data = replaceVolumeData(scene.mapper, scene.data, values, shape)
+  scene.actor.setVisibility(Boolean(scene.data))
+  if (scene.data) positionCamera(shape, false)
+  else render()
 }
 
-function updateClipDepth() {
-  clippingPlane?.setOrigin(0, 0, clipDepth.value)
-  mapper?.modified()
-  renderWindow?.render()
-}
-
-function resetClipDepth() {
-  clipDepth.value = 0
-  updateClipDepth()
-}
-
-function setClipDepth(event) {
-  clipDepth.value = Number(event.target.value)
-  updateClipDepth()
-}
-
-function setCamera(front) {
-  if (!renderer || !props.shape) return
-  const [depth, height, width] = props.shape
-  const camera = renderer.getActiveCamera()
-  const center = [(width - 1) / 2, (height - 1) / 2, (depth - 1) / 2]
-  const extent = Math.max(width, height, depth)
+function positionCamera(shape, front) {
+  const [depth, height, width] = shape
+  const center = [width, height, depth].map(size => (size - 1) / 2)
+  const extent = Math.max(...shape)
+  const offsets = front ? [0, 0, -2.5] : [1.6, -1.05, -1.8]
+  const camera = scene.renderer.getActiveCamera()
   camera.setParallelProjection(true)
   camera.setFocalPoint(...center)
-  camera.setPosition(...(front
-    ? [center[0], center[1], -extent * 2.5]
-    : [center[0] + extent * 1.6, center[1] - extent * 1.05, center[2] - extent * 1.8]))
+  camera.setPosition(...center.map((value, axis) => value + offsets[axis] * extent))
   camera.setViewUp(0, -1, 0)
   camera.setParallelScale(extent * (front ? .56 : .72))
-  renderer.resetCameraClippingRange()
-  renderWindow.render()
+  scene.renderer.resetCameraClippingRange()
+  setClipDepth(0)
 }
 
-function resetView() {
-  resetClipDepth()
-  setCamera(true)
+function setClipDepth(depth) {
+  clipDepth.value = depth
+  scene.clip.setOrigin(0, 0, depth)
+  scene.mapper.modified()
+  render()
 }
 
-function togglePhase(phase) {
-  phaseVisibility.value = phaseVisibility.value.map(
-    (visible, index) => index === phase ? !visible : visible,
-  )
-  updateAppearance()
-}
-
-function setPhaseColor(phase, event) {
-  phaseColors.value = phaseColors.value.map(
-    (color, index) => index === phase ? event.target.value : color,
-  )
-  updateAppearance()
-}
-
-watch(() => props.values, values => setVolume(values, props.shape))
-watch(() => props.numPhases, updateAppearance)
+watch(() => props.numPhases, syncPhases, { immediate: true })
+watch([() => props.values, () => props.shape], ([values, shape]) => setVolume(values, shape))
 onMounted(() => {
-  initialize()
-  if (props.values) setVolume(props.values, props.shape)
+  scene = createScene(host.value)
+  paintPhases()
+  setVolume(props.values, props.shape)
 })
 onBeforeUnmount(() => {
-  resizeObserver?.disconnect()
-  imageData = replaceVolumeData(mapper, imageData, null, null)
-  mapper?.delete()
-  clippingPlane?.delete()
-  actor?.delete()
-  colorTransfer?.delete()
-  opacityTransfer?.delete()
-  view?.delete()
+  if (!scene) return
+  const { resize, renderer, actor, mapper, data, clip, color, opacity, view } = scene
+  resize.disconnect()
+  renderer.removeVolume(actor)
+  replaceVolumeData(mapper, data, null, null)
+  for (const object of [actor, mapper, clip, color, opacity, view]) object.delete()
+  scene = null
 })
 </script>
 
@@ -200,24 +145,24 @@ onBeforeUnmount(() => {
       <div><h2>3D Generated</h2></div>
       <div class="phase-toggles">
         <div
-          v-for="(color, phase) in phaseColors"
+          v-for="(entry, phase) in phases"
           :key="phase"
           class="phase-control"
-          :class="{ active: phaseVisibility[phase] }"
+          :class="{ active: entry.visible }"
         >
           <button
             type="button"
-            :aria-pressed="phaseVisibility[phase]"
-            @click="togglePhase(phase)"
+            :aria-pressed="entry.visible"
+            @click="entry.visible = !entry.visible; paintPhases()"
           >Phase {{ phase }}</button>
           <label :title="`Phase ${phase} color`">
             <input
-              :value="color"
+              :value="entry.color"
               type="color"
               :aria-label="`Phase ${phase} color`"
-              @input="setPhaseColor(phase, $event)"
+              @input="entry.color = $event.target.value; paintPhases()"
             >
-            <i :style="{ background: color }"></i>
+            <i :style="{ background: entry.color }"></i>
           </label>
         </div>
       </div>
@@ -241,11 +186,11 @@ onBeforeUnmount(() => {
           :max="clipDepthMax"
           step="1"
           :disabled="!values"
-          @input="setClipDepth"
+          @input="setClipDepth(Number($event.target.value))"
         >
         <output>{{ clipDepth }}</output>
       </label>
-      <button type="button" :disabled="!values" @click="resetView">Reset</button>
+      <button type="button" :disabled="!values" @click="positionCamera(shape, true)">Reset</button>
     </footer>
   </section>
 </template>

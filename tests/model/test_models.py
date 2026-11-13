@@ -10,7 +10,7 @@ from src.model.denoiser import ChannelNormSiLU3D, Denoiser3D, channel_norm_silu
 MPS = torch.backends.mps.is_available()
 
 
-def _denoiser(**kwargs) -> Denoiser3D:
+def _denoiser(**kwargs):
     options = dict(
         num_phases=3,
         base_channels=4,
@@ -21,7 +21,7 @@ def _denoiser(**kwargs) -> Denoiser3D:
     return Denoiser3D(**{**options, **kwargs})
 
 
-def _critic(**kwargs) -> PairCritic2D:
+def _critic(**kwargs):
     return PairCritic2D(num_phases=3, channels=(4, 8), embedding_channels=8, **kwargs)
 
 

@@ -4,7 +4,7 @@ Generate 3D microstructures from **2D label images**, without measured 3D traini
 Learn the appearance of real sections, guide generation with known planes,
 and build larger or higher-resolution volumes.
 
-[Install](#install) · [Run and inspect](scripts/README.md) · [Method & experiments](paper/README.md) · [Changes from v1](#changes-from-v1)
+[Install](#install) · [Run and inspect](scripts/README.md) · [Method & experiments](paper/README.md)
 
 | 2D training image and example crops | Generated HR volume (128³) |
 | :---: | :---: |
@@ -96,19 +96,13 @@ high = sr.refine(labels, seed=1, tile_size=128)  # (192, 128, 128) at the defaul
 
 Unset options come from [config/gen.yaml](config/gen.yaml).
 `anchors=[PlaneAnchor(labels, axis, index)]` steers generation toward a known section
-(`axis` 0, 1, 2 for `xy`, `xz`, `yz`). Set the output with one of `blocks`, `shape`, or
-`size`. `refine` uses one block unless `tile_size` is given (`sr.default_tiling()` gives the
+(`axis` 0, 1, 2 for `xy`, `xz`, `yz`). Set the output with `blocks` or `shape`.
+`refine` uses one block unless `tile_size` is given (`sr.default_tiling()` gives the
 training size). `generate_probs` and `refine_probs` return phase fractions;
 `estimate_memory` and `check_memory` check a request against free memory.
 
 Generated volumes are plausible samples, not measurements of an unknown 3D specimen.
 
-## Changes from v1
-
-v2 is a rebuild of v1 (tag `v1`) with the same methods and defaults. It reads no v1 run or
-export, so retrain, or check out `v1` to open an old run. Removed: several domains per
-model, `extend_hr` and the `base` generation options, `data.split`, and manual plane
-augmentation. Check scripts were renumbered (`02_generate.py`, `03_anchor.py`, `04_hr.py`,
-`05_tilt.py`), `--resume` needs `--run-dir`, and `size=n` means `shape=(n, n, n)`.
+Train new weights for v3 exports and checkpoints.
 
 [MIT License](LICENSE)

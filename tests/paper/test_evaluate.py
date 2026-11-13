@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from paper.scripts import evaluate_anode, evaluate_lr, evaluate_sr, make_figures
-from paper.scripts.common import cache_dir
+from paper.scripts.common import cache_dir, cached
 
 ROOT = Path(__file__).parents[2]
 ASSETS = ROOT / "paper" / "assets"
@@ -27,7 +27,7 @@ FIGURES = {
 }
 
 
-def key_paths(value, path=()) -> set[tuple[str, ...]]:
+def key_paths(value, path=()):
     """Every key path of nested results; list items share the path "[]"."""
     if isinstance(value, list):
         return set().union(set(), *(key_paths(item, (*path, "[]")) for item in value))
@@ -41,7 +41,7 @@ def key_paths(value, path=()) -> set[tuple[str, ...]]:
 
 
 @pytest.fixture(scope="module")
-def results(tiny_lr_run, tiny_sr_run, tiny_anode_sr_run, tmp_path_factory) -> Path:
+def results(tiny_lr_run, tiny_sr_run, tiny_anode_sr_run, tmp_path_factory):
     out = tmp_path_factory.mktemp("paper")
     common = ("--device", "cpu", "--smoke", "--out", str(out))
     evaluate_lr.main(["--run", str(tiny_lr_run), *common])
@@ -134,3 +134,13 @@ def test_a_full_evaluation_clears_the_smoke_marker(tmp_path):
     assert cache_dir(tmp_path, run, smoke=False) == cache
     with pytest.raises(SystemExit, match="holds full volumes"):
         cache_dir(tmp_path, run, smoke=True)
+
+
+def test_reuse_keeps_same_named_runs_separate(tmp_path):
+    first = tmp_path / "a" / "run-sr"
+    second = tmp_path / "b" / "run-sr"
+    first_cache = cache_dir(tmp_path, first, smoke=True) / "lr.pt"
+    second_cache = cache_dir(tmp_path, second, smoke=True) / "lr.pt"
+    assert cached(first_cache, True, lambda: [1]) == [1]
+    assert cached(second_cache, True, lambda: [2]) == [2]
+    assert cached(first_cache, True, lambda: [3]) == [1]

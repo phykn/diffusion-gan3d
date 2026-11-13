@@ -1,180 +1,156 @@
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { clampCrop, cropAnchor, readPngLabels } from '../image-labels.js'
 
-const props = defineProps({
-  file: File,
-  cropSize: Number,
-  disabled: Boolean,
-})
+const props = defineProps({ file: File, cropSize: Number, disabled: Boolean })
 const emit = defineEmits(['change', 'error', 'ready'])
 const canvas = ref(null)
-const state = reactive({ image: null, sourceLabels: null, crop: null, view: null, drag: null })
-let observer
-let loadVersion = 0
+const preview = shallowRef(null)
+let drag, view, observer
 
-function fitCanvas() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2)
-  const rect = canvas.value.getBoundingClientRect()
-  const width = Math.max(1, Math.round(rect.width * dpr))
-  const height = Math.max(1, Math.round(rect.height * dpr))
-  if (canvas.value.width !== width || canvas.value.height !== height) {
-    canvas.value.width = width
-    canvas.value.height = height
-  }
-  return { width, height, dpr }
-}
-
-function draw() {
-  if (!canvas.value) return
-  const { width, height, dpr } = fitCanvas()
-  const context = canvas.value.getContext('2d')
+function paint() {
+  const element = canvas.value
+  if (!element) return
+  const { width: cssWidth, height: cssHeight } = element.getBoundingClientRect()
+  const ratio = Math.min(window.devicePixelRatio || 1, 2)
+  const width = Math.max(1, Math.round(cssWidth * ratio))
+  const height = Math.max(1, Math.round(cssHeight * ratio))
+  if (element.width !== width) element.width = width
+  if (element.height !== height) element.height = height
+  const context = element.getContext('2d')
   context.clearRect(0, 0, width, height)
-  if (!state.image || !state.crop) return
-  const padding = 24 * dpr
-  const scale = Math.min(
-    (width - 2 * padding) / state.image.naturalWidth,
-    (height - 2 * padding) / state.image.naturalHeight,
-  )
-  const drawWidth = state.image.naturalWidth * scale
-  const drawHeight = state.image.naturalHeight * scale
-  const x = (width - drawWidth) / 2
-  const y = (height - drawHeight) / 2
-  state.view = { x, y, scale }
-  context.drawImage(state.image, x, y, drawWidth, drawHeight)
+  view = null
+  if (!preview.value || width <= 48 * ratio || height <= 48 * ratio) return
 
-  const cx = x + state.crop.x * scale
-  const cy = y + state.crop.y * scale
-  const size = props.cropSize * scale
-  context.fillStyle = 'rgb(20 20 19 / 48%)'
+  const { image, source, crop } = preview.value
+  const scale = Math.min((width - 48 * ratio) / source.width, (height - 48 * ratio) / source.height)
+  const imageWidth = source.width * scale
+  const imageHeight = source.height * scale
+  const x = (width - imageWidth) / 2
+  const y = (height - imageHeight) / 2
+  view = { x, y, scale }
+  context.drawImage(image, x, y, imageWidth, imageHeight)
+  const left = x + crop.x * scale
+  const top = y + crop.y * scale
+  const side = props.cropSize * scale
   context.beginPath()
-  context.rect(x, y, drawWidth, drawHeight)
-  context.rect(cx, cy, size, size)
+  context.rect(x, y, imageWidth, imageHeight)
+  context.rect(left, top, side, side)
+  context.fillStyle = 'rgb(20 20 19 / 48%)'
   context.fill('evenodd')
-  context.strokeStyle = getComputedStyle(canvas.value).getPropertyValue('--primary')
-  context.lineWidth = 2 * dpr
-  context.strokeRect(cx, cy, size, size)
+  context.strokeStyle = getComputedStyle(element).getPropertyValue('--primary')
+  context.lineWidth = 2 * ratio
+  context.strokeRect(left, top, side, side)
   context.fillStyle = '#fff'
-  context.font = `${11 * dpr}px system-ui`
-  context.fillText(`${props.cropSize} × ${props.cropSize}`, cx + 9 * dpr, cy + 18 * dpr)
+  context.font = `${11 * ratio}px system-ui`
+  context.fillText(`${props.cropSize} × ${props.cropSize}`, left + 9 * ratio, top + 18 * ratio)
 }
 
-function point(event) {
-  const rect = canvas.value.getBoundingClientRect()
+function imagePoint(event) {
+  const element = canvas.value
+  const box = element.getBoundingClientRect()
   return {
-    x: (event.offsetX * canvas.value.width / rect.width - state.view.x) / state.view.scale,
-    y: (event.offsetY * canvas.value.height / rect.height - state.view.y) / state.view.scale,
+    x: ((event.clientX - box.left) * element.width / box.width - view.x) / view.scale,
+    y: ((event.clientY - box.top) * element.height / box.height - view.y) / view.scale,
   }
 }
 
 function moveCrop(x, y) {
-  const next = clampCrop(state.sourceLabels, { x, y }, props.cropSize)
-  if (next.x === state.crop.x && next.y === state.crop.y) return
-  Object.assign(state.crop, next)
+  const { source, crop } = preview.value
+  const next = clampCrop(source, { x, y }, props.cropSize)
+  if (crop.x === next.x && crop.y === next.y) return
+  preview.value.crop = next
   emit('change')
+  paint()
 }
 
-function pointerDown(event) {
-  if (props.disabled || !state.crop) return
-  const next = point(event)
+function startDrag(event) {
+  if (props.disabled || !preview.value || !view || drag) return
+  const { x, y } = imagePoint(event)
+  const { crop } = preview.value
   const size = props.cropSize
-  const inside = next.x >= state.crop.x
-    && next.x <= state.crop.x + size
-    && next.y >= state.crop.y
-    && next.y <= state.crop.y + size
-  if (!inside) moveCrop(next.x - size / 2, next.y - size / 2)
-  state.drag = { x: next.x - state.crop.x, y: next.y - state.crop.y }
+  if (x < crop.x || x > crop.x + size || y < crop.y || y > crop.y + size) {
+    moveCrop(x - size / 2, y - size / 2)
+  }
+  const origin = preview.value.crop
+  drag = { id: event.pointerId, x: x - origin.x, y: y - origin.y }
   canvas.value.setPointerCapture(event.pointerId)
-  draw()
 }
 
-function pointerMove(event) {
-  if (props.disabled || !state.drag) return
-  const next = point(event)
-  moveCrop(next.x - state.drag.x, next.y - state.drag.y)
-  draw()
+function updateDrag(event) {
+  if (!drag || event.pointerId !== drag.id || props.disabled || !view) return
+  const { x, y } = imagePoint(event)
+  moveCrop(x - drag.x, y - drag.y)
 }
 
-watch(() => props.disabled, (disabled) => {
-  if (disabled) state.drag = null
-})
+function endDrag(event) {
+  if (event.pointerId === drag?.id) drag = null
+}
 
-watch(() => [props.file, props.cropSize], ([file], previous, onCleanup) => {
-  const version = ++loadVersion
-  state.image = null
-  state.sourceLabels = null
-  state.crop = null
+watch(() => props.disabled, () => { drag = null })
+watch([() => props.file, () => props.cropSize], async ([file, size], _, onCleanup) => {
+  preview.value = null
+  drag = null
+  paint()
   emit('ready', false)
-  draw()
-  // Wait for /health: a guessed size could reject an image the model accepts.
-  if (!file || !props.cropSize) return
-  const cropSize = props.cropSize
+  if (!file || !size) return
+  let current = true
   const url = URL.createObjectURL(file)
-  onCleanup(() => URL.revokeObjectURL(url))
-  const image = new Image()
-  image.onload = async () => {
+  onCleanup(() => {
+    current = false
     URL.revokeObjectURL(url)
-    if (version !== loadVersion) return
-    if (image.naturalWidth < cropSize || image.naturalHeight < cropSize) {
-      emit('error', `Image must be at least ${cropSize} × ${cropSize}.`)
-      return
-    }
-    let sourceLabels = null
-    try {
-      sourceLabels = await readPngLabels(file)
-    } catch (reason) {
-      if (version === loadVersion) emit('error', reason instanceof Error ? reason.message : 'Could not read PNG labels.')
-      return
-    }
-    if (version !== loadVersion) return
-    state.image = image
-    state.sourceLabels = sourceLabels
-    state.crop = {
-      x: Math.floor((sourceLabels.width - cropSize) / 2),
-      y: Math.floor((sourceLabels.height - cropSize) / 2),
-    }
-    emit('ready', true)
-    await nextTick()
-    draw()
-  }
-  image.onerror = () => {
-    URL.revokeObjectURL(url)
-    if (version === loadVersion) emit('error', 'The browser could not decode this image.')
-  }
-  image.src = url
-})
+  })
 
-function getAnchorImage() {
-  return state.crop && cropAnchor(state.sourceLabels, state.crop, props.cropSize)
-}
+  const image = new Image()
+  image.src = url
+  try {
+    await image.decode()
+  } catch {
+    if (current) emit('error', 'The browser could not decode this image.')
+    return
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+  if (!current) return
+
+  try {
+    const source = await readPngLabels(file)
+    if (!current) return
+    if (source.width < size || source.height < size) {
+      emit('error', `Image must be at least ${size} × ${size}.`)
+      return
+    }
+    preview.value = {
+      source, image,
+      crop: { x: Math.floor((source.width - size) / 2), y: Math.floor((source.height - size) / 2) },
+    }
+    paint()
+    emit('ready', true)
+  } catch (reason) {
+    if (current) emit('error', reason instanceof Error ? reason.message : 'Could not read PNG labels.')
+  }
+})
 
 onMounted(() => {
-  observer = new ResizeObserver(draw)
+  observer = new ResizeObserver(paint)
   observer.observe(canvas.value)
 })
-onBeforeUnmount(() => {
-  loadVersion += 1
-  observer?.disconnect()
+onBeforeUnmount(() => observer?.disconnect())
+defineExpose({
+  getAnchorImage() {
+    const section = preview.value
+    return section && cropAnchor(section.source, section.crop, props.cropSize)
+  },
 })
-defineExpose({ getAnchorImage })
 </script>
 
 <template>
   <section class="panel">
-    <header class="panel-header">
-      <div><h2>Image</h2></div>
-    </header>
+    <header class="panel-header"><h2>Image</h2></header>
     <div class="canvas-wrap" :class="{ 'crop-canvas--disabled': disabled }">
-      <canvas
-        ref="canvas"
-        @pointerdown="pointerDown"
-        @pointermove="pointerMove"
-        @pointerup="state.drag = null"
-        @pointercancel="state.drag = null"
-      />
-      <div v-if="!state.image" class="empty-state">
-        <strong>No section selected</strong>
-      </div>
+      <canvas ref="canvas" @pointerdown="startDrag" @pointermove="updateDrag"
+        @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag" />
+      <div v-if="!preview" class="empty-state"><strong>No section selected</strong></div>
     </div>
   </section>
 </template>

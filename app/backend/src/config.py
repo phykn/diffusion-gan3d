@@ -15,11 +15,8 @@ class ServerConfig(BaseModel):
     max_voxels: PositiveInt
     max_blocks: PositiveInt
     max_tiles: PositiveInt
-    max_anchors: PositiveInt
-    max_request_bytes: PositiveInt
-    max_inflight_downloads: PositiveInt
 
 
-def load_server_config(path: str | Path = DEFAULT_CONFIG) -> ServerConfig:
-    with Path(path).open(encoding="utf-8") as file:
-        return ServerConfig.model_validate(yaml.safe_load(file))
+def load_server_config(path=DEFAULT_CONFIG):
+    values = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    return ServerConfig.model_validate(values)

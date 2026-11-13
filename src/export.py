@@ -3,26 +3,22 @@ from pathlib import Path
 
 import torch
 
-from src.config.schema import StageConfig, build_config, to_dict
+from src.config.schema import build_config, to_dict
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.storage import torch_save
 
 FORMAT = "diffusion-gan3d.export"
-VERSION = 2
+VERSION = 3
 STAGE_NAMES = {"lr": "LR", "sr": "SR"}
-V1_HINT = (
-    "v1 runs and exports open only with the v1 code: "
-    "git checkout v1 (see README, Changes from v1)."
-)
 
 
 def export_payload(
-    config: StageConfig,
-    step: int,
-    model: Mapping[str, torch.Tensor],
-    lr: Mapping | None = None,
-) -> dict:
+    config,
+    step,
+    model,
+    lr=None,
+):
     if (config.stage == "sr") != (lr is not None):
         raise ValueError("an SR export carries its LR export; an LR export does not.")
     payload = {
@@ -44,11 +40,11 @@ def export_payload(
     return payload
 
 
-def write_export(path: str | Path, payload: Mapping, *, overwrite=True) -> Path:
+def write_export(path, payload, *, overwrite=True):
     return torch_save(dict(payload), path, overwrite=overwrite)
 
 
-def resolve_export(weights: str | Path) -> Path:
+def resolve_export(weights):
     path = Path(weights).expanduser()
     if path.is_dir():
         path = path / "generator.pt"
@@ -57,7 +53,7 @@ def resolve_export(weights: str | Path) -> Path:
     return path
 
 
-def read_export(weights: str | Path | Mapping, stage: str) -> dict:
+def read_export(weights, stage):
     """Load and check an export: a run folder, a generator.pt or a payload."""
     if isinstance(weights, Mapping):
         return check_export(weights, stage)
@@ -66,7 +62,7 @@ def read_export(weights: str | Path | Mapping, stage: str) -> dict:
     return check_export(payload, stage, path)
 
 
-def check_export(payload, stage: str, path: Path | str | None = None) -> dict:
+def check_export(payload, stage, path=None):
     name = STAGE_NAMES[stage]
     where = "" if path is None else f": {path}"
     if (
@@ -75,17 +71,17 @@ def check_export(payload, stage: str, path: Path | str | None = None) -> dict:
         or payload.get("version") != VERSION
         or payload.get("stage") != stage
     ):
-        raise ValueError(f"not a v2 {name} export{where}. {V1_HINT}")
+        raise ValueError(f"not a v{VERSION} {name} export{where}.")
     if stage == "sr":
         check_export(payload.get("lr"), "lr", path)
     return dict(payload)
 
 
-def export_config(payload: Mapping) -> StageConfig:
+def export_config(payload):
     return build_config(payload["config"])
 
 
-def build_denoiser(config: StageConfig) -> Denoiser3D:
+def build_denoiser(config):
     """The stage's denoiser, untrained, from its settings."""
     channels = config.model.generator.channels
     return Denoiser3D(
@@ -101,12 +97,12 @@ def build_denoiser(config: StageConfig) -> Denoiser3D:
     )
 
 
-def build_diffusion(config: StageConfig) -> Diffusion:
+def build_diffusion(config):
     diffusion = config.model.diffusion
     return Diffusion(diffusion.num_steps, diffusion.beta_min, diffusion.beta_max)
 
 
-def load_denoiser(payload: Mapping, config: StageConfig) -> Denoiser3D:
+def load_denoiser(payload, config):
     """EMA denoiser of an export, in eval mode on the CPU."""
     model = build_denoiser(config)
     model.load_state_dict(payload["model"], strict=True)
@@ -124,7 +120,7 @@ SOURCE_KEYS = (
 )
 
 
-def check_lr_source(lr: StageConfig, sr: StageConfig) -> None:
+def check_lr_source(lr, sr):
     """SR source: the LR settings an SR model depends on must be its own."""
     differences = []
     for key in SOURCE_KEYS:

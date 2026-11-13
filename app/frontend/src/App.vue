@@ -1,68 +1,37 @@
 <script setup>
-import { defineAsyncComponent, ref } from 'vue'
+import { defineAsyncComponent, proxyRefs, ref } from 'vue'
 import CropEditor from './components/CropEditor.vue'
 import Sidebar from './components/Sidebar.vue'
 import { useGeneration } from './use-generation.js'
 
 const VolumeViewer = defineAsyncComponent(() => import('./components/VolumeViewer.vue'))
-const cropEditor = ref(null)
-const {
-  cropReady,
-  file,
-  seed,
-  blocks,
-  axis,
-  heightOrigin,
-  heightExtent,
-  busy,
-  error,
-  health,
-  healthError,
-  measureTortuosity,
-  result,
-  ready,
-  invalidateResult,
-  selectFile,
-  generate,
-} = useGeneration(cropEditor)
+const editor = ref(null)
+const form = proxyRefs(useGeneration(editor))
 </script>
 
 <template>
   <main class="app">
     <Sidebar
-      v-model:seed="seed"
-      v-model:blocks="blocks"
-      v-model:axis="axis"
-      v-model:height-origin="heightOrigin"
-      v-model:height-extent="heightExtent"
-      v-model:measure-tortuosity="measureTortuosity"
-      :file
-      :health
-      :health-error="healthError"
-      :busy
-      :ready
-      :error
-      :porosity="result?.porosity"
-      :tortuosity="result?.tortuosity"
-      @select-file="selectFile"
-      @generate="generate"
+      v-model:seed="form.seed"
+      v-model:blocks="form.blocks"
+      v-model:axis="form.axis"
+      v-model:height-origin="form.heightOrigin"
+      v-model:height-extent="form.heightExtent"
+      v-model:measure-tortuosity="form.measureTortuosity"
+      :file="form.file" :health="form.health" :health-error="form.healthError"
+      :busy="form.busy" :ready="form.ready" :error="form.error"
+      :porosity="form.result?.porosity" :tortuosity="form.result?.tortuosity"
+      @select-file="form.selectFile" @generate="form.generate"
     />
     <section class="editor-main">
       <div class="workspace">
         <CropEditor
-          ref="cropEditor"
-          :file
-          :crop-size="health?.crop_size"
-          :disabled="busy"
-          @change="invalidateResult"
-          @error="error = $event"
-          @ready="cropReady = $event"
+          ref="editor" :file="form.file" :crop-size="form.health?.crop_size" :disabled="form.busy"
+          @change="form.invalidateResult" @error="form.error = $event" @ready="form.cropReady = $event"
         />
         <VolumeViewer
-          :values="result?.values"
-          :shape="result?.shape"
-          :busy
-          :num-phases="health?.num_phases"
+          :values="form.result?.values" :shape="form.result?.shape"
+          :busy="form.busy" :num-phases="form.health?.num_phases"
         />
       </div>
     </section>

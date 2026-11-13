@@ -15,12 +15,11 @@ from scripts.check.common import (
     prepare_output,
     show_labels,
 )
+from src.axes import PLANE_DIRECTIONS, PLANES, PORE_PHASE
 from src.config.sample import build_stage_configs, find_sample, load_sample
 from src.console import field, path_field, section
 from src.data.crops import CropSampler
 from src.export import export_config, read_export, resolve_export
-from src.phase import PORE_PHASE
-from src.plane import PLANE_DIRECTIONS, PLANES
 from src.train.run import training_images
 
 SAMPLES = 4
@@ -35,20 +34,7 @@ FRACTION_HEIGHT = 0.3
 LEGEND_HEIGHT = 0.4
 
 
-def phase_name(phase: int) -> str:
-    return f"phase {phase} (pore)" if phase == PORE_PHASE else f"phase {phase}"
-
-
-def image_count(count: int) -> str:
-    return f"{count} image" if count == 1 else f"{count} images"
-
-
-def phase_color(phase: int, num_phases: int):
-    # The value show_labels maps phase to under its gray colormap.
-    return plt.get_cmap("gray")((phase + 0.5) / num_phases)
-
-
-def main(argv=None) -> None:
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Show the same training crops at the LR and SR grids."
     )
@@ -68,21 +54,13 @@ def main(argv=None) -> None:
     parser.add_argument(
         "--no-view", action="store_true", help="Save results without a viewer."
     )
-    args = parser.parse_args(argv)
+    preview_dataset(parser.parse_args(argv))
+
+
+def preview_dataset(args):
     section("Training crops")
     out = prepare_output(args, __file__)
-    if args.weight:
-        path = resolve_export(args.weight).resolve()
-        payload = torch.load(path, map_location="cpu", weights_only=True)
-        stage = (
-            "sr" if isinstance(payload, dict) and payload.get("stage") == "sr" else "lr"
-        )
-        config = export_config(read_export(payload, stage))
-        name = path.parent.name
-    else:
-        path = find_sample(args.sample)
-        config = build_stage_configs(load_sample(path))["lr"]
-        name = path.stem
+    config, path, name = read_source(args)
     path_field("Config", path)
     data = config.data
     planes = training_images(config)
@@ -100,7 +78,8 @@ def main(argv=None) -> None:
     for label, size in sizes.items():
         field(label, f"{crop} px -> {size}x{size} (1 cell = {crop / size:g} px)")
     for plane, images in planes.items():
-        field(plane, image_count(len(images.all_images())))
+        count = len(images.all_images())
+        field(plane, f"{count} image" if count == 1 else f"{count} images")
     fig = crop_figure(samplers, data.num_phases, args.seed)
     lr, sr = (f"{size}x{size}" for size in sizes.values())
     fig.suptitle(
@@ -116,8 +95,18 @@ def main(argv=None) -> None:
     plt.close(fig)
 
 
-def crop_figure(samplers: dict, num_phases: int, seed: int):
-    """Rows of planes; each column pairs one random crop at the LR and SR grids."""
+def read_source(args):
+    if args.weight is None:
+        path = find_sample(args.sample)
+        config = build_stage_configs(load_sample(path))["lr"]
+        return config, path, path.stem
+    path = resolve_export(args.weight).resolve()
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    stage = "sr" if isinstance(payload, dict) and payload.get("stage") == "sr" else "lr"
+    return export_config(read_export(payload, stage)), path, path.parent.name
+
+
+def crop_figure(samplers, num_phases, seed):
     axes = tuple(samplers["LR"])
     # Fixed layout in inches: a narrow gap inside each LR/SR pair, a wider one
     # between pairs, and room above each pair for its phase fractions.
@@ -169,7 +158,13 @@ def crop_figure(samplers: dict, num_phases: int, seed: int):
                 show_labels(panel, image.argmax(0), num_phases, "")
     fig.legend(
         handles=[
-            Patch(color=phase_color(phase, num_phases), label=phase_name(phase))
+            Patch(
+                # The value show_labels maps phase to under its gray colormap.
+                color=plt.get_cmap("gray")((phase + 0.5) / num_phases),
+                label=f"phase {phase} (pore)"
+                if phase == PORE_PHASE
+                else f"phase {phase}",
+            )
             for phase in range(num_phases)
         ],
         loc="lower center",

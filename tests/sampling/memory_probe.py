@@ -20,12 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.api import LowResolutionAPI, PlaneAnchor, SuperResolutionAPI  # noqa: E402
 
 
-def rss() -> int:
+def rss():
     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return value if sys.platform == "darwin" else value * 1024
 
 
-def allocated(device: torch.device) -> int:
+def allocated(device):
     if device.type == "mps":
         torch.mps.synchronize()
         return torch.mps.driver_allocated_memory()
@@ -35,7 +35,7 @@ def allocated(device: torch.device) -> int:
     return 0
 
 
-def prepare(export: str, device: str, options: dict):
+def prepare(export, device, options):
     """The API, its estimate and the generation to measure."""
     probabilities = options.pop("probabilities", False)
     if "low" in options:
@@ -61,7 +61,7 @@ def prepare(export: str, device: str, options: dict):
     return api, estimate, lambda: run(anchors, seed=0, **options)
 
 
-def main() -> None:
+def main():
     export, device, options = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
     api, estimate, generate = prepare(export, device, options)
     storage = api.check_memory(estimate)

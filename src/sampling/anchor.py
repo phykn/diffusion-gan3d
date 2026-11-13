@@ -1,11 +1,9 @@
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
 
 from src.data.crops import phase_channels
-from src.sampling.plan import Tile, TilePlan
 
 CONFLICT_TOLERANCE = 1e-5
 
@@ -37,11 +35,11 @@ class _Placed:
     col: int
 
     @property
-    def axes(self) -> tuple[int, int]:
+    def axes(self):
         return tuple(axis for axis in range(3) if axis != self.axis)
 
 
-def check_strength(value) -> float:
+def check_strength(value):
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
@@ -52,7 +50,7 @@ def check_strength(value) -> float:
     return float(value)
 
 
-def anchor_fractions(image: torch.Tensor, num_phases: int) -> torch.Tensor:
+def anchor_fractions(image, num_phases):
     """Phase fractions float32 [K, H, W] of an anchor image."""
     if not isinstance(image, torch.Tensor) or image.numel() == 0:
         raise ValueError("anchor.image must be a non-empty tensor.")
@@ -76,7 +74,7 @@ def anchor_fractions(image: torch.Tensor, num_phases: int) -> torch.Tensor:
     return phase_channels(image.detach().cpu()[None], num_phases)[0]
 
 
-def anchor_origin(anchor: PlaneAnchor, image_shape, plane_shape) -> tuple[int, int]:
+def anchor_origin(anchor, image_shape, plane_shape):
     """Top-left (row, col) of an anchor image in its plane; centered by default."""
     height, width = image_shape
     if height > plane_shape[0] or width > plane_shape[1]:
@@ -97,9 +95,7 @@ def anchor_origin(anchor: PlaneAnchor, image_shape, plane_shape) -> tuple[int, i
     return row, col
 
 
-def place_anchors(
-    anchors: Sequence, output_shape: Sequence[int], num_phases: int, margin: int = 0
-) -> list[_Placed]:
+def place_anchors(anchors, output_shape, num_phases, margin=0):
     """Check anchors against the output; place them in the generated region."""
     placed = []
     for anchor in anchors:
@@ -126,9 +122,7 @@ def place_anchors(
     return placed
 
 
-def encode(
-    placed: Sequence[_Placed], shape: Sequence[int], device=None, *, check=False
-) -> tuple[torch.Tensor, torch.Tensor]:
+def encode(placed, shape, device=None, *, check=False):
     """Anchor values [1, K, *shape] in [-1, 1] and their voxels [1, 1, *shape].
 
     check raises ValueError where two anchors give one voxel different values.
@@ -154,7 +148,7 @@ def encode(
     return image, mask
 
 
-def _crop(anchor: _Placed, tile: Tile) -> _Placed | None:
+def _crop(anchor, tile):
     """The part of an anchor inside a tile, in tile coordinates."""
     normal = tile.source[anchor.axis]
     if not normal.start <= anchor.index < normal.stop:
@@ -211,16 +205,18 @@ class TileAnchors:
 
     def __init__(
         self,
-        anchors: Sequence,
-        plan: TilePlan,
-        num_phases: int,
-        strength: float,
+        anchors,
+        plan,
+        num_phases,
+        strength,
         device=None,
     ):
         self.strength = check_strength(strength)
         self.device = device
         placed = place_anchors(anchors, plan.output_shape, num_phases, plan.margin)
         self.tiles = []
+        if not placed:
+            return
         for tile in plan.tiles:
             local = [
                 part
@@ -233,10 +229,10 @@ class TileAnchors:
             self.tiles.append(local)
 
     @property
-    def active(self) -> bool:
+    def active(self):
         return self.strength > 0 and any(self.tiles)
 
-    def __call__(self, index: int, tile: Tile) -> AnchorGuide | None:
+    def __call__(self, index, tile):
         local = self.tiles[index]
         if not local:
             return None

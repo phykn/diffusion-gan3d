@@ -11,7 +11,7 @@ class BurnInValues:
     ema_decay: float
 
 
-def burn_in_values(config, step: int) -> BurnInValues:
+def burn_in_values(config, step):
     """Over the first burn_in.steps steps a cosine curve moves the learning rates,
     Adam beta2, the R1/R2 weights and the EMA half-life from their start values to
     their end values; afterwards they stay at the end values. Large early steps

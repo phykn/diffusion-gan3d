@@ -40,7 +40,7 @@ ANODE_CMAP = ListedColormap(ANODE_RGB)
 LOGIT_WINDOW = 200
 
 
-def main(argv=None) -> None:
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Render the paper figures from the evaluate_*.py results "
         "and their caches."
@@ -55,7 +55,10 @@ def main(argv=None) -> None:
         "--out", type=Path, required=True, help="Folder for the PNG figures."
     )
     args = parser.parse_args(argv)
-    root, out = args.results, args.out
+    render_figures(args.results, args.out)
+
+
+def render_figures(root, out):
     out.mkdir(parents=True, exist_ok=True)
 
     results = read_results(root, "lr")
@@ -85,18 +88,17 @@ def main(argv=None) -> None:
     render_anode(read_results(root, "anode"), root, out)
 
 
-def read_results(root: Path, stage: str) -> dict:
+def read_results(root, stage):
     return json.loads((root / f"{stage}-results.json").read_text(encoding="utf-8"))
 
 
-def render_training_image(config, external_crop, out: Path) -> None:
+def render_training_image(config, external_crop, out):
     labels = first_image(config)[1]
     rgb = np.rint(255 * np.asarray(PHASE_RGB)[labels]).astype(np.uint8)
     image = Image.fromarray(rgb, mode="RGB")
     draw = ImageDraw.Draw(image)
     size = config.data.crop_size
-    first, last = ROI_POSITIONS
-    for left, top in (first, tuple(external_crop), last):
+    for left, top in (ROI_POSITIONS[0], external_crop, ROI_POSITIONS[1]):
         draw.rectangle(
             (left, top, left + size - 1, top + size - 1), outline=ROI_COLOR, width=4
         )
@@ -105,7 +107,7 @@ def render_training_image(config, external_crop, out: Path) -> None:
     print(f"Figure: {path}")
 
 
-def render_volume(volume: np.ndarray, path: Path) -> None:
+def render_volume(volume, path):
     figure = plt.figure(figsize=(8, 7), facecolor="#f8fafc")
     panel = figure.add_subplot(111, projection="3d")
     draw_volume(panel, volume, PHASE_RGB)
@@ -114,10 +116,10 @@ def render_volume(volume: np.ndarray, path: Path) -> None:
 
 
 def draw_volume(
-    panel: plt.Axes,
-    volume: np.ndarray,
-    colors: list[tuple[float, float, float]],
-) -> None:
+    panel,
+    volume,
+    colors,
+):
     rgba = np.asarray([(*color, 1.0) for color in colors])
     last = tuple(size - 1 for size in volume.shape)
     center = tuple(size // 2 for size in volume.shape)
@@ -155,15 +157,15 @@ def draw_volume(
 
 
 def plot_face(
-    panel: plt.Axes,
-    volume: np.ndarray,
-    rgba: np.ndarray,
-    axis: int,
-    index: int,
-    first: tuple[int, int],
-    second: tuple[int, int],
-    light: float,
-) -> None:
+    panel,
+    volume,
+    rgba,
+    axis,
+    index,
+    first,
+    second,
+    light,
+):
     other_axes = tuple(value for value in range(3) if value != axis)
     first_cells = np.arange(first[0], first[1])
     second_cells = np.arange(second[0], second[1])
@@ -194,7 +196,7 @@ def plot_face(
     )
 
 
-def draw_box(panel: plt.Axes, size: np.ndarray) -> None:
+def draw_box(panel, size):
     for axis in range(3):
         others = tuple(value for value in range(3) if value != axis)
         for first in (0.0, size[others[0]]):
@@ -230,7 +232,7 @@ def show(panel, image, title=None, cmap=CMAP):
         spine.set_visible(False)
 
 
-def render_sections(volume: torch.Tensor, config, out: Path) -> None:
+def render_sections(volume, config, out):
     labels = label_sections(real_crops(config, config.data.lo_res_size)).argmax(1)
     center = volume.shape[0] // 2
     figure, panels = plt.subplots(2, 3, figsize=(8.4, 5.8))
@@ -247,7 +249,7 @@ def render_sections(volume: torch.Tensor, config, out: Path) -> None:
     save(figure, out / "03-generated-slices.png")
 
 
-def render_training(results, run: Path, burn_in: int, out: Path) -> None:
+def render_training(results, run, burn_in, out):
     steps = results["selection"]
     x = [row["step"] for row in steps]
     best = results["best_step"]
@@ -276,18 +278,21 @@ def render_training(results, run: Path, burn_in: int, out: Path) -> None:
     panel.set_title("(b) Components / real split error", loc="left", color=INK)
     panel.set_xlabel("Step")
 
-    panel = panels[2]
-    plot_logits(panel, rows)
-    mark_schedule(panel, best, burn_in)
-    panel.set_title("(c) Mean critic logit", loc="left", color=INK)
-    panel.set_xlabel("Step")
-    panel.set_xlim(0, x[-1] * 1.22)
-    panel.set_xticks(range(0, x[-1] + 1, 2000))
+    plot_training_logits(panels[2], rows, best, burn_in, x[-1], 2000)
     figure.tight_layout(w_pad=1.5)
     save(figure, out / "lr-training.png")
 
 
-def plot_logits(panel, rows) -> None:
+def plot_training_logits(panel, rows, best, burn_in, last_step, tick):
+    plot_logits(panel, rows)
+    mark_schedule(panel, best, burn_in)
+    panel.set_title("(c) Mean critic logit", loc="left", color=INK)
+    panel.set_xlabel("Step")
+    panel.set_xlim(0, last_step * 1.22)
+    panel.set_xticks(range(0, last_step + 1, tick))
+
+
+def plot_logits(panel, rows):
     """Mean critic logit of real and generated pairs over the three planes."""
     names = {tag for row in rows for tag in row if tag.startswith("score/")}
     for color, (kind, label) in zip(SERIES, (("real", "Real"), ("fake", "Generated"))):
@@ -318,7 +323,7 @@ def mark_schedule(panel, best, burn_in):
     panel.grid(axis="y", color="#e5e7eb", lw=0.8)
 
 
-def render_anchor(results, external: dict, out: Path) -> None:
+def render_anchor(results, external, out):
     anchor = results["anchor"]
     plane = external["plane"]
     size = plane.shape[0]
@@ -415,7 +420,7 @@ def render_anchor(results, external: dict, out: Path) -> None:
     save(figure, out / "lr-anchor.png")
 
 
-def render_sr(results, root: Path, out: Path) -> None:
+def render_sr(results, root, out):
     run = project_path(results["run"])
     config = load_config(run / "train.yaml")
     best = results["best_step"]
@@ -427,7 +432,7 @@ def render_sr(results, root: Path, out: Path) -> None:
     render_volume(high[0].numpy(), out / "sr-volume.png")
 
 
-def render_sr_training(results, run: Path, burn_in: int, out: Path) -> None:
+def render_sr_training(results, run, burn_in, out):
     steps = results["selection"]
     x = [row["step"] for row in steps]
     best = results["best_step"]
@@ -446,18 +451,14 @@ def render_sr_training(results, run: Path, burn_in: int, out: Path) -> None:
         panel.set_title(title, loc="left", color=INK)
         panel.set_xlabel("Step")
         panel.set_ylabel(label)
-    panel = panels[2]
-    plot_logits(panel, read_metrics(run / "tensorboard"))
-    mark_schedule(panel, best, burn_in)
-    panel.set_title("(c) Mean critic logit", loc="left", color=INK)
-    panel.set_xlabel("Step")
-    panel.set_xlim(0, x[-1] * 1.22)
-    panel.set_xticks(range(0, x[-1] + 1, 1000))
+    plot_training_logits(
+        panels[2], read_metrics(run / "tensorboard"), best, burn_in, x[-1], 1000
+    )
     figure.tight_layout(w_pad=1.5)
     save(figure, out / "sr-training.png")
 
 
-def render_sr_sections(low: torch.Tensor, high: torch.Tensor, config, out) -> None:
+def render_sr_sections(low, high, config, out):
     labels = label_sections(real_crops(config, config.data.hi_res_size)).argmax(1)
     scale = config.scale_factor
     volumes = (
@@ -481,7 +482,7 @@ def render_sr_sections(low: torch.Tensor, high: torch.Tensor, config, out) -> No
     save(figure, out / "sr-sections.png")
 
 
-def render_anode(results, root: Path, out: Path) -> None:
+def render_anode(results, root, out):
     run = project_path(results["run"])
     config = load_config(project_path(results["lr_run"]) / "train.yaml")
     cache = cache_dir(root, run)
@@ -497,7 +498,7 @@ def render_anode(results, root: Path, out: Path) -> None:
     render_anode_volume(real[0].numpy(), high[0].numpy(), out)
 
 
-def render_anode_profile(results, scale: int, out: Path) -> None:
+def render_anode_profile(results, scale, out):
     names = ("Pore", "Graphite", "Silicon")
     figure, panels = plt.subplots(1, 3, figsize=(12, 3.4), sharex=True)
     lr, sr = results["lr"]["profile"], results["sr"]["profile"]
@@ -525,7 +526,7 @@ def render_anode_profile(results, scale: int, out: Path) -> None:
     save(figure, out / "anode-profile.png")
 
 
-def render_anode_sections(real, real_low, low, high, scale: int, out: Path) -> None:
+def render_anode_sections(real, real_low, low, high, scale, out):
     """Real, LR and SR sections: xy near both faces, and the two side planes."""
     rows = (
         ("Real", real, 1),
@@ -550,7 +551,7 @@ def render_anode_sections(real, real_low, low, high, scale: int, out: Path) -> N
     save(figure, out / "anode-sections.png")
 
 
-def render_anode_volume(real: np.ndarray, high: np.ndarray, out: Path) -> None:
+def render_anode_volume(real, high, out):
     """Real and SR volumes with depth z drawn upward and one octant removed."""
     figure = plt.figure(figsize=(12, 6), facecolor="#f8fafc")
     for column, (title, volume) in enumerate((("Real", real), ("Generated", high))):
@@ -562,7 +563,7 @@ def render_anode_volume(real: np.ndarray, high: np.ndarray, out: Path) -> None:
     save(figure, out / "anode-volume.png", pad=0.03)
 
 
-def save(figure, path: Path, pad=0.05):
+def save(figure, path, pad=0.05):
     figure.savefig(
         path,
         dpi=200,

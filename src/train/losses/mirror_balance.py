@@ -8,9 +8,7 @@ MIRROR_PLANES = {"zy": (0, 1), "zx": (0, 2), "yx": (1, 2)}
 SLOPES = ((1, 1), (1, 2), (2, 1))
 
 
-def mirror_balance_loss(
-    probs: torch.Tensor, max_gap: int, tolerance: float
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def mirror_balance_loss(probs, max_gap, tolerance):
     """Penalize per-volume differences between mirrored diagonal statistics.
 
     A mirror-symmetric structure has the same phase pairs along (+a, +b) as along

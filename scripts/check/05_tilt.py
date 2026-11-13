@@ -18,19 +18,20 @@ from scripts.check.common import (
     write_json,
 )
 from src.api import LowResolutionAPI
+from src.axes import PORE_PHASE
 from src.config.io import load_generation_settings
 from src.console import emit, paint, path_field, section, status
 from src.export import resolve_export
-from src.phase import PORE_PHASE
 from src.stats.volume import TILT_PAIRS, tilt_balance
 from src.storage import load_volume
 
 
-def main(argv=None) -> None:
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Compare the signed particle tilt balance of generated and real "
         "volumes."
     )
+    parser.add_argument("--no-view", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--weight", type=Path, help="LR generator.pt or run folder to sample."
     )
@@ -79,9 +80,13 @@ def main(argv=None) -> None:
     add_device_argument(parser)
     add_height_arguments(parser)
     args = parser.parse_args(argv)
-    section("Particle tilt check")
     if args.weight is None and not args.volumes:
         parser.error("give --weight or --volumes.")
+    check_tilt(args)
+
+
+def check_tilt(args):
+    section("Particle tilt check")
     out = prepare_output(args, __file__)
 
     generated = [load_labels(path) for path in args.volumes]
@@ -113,12 +118,11 @@ def main(argv=None) -> None:
     path_field("Report", write_json(out / "report.json", report))
 
 
-def load_labels(path: Path) -> np.ndarray:
+def load_labels(path):
     return np.asarray(load_volume(path))
 
 
-def generate_volumes(args) -> tuple[list[np.ndarray], slice]:
-    """Generated label volumes and the source z range they cover."""
+def generate_volumes(args):
     weight = resolve_export(args.weight).resolve()
     path_field("Weights", weight)
     if args.guidance is None:
@@ -133,7 +137,7 @@ def generate_volumes(args) -> tuple[list[np.ndarray], slice]:
     return volumes, source_depths(api, args.height_origin, len(volumes[0]))
 
 
-def source_depths(api: LowResolutionAPI, origin: float, depth: int) -> slice:
+def source_depths(api, origin, depth):
     """Source z pixels of depth LR voxels from origin; all of z without height."""
     if not api.config.conditioning.height_enabled:
         return slice(None)
@@ -141,7 +145,7 @@ def source_depths(api: LowResolutionAPI, origin: float, depth: int) -> slice:
     return slice(start, start + round(depth * api.crop_size / api.input_size))
 
 
-def print_phase(phase: int, entry: dict) -> None:
+def print_phase(phase, entry):
     section(f"Phase {phase}")
     emit(paint("  +/- = tilted fraction, balance = + minus -", "dim"))
     for name in TILT_PAIRS:

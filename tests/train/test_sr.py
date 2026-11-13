@@ -19,7 +19,7 @@ TINY = Path(__file__).parents[1] / "fixtures" / "tiny"
 LOSSES = ("loss/generator", "loss/generator_total", "loss/critic", "consistency")
 
 
-def _losses(run_dir: Path) -> dict:
+def _losses(run_dir):
     events = EventAccumulator(str(run_dir / "tensorboard"))
     events.Reload()
     return {
@@ -32,7 +32,7 @@ def test_a_copied_sr_export_refines_alone(tiny_sr_run, tmp_path):
     alone = tmp_path / "generator.pt"
     shutil.copy(tiny_sr_run / "generator.pt", alone)
     api = SuperResolutionAPI(alone, "cpu")
-    low = api.lr.generate(size=16, seed=0)
+    low = api.lr.generate(shape=16, seed=0)
     assert api.refine(low, seed=0).shape == (32, 32, 32)
     tile, _ = api.default_tiling()
     assert api.refine(low, seed=0, tile_size=tile).shape == (32, 32, 32)
@@ -57,7 +57,7 @@ def test_sr_resume_matches_an_unbroken_run_without_the_lr_run(
         assert before[tag] | after[tag] == expected[tag], tag
 
 
-def _sample_file(folder: Path, images: Path, **tune) -> Path:
+def _sample_file(folder, images, **tune):
     sample = yaml.safe_load((TINY / "tiny_default.yaml").read_text())
     sample["images"] = {plane: str(images) for plane in ("xy", "xz", "yz")}
     for stage, values in tune.items():
@@ -90,7 +90,7 @@ def test_corruption_replaces_blocks_and_reports_the_level():
 def test_a_height_conditioned_sr_stage_refines_at_a_depth(tiny_anode_sr_run):
     api = SuperResolutionAPI(tiny_anode_sr_run, "cpu")
     assert api.config.conditioning.height_enabled
-    low = api.lr.generate(size=16, seed=0, height_origin=16.0)
+    low = api.lr.generate(shape=16, seed=0, height_origin=16.0)
     high = api.refine(low, seed=0, height_origin=16.0)
     assert high.shape == (32, 32, 32)
     with pytest.raises(ValueError, match="outside the source image height"):

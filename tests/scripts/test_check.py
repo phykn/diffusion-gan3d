@@ -2,10 +2,14 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import matplotlib
 import pytest
+import torch
+
+from src.export import VERSION, read_export
 
 ROOT = Path(__file__).parents[2]
 CHECK = ROOT / "scripts" / "check"
@@ -41,14 +45,18 @@ def no_window():
     matplotlib.use("Agg")
 
 
-def run(script: str, *args) -> None:
+def load_check(script):
     spec = importlib.util.spec_from_file_location(script, CHECK / f"{script}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module.main([str(value) for value in args])
+    return module
 
 
-def files(folder: Path) -> set[str]:
+def run(script, *args):
+    load_check(script).main([str(value) for value in args])
+
+
+def files(folder):
     return {path.name for path in folder.iterdir()}
 
 
@@ -121,6 +129,23 @@ def test_hr(tiny_sr_run, tmp_path):
     report = json.loads((tmp_path / "report.json").read_text())
     assert report.keys() == HR_REPORT
     assert report["hr_shape"] == [32, 32, 32]
+
+
+def test_hr_auto_selects_current_version(tiny_sr_run, tmp_path, monkeypatch):
+    module = load_check("04_hr")
+    monkeypatch.setattr(module, "PROJECT_ROOT", tmp_path)
+    payload = read_export(tiny_sr_run, "sr")
+    for name, version, modified in (
+        ("valid-sr", VERSION, 10),
+        ("old-sr", VERSION - 1, 20),
+    ):
+        folder = tmp_path / "run" / name
+        folder.mkdir(parents=True)
+        (folder / "train.yaml").write_text("stage: sr\n")
+        export = folder / "generator.pt"
+        torch.save(payload | {"version": version}, export)
+        os.utime(export, (modified, modified))
+    assert module.latest_sr().parent.name == "valid-sr"
 
 
 def test_tilt(tiny_lr_run, tiny_anode, tiny_anode_lr_run, tmp_path):

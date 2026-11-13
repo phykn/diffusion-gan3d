@@ -12,7 +12,7 @@ from src.console import field, path_field, section
 DEFAULT_CONFIG = Path(__file__).resolve().with_name("config.yaml")
 
 
-def main() -> None:
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Generate synthetic training data.")
     parser.add_argument(
         "--config",
@@ -20,8 +20,10 @@ def main() -> None:
         default=DEFAULT_CONFIG,
         help="Simulation YAML (default: scripts/simul/config.yaml).",
     )
-    args = parser.parse_args()
-    cfg = load_yaml(args.config)
+    report_simulation(load_yaml(parser.parse_args(argv).config))
+
+
+def report_simulation(cfg):
     export = generate(cfg)
     slice_count = sum(len(paths) for paths in export.slices.values())
     section("Simulated data")

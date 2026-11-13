@@ -5,15 +5,15 @@ from src.model.diffusion import Diffusion
 
 
 def _extract(
-    values: torch.Tensor,
-    indices: torch.Tensor,
-    reference: torch.Tensor,
-) -> torch.Tensor:
+    values,
+    indices,
+    reference,
+):
     selected = values.index_select(0, indices)
     return selected.reshape(reference.shape[0], *([1] * (reference.ndim - 1)))
 
 
-def test_vp_schedule_is_monotonic() -> None:
+def test_vp_schedule_is_monotonic():
     process = Diffusion(11, beta_min=0.1, beta_max=20.0)
     normalized_time = torch.linspace(0.0, 1.0, 12)
     expected = torch.exp(
@@ -28,10 +28,10 @@ def test_vp_schedule_is_monotonic() -> None:
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_small_schedule_preserves_noise_and_posterior(dtype) -> None:
+def test_small_schedule_preserves_noise_and_posterior(dtype):
     process = Diffusion(4, beta_min=0.0, beta_max=1e-8)
     clean = torch.zeros(1, 1, dtype=dtype)
-    noisy = process.add_noise(clean, 2, noise=torch.ones_like(clean))
+    noisy = process.mix_noise(clean, torch.tensor([2]), torch.ones_like(clean))
     expected = (-torch.expm1(torch.tensor(-1.25e-9, dtype=torch.float64))).sqrt()
     assert torch.allclose(noisy.float(), expected.float().reshape(1, 1), rtol=0.01)
 
@@ -43,7 +43,7 @@ def test_small_schedule_preserves_noise_and_posterior(dtype) -> None:
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_small_schedule_preserves_markov_step_noise(dtype) -> None:
+def test_small_schedule_preserves_markov_step_noise(dtype):
     process = Diffusion(4, beta_min=0.0, beta_max=1e-8)
     clean = torch.zeros(1, 1, dtype=dtype)
     previous, current = process.sample_pair(
@@ -59,7 +59,7 @@ def test_small_schedule_preserves_markov_step_noise(dtype) -> None:
     assert torch.allclose(current.float(), expected.float().reshape(1, 1), rtol=0.01)
 
 
-def test_sample_pair_uses_correlated_markov_transition() -> None:
+def test_sample_pair_uses_correlated_markov_transition():
     process = Diffusion(6)
     clean = torch.linspace(-1.0, 1.0, 2 * 2 * 3 * 3).reshape(2, 2, 3, 3)
     previous_noise = torch.linspace(1.0, -1.0, clean.numel()).reshape_as(clean)
@@ -83,7 +83,7 @@ def test_sample_pair_uses_correlated_markov_transition() -> None:
     assert torch.allclose(current, want_curr)
 
 
-def test_transition_zero_posterior_is_exactly_deterministic() -> None:
+def test_transition_zero_posterior_is_exactly_deterministic():
     process = Diffusion(4)
     current = torch.randn(3, 1, 4, 4)
     pred = torch.randn_like(current)
@@ -108,8 +108,8 @@ def test_transition_zero_posterior_is_exactly_deterministic() -> None:
 
 
 def test_transition_zero_skips_posterior_work(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    monkeypatch,
+):
     process = Diffusion(4)
     current = torch.randn(1, 2, 4, 4)
     pred = torch.randn_like(current)
@@ -122,7 +122,7 @@ def test_transition_zero_skips_posterior_work(
     assert process.sample_posterior(current, pred, 0) is pred
 
 
-def test_scalar_and_uniform_tensor_transitions_are_equivalent() -> None:
+def test_scalar_and_uniform_tensor_transitions_are_equivalent():
     process = Diffusion(6)
     clean = torch.linspace(-1.0, 1.0, 2 * 2 * 3 * 3).reshape(2, 2, 3, 3)
     current = clean.flip(-1)
@@ -164,7 +164,7 @@ def test_scalar_and_uniform_tensor_transitions_are_equivalent() -> None:
     assert torch.equal(scalar_sample, tensor_sample)
 
 
-def test_mixed_posterior_transitions_preserve_deterministic_items() -> None:
+def test_mixed_posterior_transitions_preserve_deterministic_items():
     process = Diffusion(5)
     current = torch.randn(3, 2, 3, 3)
     prediction = torch.randn_like(current)
@@ -185,13 +185,13 @@ def test_mixed_posterior_transitions_preserve_deterministic_items() -> None:
     assert torch.allclose(sample, expected)
 
 
-def test_add_noise_accepts_one_state_per_batch_item() -> None:
+def test_mix_noise_takes_one_state_per_batch_item():
     process = Diffusion(5)
     clean = torch.zeros(3, 1, 2, 2, 2)
     noise = torch.ones_like(clean)
     states = torch.tensor([0, 2, 5])
 
-    sample = process.add_noise(clean, states, noise=noise)
+    sample = process.mix_noise(clean, states, noise)
     alpha_bar = _extract(process.alpha_bars, states, clean)
 
     assert torch.allclose(sample, (1.0 - alpha_bar).sqrt())
@@ -199,12 +199,12 @@ def test_add_noise_accepts_one_state_per_batch_item() -> None:
     assert sample[1].mean() < sample[2].mean()
 
 
-def test_invalid_state_and_transition_ranges_are_rejected() -> None:
+def test_invalid_state_and_transition_ranges_are_rejected():
     process = Diffusion(3)
     values = torch.zeros(2, 1, 4, 4)
 
     with pytest.raises(ValueError, match="state must be between"):
-        process.add_noise(values, 4, values)
+        process.prepare_time(4, values, process.timesteps, "state")
     with pytest.raises(ValueError, match="transition must be between"):
         process.sample_pair(values, 3, values, values)
     with pytest.raises(ValueError, match="transition must be between"):
@@ -215,7 +215,7 @@ def test_invalid_state_and_transition_ranges_are_rejected() -> None:
 def test_diffusion_rejects_non_integer_states(state):
     values = torch.zeros(2, 1, 2, 2)
     with pytest.raises(ValueError, match="integer"):
-        Diffusion(3).add_noise(values, state, values)
+        Diffusion(3).prepare_time(state, values, 3, "state")
 
 
 def test_noise_is_required_above_transition_zero():
@@ -225,7 +225,7 @@ def test_noise_is_required_above_transition_zero():
     with pytest.raises(ValueError, match="noise is required"):
         process.sample_posterior(values, values, 1)
     with pytest.raises(ValueError, match="noise must have shape"):
-        process.add_noise(values, 1, None)
+        process.mix_noise(values, torch.tensor([1, 1]), None)
     assert process.sample_posterior(values, values, 0) is values
 
 

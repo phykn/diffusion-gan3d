@@ -1,94 +1,96 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { generateVolume, getHealth, prepareImage } from './api.js'
-import { createRequestGate, normalizeBlocks, normalizeSeed } from './input-state.js'
+import { normalizeBlocks, normalizeSeed } from './input-state.js'
 
-const HEALTH_RETRY_MS = 500
-const HEALTH_RETRY_MAX_MS = 5000
-
-function wait(delay, signal) {
+function retryAfter(delay, signal) {
+  if (signal.aborted) return Promise.resolve()
   return new Promise(resolve => {
-    const done = () => {
+    const finish = () => {
       clearTimeout(timer)
-      signal.removeEventListener('abort', done)
+      signal.removeEventListener('abort', finish)
       resolve()
     }
-    const timer = setTimeout(done, delay)
-    signal.addEventListener('abort', done, { once: true })
+    const timer = setTimeout(finish, delay)
+    signal.addEventListener('abort', finish, { once: true })
   })
 }
 
-function phaseFraction(values, phase) {
-  let count = 0
-  for (let index = 0; index < values.length; index += 1) {
-    if (values[index] === phase) count += 1
-  }
-  return values.length ? count / values.length : null
-}
-
 export function useGeneration(cropEditor) {
-  const cropReady = ref(false)
   const file = ref(null)
+  const cropReady = ref(false)
+  const health = ref(null)
+  const healthError = ref('')
   const seed = ref(0)
   const blocks = ref([1, 1, 1])
   const axis = ref(0)
   const heightOrigin = ref(0)
   const heightExtent = ref(null)
-  const busy = ref(false)
-  const error = ref('')
-  const health = ref(null)
-  const healthError = ref('')
   const measureTortuosity = ref(true)
+  const busy = ref(false)
   const result = ref(null)
-  const ready = computed(() => Boolean(
-    file.value && cropReady.value && health.value && !busy.value,
-  ))
-  const gate = createRequestGate()
-  const controller = new AbortController()
+  const error = ref('')
+  const ready = computed(() => !!(file.value && cropReady.value && health.value && !busy.value))
+  const lifetime = new AbortController()
+  let revision = 0
 
-  // The backend may start after the page; keep retrying until it answers.
-  onMounted(async () => {
-    let delay = HEALTH_RETRY_MS
-    while (!controller.signal.aborted) {
+  async function connect() {
+    const { signal } = lifetime
+    for (let delay = 500; !signal.aborted; delay = Math.min(delay * 2, 5000)) {
       try {
-        health.value = await getHealth(controller.signal)
+        const model = await getHealth(signal)
+        if (signal.aborted) return
+        health.value = model
+        axis.value = model.height_enabled ? 1 : 0
+        heightExtent.value = model.height_extent ?? null
         healthError.value = ''
-        axis.value = health.value.height_enabled ? 1 : 0
-        heightExtent.value = health.value.height_extent ?? null
         return
       } catch (reason) {
-        if (controller.signal.aborted) return
-        // fetch rejects with a TypeError only when no response arrived.
+        if (signal.aborted) return
         healthError.value = reason instanceof TypeError
           ? 'Inference server unreachable · retrying'
           : `Inference server error: ${reason.message} · retrying`
-        await wait(delay, controller.signal)
-        delay = Math.min(delay * 2, HEALTH_RETRY_MAX_MS)
+        await retryAfter(delay, signal)
       }
     }
-  })
-  onBeforeUnmount(() => {
-    gate.invalidate()
-    controller.abort()
-  })
+  }
 
   function invalidateResult() {
-    gate.invalidate()
+    revision += 1
     result.value = null
     error.value = ''
   }
 
-  function selectFile(nextFile) {
+  function selectFile(selected) {
     invalidateResult()
-    file.value = nextFile
     cropReady.value = false
+    file.value = selected
   }
 
-  watch([seed, axis, heightOrigin, heightExtent], invalidateResult)
-  watch(blocks, invalidateResult, { deep: true })
+  function optionsFor(crop) {
+    const model = health.value
+    const options = {
+      axis: axis.value,
+      seed: normalizeSeed(seed.value),
+      blocks: normalizeBlocks(blocks.value, model.max_axis_blocks),
+      tortuosity: measureTortuosity.value,
+    }
+    if (model.height_enabled) {
+      const [origin, extent] = axis.value === 0
+        ? [heightOrigin.value, heightExtent.value]
+        : [crop.cropOrigin[0], crop.sourceShape[0]]
+      if (!(Number.isFinite(origin) && origin >= 0 && Number.isFinite(extent) && extent > 0)) {
+        throw new Error('Enter a non-negative Z origin and a positive full Z extent in source pixels.')
+      }
+      Object.assign(options, { heightOrigin: origin, heightExtent: extent })
+    }
+    return options
+  }
 
   async function generate() {
     if (!ready.value) return
-    const token = gate.begin()
+    const { signal } = lifetime
+    const inputRevision = revision
+    const current = () => !signal.aborted && revision === inputRevision
     busy.value = true
     error.value = ''
     try {
@@ -96,52 +98,30 @@ export function useGeneration(cropEditor) {
       if (!crop) {
         throw new Error(`Choose a valid ${health.value.crop_size} × ${health.value.crop_size} crop first.`)
       }
-      const options = {
-        axis: axis.value,
-        seed: normalizeSeed(seed.value),
-        blocks: normalizeBlocks(blocks.value, health.value.max_axis_blocks),
-        tortuosity: measureTortuosity.value,
-      }
-      if (health.value.height_enabled) {
-        options.heightOrigin = axis.value === 0 ? heightOrigin.value : crop.cropOrigin[0]
-        options.heightExtent = axis.value === 0 ? heightExtent.value : crop.sourceShape[0]
-        if (
-          !Number.isFinite(options.heightOrigin) || options.heightOrigin < 0
-          || !Number.isFinite(options.heightExtent) || options.heightExtent <= 0
-        ) {
-          throw new Error('Enter a non-negative Z origin and a positive full Z extent in source pixels.')
-        }
-      }
-      const image = await prepareImage(crop.image, controller.signal)
-      if (!gate.accepts(token)) return
-      const next = await generateVolume({ ...options, image }, controller.signal)
-      if (gate.accepts(token)) {
-        result.value = { ...next, porosity: phaseFraction(next.values, health.value.pore_phase) }
-      }
+      const options = optionsFor(crop)
+      const image = await prepareImage(crop.image, signal)
+      if (!current()) return
+      const volume = await generateVolume({ ...options, image }, signal)
+      if (!current()) return
+      let pores = 0
+      for (const label of volume.values) if (label === health.value.pore_phase) pores++
+      result.value = { ...volume, porosity: pores / volume.values.length }
     } catch (reason) {
-      if (gate.accepts(token)) error.value = reason instanceof Error ? reason.message : String(reason)
+      if (current()) error.value = reason instanceof Error ? reason.message : String(reason)
     } finally {
       busy.value = false
     }
   }
 
+  watch([seed, axis, heightOrigin, heightExtent, blocks], invalidateResult, {
+    deep: true,
+    flush: 'sync',
+  })
+  onMounted(connect)
+  onBeforeUnmount(() => lifetime.abort())
+
   return {
-    cropReady,
-    file,
-    seed,
-    blocks,
-    axis,
-    heightOrigin,
-    heightExtent,
-    busy,
-    error,
-    health,
-    healthError,
-    measureTortuosity,
-    result,
-    ready,
-    invalidateResult,
-    selectFile,
-    generate,
+    file, cropReady, health, healthError, seed, blocks, axis, heightOrigin, heightExtent,
+    measureTortuosity, busy, result, error, ready, selectFile, invalidateResult, generate,
   }
 }

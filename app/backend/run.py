@@ -8,10 +8,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.backend.src.app import create_app
-from app.backend.src.config import DEFAULT_CONFIG, ServerConfig, load_server_config
+from app.backend.src.config import DEFAULT_CONFIG, load_server_config
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv):
     parser = argparse.ArgumentParser(description="Run the 3D inference API.")
     parser.add_argument(
         "--weight",
@@ -32,21 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--max-inflight-downloads", type=int)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv=None):
+    args = parse_args(argv)
     config = load_server_config(args.config)
-    if args.max_inflight_downloads is not None:
-        # Validate the override like a config file value.
-        config = ServerConfig.model_validate(
-            {
-                **config.model_dump(),
-                "max_inflight_downloads": args.max_inflight_downloads,
-            }
-        )
     app = create_app(
         args.weight, device=args.device, lr_weights=args.lr_weight, config=config
     )

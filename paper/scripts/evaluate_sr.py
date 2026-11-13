@@ -14,8 +14,8 @@ from paper.scripts.common import (
     cache_dir,
     cached,
     connectivity,
+    describe_volumes,
     mean_std,
-    normalized,
     parse_args,
     real_crops,
     wall_minutes,
@@ -25,26 +25,28 @@ from src.api import SuperResolutionAPI
 from src.config.io import load_generation_settings, load_yaml, stored_path
 from src.data.crops import downsample
 from src.stats.sections import (
-    compare_sections,
     label_sections,
     section_errors,
     section_statistics,
 )
 from src.stats.volume import interface_density
-from src.train.selection import lr_mse, pick_sections
+from src.train.selection import lr_mse
 
 DESCRIPTION = (
     "Evaluate one run's SR stage for the paper: HR structure, baselines and LR "
     "agreement. Writes sr-results.json to --out and caches the LR inputs and HR "
-    "volumes in its cache/<run>/; --reuse recomputes the metrics from them "
+    "volumes in its cache/; --reuse recomputes the metrics from them "
     "without sampling."
 )
 # Second SR seed per LR input, to separate what SR adds from what LR fixes.
 RESEED = 1000
 
 
-def main(argv=None) -> None:
-    args = parse_args(DESCRIPTION, "SR run directory.", argv)
+def main(argv=None):
+    evaluate(parse_args(DESCRIPTION, "SR run directory.", argv))
+
+
+def evaluate(args):
     run = args.run
     # The same LR seeds as evaluate_lr.py; the LR inputs come from the LR model
     # inside the SR export.
@@ -59,19 +61,18 @@ def main(argv=None) -> None:
 
     real_labels = label_sections(real_crops(config, config.data.hi_res_size))
     noise = section_errors(real_labels[0::2], real_labels[1::2])
+    reference = section_statistics(real_labels)
+    phases = real_labels.shape[1]
 
-    def sample_lr():
-        return [
+    low = cached(
+        cache / "lr.pt",
+        args.reuse,
+        lambda: [
             api.lr.generate_probs(seed=seed, guidance=settings.guidance)
             for seed in range(samples)
-        ]
-
-    low = cached(cache / "lr.pt", args.reuse, sample_lr)
+        ],
+    )
     weights = {best: run / "generator.pt"} | archived_generators(run)
-
-    def refine(step, offset=0):
-        sr = SuperResolutionAPI(weights[step], args.device)
-        return [sr.refine(v, seed=offset + i) for i, v in enumerate(low)]
 
     results = {
         "run": stored_path(run),
@@ -84,24 +85,28 @@ def main(argv=None) -> None:
         "steps": {},
         "baselines": {},
     }
-    for step in sorted(weights):
+    for step, export in sorted(weights.items()):
         volumes = cached(
-            cache / f"step{step}.pt", args.reuse, lambda step=step: refine(step)
+            cache / f"step{step}.pt",
+            args.reuse,
+            lambda: refine_samples(export, args.device, low),
         )
         print(f"step {step}: {len(volumes)} volumes")
         results["steps"][str(step)] = volume_summary(
-            volumes, low, real_labels, noise, full=step == best
+            volumes, low, reference, phases, noise, full=step == best
         )
         if step == best:
             high = volumes
     for name, upsample in (("nearest", upsample_nearest), ("linear", upsample_linear)):
         baseline = [upsample(v, scale) for v in low]
         results["baselines"][name] = volume_summary(
-            baseline, low, real_labels, noise, full=name == "nearest"
+            baseline, low, reference, phases, noise, full=name == "nearest"
         )
 
     again = cached(
-        cache / f"step{best}-reseed.pt", args.reuse, lambda: refine(best, RESEED)
+        cache / f"step{best}-reseed.pt",
+        args.reuse,
+        lambda: refine_samples(weights[best], args.device, low, RESEED),
     )
     nearest = [upsample_nearest(v, scale) for v in low]
     results["reseed"] = {
@@ -117,26 +122,33 @@ def main(argv=None) -> None:
     print(f"Results: {output}")
 
 
-def upsample_nearest(low: torch.Tensor, scale: int) -> torch.Tensor:
-    labels = low.argmax(0)
-    for dim in range(3):
+def refine_samples(weights, device, volumes, offset=0):
+    model = SuperResolutionAPI(weights, device)
+    return [
+        model.refine(volume, seed=seed) for seed, volume in enumerate(volumes, offset)
+    ]
+
+
+def upsample_nearest(low, scale):
+    labels = low.argmax(0).to(torch.uint8)
+    for dim in range(labels.ndim):
         labels = labels.repeat_interleave(scale, dim)
-    return labels.to(torch.uint8)
+    return labels
 
 
-def upsample_linear(low: torch.Tensor, scale: int) -> torch.Tensor:
+def upsample_linear(low, scale):
     probs = F.interpolate(low[None], scale_factor=scale, mode="trilinear")
     return probs[0].argmax(0).to(torch.uint8)
 
 
-def lr_agreement(high: torch.Tensor, low: torch.Tensor) -> float:
+def lr_agreement(high, low):
     """Fraction of LR voxels whose majority HR phase is the LR label."""
     onehot = F.one_hot(high.long(), len(low)).movedim(-1, 0)[None].float()
     coarse = downsample(onehot, tuple(low.shape[-3:]))[0]
     return float((coarse.argmax(0) == low.argmax(0)).float().mean())
 
 
-def real_summary(real_labels: torch.Tensor, noise) -> dict:
+def real_summary(real_labels, noise):
     labels = real_labels.argmax(1)
     return {
         "crops": len(labels),
@@ -151,29 +163,20 @@ def real_summary(real_labels: torch.Tensor, noise) -> dict:
     }
 
 
-def volume_summary(volumes, low, real_labels, noise, full: bool) -> dict:
-    real = section_statistics(real_labels)
-    planes = {}
-    structure = []
-    clusters = []
-    for axis, name in enumerate(("xy", "xz", "yz")):
-        fake = section_statistics(pick_sections(volumes, axis, real_labels.shape[1]))
-        errors = compare_sections(real, fake)
-        planes[name] = errors._asdict()
-        structure.append(normalized(errors, noise))
-        clusters.append(fake.clusters[0])
-    summary = {
-        "samples": len(volumes),
-        "planes": planes,
-        "structure": float(np.mean(structure)),
-        "cluster_density": np.mean(clusters, 0).tolist(),
-        "phase0_fraction": mean_std([(v == 0).float().mean() for v in volumes]),
-        "interface_density": mean_std(
-            [interface_density(v, (0, 1, 2)) for v in volumes]
+def volume_summary(volumes, low, reference, phases, noise, full):
+    summary, clusters = describe_volumes(volumes, reference, phases, noise)
+    summary.update(
+        cluster_density=np.mean(clusters, 0).tolist(),
+        lr_mse=mean_std(
+            [lr_mse(high, source) for high, source in zip(volumes, low, strict=True)]
         ),
-        "lr_mse": mean_std([lr_mse(h, v) for h, v in zip(volumes, low)]),
-        "lr_agreement": mean_std([lr_agreement(h, v) for h, v in zip(volumes, low)]),
-    }
+        lr_agreement=mean_std(
+            [
+                lr_agreement(high, source)
+                for high, source in zip(volumes, low, strict=True)
+            ]
+        ),
+    )
     if not full:
         return summary
     summary |= connectivity(volumes)

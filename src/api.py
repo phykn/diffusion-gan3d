@@ -1,10 +1,10 @@
 import math
-from collections.abc import Mapping, Sequence
-from pathlib import Path
+from dataclasses import dataclass
+from functools import cached_property
 
 import torch
 
-from src.config.io import GenerationSettings, load_generation_settings
+from src.config.io import load_generation_settings
 from src.data.crops import phase_channels, resize_anchor
 from src.device import check_device, default_device
 from src.export import (
@@ -14,9 +14,9 @@ from src.export import (
     load_denoiser,
     read_export,
 )
-from src.sampling.anchor import PlaneAnchor, TileAnchors
+from src.sampling.anchor import PlaneAnchor, TileAnchors, check_strength
 from src.sampling.conditions import LRConditions, SRConditions
-from src.sampling.memory import MemoryEstimate, check_memory, estimate_memory
+from src.sampling.memory import check_memory, estimate_memory
 from src.sampling.plan import (
     TilePlan,
     check_non_negative,
@@ -29,11 +29,9 @@ from src.sampling.sampler import Predictor, TileSampler
 __all__ = ["LowResolutionAPI", "PlaneAnchor", "SuperResolutionAPI"]
 
 
-def output_shape(blocks, shape, size, patch: int, overlap: int) -> tuple[int, ...]:
-    """The requested output size; blocks, shape and size are exclusive."""
-    given = [value is not None for value in (blocks, shape, size)]
-    if sum(given) > 1:
-        raise ValueError("give only one of blocks, shape and size.")
+def output_shape(blocks, shape, patch, overlap):
+    if blocks is not None and shape is not None:
+        raise ValueError("give only one of blocks and shape.")
     if blocks is not None:
         counts = parse_shape(blocks, "blocks")
         if not 2 * overlap < patch:
@@ -41,8 +39,6 @@ def output_shape(blocks, shape, size, patch: int, overlap: int) -> tuple[int, ..
         result = tuple(patch + (n - 1) * (patch - 2 * overlap) for n in counts)
     elif shape is not None:
         result = parse_shape(shape, "shape")
-    elif size is not None:
-        result = parse_shape(size, "size")
     else:
         result = (patch,) * 3
     if any(value < patch for value in result):
@@ -50,8 +46,43 @@ def output_shape(blocks, shape, size, patch: int, overlap: int) -> tuple[int, ..
     return result
 
 
+@dataclass(frozen=True)
+class SamplingRequest:
+    sampler: TileSampler
+    plan: TilePlan
+    channels: int
+    probabilities: bool
+    guided: bool = False
+    cfg: bool = False
+    profile: bool = False
+    coarse: bool = False
+    extra_host_bytes: int = 0
+
+    @cached_property
+    def estimate(self):
+        predictor = self.sampler.predictor
+        return estimate_memory(
+            self.plan,
+            predictor.num_phases,
+            self.channels,
+            predictor.device,
+            probabilities=self.probabilities,
+            guided=self.guided,
+            profile=self.profile,
+            cfg=self.cfg,
+            coarse=self.coarse,
+            extra_host_bytes=self.extra_host_bytes,
+        )
+
+    def sample(self, storage, **options):
+        storage = check_memory(self.estimate, self.sampler.predictor.device, storage)
+        return self.sampler.sample(
+            self.plan, storage=storage, probabilities=self.probabilities, **options
+        )
+
+
 class LowResolutionAPI:
-    def __init__(self, weights: str | Path | Mapping, device=None):
+    def __init__(self, weights, device=None):
         self.device = check_device(default_device() if device is None else device)
         payload = read_export(weights, "lr")
         self.config = export_config(payload)
@@ -62,19 +93,19 @@ class LowResolutionAPI:
         self.input_size = data.lo_res_size
         self.num_phases = data.num_phases
         self.default_margin = model.downsample_factor
-        self.settings: GenerationSettings = load_generation_settings()
+        self.settings = load_generation_settings()
         self.predictor = Predictor.from_config(
             model, diffusion, self.config, self.device
         )
 
-    def prepare_image(self, image: torch.Tensor) -> torch.Tensor:
+    def prepare_image(self, image):
         if image.shape != (self.crop_size, self.crop_size):
             raise ValueError(
                 f"image must be a {self.crop_size} x {self.crop_size} original crop."
             )
         return resize_anchor(image, self.input_size, self.num_phases)
 
-    def plan(self, *, blocks=None, shape=None, size=None, overlap=None, margin=None):
+    def plan(self, *, blocks=None, shape=None, overlap=None, margin=None):
         """The tile plan of a request. margin (default: the denoiser's
         downsample factor) is generated around the output and cropped off."""
         overlap = check_non_negative(
@@ -83,7 +114,7 @@ class LowResolutionAPI:
         margin = self.default_margin if margin is None else margin
         patch = self.input_size
         return make_plan(
-            output_shape(blocks, shape, size, patch, overlap), patch, margin, overlap
+            output_shape(blocks, shape, patch, overlap), patch, margin, overlap
         )
 
     def estimate_memory(
@@ -91,42 +122,41 @@ class LowResolutionAPI:
         *,
         blocks=None,
         shape=None,
-        size=None,
         overlap=None,
         margin=None,
         anchors=(),
         guidance=None,
+        anchor_strength=None,
         probabilities=False,
-    ) -> MemoryEstimate:
-        """Memory of generate with these options.
-
-        Anchors count at any strength, and guidance other than 0 and 1 counts
-        as CFG, since vf may be given.
-        """
-        plan = self.plan(
-            blocks=blocks, shape=shape, size=size, overlap=overlap, margin=margin
-        )
+    ):
+        plan = self.plan(blocks=blocks, shape=shape, overlap=overlap, margin=margin)
         guidance = self.settings.guidance if guidance is None else float(guidance)
-        return self._estimate(
-            plan, bool(len(tuple(anchors))), probabilities, guidance not in (0.0, 1.0)
-        )
-
-    def _estimate(self, plan: TilePlan, guided: bool, probabilities: bool, cfg: bool):
-        return estimate_memory(
+        strength = self._anchor_strength(anchor_strength)
+        return self._request(
             plan,
-            self.num_phases,
+            bool(tuple(anchors)) and strength > 0,
+            probabilities,
+            guidance not in (0.0, 1.0),
+        ).estimate
+
+    def _anchor_strength(self, value):
+        return self.settings.anchor_strength if value is None else check_strength(value)
+
+    def _request(self, plan, guided, probabilities, cfg):
+        return SamplingRequest(
+            TileSampler(self.predictor),
+            plan,
             self.config.model.generator.channels[0],
-            self.device,
-            probabilities=probabilities,
+            probabilities,
             guided=guided,
             profile=self.config.profile_enabled,
             cfg=cfg,
         )
 
-    def check_memory(self, estimate: MemoryEstimate, storage: str = "auto") -> str:
+    def check_memory(self, estimate, storage="auto"):
         return check_memory(estimate, self.device, storage)
 
-    def generate(self, anchors=(), **options) -> torch.Tensor:
+    def generate(self, anchors=(), **options):
         """Labels uint8 (D, H, W) on the CPU.
 
         guidance only acts when vf or a depth profile conditions the model;
@@ -134,39 +164,31 @@ class LowResolutionAPI:
         """
         return self._generate(anchors, probabilities=False, **options)
 
-    def generate_probs(self, anchors=(), **options) -> torch.Tensor:
+    def generate_probs(self, anchors=(), **options):
         """Phase fractions float32 (C, D, H, W) on the CPU; options as generate."""
         return self._generate(anchors, probabilities=True, **options)
 
     def _generate(
         self,
-        anchors: Sequence = (),
+        anchors=(),
         *,
-        probabilities: bool,
+        probabilities,
         blocks=None,
         shape=None,
-        size=None,
         vf=None,
-        seed: int | None = None,
-        guidance: float | None = None,
-        anchor_strength: float | None = None,
-        overlap: int | None = None,
-        margin: int | None = None,
-        storage: str = "auto",
-        progress: bool = False,
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
-        vf_profile: Mapping | None = None,
-    ) -> torch.Tensor:
+        seed=None,
+        guidance=None,
+        anchor_strength=None,
+        overlap=None,
+        margin=None,
+        storage="auto",
+        progress=False,
+        height_origin=0.0,
+        height_extent=None,
+        vf_profile=None,
+    ):
         guidance = self.settings.guidance if guidance is None else float(guidance)
-        strength = (
-            self.settings.anchor_strength
-            if anchor_strength is None
-            else anchor_strength
-        )
-        plan = self.plan(
-            blocks=blocks, shape=shape, size=size, overlap=overlap, margin=margin
-        )
+        plan = self.plan(blocks=blocks, shape=shape, overlap=overlap, margin=margin)
         conditions = LRConditions(
             self.config,
             plan,
@@ -176,23 +198,25 @@ class LowResolutionAPI:
             height_origin=height_origin,
             height_extent=height_extent,
         )
+        strength = (
+            self.settings.anchor_strength
+            if anchor_strength is None
+            else anchor_strength
+        )
         anchors = TileAnchors(anchors, plan, self.num_phases, strength, self.device)
         cfg = conditions.guided and guidance not in (0.0, 1.0)
-        estimate = self._estimate(plan, anchors.active, probabilities, cfg)
-        storage = self.check_memory(estimate, storage)
-        return TileSampler(self.predictor).sample(
-            plan,
+        request = self._request(plan, anchors.active, probabilities, cfg)
+        return request.sample(
+            storage,
             seed=seed,
             conditions=conditions,
             guidance=guidance,
             guide=anchors if anchors.active else None,
-            probabilities=probabilities,
-            storage=storage,
             progress=progress,
         )
 
 
-def lr_fractions(low: torch.Tensor, num_phases: int) -> torch.Tensor:
+def lr_fractions(low, num_phases):
     """LR labels (D, H, W) or fractions (C, D, H, W) as float32 fractions."""
     if not isinstance(low, torch.Tensor):
         raise TypeError("low must be a tensor.")
@@ -215,12 +239,7 @@ class SuperResolutionAPI:
     volume is one tile.
     """
 
-    def __init__(
-        self,
-        weights: str | Path | Mapping,
-        device=None,
-        lr_weights: str | Path | Mapping | None = None,
-    ):
+    def __init__(self, weights, device=None, lr_weights=None):
         self.device = check_device(default_device() if device is None else device)
         payload = read_export(weights, "sr")
         self.config = export_config(payload)
@@ -241,7 +260,7 @@ class SuperResolutionAPI:
         )
         check_lr_source(self.lr.config, self.config)
 
-    def default_tiling(self, tile_size: int | None = None) -> tuple[int, int]:
+    def default_tiling(self, tile_size=None):
         """HR tile edge (default: the training size) and its overlap, aligned to
         the scale and at most 8."""
         scale = self.scale_factor
@@ -278,50 +297,49 @@ class SuperResolutionAPI:
         overlap=None,
         margin=None,
         probabilities=False,
-    ) -> MemoryEstimate:
+    ):
         """Memory of refine for a CPU LR volume of low_shape."""
         plan = self.plan(low_shape, tile_size=tile_size, overlap=overlap, margin=margin)
-        return self._estimate(plan, probabilities)
+        return self._request(plan, probabilities).estimate
 
-    def _estimate(self, plan: TilePlan, probabilities: bool) -> MemoryEstimate:
+    def _request(self, plan, probabilities):
         scale = self.scale_factor
         low = math.prod(n // scale for n in plan.output_shape)
         padded = math.prod(n // scale for n in plan.shape)
-        return estimate_memory(
+        return SamplingRequest(
+            TileSampler(self.predictor),
             plan,
-            self.num_phases,
             self.config.model.generator.channels[0],
-            self.device,
-            probabilities=probabilities,
+            probabilities,
             coarse=True,
             # The LR fractions and their padded copy stay in RAM.
             extra_host_bytes=4 * self.num_phases * (low + padded),
         )
 
-    def check_memory(self, estimate: MemoryEstimate, storage: str = "auto") -> str:
+    def check_memory(self, estimate, storage="auto"):
         return check_memory(estimate, self.device, storage)
 
-    def refine(self, low: torch.Tensor, **options) -> torch.Tensor:
+    def refine(self, low, **options):
         """HR labels uint8 (D, H, W) * scale on the CPU."""
         return self._refine(low, probabilities=False, **options)
 
-    def refine_probs(self, low: torch.Tensor, **options) -> torch.Tensor:
+    def refine_probs(self, low, **options):
         """HR phase fractions float32 (C, D, H, W) * scale; options as refine."""
         return self._refine(low, probabilities=True, **options)
 
     def _refine(
         self,
-        low: torch.Tensor,
+        low,
         *,
-        probabilities: bool,
-        seed: int | None = None,
-        tile_size: int | None = None,
-        overlap: int | None = None,
-        margin: int | None = None,
-        storage: str = "auto",
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
-    ) -> torch.Tensor:
+        probabilities,
+        seed=None,
+        tile_size=None,
+        overlap=None,
+        margin=None,
+        storage="auto",
+        height_origin=0.0,
+        height_extent=None,
+    ):
         probs = lr_fractions(low, self.num_phases)
         plan = self.plan(
             probs.shape[1:], tile_size=tile_size, overlap=overlap, margin=margin
@@ -334,11 +352,8 @@ class SuperResolutionAPI:
             height_origin=height_origin,
             height_extent=height_extent,
         )
-        storage = self.check_memory(self._estimate(plan, probabilities), storage)
-        return TileSampler(self.predictor).sample(
-            plan,
+        return self._request(plan, probabilities).sample(
+            storage,
             seed=seed,
             conditions=conditions,
-            probabilities=probabilities,
-            storage=storage,
         )

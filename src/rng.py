@@ -10,36 +10,28 @@ STREAMS = ("data", "train", "pairs", "augment", "bank")
 NOISE = "noise"
 
 
-def make_generator(seed: int) -> torch.Generator:
+def make_generator(seed):
     return torch.Generator(device="cpu").manual_seed(int(seed))
 
 
 class RunRandom:
-    """Run random state: every draw comes from a saved torch.Generator.
-
-    Small draws come from CPU generators and move to the device, so a seed gives
-    the same crops, choices and latents on every device. Diffusion noise volumes
-    come from a generator on the training device: drawn on the CPU, they took
-    about 7% of an SR step on MPS. Its state is saved too, so a resume on the
-    same device type repeats the run exactly.
-    """
-
-    def __init__(self, seed: int, device: torch.device | str = "cpu") -> None:
-        children = np.random.SeedSequence(seed).spawn(len(STREAMS) + 1)
-        seeds = [int(child.generate_state(1, np.uint64)[0] >> 1) for child in children]
+    def __init__(self, seed, device="cpu"):
+        names = (*STREAMS, NOISE)
+        children = np.random.SeedSequence(seed).spawn(len(names))
         self.generators = {
-            name: make_generator(value)
-            for name, value in zip(STREAMS, seeds, strict=False)
+            name: torch.Generator(
+                device=device if name == NOISE else "cpu"
+            ).manual_seed(int(child.generate_state(1, np.uint64)[0] >> 1))
+            for name, child in zip(names, children, strict=True)
         }
-        self.generators[NOISE] = torch.Generator(device=device).manual_seed(seeds[-1])
 
-    def __getitem__(self, name: str) -> torch.Generator:
+    def __getitem__(self, name):
         return self.generators[name]
 
-    def state(self) -> dict[str, torch.Tensor]:
+    def state(self):
         return {name: gen.get_state() for name, gen in self.generators.items()}
 
-    def load_state(self, states: dict[str, torch.Tensor]) -> None:
+    def load_state(self, states):
         if set(states) != set(self.generators):
             raise ValueError("checkpoint random state does not match this version.")
         for name, state in states.items():
@@ -60,14 +52,14 @@ class RunRandom:
                 )
 
 
-def randn(shape, generator, device=None, dtype=torch.float32) -> torch.Tensor:
+def randn(shape, generator, device=None, dtype=torch.float32):
     values = torch.randn(tuple(shape), generator=generator, dtype=torch.float32)
     return values.to(device=device, dtype=dtype)
 
 
-def rand(shape, generator, device=None) -> torch.Tensor:
+def rand(shape, generator, device=None):
     return torch.rand(tuple(shape), generator=generator).to(device)
 
 
-def randint(high: int, shape, generator, device=None) -> torch.Tensor:
+def randint(high, shape, generator, device=None):
     return torch.randint(high, tuple(shape), generator=generator).to(device)

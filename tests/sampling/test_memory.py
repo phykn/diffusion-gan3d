@@ -20,7 +20,7 @@ GPU = (
 )
 
 
-def probe(export: Path, device: str, options: dict) -> dict:
+def probe(export, device, options):
     """Peak memory of one generation, measured in a fresh process."""
     result = subprocess.run(
         [sys.executable, str(PROBE), str(export), device, json.dumps(options)],
@@ -33,17 +33,17 @@ def probe(export: Path, device: str, options: dict) -> dict:
 
 
 @pytest.fixture(scope="module")
-def default_configs() -> dict:
+def default_configs():
     return build_stage_configs(load_sample("default"))
 
 
 @pytest.fixture(scope="module")
-def default_lr_export(random_export, default_configs) -> Path:
+def default_lr_export(random_export, default_configs):
     return random_export(default_configs["lr"], "lr")
 
 
 @pytest.fixture(scope="module")
-def default_sr_export(random_export, default_configs) -> Path:
+def default_sr_export(random_export, default_configs):
     return random_export(default_configs["sr"], "sr", lr=default_configs["lr"])
 
 

@@ -1,22 +1,20 @@
 import copy
-from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 
 import torch
 from torch import nn
 
-from src.config.schema import StageConfig, plane_groups
+from src.axes import AXES, PLANES
+from src.config.schema import plane_groups
 from src.data.crops import CropSampler
 from src.data.height import grid_spacing, height_field
-from src.data.images import fingerprint
 from src.data.orientation import CriticAugment, plane_policies
 from src.data.pairs import sample_pairs
 from src.device import gpu_amp, wide_dtype
 from src.export import build_denoiser, build_diffusion, export_payload
 from src.model.critic import PairCritic2D
-from src.plane import AXES, PLANES
 from src.rng import RunRandom, randn
-from src.train.burn_in import BurnInValues, burn_in_values
+from src.train.burn_in import burn_in_values
 from src.train.losses.gan import critic_objective, relativistic_loss
 from src.train.losses.group_statistics import group_statistics_loss
 from src.train.metrics import structure_metrics
@@ -40,7 +38,7 @@ class Pairs:
     current: torch.Tensor
     height: torch.Tensor | None = None
 
-    def conditions(self) -> dict:
+    def conditions(self):
         return {} if self.height is None else {"height": self.height}
 
 
@@ -54,7 +52,7 @@ class StepInputs:
     diagnostics: dict = field(default_factory=dict)
 
 
-def build_ema(model: nn.Module) -> nn.Module:
+def build_ema(model):
     ema = copy.deepcopy(model)
     ema.eval()
     for parameter in ema.parameters():
@@ -63,7 +61,7 @@ def build_ema(model: nn.Module) -> nn.Module:
 
 
 @torch.no_grad()
-def update_ema(ema: nn.Module, model: nn.Module, decay: float) -> None:
+def update_ema(ema, model, decay):
     for ema_parameter, parameter in zip(
         ema.parameters(), model.parameters(), strict=True
     ):
@@ -73,7 +71,7 @@ def update_ema(ema: nn.Module, model: nn.Module, decay: float) -> None:
     ema.eval()
 
 
-def build_critics(config: StageConfig) -> nn.ModuleDict:
+def build_critics(config):
     critic = config.model.critic
     return nn.ModuleDict(
         {
@@ -90,13 +88,13 @@ def build_critics(config: StageConfig) -> nn.ModuleDict:
     )
 
 
-def validate_loss(loss: torch.Tensor, name: str) -> torch.Tensor:
+def validate_loss(loss, name):
     if not bool(torch.isfinite(loss.detach())):
         raise FloatingPointError(f"non-finite {name} loss; optimizer was not stepped.")
     return loss
 
 
-def step_optimizer(optimizer, scaler, diagnostics: dict, name: str) -> bool:
+def step_optimizer(optimizer, scaler, diagnostics, name):
     """Step unless the gradient is not finite; that is an error without AMP."""
     scaler.unscale_(optimizer)
     grads = [
@@ -120,18 +118,10 @@ def step_optimizer(optimizer, scaler, diagnostics: dict, name: str) -> bool:
     return finite
 
 
-def input_gradient_norms(loss: torch.Tensor, inputs: tuple[torch.Tensor, ...]):
-    grads = torch.autograd.grad(loss, inputs, retain_graph=True)
-    return tuple(grad.detach().float().flatten(1).norm(dim=1).mean() for grad in grads)
-
-
-def schedule_ramp(step: int, start: int, ramp: int) -> float:
-    """0 before start, then linear to 1 over ramp steps."""
-    if step < start:
-        return 0.0
+def schedule_ramp(step, ramp):
     if ramp == 0:
         return 1.0
-    return min((step - start + 1) / ramp, 1.0)
+    return min((step + 1) / ramp, 1.0)
 
 
 class Trainer:
@@ -143,7 +133,7 @@ class Trainer:
     conditions and the non-adversarial objective.
     """
 
-    def __init__(self, config: StageConfig, device: torch.device, planes: dict):
+    def __init__(self, config, device, planes):
         self.config = config
         self.device = torch.device(device)
         self.random = RunRandom(config.train.seed, device)
@@ -191,9 +181,6 @@ class Trainer:
         self.updates = {name: 0 for name in (*self.critics, "generator")}
         self.completed_steps = 0
         self.generator_updated = True
-        self.selection = None
-        self.data_fingerprint = fingerprint(planes)
-        self.path_maps: list = []
         self.diagnostics: dict = {}
         self.scheduled = burn_in_values(config, 0)
 
@@ -204,24 +191,60 @@ class Trainer:
 
     # Stage hooks -----------------------------------------------------------
 
-    def prepare(self, step: int, transition: int | None) -> StepInputs:
+    def prepare(self, step, transition):
         raise NotImplementedError
 
-    def objective(self, inputs: StepInputs, clean_probs):
+    def objective(self, inputs, clean_probs):
         """Non-adversarial generator terms: (loss, metrics)."""
         raise NotImplementedError
 
-    def export_payload(self, step: int, model) -> dict:
+    def export_payload(self, step, model):
         """The stage's export of EMA weights model at step (SR adds its LR)."""
         return export_payload(self.config, step, model)
 
-    def stage_state(self) -> dict:
-        """Stage fields of the checkpoint (SR: lr export and bank)."""
+    def stage_state(self):
         return {}
+
+    def state_dict(self):
+        return {
+            "models": {
+                "generator": self.denoiser.state_dict(),
+                "ema": self.ema.state_dict(),
+                "critics": {
+                    name: model.state_dict() for name, model in self.critics.items()
+                },
+            },
+            "optimizers": {
+                name: opt.state_dict() for name, opt in self.optimizers.items()
+            },
+            "scaler": self.scaler.state_dict(),
+            "updates": dict(self.updates),
+            "rng": self.random.state(),
+            **self.stage_state(),
+        }
+
+    def load_state_dict(self, state):
+        models = state["models"]
+        if (
+            models["critics"].keys() != self.critics.keys()
+            or state["optimizers"].keys() != self.optimizers.keys()
+        ):
+            raise ValueError("critic groups do not match the checkpoint.")
+        self.denoiser.load_state_dict(models["generator"])
+        self.ema.load_state_dict(models["ema"])
+        for name, critic in self.critics.items():
+            critic.load_state_dict(models["critics"][name])
+        for name, optimizer in self.optimizers.items():
+            optimizer.load_state_dict(state["optimizers"][name])
+        if state["scaler"]:
+            self.scaler.load_state_dict(state["scaler"])
+        self.updates = dict(state["updates"])
+        self.random.load_state(state["rng"])
+        self.completed_steps = state["step"]
 
     # Step ------------------------------------------------------------------
 
-    def step(self, step: int, transition: int | None = None) -> dict:
+    def step(self, step, transition=None):
         self.diagnostics = {}
         self.scheduled = self.apply_burn_in(step)
         self.denoiser.train()
@@ -248,24 +271,22 @@ class Trainer:
             "loss/critic": sum(value for value in critic_losses if value is not None),
             "loss/r1": r1,
             "sampling/transition": inputs.transition,
-            f"timestep/{inputs.transition}/generator": generator["adversarial"],
             **{
                 f"critic_plane/{PLANES[axis]}": value
                 for axis, value in enumerate(critic_losses)
             },
             **self.diagnostics,
         }
-        scalars[f"timestep/{inputs.transition}/critic"] = scalars["loss/critic"]
         return materialize(scalars)
 
-    def after_step(self, step: int, inputs: StepInputs, clean_probs) -> None:
+    def after_step(self, step, inputs, clean_probs):
         """Structure metrics of the prediction every structure_every_steps."""
         every = self.config.train.structure_every_steps
         if every and (step + 1) % every == 0:
             real = {axis: crops.images for axis, crops in inputs.real.items()}
             self.diagnostics.update(structure_metrics(clean_probs, real, self.groups))
 
-    def apply_burn_in(self, step: int) -> BurnInValues:
+    def apply_burn_in(self, step):
         """Set this step's learning rates and beta2; return its scheduled values."""
         values = burn_in_values(self.config, step)
         for name, optimizer in self.optimizers.items():
@@ -273,22 +294,13 @@ class Trainer:
             for group in optimizer.param_groups:
                 group["lr"] = lr
                 group["betas"] = values.betas
-        self.diagnostics.update(
-            {
-                "burn_in/generator_lr": values.generator_lr,
-                "burn_in/critic_lr": values.critic_lr,
-                "burn_in/beta2": values.betas[1],
-                "burn_in/regularization_scale": values.regularization_scale,
-                "burn_in/ema_decay": values.ema_decay,
-            }
-        )
         return values
 
-    def sample_transition(self) -> int:
+    def sample_transition(self):
         timesteps = self.diffusion.timesteps
         return int(torch.randint(timesteps, (), generator=self.random["train"]))
 
-    def real_crops(self) -> dict[int, RealCrops]:
+    def real_crops(self):
         """real_batch_size crops of every judged plane, with side-plane heights."""
         count = self.config.train.real_batch_size
         crops = {}
@@ -307,7 +319,7 @@ class Trainer:
             crops[axis] = real
         return crops
 
-    def volume_height(self, origins, extents) -> torch.Tensor:
+    def volume_height(self, origins, extents):
         return height_field(
             (self.patch_size,) * 3, origins, self.spacing, extents, self.device
         )
@@ -316,9 +328,7 @@ class Trainer:
         """total plus the ramped group-statistics term on transition 0. SR passes
         its LR input low: differences low already has are allowed on top."""
         group_statistics = self.config.loss.group_statistics
-        ramp = schedule_ramp(
-            inputs.step, group_statistics.start_step, group_statistics.ramp_steps
-        )
+        ramp = schedule_ramp(inputs.step, group_statistics.ramp_steps)
         if group_statistics.weight > 0 and inputs.transition == 0 and ramp > 0:
             value, values = group_statistics_loss(
                 clean_probs,
@@ -334,24 +344,24 @@ class Trainer:
             diagnostics["group_statistics/ramp"] = value.new_tensor(ramp)
         return total
 
-    def make_time(self, transition: int, batch: int) -> torch.Tensor:
+    def make_time(self, transition, batch):
         return torch.full((batch,), transition, device=self.device, dtype=torch.long)
 
-    def latent(self, batch: int) -> torch.Tensor:
+    def latent(self, batch):
         channels = self.config.model.generator.latent_channels
         return randn((batch, channels), self.random["train"], self.device)
 
-    def noise(self, shape) -> torch.Tensor:
+    def noise(self, shape):
         return torch.randn(
             tuple(shape), generator=self.random["noise"], device=self.device
         )
 
-    def autocast(self, enabled: bool) -> AbstractContextManager:
+    def autocast(self, enabled):
         return torch.autocast(
             device_type=self.device.type, dtype=torch.float16, enabled=enabled
         )
 
-    def generate_pair(self, transition: int, conditions: dict):
+    def generate_pair(self, transition, conditions):
         """Run the reverse chain from noise to x_t+1 without gradients, then
         take the transition t step with them. Returns (x_t, x_t+1, x0 pred)."""
         batch = self.config.train.volume_batch_size
@@ -381,7 +391,7 @@ class Trainer:
             )
         return previous, current, prediction
 
-    def fake_pairs(self, previous, current, inputs: StepInputs) -> dict[int, Pairs]:
+    def fake_pairs(self, previous, current, inputs):
         volume_height = inputs.conditions.get("height")
         pairs = {}
         for axis in self.axes:
@@ -398,7 +408,7 @@ class Trainer:
             pairs[axis] = Pairs(*self.augment(sampled, axis, self.random["augment"]))
         return pairs
 
-    def real_pairs(self, inputs: StepInputs) -> dict[int, Pairs]:
+    def real_pairs(self, inputs):
         pairs = {}
         for axis in self.axes:
             real = inputs.real[axis]
@@ -415,11 +425,11 @@ class Trainer:
             pairs[axis] = Pairs(*self.augment(values, axis, self.random["augment"]))
         return pairs
 
-    def lazy_update(self, name: str) -> bool:
+    def lazy_update(self, name):
         """Whether the next update of name is one with R1/R2 or diagnostics."""
         return (self.updates[name] + 1) % self.config.loss.r1_every_steps == 0
 
-    def regularization(self, name: str) -> tuple[bool, float, float]:
+    def regularization(self, name):
         """Lazy R1/R2 schedule and weights for one critic's next update."""
         loss = self.config.loss
         regularize = self.lazy_update(name)
@@ -443,8 +453,8 @@ class Trainer:
             for axis in axes:
                 # Copies keep the shared real pairs free of gradients for the
                 # generator update.
-                real_prev = real[axis].previous.detach().requires_grad_(regularize)
-                real_curr = real[axis].current.detach().requires_grad_(regularize)
+                real_prev = real[axis].previous.detach().requires_grad_(r1_weight > 0)
+                real_curr = real[axis].current.detach()
                 fake_prev = fake[axis].previous.detach().float()
                 fake_prev = fake_prev.requires_grad_(r2_weight > 0)
                 fake_curr = fake[axis].current.detach().float()
@@ -480,12 +490,6 @@ class Trainer:
                 self.diagnostics[f"score/{prefix}/fake"] = (
                     fake_score.logits_global.detach().mean()
                 )
-                if regularize:
-                    norms = input_gradient_norms(
-                        real_score.logits_global.sum(), (real_prev, real_curr)
-                    )
-                    for name, norm in zip(("previous", "current"), norms, strict=True):
-                        self.diagnostics[f"input_gradient/{prefix}/{name}"] = norm
                 if r1_weight > 0:
                     r1 = losses.r1.detach() * weight
                     r1_sum = r1 if r1_sum is None else r1_sum + r1
@@ -498,15 +502,12 @@ class Trainer:
                 self.updates[group] += 1
         return critic_losses, r1_sum
 
-    def adversarial_loss(self, transition, fake, real, diagnose):
+    def adversarial_loss(self, transition, fake, real):
         losses = []
         for group, axes in self.groups.items():
             critic = self.critics[group]
             for axis in axes:
                 fake_prev, fake_curr = fake[axis].previous, fake[axis].current
-                if diagnose:
-                    # The preceding reverse chain is already detached.
-                    fake_curr = fake_curr.detach().requires_grad_(True)
                 scores = critic(
                     fake_prev,
                     fake_curr,
@@ -520,28 +521,17 @@ class Trainer:
                     **real[axis].conditions(),
                 )
                 loss = relativistic_loss(scores, real_scores)
-                if diagnose:
-                    # Undo only the batch mean, retaining pyramid weights.
-                    norms = input_gradient_norms(
-                        loss * len(fake_prev), (fake_prev, fake_curr)
-                    )
-                    prefix = f"generator_input_gradient/{group}/{axis}/t{transition}"
-                    for name, norm in zip(("previous", "current"), norms, strict=True):
-                        self.diagnostics[f"{prefix}/{name}"] = norm
                 losses.append(loss / (len(axes) * len(self.groups)))
         return torch.stack(losses).sum()
 
-    def update_generator(self, inputs, clean_probs, fake, real) -> dict:
+    def update_generator(self, inputs, clean_probs, fake, real):
         optimizer = self.optimizers["generator"]
         optimizer.zero_grad(set_to_none=True)
         self.critics.requires_grad_(False)
         try:
-            diagnose = self.lazy_update("generator")
             # The critics score the fake pairs, so the critics' precision applies.
             with self.autocast(self.critic_amp):
-                adversarial = self.adversarial_loss(
-                    inputs.transition, fake, real, diagnose
-                )
+                adversarial = self.adversarial_loss(inputs.transition, fake, real)
                 extra, values = self.objective(inputs, clean_probs)
                 total = adversarial + extra
             self.diagnostics.update(values)
@@ -557,7 +547,7 @@ class Trainer:
         return {"adversarial": adversarial.detach(), "total": total.detach()}
 
 
-def materialize(scalars: dict) -> dict:
+def materialize(scalars):
     """The scalars with each tensor turned into a Python number (one sync)."""
     keys = [key for key, value in scalars.items() if isinstance(value, torch.Tensor)]
     result = dict(scalars)

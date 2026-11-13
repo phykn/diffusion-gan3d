@@ -20,27 +20,27 @@ from scripts.check.common import (
     write_json,
 )
 from src.api import SuperResolutionAPI, lr_fractions
-from src.config.io import PROJECT_ROOT, load_generation_settings, load_yaml
+from src.axes import PLANES
+from src.config.io import PROJECT_ROOT
 from src.console import field, metric, path_field, section, status
 from src.data.crops import downsample
 from src.device import empty_cache
-from src.export import resolve_export
-from src.plane import PLANES
+from src.export import VERSION, read_export, resolve_export
 from src.stats.labels import phase_fractions
 from src.storage import load_probabilities, load_volume, save_probabilities, save_volume
 
 
-def latest_sr() -> Path:
-    candidates = [
-        directory / "generator.pt"
-        for directory in (PROJECT_ROOT / "run").glob("*-sr/")
-        if (directory / "generator.pt").is_file()
-        and (directory / "train.yaml").is_file()
-        and load_yaml(directory / "train.yaml").get("stage") == "sr"
-    ]
-    if not candidates:
-        raise FileNotFoundError("No trained SR export found in run/. Supply --weight.")
-    return max(candidates, key=lambda path: path.stat().st_mtime)
+def latest_sr():
+    paths = (PROJECT_ROOT / "run").glob("*-sr/generator.pt")
+    for path in sorted(
+        paths, key=lambda candidate: candidate.stat().st_mtime, reverse=True
+    ):
+        try:
+            read_export(path, "sr")
+        except ValueError:
+            continue
+        return path
+    raise FileNotFoundError(f"No v{VERSION} SR export found in run/. Supply --weight.")
 
 
 def comparison(low, high, phases, path, show):
@@ -78,7 +78,7 @@ def comparison(low, high, phases, path, show):
     plt.close(fig)
 
 
-def main(argv=None) -> None:
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Refine an LR volume with SR; the SR export carries its LR model."
     )
@@ -124,7 +124,10 @@ def main(argv=None) -> None:
     parser.add_argument(
         "--no-view", action="store_true", help="Save results without a viewer."
     )
-    args = parser.parse_args(argv)
+    check_refinement(parser.parse_args(argv))
+
+
+def check_refinement(args):
     section("SR generation check")
     root = prepare_output(args, __file__)
     weight = resolve_export(args.weight or latest_sr()).resolve()
@@ -135,34 +138,18 @@ def main(argv=None) -> None:
         "height_origin": args.height_origin,
         "height_extent": args.height_extent,
     }
-    lr_weight = None
-    if args.input:
-        low = (
-            load_probabilities(args.input)
-            if args.input.suffix.lower() == ".pt"
-            else load_volume(args.input)
-        )
-    else:
-        # None: the LR export stored inside the SR export.
-        if args.lr_weight:
-            lr_weight = str(resolve_export(args.lr_weight).resolve())
-        if args.lr_guidance is None:
-            args.lr_guidance = load_generation_settings().guidance
-        status("Generating LR")
-        low = sr.lr.generate_probs(guidance=args.lr_guidance, **shared)
-        gc.collect()
-        empty_cache(sr.device)
-    tile_size, overlap = sr.default_tiling(args.tile_size)
-    if args.overlap is not None:
-        overlap = args.overlap
+    low, lr_weight = read_low_resolution(sr, args, shared)
+    tile_size, default_overlap = sr.default_tiling(args.tile_size)
+    overlap = default_overlap if args.overlap is None else args.overlap
     status(f"Refining LR {tuple(low.shape[-3:])}")
     high = sr.refine(
         low, tile_size=tile_size, overlap=overlap, margin=args.margin, **shared
     )
-    low_labels = low.argmax(0) if low.ndim == 4 else low
+    fractional = low.ndim == 4
+    low_labels = low.argmax(0) if fractional else low
     save_volume(low_labels, root / "lr.tiff")
     save_volume(high, root / "hr.tiff")
-    if low.ndim == 4:
+    if fractional:
         save_probabilities(low, root / "lr_probs.pt")
     low_probs = lr_fractions(low, sr.num_phases)[None]
     # This compares categorical output occupancy, not an unknown HR ground truth.
@@ -223,6 +210,22 @@ def main(argv=None) -> None:
         viewer.add_labels(high.cpu().numpy(), name="Generated HR")
         viewer.dims.ndisplay = 3
         napari.run()
+
+
+def read_low_resolution(sr, args, options):
+    if args.input:
+        reader = (
+            load_probabilities if args.input.suffix.lower() == ".pt" else load_volume
+        )
+        return reader(args.input), None
+    source = str(resolve_export(args.lr_weight).resolve()) if args.lr_weight else None
+    if args.lr_guidance is None:
+        args.lr_guidance = sr.lr.settings.guidance
+    status("Generating LR")
+    low = sr.lr.generate_probs(guidance=args.lr_guidance, **options)
+    gc.collect()
+    empty_cache(sr.device)
+    return low, source
 
 
 if __name__ == "__main__":

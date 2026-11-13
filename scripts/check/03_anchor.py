@@ -35,21 +35,21 @@ from src.stats.labels import voxel_accuracy
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
 
 
-def select_indices(size: int, count: int) -> tuple[int, ...]:
+def select_indices(size, count):
     """count section indices spread evenly over size."""
     if count < 0 or count > size:
         raise ValueError("count must be between 0 and the volume depth.")
     return tuple((2 * index + 1) * size // (2 * count) for index in range(count))
 
 
-def select_display_index(size: int, indices: tuple[int, ...]) -> int:
+def select_display_index(size, indices):
     center = size // 2
     if not indices:
         return center
     return min(indices, key=lambda index: (abs(index - center), index))
 
 
-def anchor_accuracy(vol, target, indices: tuple[int, ...], axis: int):
+def anchor_accuracy(vol, target, indices, axis):
     """Voxel accuracy on the anchored planes only."""
     if not indices:
         return None
@@ -59,15 +59,15 @@ def anchor_accuracy(vol, target, indices: tuple[int, ...], axis: int):
     return voxel_accuracy(actual, expected)
 
 
-def format_percent(value: float | None) -> str:
+def format_percent(value):
     return "n/a" if value is None else f"{value:.2%}"
 
 
-def format_ratio(value: float | None) -> str:
+def format_ratio(value):
     return "n/a" if value is None else f"{value:.2f}x"
 
 
-def format_profile(values, near_label: str) -> str:
+def format_profile(values, near_label):
     valid = [(d, value) for d, value in enumerate(values) if value is not None]
     if not valid:
         return "n/a"
@@ -79,7 +79,7 @@ def format_profile(values, near_label: str) -> str:
     )
 
 
-def print_anchor_effect(smoothness, profile, label: str) -> None:
+def print_anchor_effect(smoothness, profile, label):
     peak = ""
     if smoothness.peak_anchor_distance is not None:
         peak = f" at distance {smoothness.peak_anchor_distance}"
@@ -137,42 +137,16 @@ def parse_args(argv):
     return parser, args
 
 
-def main(argv=None) -> None:
+def main(argv=None):
     parser, args = parse_args(argv)
+    check_anchors(args, parser)
+
+
+def check_anchors(args, parser):
     section("Anchor check")
     prepare_check(args, __file__)
     api = LowResolutionAPI(args.weight, args.device)
-    patch = api.input_size
-    if args.anchor is None:
-        count = args.count if args.anchor_strength > 0 else 0
-        if count > patch:
-            parser.error(f"--count must be at most {patch}.")
-        status("Generating reference")
-        reference = api.generate(seed=args.seed, **generation_options(args))
-        sections = reference.movedim(args.axis, 0)
-        indices = select_indices(sections.shape[0], count)
-        anchors = [PlaneAnchor(sections[index], args.axis, index) for index in indices]
-        field("Anchors", f"{len(indices)} planes on axis {args.axis}")
-        target, labels, source = reference, None, None
-    else:
-        index = 0 if args.side == "start" else patch - 1
-        image, crop, height = load_anchor_image(args.anchor, api)
-        # A real xz/yz image fixes its own depth unless the options set it.
-        if api.config.conditioning.height_enabled and args.axis in (1, 2):
-            if args.height_origin is None:
-                args.height_origin = float(crop[0])
-            if args.height_extent is None:
-                args.height_extent = float(height)
-        indices = (index,)
-        anchors = [PlaneAnchor(image, args.axis, index)]
-        labels = image.argmax(0)
-        source = {"path": str(args.anchor.resolve()), "crop": list(crop)}
-        field(
-            "Anchor",
-            f"{args.anchor.resolve()}, crop {crop} -> input {patch} x {patch}",
-        )
-        field("Boundary", f"axis {args.axis}, {args.side} plane {index}")
-        target = None
+    anchors, indices, target, labels, source = build_anchors(args, api, parser)
     if indices:
         field("Strength", f"{args.anchor_strength:.2f}")
     options = generation_options(args) | {"seed": args.seed + 1}
@@ -228,7 +202,42 @@ def main(argv=None) -> None:
         show_napari(generated)
 
 
-def load_anchor_image(path: Path, api: LowResolutionAPI):
+def build_anchors(args, api, parser):
+    patch = api.input_size
+    if args.anchor is None:
+        count = args.count if args.anchor_strength > 0 else 0
+        if count > patch:
+            parser.error(f"--count must be at most {patch}.")
+        status("Generating reference")
+        reference = api.generate(seed=args.seed, **generation_options(args))
+        sections = reference.movedim(args.axis, 0)
+        indices = select_indices(sections.shape[0], count)
+        anchors = [PlaneAnchor(sections[index], args.axis, index) for index in indices]
+        field("Anchors", f"{len(indices)} planes on axis {args.axis}")
+        target, labels, source = reference, None, None
+    else:
+        index = 0 if args.side == "start" else patch - 1
+        image, crop, height = load_anchor_image(args.anchor, api)
+        # A real xz/yz image fixes its own depth unless the options set it.
+        if api.config.conditioning.height_enabled and args.axis in (1, 2):
+            if args.height_origin is None:
+                args.height_origin = float(crop[0])
+            if args.height_extent is None:
+                args.height_extent = float(height)
+        indices = (index,)
+        anchors = [PlaneAnchor(image, args.axis, index)]
+        labels = image.argmax(0)
+        source = {"path": str(args.anchor.resolve()), "crop": list(crop)}
+        field(
+            "Anchor",
+            f"{args.anchor.resolve()}, crop {crop} -> input {patch} x {patch}",
+        )
+        field("Boundary", f"axis {args.axis}, {args.side} plane {index}")
+        target = None
+    return anchors, indices, target, labels, source
+
+
+def load_anchor_image(path, api):
     """Center crop, resized to the LR grid; also the crop and image height."""
     values = read_labels(path)
     height, width = values.shape
@@ -240,7 +249,7 @@ def load_anchor_image(path: Path, api: LowResolutionAPI):
     return api.prepare_image(crop.long()), (top, left, size, size), height
 
 
-def show_result(vol, target, indices, axis: int, num_phases: int) -> None:
+def show_result(vol, target, indices, axis, num_phases):
     slices = vol.movedim(axis, 0)
     index = select_display_index(slices.shape[0], indices)
     target_plane = target.movedim(axis, 0)[index]
@@ -299,7 +308,7 @@ def show_result(vol, target, indices, axis: int, num_phases: int) -> None:
     plt.show()
 
 
-def render_strip(volume, anchor, axis, side, num_phases, output: Path, show: bool):
+def render_strip(volume, anchor, axis, side, num_phases, output, show):
     slices = volume.movedim(axis, 0)
     if side == "end":
         slices = slices.flip(0)

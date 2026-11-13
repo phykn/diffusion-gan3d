@@ -19,7 +19,7 @@ def _label_chunks(values, num_phases=None):
             pending.extend(part.split((part.shape[axis] + 1) // 2, dim=axis))
 
 
-def phase_labels(values, num_phases: int | None = None) -> torch.Tensor:
+def phase_labels(values, num_phases=None):
     values = torch.as_tensor(values)
     if values.numel() == 0 or values.is_complex():
         raise ValueError("phase labels must be non-empty real integers.")
@@ -37,19 +37,16 @@ def phase_labels(values, num_phases: int | None = None) -> torch.Tensor:
     return labels
 
 
-def phase_fractions(values, num_phases: int) -> torch.Tensor:
+def phase_fractions(values, num_phases):
     values = torch.as_tensor(values)
     counts = None
     for labels in _label_chunks(values, num_phases):
         chunk_counts = torch.bincount(labels.reshape(-1), minlength=num_phases)
-        if counts is None:
-            counts = chunk_counts
-        else:
-            counts.add_(chunk_counts)
+        counts = chunk_counts if counts is None else counts.add_(chunk_counts)
     return counts.to(wide_dtype(counts.device)).div(values.numel())
 
 
-def voxel_accuracy(actual, expected) -> float:
+def voxel_accuracy(actual, expected):
     actual = phase_labels(actual)
     expected = phase_labels(expected).to(actual.device)
     if actual.shape != expected.shape:
@@ -73,8 +70,7 @@ def phase_profile(values, phases, bins=None):
     return result if bins is None else rebin_profile(result, bins)
 
 
-def transition_counts(previous, current, num_phases: int) -> torch.Tensor:
-    """Counts of label pairs between two adjacent sections, [K, K]."""
+def transition_counts(previous, current, num_phases):
     previous = phase_labels(previous, num_phases)
     current = phase_labels(current, num_phases).to(previous.device)
     if previous.shape != current.shape:
@@ -84,14 +80,14 @@ def transition_counts(previous, current, num_phases: int) -> torch.Tensor:
     return counts.reshape(num_phases, num_phases).to(wide_dtype(counts.device))
 
 
-def transition_tv(first, second) -> float:
+def transition_tv(first, second):
     first, second = _transition_matrices(first, second)
     first = first / first.sum()
     second = second / second.sum()
     return float(0.5 * (first - second).abs().sum())
 
 
-def continuation_delta(first, second) -> float | None:
+def continuation_delta(first, second):
     first, second = _transition_matrices(first, second)
     first_totals = first.sum(dim=1)
     second_totals = second.sum(dim=1)
@@ -103,7 +99,7 @@ def continuation_delta(first, second) -> float | None:
     return float((first_values - second_values).abs().max())
 
 
-def _transition_matrices(first, second) -> tuple[torch.Tensor, torch.Tensor]:
+def _transition_matrices(first, second):
     first = torch.as_tensor(first)
     first = first.to(wide_dtype(first.device))
     second = torch.as_tensor(second, dtype=first.dtype, device=first.device)

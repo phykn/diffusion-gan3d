@@ -1,68 +1,62 @@
-const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10]
-const SIZE_MISMATCH = 'PNG pixel data does not match its declared dimensions.'
+const PNG = [137, 80, 78, 71, 13, 10, 26, 10]
+const SIZE_ERROR = 'PNG pixel data does not match its declared dimensions.'
 
-function joinBytes(chunks) {
-  const size = chunks.reduce((total, chunk) => total + chunk.length, 0)
-  const result = new Uint8Array(size)
-  let offset = 0
-  for (const chunk of chunks) {
-    result.set(chunk, offset)
-    offset += chunk.length
-  }
-  return result
-}
-
-function parseLabelPng(buffer) {
+function readChunks(buffer) {
   const bytes = new Uint8Array(buffer)
-  if (bytes.length < PNG_SIGNATURE.length || !PNG_SIGNATURE.every((value, index) => bytes[index] === value)) return null
+  if (!PNG.every((value, i) => bytes[i] === value)) return null
 
-  let offset = PNG_SIGNATURE.length
-  let header = null
-  const compressedRows = []
-  while (offset + 12 <= bytes.length) {
-    const length = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0)
-    const dataStart = offset + 8
-    const dataEnd = dataStart + length
-    if (dataEnd + 4 > bytes.length) return null
-    const name = String.fromCharCode(...bytes.subarray(offset + 4, offset + 8))
-    if (name === 'IHDR' && length === 13) {
-      const view = new DataView(bytes.buffer, bytes.byteOffset + dataStart, length)
-      header = {
-        width: view.getUint32(0),
-        height: view.getUint32(4),
-        bitDepth: bytes[dataStart + 8],
-        colorType: bytes[dataStart + 9],
-        interlace: bytes[dataStart + 12],
+  const view = new DataView(buffer)
+  const data = []
+  let info
+  for (let offset = PNG.length; offset + 12 <= bytes.length;) {
+    const length = view.getUint32(offset)
+    const start = offset + 8
+    const end = start + length
+    if (end + 4 > bytes.length) return null
+    switch (view.getUint32(offset + 4)) {
+      case 0x49484452: {
+        if (length !== 13) return null
+        info = {
+          width: view.getUint32(start),
+          height: view.getUint32(start + 4),
+          bits: bytes[start + 8],
+          color: bytes[start + 9],
+          interlaced: bytes[start + 12] !== 0,
+        }
+        break
       }
-    } else if (name === 'IDAT') {
-      compressedRows.push(bytes.slice(dataStart, dataEnd))
+      case 0x49444154:
+        data.push(bytes.subarray(start, end))
+        break
+      case 0x49454e44:
+        return info && data.length ? { ...info, data } : null
     }
-    offset = dataEnd + 4
-    if (name === 'IEND') break
+    offset = end + 4
   }
-  if (!header || ![0, 2, 3].includes(header.colorType) || header.interlace !== 0 || !compressedRows.length) return null
-  if (![1, 2, 4, 8].includes(header.bitDepth)) return null
-  if (header.colorType === 2 && header.bitDepth !== 8) return null
-  return { ...header, compressed: joinBytes(compressedRows) }
+  return null
 }
 
-async function inflate(bytes, expectedSize) {
+async function inflateRows(parts, length) {
   if (typeof DecompressionStream === 'undefined') throw new Error('This browser cannot decode PNG label data.')
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'))
-  const reader = stream.getReader()
+  const reader = new Blob(parts).stream().pipeThrough(new DecompressionStream('deflate')).getReader()
   const chunks = []
-  let size = 0
+  let bytes = 0
   try {
     while (true) {
-      const { value, done } = await reader.read()
+      const { done, value } = await reader.read()
       if (done) break
-      size += value.length
-      if (size > expectedSize) {
-        throw new Error(SIZE_MISMATCH)
-      }
+      bytes += value.length
+      if (bytes > length) throw new Error(SIZE_ERROR)
       chunks.push(value)
     }
-    return joinBytes(chunks)
+    if (bytes !== length) throw new Error(SIZE_ERROR)
+    const result = new Uint8Array(bytes)
+    let offset = 0
+    for (const chunk of chunks) {
+      result.set(chunk, offset)
+      offset += chunk.length
+    }
+    return result
   } finally {
     try {
       await reader.cancel()
@@ -72,115 +66,89 @@ async function inflate(bytes, expectedSize) {
   }
 }
 
-function paeth(left, above, upperLeft) {
-  const estimate = left + above - upperLeft
-  const leftDistance = Math.abs(estimate - left)
-  const aboveDistance = Math.abs(estimate - above)
-  const upperLeftDistance = Math.abs(estimate - upperLeft)
-  if (leftDistance <= aboveDistance && leftDistance <= upperLeftDistance) return left
-  if (aboveDistance <= upperLeftDistance) return above
-  return upperLeft
+function paeth(a, b, c) {
+  const distanceA = Math.abs(b - c)
+  const distanceB = Math.abs(a - c)
+  const distanceC = Math.abs(a + b - 2 * c)
+  if (distanceA <= distanceB && distanceA <= distanceC) return a
+  return distanceB <= distanceC ? b : c
 }
 
-function unfilterRow(filtered, previous, filter, bytesPerPixel) {
-  const row = new Uint8Array(filtered.length)
-  for (let index = 0; index < row.length; index += 1) {
-    const left = index >= bytesPerPixel ? row[index - bytesPerPixel] : 0
-    const above = previous?.[index] ?? 0
-    const upperLeft = index >= bytesPerPixel ? (previous?.[index - bytesPerPixel] ?? 0) : 0
-    const value = filtered[index]
-    if (filter === 0) row[index] = value
-    else if (filter === 1) row[index] = (value + left) & 255
-    else if (filter === 2) row[index] = (value + above) & 255
-    else if (filter === 3) row[index] = (value + Math.floor((left + above) / 2)) & 255
-    else if (filter === 4) row[index] = (value + paeth(left, above, upperLeft)) & 255
-    else throw new Error(`Unsupported PNG row filter: ${filter}.`)
+function restoreRow(row, above, filter, stride) {
+  if (filter > 4) throw new Error(`Unsupported PNG row filter: ${filter}.`)
+  if (!filter) return
+  for (let i = 0; i < row.length; i++) {
+    const left = i >= stride ? row[i - stride] : 0
+    const top = above?.[i] ?? 0
+    const diagonal = above?.[i - stride] ?? 0
+    let prediction = left
+    if (filter === 2) prediction = top
+    if (filter === 3) prediction = (left + top) >> 1
+    if (filter === 4) prediction = paeth(left, top, diagonal)
+    row[i] += prediction
   }
-  return row
-}
-
-function unpackRow(row, width, bitDepth) {
-  if (bitDepth === 8) return row.slice(0, width)
-  const mask = (1 << bitDepth) - 1
-  const perByte = 8 / bitDepth
-  const labels = new Uint8Array(width)
-  for (let index = 0; index < width; index += 1) {
-    const byte = row[Math.floor(index / perByte)]
-    const shift = 8 - bitDepth * ((index % perByte) + 1)
-    labels[index] = (byte >> shift) & mask
-  }
-  return labels
 }
 
 export async function decodePngLabels(buffer) {
-  const png = parseLabelPng(buffer)
-  if (!png) return null
-  const channels = png.colorType === 2 ? 3 : 1
-  const rowBytes = Math.ceil(png.width * channels * png.bitDepth / 8)
-  const bytesPerPixel = Math.max(1, Math.ceil(channels * png.bitDepth / 8))
-  const expectedSize = (rowBytes + 1) * png.height
-  if (png.width < 1 || png.height < 1 || !Number.isSafeInteger(expectedSize)) {
-    throw new Error(SIZE_MISMATCH)
-  }
-  const decoded = await inflate(png.compressed, expectedSize)
-  if (decoded.length !== expectedSize) {
-    throw new Error(SIZE_MISMATCH)
-  }
-  const labels = new Uint8Array(png.width * png.height)
-  let sourceOffset = 0
-  let previous = null
-  for (let rowIndex = 0; rowIndex < png.height; rowIndex += 1) {
-    const filter = decoded[sourceOffset]
-    const filtered = decoded.slice(sourceOffset + 1, sourceOffset + 1 + rowBytes)
-    const row = unfilterRow(filtered, previous, filter, bytesPerPixel)
-    const outputOffset = rowIndex * png.width
-    if (png.colorType === 2) {
-      for (let column = 0; column < png.width; column += 1) {
-        const pixelOffset = column * 3
-        const value = row[pixelOffset]
-        if (value !== row[pixelOffset + 1] || value !== row[pixelOffset + 2]) {
+  const png = readChunks(buffer)
+  if (!png || png.interlaced || ![0, 2, 3].includes(png.color)) return null
+  const { width, height, bits, data, color } = png
+  if (![1, 2, 4, 8].includes(bits) || (color === 2 && bits !== 8)) return null
+
+  const channels = color === 2 ? 3 : 1
+  const rowSize = Math.ceil(width * channels * bits / 8)
+  const length = (rowSize + 1) * height
+  if (!width || !height || !Number.isSafeInteger(length)) throw new Error(SIZE_ERROR)
+
+  const rows = await inflateRows(data, length)
+  const labels = new Uint8Array(width * height)
+  let previous
+  for (let y = 0; y < height; y++) {
+    const start = y * (rowSize + 1)
+    const row = rows.subarray(start + 1, start + 1 + rowSize)
+    restoreRow(row, previous, rows[start], channels)
+    previous = row
+    if (channels === 1 && bits === 8) {
+      labels.set(row, y * width)
+      continue
+    }
+    for (let x = 0; x < width; x++) {
+      if (channels === 3) {
+        const i = 3 * x
+        if (row[i] !== row[i + 1] || row[i] !== row[i + 2]) {
           throw new Error('RGB PNG labels must use identical channel values.')
         }
-        labels[outputOffset + column] = value
+        labels[y * width + x] = row[i]
+      } else {
+        const bit = x * bits
+        labels[y * width + x] = (row[Math.floor(bit / 8)] >> (8 - bits - (bit % 8))) & ((1 << bits) - 1)
       }
-    } else {
-      labels.set(unpackRow(row, png.width, png.bitDepth), outputOffset)
     }
-    previous = row
-    sourceOffset += rowBytes + 1
   }
-  return { width: png.width, height: png.height, labels }
+  return { width, height, labels }
 }
 
 export async function readPngLabels(file) {
-  const name = file?.name?.toLowerCase() || ''
-  if (file?.type !== 'image/png' && !name.endsWith('.png')) {
+  if (file?.type !== 'image/png' && !file?.name?.toLowerCase().endsWith('.png')) {
     throw new Error('Only PNG label images are supported.')
   }
-  const labels = await decodePngLabels(await file.arrayBuffer())
-  if (!labels) {
-    throw new Error('PNG must contain raw grayscale, RGB, or indexed label values.')
-  }
-  return labels
+  const source = await decodePngLabels(await file.arrayBuffer())
+  if (!source) throw new Error('PNG must contain raw grayscale, RGB, or indexed label values.')
+  return source
 }
 
-// The drawn crop box and the extracted labels share these integer cell boundaries.
-export function clampCrop(source, crop, cropSize) {
-  return {
-    x: Math.max(0, Math.min(Math.round(crop.x), source.width - cropSize)),
-    y: Math.max(0, Math.min(Math.round(crop.y), source.height - cropSize)),
-  }
+export function clampCrop(source, crop, size) {
+  const bound = (position, edge) => Math.max(0, Math.min(Math.round(position), edge - size))
+  return { x: bound(crop.x, source.width), y: bound(crop.y, source.height) }
 }
 
-export function cropAnchor(source, crop, cropSize) {
-  const { x, y } = clampCrop(source, crop, cropSize)
-  return {
-    // /prepare resizes the crop to the model input on the server.
-    image: Array.from({ length: cropSize }, (_, row) => {
-      const start = (y + row) * source.width + x
-      return Array.from(source.labels.subarray(start, start + cropSize))
-    }),
-    cropOrigin: [y, x],
-    sourceShape: [source.height, source.width],
+export function cropAnchor(source, crop, size) {
+  const { width, height, labels } = source
+  const { x, y } = clampCrop(source, crop, size)
+  const image = []
+  for (let row = y; row < y + size; row++) {
+    const start = row * width + x
+    image.push([...labels.subarray(start, start + size)])
   }
+  return { image, cropOrigin: [y, x], sourceShape: [height, width] }
 }

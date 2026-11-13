@@ -1,19 +1,17 @@
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from src.phase import validate_num_phases
-from src.plane import PLANES
+from src.axes import PLANES, validate_num_phases
 from src.storage import file_hash
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff"}
 
 
-def list_images(folder: Path) -> tuple[Path, ...]:
-    """Label images directly in folder; subfolders and other files are skipped."""
+def list_images(folder):
     if not folder.is_dir():
         raise FileNotFoundError(f"image folder does not exist: {folder}")
     images = tuple(
@@ -28,8 +26,7 @@ def list_images(folder: Path) -> tuple[Path, ...]:
     return images
 
 
-def read_labels(path: Path) -> np.ndarray:
-    """Return a read-only 2D uint8 label image."""
+def read_labels(path):
     try:
         with Image.open(path) as image:
             if getattr(image, "n_frames", 1) != 1:
@@ -48,75 +45,58 @@ def read_labels(path: Path) -> np.ndarray:
 
 @dataclass(frozen=True)
 class PlaneImages:
-    """Decoded images of one plane, grouped by folder (one group per folder)."""
-
     plane: str
     folders: tuple[Path, ...]
     paths: tuple[tuple[Path, ...], ...]
     images: tuple[tuple[np.ndarray, ...], ...]
 
-    def all_images(self) -> list[np.ndarray]:
-        return [image for group in self.images for image in group]
+    def all_images(self):
+        return list(chain.from_iterable(self.images))
 
 
-def find_images(
-    images: Mapping[str, Sequence[str | Path]],
-) -> dict[str, tuple[tuple[Path, ...], ...]]:
-    """Image paths of each plane, one tuple per folder, in plane order."""
-    result = {}
+def load_images(images, num_phases=None):
+    planes = {}
     for plane in PLANES:
         if plane not in images:
             continue
-        folders = [Path(folder) for folder in images[plane]]
+        folders = tuple(map(Path, images[plane]))
         if len({folder.resolve() for folder in folders}) != len(folders):
             raise ValueError(f"{plane} folders must not contain duplicates.")
-        result[plane] = tuple(list_images(folder) for folder in folders)
-    return result
-
-
-def load_images(
-    images: Mapping[str, Sequence[str | Path]], num_phases: int | None = None
-) -> dict[str, PlaneImages]:
-    """Decode every image once; labels must be below num_phases when given."""
-    planes = {}
-    for plane, groups in find_images(images).items():
+        groups = tuple(map(list_images, folders))
         decoded = []
         for group in groups:
             values = []
             for path in group:
                 image = read_labels(path)
-                if num_phases is not None:
-                    largest = int(image.max())
-                    if largest >= num_phases:
-                        raise ValueError(
-                            f"phase labels must be in [0, {num_phases - 1}], "
-                            f"found {largest}: {path}"
-                        )
+                if (
+                    num_phases is not None
+                    and (largest := int(image.max())) >= num_phases
+                ):
+                    raise ValueError(
+                        f"phase labels must be in [0, {num_phases - 1}], "
+                        f"found {largest}: {path}"
+                    )
                 values.append(image)
             decoded.append(tuple(values))
         planes[plane] = PlaneImages(
             plane=plane,
-            folders=tuple(Path(folder) for folder in images[plane]),
+            folders=folders,
             paths=groups,
             images=tuple(decoded),
         )
     return planes
 
 
-def infer_num_phases(planes: Mapping[str, PlaneImages]) -> int:
-    """Count phases as the largest label in the training images plus one.
-
-    Every smaller label must appear too: 0/255 masks, or 2- and 4-bit PNGs that
-    PIL scales to 0..255, would otherwise make hundreds of phases.
-    """
+def infer_num_phases(planes):
     present = np.zeros(256, dtype=bool)
     largest, source = -1, None
     for images in planes.values():
         for group, paths in zip(images.images, images.paths, strict=True):
             for image, path in zip(group, paths, strict=True):
-                present |= np.bincount(image.ravel(), minlength=256) > 0
-                if int(image.max()) > largest:
-                    largest, source = int(image.max()), path
+                labels = np.flatnonzero(np.bincount(image.ravel()))
+                present[labels] = True
+                if labels[-1] > largest:
+                    largest, source = int(labels[-1]), path
     count = largest + 1
     missing = np.flatnonzero(~present[:count])
     if missing.size:
@@ -128,17 +108,17 @@ def infer_num_phases(planes: Mapping[str, PlaneImages]) -> int:
     return validate_num_phases(count)
 
 
-def fingerprint(planes: Mapping[str, PlaneImages]) -> dict[str, dict[str, str]]:
-    """sha256 of every image, keyed by plane and folder-relative file name."""
-    result = {}
+def fingerprint(planes):
+    hashes = {}
+    result = {plane: {} for plane in planes}
     for plane, images in planes.items():
-        entries = {}
         for index, (folder, paths) in enumerate(
             zip(images.folders, images.paths, strict=True)
         ):
+            prefix = "" if len(images.folders) == 1 else f"{index}/"
             for path in paths:
-                name = path.relative_to(folder).as_posix()
-                key = name if len(images.folders) == 1 else f"{index}/{name}"
-                entries[key] = file_hash(path)
-        result[plane] = entries
+                if path not in hashes:
+                    hashes[path] = file_hash(path)
+                key = prefix + path.relative_to(folder).as_posix()
+                result[plane][key] = hashes[path]
     return result

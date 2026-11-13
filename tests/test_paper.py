@@ -13,16 +13,16 @@ from src.stats.volume import interface_density
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def read_paper() -> str:
+def read_paper():
     return (ROOT / "paper/README.md").read_text(encoding="utf-8")
 
 
-def read_results(stage: str) -> dict:
+def read_results(stage):
     path = ROOT / f"paper/assets/{stage}-results.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def table(paper: str, header: str) -> dict[str, list[str]]:
+def table(paper, header):
     """Cells of the paper table whose first column is header, by row name."""
     lines = paper.splitlines()
     start = next(i for i, line in enumerate(lines) if line.startswith(f"| {header} |"))
@@ -35,7 +35,7 @@ def table(paper: str, header: str) -> dict[str, list[str]]:
     return rows
 
 
-def spread(values, digits: int, scale: float = 1.0, unit: str = "") -> str:
+def spread(values, digits, scale=1.0, unit=""):
     """Mean ± standard deviation of a summary or of raw values, as the paper prints it."""
     if isinstance(values, dict):
         mean, std = values["mean"], values["std"]
@@ -44,7 +44,7 @@ def spread(values, digits: int, scale: float = 1.0, unit: str = "") -> str:
     return f"{scale * mean:.{digits}f} ± {scale * std:.{digits}f}{unit}"
 
 
-def section_cells(summary: dict) -> list[str]:
+def section_cells(summary):
     planes = summary["planes"].values()
     error = {
         key: np.mean([plane[key] for plane in planes])
@@ -60,19 +60,19 @@ def section_cells(summary: dict) -> list[str]:
     ]
 
 
-def signed(value: float) -> str:
+def signed(value):
     """A value at two decimals with the paper's minus sign."""
     return f"{value:.2f}".replace("-", "−")
 
 
-def real_cells(real: dict) -> list[str]:
+def real_cells(real):
     return ["—"] * 4 + [
         spread(real["phase0_fraction"], 3),
         spread(real["interface_density"], 4),
     ]
 
 
-def test_paper_numbers_and_figures_match_lr_results() -> None:
+def test_paper_numbers_and_figures_match_lr_results():
     paper = read_paper()
     results = read_results("lr")
     best = results["steps"][str(results["best_step"])]
@@ -94,7 +94,7 @@ def test_paper_numbers_and_figures_match_lr_results() -> None:
     assert all((ROOT / "paper" / figure).is_file() for figure in figures)
 
 
-def test_paper_numbers_match_sr_results() -> None:
+def test_paper_numbers_match_sr_results():
     paper = read_paper()
     results = read_results("sr")
     best = results["steps"][str(results["best_step"])]
@@ -120,7 +120,7 @@ def test_paper_numbers_match_sr_results() -> None:
         assert f"{span:.1f}% of {label}" in paper
 
 
-def test_lr_table_matches_results() -> None:
+def test_lr_table_matches_results():
     results = read_results("lr")
     rows = table(read_paper(), "Step")
     best, last = results["best_step"], max(map(int, results["steps"]))
@@ -133,7 +133,7 @@ def test_lr_table_matches_results() -> None:
     assert not rows
 
 
-def test_sr_table_matches_results() -> None:
+def test_sr_table_matches_results():
     results = read_results("sr")
     rows = table(read_paper(), "Volumes")
 
@@ -153,7 +153,7 @@ def test_sr_table_matches_results() -> None:
     assert not rows
 
 
-def test_anchor_table_matches_results() -> None:
+def test_anchor_table_matches_results():
     anchor = read_results("lr")["anchor"]
     rows = table(read_paper(), "Anchor")
     center = max(row["index"] for row in anchor["external"])
@@ -180,7 +180,7 @@ def test_anchor_table_matches_results() -> None:
     assert not rows
 
 
-def test_paper_text_numbers_match_results() -> None:
+def test_paper_text_numbers_match_results():
     paper = read_paper()
     lr, sr = read_results("lr"), read_results("sr")
     assert f"({lr['training_minutes']:.0f} minutes" in paper
@@ -213,7 +213,7 @@ def test_paper_text_numbers_match_results() -> None:
         assert f"{100 * np.mean(whole):.1f}% with {text}" in paper
 
 
-def test_anode_table_matches_results() -> None:
+def test_anode_table_matches_results():
     results = read_results("anode")
     rows = table(read_paper(), "Measure")
 
@@ -256,7 +256,7 @@ def test_anode_table_matches_results() -> None:
     assert not rows
 
 
-def test_paper_numbers_match_anode_results() -> None:
+def test_paper_numbers_match_anode_results():
     paper = read_paper()
     results = read_results("anode")
     lr, sr = results["lr"], results["sr"]
@@ -303,14 +303,14 @@ def test_paper_numbers_match_anode_results() -> None:
     assert f"tortuosity within {worst(sr):.1f}%" in paper
 
 
-def test_readme_figures_exist() -> None:
+def test_readme_figures_exist():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     figures = re.findall(r'<img src="([^"]+)"', readme)
     assert "paper/assets/sr-volume.png" in figures
     assert all((ROOT / figure).is_file() for figure in figures)
 
 
-def test_upsampling_baselines_keep_lr_labels() -> None:
+def test_upsampling_baselines_keep_lr_labels():
     low = torch.nn.functional.one_hot(torch.randint(2, (4, 4, 4)), 2)
     low = low.movedim(-1, 0).float()
 
@@ -321,7 +321,7 @@ def test_upsampling_baselines_keep_lr_labels() -> None:
     assert upsample_nearest(low, 3).shape == (12, 12, 12)
 
 
-def test_nested_plane_order_covers_every_plane_in_nested_prefixes() -> None:
+def test_nested_plane_order_covers_every_plane_in_nested_prefixes():
     order = nested_plane_order(8)
 
     assert sorted(order) == list(range(8))
@@ -329,7 +329,7 @@ def test_nested_plane_order_covers_every_plane_in_nested_prefixes() -> None:
     assert set(order[:2]) <= set(order[:4])
 
 
-def test_pool_similarity_rewards_coarse_match() -> None:
+def test_pool_similarity_rewards_coarse_match():
     target = torch.zeros((8, 8), dtype=torch.long)
     shifted = target.clone()
     shifted[0, 0] = 1
@@ -338,7 +338,7 @@ def test_pool_similarity_rewards_coarse_match() -> None:
     assert pool_similarity(shifted, target) == pytest.approx(1 - 1 / 64)
 
 
-def test_interface_density_averages_given_axes() -> None:
+def test_interface_density_averages_given_axes():
     labels = torch.tensor([[0, 1], [0, 1]])
 
     assert interface_density(labels, (0,)) == 0.0

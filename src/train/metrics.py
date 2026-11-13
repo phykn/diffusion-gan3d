@@ -3,15 +3,13 @@ from itertools import combinations
 
 import numpy as np
 import torch
-from torch.utils.tensorboard import SummaryWriter
 
-from src.phase import PORE_PHASE
-from src.plane import AXIS_NAMES, PLANES
+from src.axes import AXIS_NAMES, PLANES, PORE_PHASE
 from src.stats.sections import label_sections, section_errors, two_point
 from src.stats.volume import spanning_fractions, tilt_balance
 
 
-def write_metrics(writer: SummaryWriter, step: int, metrics: dict) -> None:
+def write_metrics(writer, step, metrics):
     for tag, value in metrics.items():
         # Unavailable measurements remain visible as gaps at their recorded steps.
         if value is None:
@@ -20,7 +18,7 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: dict) -> None:
 
 
 @torch.no_grad()
-def structure_metrics(probs, real: dict, groups: dict) -> dict:
+def structure_metrics(probs, real, groups):
     """structure/* tags of [B, K, D, H, W] predictions against real sections."""
     # One scheduled transfer; never called from a diffusion or critic inner loop.
     probs = probs.detach().float().cpu()
@@ -92,7 +90,7 @@ def structure_metrics(probs, real: dict, groups: dict) -> dict:
     return metrics
 
 
-def selection_metrics(entry: dict, best: dict) -> dict:
+def selection_metrics(entry, best):
     """selection/* tags of one scored step."""
     values = {
         f"selection/{name}": value for name, value in entry.items() if name != "step"

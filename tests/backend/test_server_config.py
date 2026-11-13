@@ -12,7 +12,7 @@ CONFIG = load_server_config(
 )
 
 
-def write_config(tmp_path, **values) -> Path:
+def write_config(tmp_path, **values):
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(CONFIG.model_dump() | values), encoding="utf-8")
     return path
@@ -31,7 +31,7 @@ def test_config_rejects_unknown_settings(tmp_path):
 
 def test_config_can_raise_limits_without_changing_request_classes(tmp_path):
     path = write_config(tmp_path, max_size=2048, max_voxels=2048**3)
-    request = GenerateRequest(size=1025)
+    request = GenerateRequest(shape=1025)
     with pytest.raises(ValueError, match="server limit"):
         request.check_limits(CONFIG)
     request.check_limits(load_server_config(path))

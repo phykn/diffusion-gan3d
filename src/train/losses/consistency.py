@@ -1,14 +1,12 @@
-import torch
-
 from src.data.crops import downsample
 
 
 def consistency_loss(
-    high: torch.Tensor,
-    low: torch.Tensor,
-    tolerance: float,
-    mask: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    high,
+    low,
+    tolerance,
+    mask=None,
+):
     reconstructed = downsample(high, tuple(low.shape[2:]))
     squared = (reconstructed - low).square()
     if mask is None:

@@ -1,13 +1,19 @@
 import math
-import types
-import typing
 from collections.abc import Mapping
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
+from types import MappingProxyType, UnionType
+from typing import get_args, get_origin
 
-from src.phase import validate_num_phases
-from src.plane import PLANES
+from src.axes import PLANES, validate_num_phases
 
 STAGES = ("lr", "sr")
+
+
+@dataclass(frozen=True, kw_only=True)
+class GenerationSettings:
+    guidance: float
+    anchor_strength: float = field(metadata={"minimum": 0.0})
+    overlap: int = field(metadata={"minimum": 0})
 
 
 def _number(default, *, minimum=0.0, maximum=None, exclusive=False):
@@ -89,7 +95,6 @@ class RealTransition:
     max_gap: int = _integer(8)
     ramp_steps: int = _integer(5000, minimum=0)
     weight: float = _number(0.1)
-    start_step: int = _integer(0, minimum=0)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -104,7 +109,6 @@ class GroupStatistics:
     weight: float = _number(0.1)
     max_gap: int = _integer(8)
     tolerance: float = _probability(0.01)
-    start_step: int = _integer(0, minimum=0)
     ramp_steps: int = _integer(5000, minimum=0)
 
 
@@ -145,8 +149,6 @@ class Optim:
 
 @dataclass(frozen=True, kw_only=True)
 class BurnIn:
-    """R3GAN burn-in: lr, beta2, R1/R2 and EMA reach their end values here."""
-
     steps: int = _integer(5000, minimum=0)
     regularization_scale: float = _number(0.1)
     lr_scale: float = _number(0.25)
@@ -160,7 +162,7 @@ class SRBurnIn(BurnIn):
 
 @dataclass(frozen=True, kw_only=True)
 class LRBank:
-    samples_per_domain: int = _integer(8)
+    size: int = _integer(8)
     guidance: float = 0.9
     refresh_every_steps: int = _integer(500, minimum=0)
     flips: bool = True
@@ -207,14 +209,11 @@ class SRConditioning:
 
 @dataclass(frozen=True, kw_only=True)
 class Selection:
-    enabled: bool = True
     samples: int = _integer(8)
 
 
 @dataclass(frozen=True, kw_only=True)
 class Source:
-    """The frozen LR run an SR stage trains from (set when training starts)."""
-
     lr_run: str | None = None
     lr_step: int | None = None
 
@@ -234,11 +233,11 @@ class LRConfig:
     selection: Selection = field(default_factory=Selection)
 
     @property
-    def patch_size(self) -> int:
+    def patch_size(self):
         return self.data.lo_res_size
 
     @property
-    def profile_enabled(self) -> bool:
+    def profile_enabled(self):
         return self.conditioning.spatial_profile.enabled
 
 
@@ -259,15 +258,15 @@ class SRConfig:
     source: Source = field(default_factory=Source)
 
     @property
-    def patch_size(self) -> int:
+    def patch_size(self):
         return self.data.hi_res_size
 
     @property
-    def profile_enabled(self) -> bool:
+    def profile_enabled(self):
         return False
 
     @property
-    def scale_factor(self) -> int:
+    def scale_factor(self):
         return self.data.hi_res_size // self.data.lo_res_size
 
 
@@ -275,20 +274,22 @@ StageConfig = LRConfig | SRConfig
 CONFIG_TYPES = {"lr": LRConfig, "sr": SRConfig}
 
 
-def build_config(values: Mapping) -> StageConfig:
-    """Make a checked stage config; missing keys take the defaults above."""
+def build_config(values):
     if not isinstance(values, Mapping):
         raise ValueError("config must be a mapping.")
     stage = values.get("stage")
-    if stage not in CONFIG_TYPES:
+    if not isinstance(stage, str) or stage not in CONFIG_TYPES:
         raise ValueError(f"stage must be one of {', '.join(STAGES)}.")
     config = _build(CONFIG_TYPES[stage], values, "")
-    validate(config)
+    validate_stage(config)
     return config
 
 
-def to_dict(value) -> object:
-    """Plain YAML-ready values: dicts, lists, numbers, strings and None."""
+def build_generation_settings(values):
+    return _build(GenerationSettings, values, "")
+
+
+def to_dict(value):
     if is_dataclass(value):
         return {item.name: to_dict(getattr(value, item.name)) for item in fields(value)}
     if isinstance(value, Mapping):
@@ -298,14 +299,13 @@ def to_dict(value) -> object:
     return value
 
 
-def update(config: StageConfig, path: str, value) -> StageConfig:
-    """Return config with one dotted key replaced and checked again."""
+def update(config, path, value):
     values = to_dict(config)
     target = values
     *sections, key = path.split(".")
     for section in sections:
-        target = target[section]
-    if key not in target:
+        target = target.get(section) if isinstance(target, dict) else None
+    if not isinstance(target, dict) or key not in target:
         raise ValueError(f"unknown setting: {path}")
     target[key] = value
     return build_config(values)
@@ -314,16 +314,14 @@ def update(config: StageConfig, path: str, value) -> StageConfig:
 def _build(cls, values, path):
     if not isinstance(values, Mapping):
         raise ValueError(f"{path or 'config'} must be a mapping.")
-    known = {item.name: item for item in fields(cls)}
-    for key in values:
-        if key not in known:
-            raise ValueError(f"unknown setting: {_join(path, key)}")
-    hints = typing.get_type_hints(cls)
+    specs = {item.name: item for item in fields(cls)}
+    for key in values.keys() - specs.keys():
+        raise ValueError(f"unknown setting: {_join(path, key)}")
     kwargs = {}
-    for name, item in known.items():
+    for name, item in specs.items():
         key = _join(path, name)
         if name in values:
-            kwargs[name] = _convert(hints[name], values[name], key)
+            kwargs[name] = _convert(item.type, values[name], key)
             _check_range(item, kwargs[name], key)
         elif item.default is MISSING and item.default_factory is MISSING:
             raise ValueError(f"missing setting: {key}")
@@ -331,13 +329,9 @@ def _build(cls, values, path):
 
 
 def _convert(kind, value, path):
-    origin = typing.get_origin(kind)
-    if origin in (typing.Union, types.UnionType):
-        options = typing.get_args(kind)
-        if value is None and type(None) in options:
-            return None
-        (kind,) = (option for option in options if option is not type(None))
-        return _convert(kind, value, path)
+    origin = get_origin(kind)
+    if origin is UnionType:
+        return None if value is None else _convert(get_args(kind)[0], value, path)
     if is_dataclass(kind):
         return _build(kind, value, path)
     if kind is bool:
@@ -362,15 +356,12 @@ def _convert(kind, value, path):
             raise ValueError(f"{path} must be text, got {value!r}.")
         return value
     if origin is tuple:
-        args = typing.get_args(kind)
+        args = get_args(kind)
         if not isinstance(value, (list, tuple)):
             raise ValueError(f"{path} must be a list.")
-        if len(args) == 2 and args[1] is Ellipsis:
-            return tuple(
-                _convert(args[0], item, f"{path}[{index}]")
-                for index, item in enumerate(value)
-            )
-        if len(value) != len(args):
+        if args[-1] is Ellipsis:
+            args = (args[0],) * len(value)
+        elif len(value) != len(args):
             raise ValueError(f"{path} must list {len(args)} values.")
         return tuple(
             _convert(arg, item, f"{path}[{index}]")
@@ -379,10 +370,10 @@ def _convert(kind, value, path):
     if origin is Mapping or kind is Mapping:
         if not isinstance(value, Mapping):
             raise ValueError(f"{path} must be a mapping.")
-        args = typing.get_args(kind)
+        args = get_args(kind)
         if not args:
-            return types.MappingProxyType(_freeze(value))
-        return types.MappingProxyType(
+            return freeze(value)
+        return MappingProxyType(
             {
                 _convert(args[0], key, path): _convert(args[1], item, _join(path, key))
                 for key, item in value.items()
@@ -391,11 +382,11 @@ def _convert(kind, value, path):
     raise TypeError(f"unsupported setting type for {path}: {kind}")
 
 
-def _freeze(value):
+def freeze(value):
     if isinstance(value, Mapping):
-        return types.MappingProxyType({k: _freeze(v) for k, v in value.items()})
+        return MappingProxyType({k: freeze(v) for k, v in value.items()})
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze(item) for item in value)
+        return tuple(freeze(item) for item in value)
     return value
 
 
@@ -421,8 +412,7 @@ def _join(path, key):
     return f"{path}.{key}" if path else str(key)
 
 
-def validate(config: StageConfig) -> None:
-    """Rules that relate several settings of one stage."""
+def validate_stage(config):
     nickname = config.nickname.strip()
     if nickname != config.nickname or (
         nickname.endswith(".")
@@ -500,10 +490,9 @@ def _check_plane_groups(groups, planes):
         )
 
 
-def plane_groups(config: StageConfig) -> dict[str, tuple[int, ...]]:
-    """Critic name (planes joined by _) to the plane axes it judges."""
-    groups = {}
-    for group in config.model.critic.plane_groups:
-        axes = tuple(sorted(PLANES.index(plane) for plane in group))
-        groups["_".join(PLANES[axis] for axis in axes)] = axes
-    return dict(sorted(groups.items(), key=lambda item: item[1]))
+def plane_groups(config):
+    groups = [
+        tuple(sorted(PLANES.index(plane) for plane in group))
+        for group in config.model.critic.plane_groups
+    ]
+    return {"_".join(PLANES[axis] for axis in axes): axes for axes in sorted(groups)}

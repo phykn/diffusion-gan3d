@@ -19,7 +19,7 @@ def _leaf_paths(cls, prefix=()):
             yield ".".join(path)
 
 
-def _sources() -> str:
+def _sources():
     texts = []
     for root in ROOTS:
         folder = PROJECT_ROOT / root
@@ -32,7 +32,7 @@ def _sources() -> str:
     return "\n".join(texts)
 
 
-def _unread() -> set[str]:
+def _unread():
     text = _sources()
     paths = set(_leaf_paths(LRConfig)) | set(_leaf_paths(SRConfig))
     unread = set()

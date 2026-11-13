@@ -45,18 +45,18 @@ def test_plain_state_dict_is_not_an_export(tiny_lr_run, tmp_path):
     state = read_export(tiny_lr_run, "lr")["model"]
     path = tmp_path / "generator.pt"
     torch.save(state, path)
-    with pytest.raises(ValueError, match="not a v2 LR export"):
+    with pytest.raises(ValueError, match="not a v3 LR export"):
         LowResolutionAPI(path, device="cpu")
-    with pytest.raises(ValueError, match="not a v2 SR export"):
+    with pytest.raises(ValueError, match="not a v3 SR export"):
         read_export(tiny_lr_run, "sr")
 
 
 def test_generate_labels_and_fractions(tiny_lr_run):
     api = LowResolutionAPI(tiny_lr_run, device="cpu")
-    volume = api.generate(size=16, seed=0)
+    volume = api.generate(shape=16, seed=0)
     assert volume.dtype == torch.uint8
     assert set(volume.unique().tolist()) <= {0, 1}
-    probs = api.generate_probs(size=16, seed=0)
+    probs = api.generate_probs(shape=16, seed=0)
     assert probs.shape == (2, 16, 16, 16)
     torch.testing.assert_close(probs.sum(0), torch.ones(16, 16, 16))
     with pytest.raises(ValueError, match="storage"):

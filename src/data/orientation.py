@@ -1,10 +1,9 @@
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import permutations
 
 import torch
 
-from src.plane import PLANE_DIRECTIONS, PLANES
+from src.axes import PLANE_DIRECTIONS, PLANES
 
 
 @dataclass(frozen=True)
@@ -13,20 +12,11 @@ class PlanePolicy:
     rotate_90: bool
 
 
-def fixed_z(config) -> bool:
-    """Rotating xz/yz swaps z with x or y. That hides a height gradient, and
-    hides z anisotropy whenever xy is judged apart from the side planes."""
-    groups = config.model.critic.plane_groups
-    return config.conditioning.height_enabled or not any(
-        "xy" in group and len(group) > 1 for group in groups
-    )
-
-
-def plane_policies(config) -> dict[str, PlanePolicy]:
-    """Which flips and rotations keep each section realistic: the one place
-    this is decided, read by critic and SR bank augmentation."""
+def plane_policies(config):
     height = config.conditioning.height_enabled
-    fixed = fixed_z(config)
+    groups = config.model.critic.plane_groups
+    # A side rotation would hide a depth gradient or exchange anisotropic axes.
+    fixed = height or not any("xy" in group and len(group) > 1 for group in groups)
     return {
         plane: PlanePolicy(
             flip_axes=tuple(axis for axis in axes if not (height and axis == "z")),
@@ -36,29 +26,25 @@ def plane_policies(config) -> dict[str, PlanePolicy]:
     }
 
 
-def _allowed_transforms(plane: str, policy: PlanePolicy) -> tuple[int, ...]:
-    """Indices into the 8 square symmetries: rot90 k times, then flip if >= 4."""
+def _allowed_transforms(plane, policy):
+    if policy.rotate_90:
+        return tuple(range(8 if policy.flip_axes else 4))
     rows, cols = PLANE_DIRECTIONS[plane]
     flips = policy.flip_axes
-    allowed = {0}
-    if cols in flips:
-        allowed.add(4)
-    if rows in flips:
-        allowed.add(6)
-    if len(flips) == 2:
-        allowed.add(2)
-    if policy.rotate_90:
-        allowed = set(range(8)) if flips else set(range(4))
-    return tuple(sorted(allowed))
+    return tuple(
+        index
+        for index, enabled in (
+            (0, True),
+            (2, len(flips) == 2),
+            (4, cols in flips),
+            (6, rows in flips),
+        )
+        if enabled
+    )
 
 
 class CriticAugment:
-    """With probability p, apply one non-identity allowed symmetry to a section.
-
-    Pairs (and their height fields) of one sample get the same transform.
-    """
-
-    def __init__(self, policies: Mapping[str, PlanePolicy], probability: float):
+    def __init__(self, policies, probability):
         self.probability = float(probability)
         self.transforms = {
             PLANES.index(plane): _allowed_transforms(plane, policy)
@@ -67,7 +53,7 @@ class CriticAugment:
         self._maps: dict[tuple, torch.Tensor] = {}
 
     @property
-    def rotated_axes(self) -> tuple[int, ...]:
+    def rotated_axes(self):
         if self.probability <= 0.0:
             return ()
         return tuple(
@@ -76,12 +62,7 @@ class CriticAugment:
             if any(index % 2 for index in allowed)
         )
 
-    def __call__(
-        self,
-        inputs: Sequence[torch.Tensor],
-        axis: int,
-        generator: torch.Generator,
-    ) -> tuple[torch.Tensor, ...]:
+    def __call__(self, inputs, axis, generator):
         tensors = tuple(inputs)
         first = tensors[0]
         if self.probability <= 0.0 or first.shape[0] == 0:
@@ -97,7 +78,7 @@ class CriticAugment:
         selected.masked_fill_(keep, 0)
         return tuple(self._apply(tensor, selected) for tensor in tensors)
 
-    def _apply(self, inputs: torch.Tensor, transforms: torch.Tensor) -> torch.Tensor:
+    def _apply(self, inputs, transforms):
         height, width = inputs.shape[-2:]
         maps = self._index_maps(inputs.device, height, width)
         indices = maps.index_select(0, transforms.to(inputs.device))
@@ -105,7 +86,7 @@ class CriticAugment:
         indices = indices.unsqueeze(1).expand(-1, flattened.shape[1], -1)
         return flattened.gather(2, indices).reshape_as(inputs)
 
-    def _index_maps(self, device, height, width) -> torch.Tensor:
+    def _index_maps(self, device, height, width):
         key = (device, height, width)
         if key not in self._maps:
             source = torch.arange(height * width, device=device).reshape(height, width)
@@ -119,22 +100,16 @@ class CriticAugment:
 
 @dataclass(frozen=True)
 class BankSymmetries:
-    """Volume symmetries allowed for SR bank volumes (axis orders and flips)."""
-
     orders: tuple[tuple[int, int, int], ...]
     flip_axes: tuple[int, ...]
 
     @property
-    def count(self) -> int:
+    def count(self):
         return len(self.orders) * 2 ** len(self.flip_axes)
 
 
-def bank_symmetries(config) -> BankSymmetries:
-    """z swaps or flips only where the z plane policies allow them.
-
-    With lr_bank.flips false only the identity is left: an axis swap is a
-    reflection too and would reverse a tilt the LR volume carries.
-    """
+def bank_symmetries(config):
+    # Swaps are reflections too and can reverse the tilt carried by LR.
     if not config.lr_bank.flips:
         return BankSymmetries(orders=((0, 1, 2),), flip_axes=())
     policies = plane_policies(config)
@@ -150,10 +125,7 @@ def bank_symmetries(config) -> BankSymmetries:
     return BankSymmetries(orders=orders, flip_axes=((0,) if flip_z else ()) + (1, 2))
 
 
-def augment_volumes(
-    volumes: torch.Tensor, symmetries: BankSymmetries, generator: torch.Generator
-) -> torch.Tensor:
-    """Apply one allowed symmetry per [B, C, D, H, W] volume (cubes only permute)."""
+def augment_volumes(volumes, symmetries, generator):
     shape = volumes.shape[-3:]
     orders = [
         order
@@ -167,12 +139,9 @@ def augment_volumes(
     ).tolist()
     result = []
     for volume, choice in zip(volumes, choices, strict=True):
-        order = orders[choice // flip_count]
+        order, flip_mask = divmod(choice, flip_count)
+        order = orders[order]
         volume = volume.permute(0, *(axis + 1 for axis in order))
-        dims = [
-            axis + 1
-            for bit, axis in enumerate(flips)
-            if (choice % flip_count) & (1 << bit)
-        ]
+        dims = [axis + 1 for bit, axis in enumerate(flips) if flip_mask & (1 << bit)]
         result.append(volume.flip(dims) if dims else volume)
     return torch.stack(result)

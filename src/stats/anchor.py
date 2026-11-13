@@ -20,40 +20,28 @@ class SliceSmoothness:
     peak_anchor_distance: int | None
 
 
-def measure_boundaries(
-    vol: torch.Tensor,
-    indices: tuple[int, ...],
-    axis: int,
-) -> BoundaryQuality:
+def measure_boundaries(vol, indices, axis):
     if not indices:
         return BoundaryQuality(None, None, None)
     slices = vol.movedim(axis, 0)
     pair_count = slices.shape[0] - 1
-    boundary_indices = sorted(
-        {
-            pair
-            for index in indices
-            for pair in (index - 1, index)
-            if 0 <= pair < pair_count
-        }
-    )
-    boundary_set = set(boundary_indices)
-    ordinary_indices = [pair for pair in range(pair_count) if pair not in boundary_set]
-    if not boundary_indices or not ordinary_indices:
+    boundaries = {
+        pair
+        for index in indices
+        for pair in (index - 1, index)
+        if 0 <= pair < pair_count
+    }
+    ordinary = sorted(set(range(pair_count)) - boundaries)
+    if not boundaries or not ordinary:
         return BoundaryQuality(None, None, None)
 
-    boundary_change = _change(slices, boundary_indices)
-    ordinary_change = _change(slices, ordinary_indices)
+    boundary_change = _change(slices, sorted(boundaries))
+    ordinary_change = _change(slices, ordinary)
     ratio = None if ordinary_change == 0.0 else boundary_change / ordinary_change
     return BoundaryQuality(boundary_change, ordinary_change, ratio)
 
 
-def measure_distance_divergence(
-    anchored: torch.Tensor,
-    baseline: torch.Tensor,
-    indices: tuple[int, ...],
-    axis: int,
-) -> tuple[float | None, ...]:
+def measure_distance_divergence(anchored, baseline, indices, axis):
     if not indices:
         return ()
     anchored_slices = anchored.movedim(axis, 0)
@@ -62,20 +50,14 @@ def measure_distance_divergence(
     positions = torch.arange(anchored_slices.shape[0], device=anchored_slices.device)
     anchors = torch.as_tensor(indices, dtype=torch.long, device=positions.device)
     distances = (positions[:, None] - anchors[None, :]).abs().amin(dim=1)
-    return tuple(
-        None
-        if not bool((distances == distance).any())
-        else float(changes[distances == distance].mean())
-        for distance in range(anchored_slices.shape[0])
-    )
+    result = [None] * anchored_slices.shape[0]
+    for distance in distances.unique().tolist():
+        if distance < len(result):
+            result[distance] = float(changes[distances == distance].mean())
+    return tuple(result)
 
 
-def measure_slice_smoothness(
-    vol: torch.Tensor,
-    indices: tuple[int, ...],
-    axis: int,
-    baseline: torch.Tensor | None = None,
-) -> SliceSmoothness:
+def measure_slice_smoothness(vol, indices, axis, baseline=None):
     acceleration = _slice_acceleration(vol, axis)
     if acceleration.numel() == 0:
         return SliceSmoothness(None, None, None, None, None, None)
@@ -114,20 +96,18 @@ def measure_slice_smoothness(
     )
 
 
-def _change(slices: torch.Tensor, pairs: list[int]) -> float:
+def _change(slices, pairs):
     following = [pair + 1 for pair in pairs]
     return float((slices[pairs] != slices[following]).to(torch.float32).mean())
 
 
-def _slice_acceleration(vol: torch.Tensor, axis: int) -> torch.Tensor:
+def _slice_acceleration(vol, axis):
     slices = vol.movedim(axis, 0)
     change = (slices[1:] != slices[:-1]).to(torch.float32).mean((1, 2))
-    if change.numel() < 2:
-        return change.new_empty(0)
-    return (change[1:] - change[:-1]).abs()
+    return change.diff().abs()
 
 
-def _slice_reversal_rate(vol: torch.Tensor, axis: int) -> float:
+def _slice_reversal_rate(vol, axis):
     slices = vol.movedim(axis, 0)
     if slices.shape[0] < 3:
         return 0.0

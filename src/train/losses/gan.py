@@ -1,10 +1,7 @@
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-
-from src.model.critic import CriticScores
 
 
 @dataclass(frozen=True)
@@ -15,7 +12,7 @@ class CriticObjective:
     r2: torch.Tensor
 
 
-def relativistic_loss(preferred: CriticScores, other: CriticScores) -> torch.Tensor:
+def relativistic_loss(preferred, other):
     """RpGAN loss: each other sample should score below its paired preferred one.
 
     Judging pairs instead of single samples removes the mode-dropping optima of
@@ -40,15 +37,15 @@ def relativistic_loss(preferred: CriticScores, other: CriticScores) -> torch.Ten
 
 
 def critic_objective(
-    adversarial: torch.Tensor,
-    real_scores: CriticScores,
-    fake_scores: CriticScores,
-    real_inputs: Sequence[torch.Tensor],
-    fake_inputs: Sequence[torch.Tensor],
-    r1_weight: float,
-    r2_weight: float,
-    interval: int,
-) -> CriticObjective:
+    adversarial,
+    real_scores,
+    fake_scores,
+    real_inputs,
+    fake_inputs,
+    r1_weight,
+    r2_weight,
+    interval,
+):
     """Lazy R1 (reals) and R2 (fakes), scaled by the regularization interval."""
     total = adversarial
     r1 = total.new_zeros(())
@@ -62,9 +59,7 @@ def critic_objective(
     return CriticObjective(adversarial, total, r1, r2)
 
 
-def gradient_penalty(
-    scores: CriticScores, inputs: Sequence[torch.Tensor]
-) -> torch.Tensor:
+def gradient_penalty(scores, inputs):
     if scores.levels:
         return torch.stack(
             [gradient_penalty(level, inputs) for level in scores.levels]
@@ -72,9 +67,7 @@ def gradient_penalty(
     return input_gradient_penalty(scores.logits_global, inputs)
 
 
-def input_gradient_penalty(
-    logits: torch.Tensor, inputs: Sequence[torch.Tensor]
-) -> torch.Tensor:
+def input_gradient_penalty(logits, inputs):
     grads = torch.autograd.grad(
         outputs=logits.sum(), inputs=tuple(inputs), create_graph=True, only_inputs=True
     )

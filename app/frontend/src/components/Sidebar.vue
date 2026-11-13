@@ -20,31 +20,32 @@ const heightExtent = defineModel('heightExtent', { type: Number })
 const measureTortuosity = defineModel('measureTortuosity', { type: Boolean })
 const emit = defineEmits(['select-file', 'generate'])
 const dragging = ref(false)
+const blockLimit = computed(() => props.health?.max_axis_blocks ?? MIN_BLOCKS)
 const blockNote = computed(() => anchorNote(blocks.value, props.health?.crop_size))
+const metrics = computed(() => [
+  ['Porosity', Number.isFinite(props.porosity) ? `${(props.porosity * 100).toFixed(2)}%` : '—'],
+  ['Tortuosity', props.tortuosity === Infinity ? '∞' : Number.isFinite(props.tortuosity) ? props.tortuosity.toFixed(3) : '—'],
+])
 
-function accept(files) {
+function select(files) {
   dragging.value = false
-  if (!props.busy && files?.[0]) emit('select-file', files[0])
+  if (!props.busy && files?.length) emit('select-file', files[0])
 }
 
-function selectInput(event) {
-  accept(event.target.files)
-  // Clear the input so choosing the same file again still fires change.
+function upload(event) {
+  select(event.target.files)
   event.target.value = ''
 }
 
-function setSeed(event) {
-  const value = normalizeSeed(event.target.value)
-  seed.value = value
-  event.target.value = String(value)
+function updateSeed(input) {
+  seed.value = normalizeSeed(input.value)
+  input.value = String(seed.value)
 }
 
-function setBlock(index, event) {
-  const value = normalizeBlock(event.target.value, props.health?.max_axis_blocks ?? MIN_BLOCKS)
-  const next = [...blocks.value]
-  next[index] = value
-  blocks.value = next
-  event.target.value = String(value)
+function updateBlock(axis, input) {
+  const value = normalizeBlock(input.value, blockLimit.value)
+  blocks.value = blocks.value.map((previous, index) => index === axis ? value : previous)
+  input.value = String(value)
 }
 </script>
 
@@ -57,14 +58,14 @@ function setBlock(index, event) {
         @dragenter.prevent="!busy && (dragging = true)"
         @dragover.prevent
         @dragleave.prevent="dragging = false"
-        @drop.prevent="accept($event.dataTransfer.files)"
+        @drop.prevent="select($event.dataTransfer.files)"
       >
         <input
           class="visually-hidden"
           type="file"
           accept="image/png"
           :disabled="busy"
-          @change="selectInput"
+          @change="upload"
         >
         <strong>{{ file?.name || 'Upload image' }}</strong>
       </label>
@@ -96,17 +97,17 @@ function setBlock(index, event) {
           :value="blocks[index]"
           type="number"
           :min="MIN_BLOCKS"
-          :max="health?.max_axis_blocks ?? MIN_BLOCKS"
+          :max="blockLimit"
           step="1"
           :disabled="busy"
-          @change="setBlock(index, $event)"
+          @change="updateBlock(index, $event.target)"
         >
       </label>
     </div>
     <p v-if="blockNote" class="status">{{ blockNote }}</p>
     <label class="number-control">
       <span>Seed</span>
-      <input :value="seed" type="number" min="0" step="1" :disabled="busy" @change="setSeed">
+      <input :value="seed" type="number" min="0" step="1" :disabled="busy" @change="updateSeed($event.target)">
     </label>
     <label class="number-control" title="Solved on the server before the volume is sent; slow for large volumes.">
       <span>Tortuosity</span>
@@ -117,13 +118,9 @@ function setBlock(index, event) {
     </button>
     <p v-if="error" class="status status--error">{{ error }}</p>
     <dl class="metrics">
-      <div>
-        <dt>Porosity</dt>
-        <dd>{{ Number.isFinite(porosity) ? `${(porosity * 100).toFixed(2)}%` : '—' }}</dd>
-      </div>
-      <div>
-        <dt>Tortuosity</dt>
-        <dd>{{ tortuosity === Infinity ? '∞' : Number.isFinite(tortuosity) ? tortuosity.toFixed(3) : '—' }}</dd>
+      <div v-for="[label, value] in metrics" :key="label">
+        <dt>{{ label }}</dt>
+        <dd>{{ value }}</dd>
       </div>
     </dl>
     <div class="server-state" :class="{ ready: health }">

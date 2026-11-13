@@ -1,23 +1,20 @@
 import math
-from collections.abc import Mapping, Sequence
 
 import torch
 import torch.nn.functional as F
 
-from src.config.schema import StageConfig
 from src.data.crops import coarse_region
 from src.data.height import (
     check_extent,
     grid_spacing,
     height_field,
-    sample_profile,
+    integrate_profile,
     validate_profile,
 )
 from src.device import wide_dtype
-from src.sampling.plan import Tile, TilePlan
 
 
-def prepare_vf(vf: Sequence[float] | None, num_phases: int, device) -> torch.Tensor:
+def prepare_vf(vf, num_phases, device):
     if vf is None:
         return None
     values = torch.as_tensor(vf, dtype=wide_dtype(torch.device(device)))
@@ -37,9 +34,7 @@ def prepare_vf(vf: Sequence[float] | None, num_phases: int, device) -> torch.Ten
 class HeightRange:
     """Source-pixel height coordinates of a generation along z."""
 
-    def __init__(
-        self, config: StageConfig, plan: TilePlan, origin: float, extent: float | None
-    ):
+    def __init__(self, config, plan, origin, extent):
         self.enabled = config.conditioning.height_enabled
         self.spacing = grid_spacing(config.data.crop_size, config.patch_size)
         self.margin = plan.margin
@@ -69,10 +64,10 @@ class HeightRange:
                 "height_origin places the volume outside the source image height."
             )
 
-    def tile_origin(self, tile: Tile) -> float:
+    def tile_origin(self, tile):
         return self.origin + (tile.source[0].start - self.margin) * self.spacing
 
-    def field(self, tile: Tile, device) -> torch.Tensor:
+    def field(self, tile, device):
         return height_field(
             tile.shape, self.tile_origin(tile), self.spacing, self.extent, device
         )
@@ -83,14 +78,14 @@ class LRConditions:
 
     def __init__(
         self,
-        config: StageConfig,
-        plan: TilePlan,
+        config,
+        plan,
         device,
         *,
         vf=None,
-        vf_profile: Mapping | None = None,
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
+        vf_profile=None,
+        height_origin=0.0,
+        height_extent=None,
     ):
         self.device = device
         self.num_phases = config.data.num_phases
@@ -99,13 +94,16 @@ class LRConditions:
         if vf_profile is None and vf is None and profile_enabled:
             # Height alone flattens strong depth gradients; use the training one.
             vf_profile = config.data.depth_profile
+        self.profile = None
         if vf_profile is not None:
             if not profile_enabled:
                 raise ValueError("vf_profile requires a profile-conditioned LR model.")
-            validate_profile(vf_profile, self.num_phases)
-        self.vf_profile = vf_profile
+            self.profile = (
+                *validate_profile(vf_profile, self.num_phases),
+                vf_profile["interpolation"],
+            )
         self.vf = prepare_vf(vf, self.num_phases, device)
-        if self.vf_profile is not None and self.vf is not None:
+        if self.profile is not None and self.vf is not None:
             profile = self._profile(plan.output_shape[0], self.height.origin)
             if not torch.allclose(self.vf, profile.mean(-1), atol=1e-5, rtol=0):
                 raise ValueError(
@@ -113,14 +111,13 @@ class LRConditions:
                 )
 
     @property
-    def guided(self) -> bool:
+    def guided(self):
         """Whether CFG has a condition to drop."""
-        return self.vf is not None or self.vf_profile is not None
+        return self.vf is not None or self.profile is not None
 
-    def _profile(self, depth: int, origin: float) -> torch.Tensor:
-        return sample_profile(
-            self.vf_profile,
-            self.num_phases,
+    def _profile(self, depth, origin):
+        return integrate_profile(
+            *self.profile,
             depth,
             origin,
             self.height.spacing,
@@ -128,11 +125,11 @@ class LRConditions:
             self.device,
         )
 
-    def __call__(self, index: int, tile: Tile) -> dict:
+    def __call__(self, index, tile):
         result = {"vf": self.vf}
         if self.height.enabled:
             result["height"] = self.height.field(tile, self.device)
-            if self.vf_profile is not None:
+            if self.profile is not None:
                 profile = self._profile(tile.shape[0], self.height.tile_origin(tile))
                 result.update(profile=profile, vf=profile.mean(-1))
         return result
@@ -147,13 +144,13 @@ class SRConditions:
 
     def __init__(
         self,
-        config: StageConfig,
-        plan: TilePlan,
-        low: torch.Tensor,
+        config,
+        plan,
+        low,
         device,
         *,
-        height_origin: float = 0.0,
-        height_extent: float | None = None,
+        height_origin=0.0,
+        height_extent=None,
     ):
         self.scale = config.scale_factor
         expected = tuple(n // self.scale for n in plan.output_shape)
@@ -165,7 +162,7 @@ class SRConditions:
         self.device = device
         self.height = HeightRange(config, plan, height_origin, height_extent)
 
-    def __call__(self, index: int, tile: Tile) -> dict:
+    def __call__(self, index, tile):
         start = tuple(region.start for region in tile.source)
         coarse = coarse_region(self.low, start, tile.shape, self.scale)
         result = {"coarse": coarse.to(self.device, torch.float32)}

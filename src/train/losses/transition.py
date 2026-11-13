@@ -1,10 +1,10 @@
 import torch
 
-from src.plane import PLANE_DIRECTIONS, PLANES
+from src.axes import PLANE_DIRECTIONS, PLANES
 from src.stats.pairs import section_pairs
 
 
-def height_intervals(height: torch.Tensor, dim: int, gap: int):
+def height_intervals(height, dim, gap):
     rows = height[:, 0, :, 0].float()
     width = (rows[:, 1:] - rows[:, :-1]).mean(1, keepdim=True)
     centers = (rows[:, :-gap] + rows[:, gap:]) * 0.5 if dim == 2 else rows
@@ -66,13 +66,13 @@ def match_height(real, fake, real_height, fake_height, dim, gap):
 
 
 def real_transition_loss(
-    real: dict[int, torch.Tensor],
-    fake: dict[int, torch.Tensor],
-    max_gap: int,
-    real_heights: dict[int, torch.Tensor] | None = None,
-    fake_heights: dict[int, torch.Tensor] | None = None,
-    rotations: tuple[int, ...] = (),
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    real,
+    fake,
+    max_gap,
+    real_heights=None,
+    fake_heights=None,
+    rotations=(),
+):
     """Match observed in-plane transitions at equal LR-grid separations.
 
     Height-conditioned samples compare row statistics over overlapping normalized

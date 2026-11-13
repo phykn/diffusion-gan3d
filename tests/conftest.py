@@ -13,18 +13,18 @@ TINY_DEFAULT = TINY / "tiny_default.yaml"
 
 
 @pytest.fixture(scope="session")
-def tiny_sample() -> Path:
+def tiny_sample():
     return TINY_DEFAULT
 
 
 @pytest.fixture(scope="session")
-def tiny_configs() -> dict:
+def tiny_configs():
     """LR and SR configs of the tiny default sample (crop 32, LR 16, SR x2)."""
     return build_stage_configs(load_sample(TINY_DEFAULT))
 
 
 @pytest.fixture(scope="session")
-def tiny_height_configs() -> dict:
+def tiny_height_configs():
     """The tiny sample with a depth gradient: height and profile conditions."""
     sample = load_sample(TINY_DEFAULT)
     sample["structure"] = {
@@ -40,7 +40,7 @@ def random_export(tmp_path_factory):
     """Write a seeded random-init LR export of a config; memory and shapes do
     not depend on the weight values."""
 
-    def make(config, name: str, lr=None) -> Path:
+    def make(config, name, lr=None):
         """lr: for SR, the LR config whose random export it carries."""
         torch.manual_seed(0)
         model = build_denoiser(config)
@@ -55,7 +55,7 @@ def random_export(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def tiny_lr_run(tiny_configs, tmp_path_factory) -> Path:
+def tiny_lr_run(tiny_configs, tmp_path_factory):
     """A finished one-step tiny LR run on the CPU."""
     from src.train.run import train_stage
 
@@ -65,7 +65,7 @@ def tiny_lr_run(tiny_configs, tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def tiny_sr_run(tiny_configs, tiny_lr_run, tmp_path_factory) -> Path:
+def tiny_sr_run(tiny_configs, tiny_lr_run, tmp_path_factory):
     """A finished one-step tiny SR run on top of tiny_lr_run."""
     from src.train.run import train_stage
 
@@ -77,7 +77,7 @@ def tiny_sr_run(tiny_configs, tiny_lr_run, tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def tiny_anode(tmp_path_factory) -> Path:
+def tiny_anode(tmp_path_factory):
     """Two 64^3 simulated anodes (scripts/simul) and their tiny sample file:
     crop 32, LR 16, SR x2, height and depth profile conditioned. The paper
     evaluation splits the real volumes, so there are two."""
@@ -105,7 +105,7 @@ def tiny_anode(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def tiny_anode_lr_run(tiny_anode, tmp_path_factory) -> Path:
+def tiny_anode_lr_run(tiny_anode, tmp_path_factory):
     """A finished one-step LR run of tiny_anode on the CPU."""
     from src.train.run import train_stage
 
@@ -116,7 +116,7 @@ def tiny_anode_lr_run(tiny_anode, tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def tiny_anode_sr_run(tiny_anode, tiny_anode_lr_run, tmp_path_factory) -> Path:
+def tiny_anode_sr_run(tiny_anode, tiny_anode_lr_run, tmp_path_factory):
     """A finished one-step SR run of tiny_anode on top of tiny_anode_lr_run."""
     from src.train.run import train_stage
 

@@ -5,8 +5,8 @@ import numpy as np
 import scipy.ndimage as ndi
 import torch
 
+from src.axes import PORE_PHASE
 from src.device import default_device
-from src.phase import PORE_PHASE
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +14,7 @@ logger = logging.getLogger(__name__)
 TILT_PAIRS = {"zy": (0, 1), "zx": (0, 2), "yx": (1, 2)}
 
 
-def spanning_fractions(mask: np.ndarray) -> tuple[float, float, float]:
-    """Per axis, the fraction of phase voxels in components touching both faces."""
+def spanning_fractions(mask):
     phase_voxels = int(mask.sum())
     if phase_voxels == 0:
         return 0.0, 0.0, 0.0
@@ -23,20 +22,15 @@ def spanning_fractions(mask: np.ndarray) -> tuple[float, float, float]:
     sizes = np.bincount(components.reshape(-1))
     fractions = []
     for axis in range(3):
-        first = np.unique(np.take(components, 0, axis=axis))
-        last = np.unique(np.take(components, -1, axis=axis))
+        first = np.take(components, 0, axis=axis)
+        last = np.take(components, -1, axis=axis)
         spanning = np.intersect1d(first, last)
         spanning = spanning[spanning != 0]
         fractions.append(float(sizes[spanning].sum() / phase_voxels))
     return tuple(fractions)
 
 
-def tortuosity(
-    volume,
-    phase: int = 0,
-    axis: int = 0,
-    device: torch.device | str | None = None,
-) -> float:
+def tortuosity(volume, phase=0, axis=0, device=None):
     import taufactor as tau
 
     if isinstance(volume, torch.Tensor):
@@ -59,8 +53,7 @@ def tortuosity(
     return result
 
 
-def pore_tortuosity(volume: torch.Tensor, device: torch.device) -> float | None:
-    """Pore-phase tortuosity through the thickness (z); None if the solver fails."""
+def pore_tortuosity(volume, device):
     try:
         return tortuosity(volume, phase=PORE_PHASE, axis=0, device=device)
     except (RuntimeError, ValueError, ZeroDivisionError) as exc:
@@ -72,8 +65,7 @@ def pore_tortuosity(volume: torch.Tensor, device: torch.device) -> float | None:
         return None
 
 
-def component_slopes(labels, phase: int, min_voxels: int = 8) -> dict[str, np.ndarray]:
-    """Per-particle least-squares slopes cov(a, b) / var(b) for each axis pair."""
+def component_slopes(labels, phase, min_voxels=8):
     labels = np.asarray(labels)
     if labels.ndim != 3:
         raise ValueError("tilt labels must be a 3D volume.")
@@ -82,7 +74,7 @@ def component_slopes(labels, phase: int, min_voxels: int = 8) -> dict[str, np.nd
     # Accumulate coordinate moments one z slice at a time, so memory follows the
     # slice area rather than the volume.
     names = ("n", "z", "y", "x", "zy", "zx", "yx", "yy", "xx")
-    sums = dict.fromkeys(names, np.zeros(count + 1))
+    sums = {name: np.zeros(count + 1) for name in names}
     for z, plane in enumerate(components):
         flat = plane.ravel()
         inside = flat > 0
@@ -103,7 +95,7 @@ def component_slopes(labels, phase: int, min_voxels: int = 8) -> dict[str, np.nd
             ("yy", total(ys * ys)),
             ("xx", total(xs * xs)),
         ):
-            sums[name] = sums[name] + value
+            sums[name] += value
     size = sums["n"][1:]
     keep = size >= min_voxels
     means = {name: sums[name][1:][keep] / size[keep] for name in names[1:]}
@@ -117,7 +109,7 @@ def component_slopes(labels, phase: int, min_voxels: int = 8) -> dict[str, np.nd
     return slopes
 
 
-def tilt_balance(volumes, phase: int, threshold: float = 0.05, min_voxels: int = 8):
+def tilt_balance(volumes, phase, threshold=0.05, min_voxels=8):
     """Signed tilt statistics of one phase, pooled over volumes.
 
     `balance` is the fraction tilted positive minus the fraction tilted
@@ -144,8 +136,7 @@ def tilt_balance(volumes, phase: int, threshold: float = 0.05, min_voxels: int =
     return result
 
 
-def chord_mean(volume: torch.Tensor, phase: int, axis: int) -> float:
-    """Mean length of runs of phase along axis, in voxels."""
+def chord_mean(volume, phase, axis):
     lines = np.moveaxis(np.asarray(volume) == phase, axis, -1)
     lines = lines.reshape(-1, lines.shape[-1])
     edges = np.diff(np.pad(lines, ((0, 0), (1, 1))).astype(np.int8), axis=1)
@@ -153,8 +144,7 @@ def chord_mean(volume: torch.Tensor, phase: int, axis: int) -> float:
     return float(lines.sum() / max(runs, 1))
 
 
-def interface_density(labels: torch.Tensor, dims) -> float:
-    """Fraction of neighbour pairs along dims whose labels differ."""
+def interface_density(labels, dims):
     values = [
         (
             labels.narrow(dim, 1, labels.shape[dim] - 1)

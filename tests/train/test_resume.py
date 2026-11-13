@@ -33,7 +33,7 @@ def _config(base, steps, **values):
     return config
 
 
-def _losses(run_dir: Path) -> dict:
+def _losses(run_dir):
     events = EventAccumulator(str(run_dir / "tensorboard"))
     events.Reload()
     return {
@@ -62,7 +62,7 @@ def test_incomplete_steps_are_skipped(tiny_lr_run, tmp_path):
         resolve_checkpoint(last)
 
 
-def _rewrite(source: Path, target: Path, change) -> Path:
+def _rewrite(source, target, change):
     payload = torch.load(source, map_location="cpu", weights_only=True)
     change(payload)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +140,7 @@ def test_lr_resume_prints_the_sr_command(tiny_lr_run, tmp_path, capsys):
     assert not name.with_name("next-sr").exists()
 
 
-def _start(tiny_sample, run: Path) -> subprocess.Popen:
+def _start(tiny_sample, run):
     process = subprocess.Popen(
         [
             sys.executable,

@@ -4,12 +4,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from src.data.images import PlaneImages
 from src.device import adaptive_pool, assert_all, wide_dtype
 
 
-def phase_channels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:
-    """One-hot [B, *S] integer labels into float32 [B, K, *S]."""
+def phase_channels(labels, num_phases):
     if labels.is_floating_point() or labels.is_complex() or labels.dtype == torch.bool:
         raise ValueError("phase labels must have an integer dtype.")
     if labels.numel() == 0:
@@ -25,13 +23,7 @@ def phase_channels(labels: torch.Tensor, num_phases: int) -> torch.Tensor:
     return channels.scatter_(1, indices.unsqueeze(1), 1.0)
 
 
-def resize_phases(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
-    """Resize cell fractions without changing the amount of each phase.
-
-    Integer reductions average-pool; other reductions integrate the exact
-    source/target cell overlaps (PyTorch's area mode overlaps its bins there);
-    enlargement interpolates linearly from cell centers.
-    """
+def resize_phases(probs, shape):
     shape = tuple(shape)
     if (
         probs.ndim not in (4, 5)
@@ -43,12 +35,13 @@ def resize_phases(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
     if source == shape:
         return probs
     reduced = tuple(min(new, old) for new, old in zip(shape, source, strict=True))
-    if reduced != source and all(old % new == 0 for old, new in zip(source, reduced)):
-        probs = adaptive_pool(probs, reduced)
-    else:
-        for axis, size in enumerate(reduced, 2):
-            if size != probs.shape[axis]:
-                probs = _resize_fraction_axis(probs, axis, size)
+    if reduced != source:
+        if all(old % new == 0 for old, new in zip(source, reduced, strict=True)):
+            probs = adaptive_pool(probs, reduced)
+        else:
+            for axis, (old, size) in enumerate(zip(source, reduced, strict=True), 2):
+                if size != old:
+                    probs = _resize_fraction_axis(probs, axis, size)
     if reduced == shape:
         return probs
     for axis, size in enumerate(shape, 2):
@@ -74,27 +67,20 @@ def _resize_fraction_axis(probs, axis, size):
         return (values.movedim(axis, -1) @ overlap.to(values.dtype).T).movedim(-1, axis)
 
 
-def resize_anchor(labels: torch.Tensor, size: int, num_phases: int) -> torch.Tensor:
-    """[*S] labels to [K, size, ...] fractions; ties stay fractional."""
+def resize_anchor(labels, size, num_phases):
     probs = phase_channels(labels.unsqueeze(0), num_phases)
     probs = resize_phases(probs, (size,) * labels.ndim).squeeze(0)
     # Area resizing can round a full cell to 1 + eps; anchors require [0, 1].
     return probs.clamp_(0.0, 1.0)
 
 
-def downsample(probs: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+def downsample(probs, shape):
     if any(new > old for new, old in zip(shape, probs.shape[2:], strict=True)):
         raise ValueError("downsample cannot expand spatial dimensions.")
     return resize_phases(probs.float(), shape)
 
 
-def coarse_region(
-    probs: torch.Tensor,
-    start: tuple[int, int, int],
-    shape: tuple[int, int, int],
-    scale: int,
-) -> torch.Tensor:
-    """HR-grid trilinear upsampling of an LR region with one LR cell of halo."""
+def coarse_region(probs, start, shape, scale):
     if (
         type(scale) is not int
         or scale < 1
@@ -108,34 +94,24 @@ def coarse_region(
         left, right = s // scale - 1, (s + n) // scale + 1
         source.append(slice(max(0, left), min(total, right)))
         padding.append((max(0, -left), max(0, right - total)))
-    low = probs[(slice(None), slice(None), *source)]
+    low = probs[(Ellipsis, *source)]
     low = F.pad(
         low, tuple(v for pair in reversed(padding) for v in pair), mode="replicate"
     )
     high = F.interpolate(low, scale_factor=scale, mode="trilinear", align_corners=False)
-    return high[(slice(None), slice(None), *(slice(scale, scale + n) for n in shape))]
+    return high[(Ellipsis, *(slice(scale, scale + n) for n in shape))]
 
 
 @dataclass(frozen=True)
 class Crops:
-    """A batch of resized crops of one plane and where they came from."""
-
     images: torch.Tensor  # [B, K, patch, patch] phase fractions
     origins: torch.Tensor  # [B] crop top row in source pixels (z for side planes)
     extents: torch.Tensor  # [B] source image heights in pixels
 
 
 class CropSampler:
-    """Draw crops of one plane: a random folder, then random images and crops.
-
-    Every choice comes from the generator passed in, so a seeded generator
-    repeats the same crops.
-    """
-
-    def __init__(
-        self, images: PlaneImages, crop_size: int, patch_size: int, num_phases: int
-    ):
-        self.images = images
+    def __init__(self, images, crop_size, patch_size, num_phases):
+        self.groups = images.images
         self.crop_size = crop_size
         self.patch_size = patch_size
         self.num_phases = num_phases
@@ -147,9 +123,10 @@ class CropSampler:
                         f"({image.shape[0]}x{image.shape[1]})."
                     )
 
-    def sample(self, count: int, generator: torch.Generator) -> Crops:
-        groups = self.images.images
-        group = groups[int(torch.randint(len(groups), (), generator=generator))]
+    def sample(self, count, generator):
+        group = self.groups[
+            int(torch.randint(len(self.groups), (), generator=generator))
+        ]
         choices = torch.randint(len(group), (count,), generator=generator).tolist()
         size = self.crop_size
         crops, origins, extents = [], [], []
@@ -158,11 +135,10 @@ class CropSampler:
             height, width = image.shape
             top = int(torch.randint(height - size + 1, (), generator=generator))
             left = int(torch.randint(width - size + 1, (), generator=generator))
-            crop = np.array(image[top : top + size, left : left + size])
-            crops.append(torch.from_numpy(crop).long())
+            crops.append(image[top : top + size, left : left + size])
             origins.append(float(top))
             extents.append(float(height))
-        labels = torch.stack(crops)
+        labels = torch.from_numpy(np.stack(crops))
         probs = phase_channels(labels, self.num_phases)
         images = resize_phases(probs, (self.patch_size,) * 2)
         return Crops(

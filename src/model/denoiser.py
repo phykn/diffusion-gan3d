@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 from functools import cache, partial
 
 import torch
@@ -15,12 +14,7 @@ from src.model.layers import (
 )
 
 
-def channel_norm_silu(
-    x: torch.Tensor,
-    scale: torch.Tensor,
-    shift: torch.Tensor,
-    eps: float,
-) -> torch.Tensor:
+def channel_norm_silu(x, scale, shift, eps):
     dtype = x.dtype
     h = x.float()
     var, mean = torch.var_mean(h, dim=1, keepdim=True, correction=0)
@@ -38,14 +32,7 @@ def fused_channel_norm_silu():
 
 
 class ChannelNormSiLU3D(nn.Module):
-    """Normalize each voxel over channels, scale and shift, then apply SiLU."""
-
-    def __init__(
-        self,
-        channels: int,
-        eps: float = 1.0e-5,
-        affine: bool = True,
-    ) -> None:
+    def __init__(self, channels, eps=1.0e-5, affine=True):
         super().__init__()
         self.eps = eps
         if affine:
@@ -55,13 +42,7 @@ class ChannelNormSiLU3D(nn.Module):
             self.register_parameter("scale", None)
             self.register_parameter("shift", None)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        scale: torch.Tensor | None = None,
-        shift: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """scale and shift broadcast over x; they default to the learned affine."""
+    def forward(self, x, scale=None, shift=None):
         if scale is None:
             shape = (1, -1, 1, 1, 1)
             scale, shift = self.scale.view(shape), self.shift.view(shape)
@@ -79,34 +60,28 @@ class ChannelNormSiLU3D(nn.Module):
 
 
 class Upsample3D(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int) -> None:
+    def __init__(self, in_channels, out_channels):
         super().__init__()
         self.conv = Conv3d(in_channels, out_channels, 3, padding=1)
 
-    def forward(self, x: torch.Tensor, size: tuple[int, int, int]) -> torch.Tensor:
+    def forward(self, x, size):
         # Convolving before enlarging costs an eighth of convolving after.
         return F.interpolate(self.conv(x), size=size, mode="nearest")
 
 
 class Denoiser3D(nn.Module):
-    """3D U-Net that predicts clean phase values from a noisy state.
-
-    LR models take volume fractions (vf), a height field and a depth profile;
-    SR models take coarse phase fractions and a corruption level instead.
-    """
-
     def __init__(
         self,
-        num_phases: int,
-        base_channels: int,
-        channel_multipliers: Sequence[int],
-        embedding_channels: int,
-        latent_channels: int,
-        gradient_checkpointing: bool = False,
-        height_enabled: bool = False,
-        profile_enabled: bool = False,
-        coarse_enabled: bool = False,
-    ) -> None:
+        num_phases,
+        base_channels,
+        channel_multipliers,
+        embedding_channels,
+        latent_channels,
+        gradient_checkpointing=False,
+        height_enabled=False,
+        profile_enabled=False,
+        coarse_enabled=False,
+    ):
         super().__init__()
         channels = tuple(base_channels * scale for scale in channel_multipliers)
         if not channels or any(channel < 2 for channel in channels):
@@ -136,7 +111,7 @@ class Denoiser3D(nn.Module):
         self.encoder = nn.ModuleList()
         self.downsample = nn.ModuleList()
         for idx, ch in enumerate(channels):
-            self.encoder.append(block(ch, ch, embedding_channels))
+            self.encoder.append(block(ch, embedding_channels))
             if idx + 1 < len(channels):
                 self.downsample.append(
                     nn.Sequential(
@@ -146,7 +121,7 @@ class Denoiser3D(nn.Module):
                 )
 
         self.middle = nn.ModuleList(
-            block(channels[-1], channels[-1], embedding_channels) for _ in range(2)
+            block(channels[-1], embedding_channels) for _ in range(2)
         )
 
         self.upsample = nn.ModuleList()
@@ -154,7 +129,7 @@ class Denoiser3D(nn.Module):
         ch = channels[-1]
         for skip_ch in reversed(channels[:-1]):
             self.upsample.append(Upsample3D(ch, skip_ch))
-            self.decoder.append(block(skip_ch, skip_ch, embedding_channels))
+            self.decoder.append(block(skip_ch, embedding_channels))
             ch = skip_ch
 
         self.output_norm = ChannelNormSiLU3D(channels[0])
@@ -178,35 +153,28 @@ class Denoiser3D(nn.Module):
             embedding_mlp(1, embedding_channels) if coarse_enabled else None
         )
 
-    def forward(
-        self,
-        x_current: torch.Tensor,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        **conditions: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Predict clean phase values in [-1, 1]; see logits for conditions."""
+    def forward(self, x_current, time, latent, **conditions):
         return self.decode(self.logits(x_current, time, latent, **conditions))
 
     def logits(
         self,
-        x_current: torch.Tensor,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        vf: torch.Tensor | None = None,
-        vf_present: torch.Tensor | None = None,
-        height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
-        profile_present: torch.Tensor | None = None,
-        coarse: torch.Tensor | None = None,
-        corruption_level: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if self.coarse_enabled and (vf is not None or vf_present is not None):
+        x_current,
+        time,
+        latent,
+        vf=None,
+        vf_present=None,
+        height=None,
+        profile=None,
+        profile_present=None,
+        coarse=None,
+        corruption_level=None,
+    ):
+        if self.coarse_enabled and vf_present is not None:
             raise ValueError("SR denoisers do not accept volume fractions.")
         emb = self.embed(
-            time.to(device=x_current.device),
+            time,
             latent.to(x_current),
-            vf=None if vf is None else vf.to(x_current),
+            vf=vf,
             vf_present=vf_present,
         )
         return self.forward_body(
@@ -219,14 +187,7 @@ class Denoiser3D(nn.Module):
             corruption_level=corruption_level,
         )
 
-    def embed(
-        self,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        vf: torch.Tensor | None = None,
-        vf_present: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Time and latent embeddings averaged by 1/sqrt(2), plus present vf."""
+    def embed(self, time, latent, vf=None, vf_present=None):
         time_emb = self.time_mlp(
             self.time_emb(time.to(latent.device)).to(dtype=latent.dtype)
         )
@@ -243,15 +204,14 @@ class Denoiser3D(nn.Module):
 
     def forward_body(
         self,
-        x_current: torch.Tensor,
-        emb: torch.Tensor,
-        height: torch.Tensor | None = None,
-        profile: torch.Tensor | None = None,
-        profile_present: torch.Tensor | None = None,
-        coarse: torch.Tensor | None = None,
-        corruption_level: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Logits for an embedding; SR adds the corruption level to it here."""
+        x_current,
+        emb,
+        height=None,
+        profile=None,
+        profile_present=None,
+        coarse=None,
+        corruption_level=None,
+    ):
         if self.coarse_enabled:
             if profile is not None or profile_present is not None:
                 raise ValueError("SR denoisers do not accept a depth profile.")
@@ -278,7 +238,11 @@ class Denoiser3D(nn.Module):
         if profile is not None:
             if self.profile_input is None:
                 raise ValueError("profile conditioning is disabled.")
-            field = _profile_field(profile.to(x_current), x_current.shape[-3:]) * 2 - 1
+            shape = x_current.shape[-3:]
+            if profile.ndim != 3 or profile.shape[-1] != shape[0]:
+                raise ValueError("profile must match the volume depth.")
+            field = profile.to(x_current)[..., None, None].expand(-1, -1, *shape)
+            field = field * 2 - 1
             if profile_present is not None:
                 field = field * profile_present.to(field).reshape(-1, 1, 1, 1, 1)
             x = x + self.profile_input(field)
@@ -303,20 +267,7 @@ class Denoiser3D(nn.Module):
 
         return self.output(self.output_norm(x))
 
-    def guided_logits(
-        self,
-        x_current: torch.Tensor,
-        time: torch.Tensor,
-        latent: torch.Tensor,
-        guidance: float,
-        **conditions: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Classifier-free guidance over vf and the depth profile (LR only).
-
-        The unconditional branch drops vf and the profile and keeps the height.
-        Without either condition, and at guidance 1, this is one forward pass.
-        SR models have no guided condition and always take one pass.
-        """
+    def guided_logits(self, x_current, time, latent, guidance, **conditions):
         measured = ("vf", "vf_present", "profile", "profile_present")
         if (
             self.coarse_enabled
@@ -335,11 +286,5 @@ class Denoiser3D(nn.Module):
         return baseline + guidance * (conditional.float() - baseline)
 
     @staticmethod
-    def decode(logits: torch.Tensor) -> torch.Tensor:
+    def decode(logits):
         return 2.0 * logits.softmax(dim=1) - 1.0
-
-
-def _profile_field(profile: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
-    if profile.ndim != 3 or profile.shape[-1] != shape[0]:
-        raise ValueError("profile must match the volume depth.")
-    return profile[..., None, None].expand(-1, -1, *shape)

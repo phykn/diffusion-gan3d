@@ -25,7 +25,7 @@ from src.stats.labels import phase_fractions
 from src.stats.seam import measure_seams
 
 
-def main(argv=None) -> None:
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Generate an LR volume, tiled over blocks, and inspect its seams."
     )
@@ -57,14 +57,15 @@ def main(argv=None) -> None:
         "(default: the training depth profile of a profile-conditioned model).",
     )
     add_generation_arguments(parser)
-    args = parser.parse_args(argv)
+    check_generation(parser.parse_args(argv))
+
+
+def check_generation(args):
     section("LR generation check")
     settings = prepare_check(args, __file__)
     api = LowResolutionAPI(args.weight, args.device)
-    patch = api.input_size
-    # A small patch cannot take the default overlap; keep below half of it.
     if args.overlap is None:
-        args.overlap = min(settings.overlap, (patch - 1) // 2)
+        args.overlap = min(settings.overlap, (api.input_size - 1) // 2)
     blocks = tuple(args.blocks)
     options = generation_options(args) | {
         "blocks": blocks,
@@ -103,14 +104,14 @@ def main(argv=None) -> None:
     show(volume, args, api.num_phases, "EMA model")
 
 
-def load_vf_profile(path: Path) -> dict:
+def load_vf_profile(path):
     spec = load_yaml(path)
     if spec.get("geometry", {}).get("kind") == "anode":
         return depth_profile(spec["geometry"])
     return spec
 
 
-def format_axes(values) -> str:
+def format_axes(values):
     return "  ".join(
         f"axis {axis}: {'n/a' if value is None else f'{value:.4f}'}"
         for axis, value in enumerate(values)

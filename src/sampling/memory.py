@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import psutil
 import torch
 
-from src.sampling.plan import TilePlan
 from src.sampling.sampler import STATE_DTYPE
 
 # The fraction of free memory a generation may use.
@@ -39,34 +38,34 @@ class MemoryEstimate:
     shape: tuple[int, int, int]
     stored_bytes: int = 0
 
-    def device_total(self, storage: str) -> int:
+    def device_total(self, storage):
         return self.device_bytes + (self.stored_bytes if storage == "cuda" else 0)
 
-    def host_total(self, storage: str) -> int:
+    def host_total(self, storage):
         return self.host_bytes + (self.stored_bytes if storage != "cuda" else 0)
 
 
-def tile_buffer_bytes(phases: int, voxels: int) -> int:
+def tile_buffer_bytes(phases, voxels):
     # Upload/download, prediction, weighting and posterior scratch tensors.
     return 4 * (12 * phases + 4) * voxels
 
 
-def flush_bytes(phases: int, voxels: int) -> int:
+def flush_bytes(phases, voxels):
     # Staged predictions, clean values, posterior mean and noise of one tile
     # target, where the state is stored.
     return 4 * (6 * phases + 4) * voxels
 
 
 def activation_bytes(
-    channels: int,
-    phases: int,
-    voxels: int,
+    channels,
+    phases,
+    voxels,
     *,
-    profile: bool = False,
-    coarse: bool = False,
-    guided: bool = False,
-    cfg: bool = False,
-) -> int:
+    profile=False,
+    coarse=False,
+    guided=False,
+    cfg=False,
+):
     """Denoiser activations for one tile of voxels.
 
     FP32 normalization, skip activations and convolution scratch coexist, also
@@ -83,18 +82,18 @@ def activation_bytes(
 
 
 def estimate_memory(
-    plan: TilePlan,
-    phases: int,
-    channels: int,
-    device: torch.device,
+    plan,
+    phases,
+    channels,
+    device,
     *,
-    probabilities: bool = False,
-    guided: bool = False,
-    profile: bool = False,
-    coarse: bool = False,
-    cfg: bool = False,
-    extra_host_bytes: int = 0,
-) -> MemoryEstimate:
+    probabilities=False,
+    guided=False,
+    profile=False,
+    coarse=False,
+    cfg=False,
+    extra_host_bytes=0,
+):
     voxels = math.prod(plan.shape)
     tile_voxels = math.prod(plan.tile_edge)
     output_voxels = math.prod(plan.output_shape)
@@ -128,11 +127,11 @@ def estimate_memory(
     )
 
 
-def ram_budget() -> int:
+def ram_budget():
     return int(psutil.virtual_memory().available * BUDGET)
 
 
-def cuda_budget(device: torch.device) -> int:
+def cuda_budget(device):
     free, _total = torch.cuda.mem_get_info(device)
     # The driver counts cached allocator blocks as used, but this process can
     # reuse them without another allocation.
@@ -142,7 +141,7 @@ def cuda_budget(device: torch.device) -> int:
     return int((free + reusable) * BUDGET)
 
 
-def _require(required: int, available: int, name: str, estimate) -> None:
+def _require(required, available, name, estimate):
     if required > available:
         size = "x".join(map(str, estimate.shape))
         raise MemoryError(
@@ -152,7 +151,7 @@ def _require(required: int, available: int, name: str, estimate) -> None:
         )
 
 
-def check_memory(estimate: MemoryEstimate, device: torch.device, storage: str) -> str:
+def check_memory(estimate, device, storage):
     """The storage to use (auto: cuda when it fits there), or MemoryError.
 
     On MPS and the CPU the device shares RAM with the host.

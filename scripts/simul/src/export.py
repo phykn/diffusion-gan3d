@@ -1,6 +1,5 @@
 import warnings
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import tifffile
@@ -15,134 +14,115 @@ from scripts.simul.src.anode import (
     vf_profile,
 )
 from scripts.simul.src.geometry import check_geometry, pack
+from src.axes import AXES
 from src.config.io import project_path
-from src.plane import AXES
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253
-
-# geometry.kind -> (defaults, check, pack, measured fraction name -> label)
-STRUCTURES = {
-    "particles": (
-        {"big_elongation": 1.0, "radius_gradient": [1.0, 1.0]},
-        check_geometry,
-        pack,
-        {"big_vf": 2, "small_vf": 1},
-    ),
-    "anode": (
-        {"size_spread": 0.0, "min_section": 0},
-        check_anode,
-        pack_anode,
-        {"graphite_vf": GRAPHITE, "silicon_vf": SILICON},
-    ),
-}
 
 
 @dataclass(frozen=True)
 class Export:
-    volumes: tuple[Path, ...]
-    slices: dict[int, tuple[Path, ...]]
-    measured: tuple[dict[str, float], ...]
-    targets: dict[str, float]
+    volumes: tuple
+    slices: dict
+    measured: tuple
+    targets: dict
 
 
-def generate(cfg: dict) -> Export:
+def generate(cfg):
     output = cfg["output"]
-    geometry = dict(cfg["geometry"])
-    kind = geometry.pop("kind", "particles")
-    if kind not in STRUCTURES:
-        raise ValueError(f"geometry kind must be one of {sorted(STRUCTURES)}.")
-    defaults, check, pack_volume, fractions = STRUCTURES[kind]
-    geometry = {**defaults, **geometry}
-    check(**geometry)
+    kind, geometry, pack_volume, phases = prepare_geometry(cfg["geometry"])
     count = output["count"]
+    seed = output.get("seed")
     if type(count) is not int or count < 1:
         raise ValueError("output count must be a positive integer.")
-    seed = output.get("seed")
     if seed is not None and (type(seed) is not int or seed < 0):
         raise ValueError("output seed must be a non-negative integer or null.")
-    rng = np.random.default_rng(seed)
-    root = project_path(output["data_dir"])
-    vol_dir, slice_dirs = make_dirs(root)
-    volumes: list[Path] = []
-    slices: dict[int, list[Path]] = {axis: [] for axis in AXES}
-    measured = []
 
-    # Mean over z; anode fractions are depth profiles.
+    root = project_path(output["data_dir"])
+    volume_dir = root / "volumes"
+    slice_dirs = {axis: root / "slices" / str(axis) for axis in AXES}
+    directories = (volume_dir, *slice_dirs.values())
+    for folder in directories:
+        if folder.exists() and (not folder.is_dir() or any(folder.iterdir())):
+            raise FileExistsError(f"output directory is not empty: {folder}")
+    for folder in directories:
+        folder.mkdir(parents=True, exist_ok=True)
+
+    rng = np.random.default_rng(seed)
     targets = {
-        key: float(vf_profile(geometry["size"], 0, geometry[key]).mean())
-        for key in fractions
+        name: float(vf_profile(geometry["size"], 0, geometry[name]).mean())
+        for name in phases
     }
+    volumes, measured = [], []
+    slices = {axis: [] for axis in AXES}
     jammed = set()
-    for idx in range(count):
+    for index in range(count):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            vol = pack_volume(**geometry, rng=rng)
-        stem = f"volume_{idx:03d}"
-        path = vol_dir / f"{stem}.tiff"
-        tifffile.imwrite(path, vol)
+            volume = pack_volume(**geometry, rng=rng)
+        stem = f"volume_{index:03d}"
+        path = volume_dir / f"{stem}.tiff"
+        tifffile.imwrite(path, volume)
         volumes.append(path)
-        measured.append(
-            {key: float((vol == label).mean()) for key, label in fractions.items()}
-        )
+        fractions = {
+            name: float((volume == label).mean()) for name, label in phases.items()
+        }
+        measured.append(fractions)
         if caught:
-            jammed |= {
-                key for key, value in measured[-1].items() if value < targets[key]
-            }
-
-        for axis in AXES:
-            slices[axis].extend(save_slices(vol, slice_dirs[axis], axis, stem))
+            jammed.update(name for name in phases if fractions[name] < targets[name])
+        for axis, folder in slice_dirs.items():
+            slices[axis].extend(write_slices(volume, axis, folder, stem))
 
     if jammed:
+        detail = ", ".join(
+            f"{name} {np.mean([row[name] for row in measured]):.3f} (target {targets[name]:.3f})"
+            for name in sorted(jammed)
+        )
         warnings.warn(
-            "random packing jammed below the configured fractions: "
-            + ", ".join(
-                f"{key} {np.mean([item[key] for item in measured]):.3f} "
-                f"(target {targets[key]:.3f})"
-                for key in sorted(jammed)
-            ),
+            f"random packing jammed below the configured fractions: {detail}",
             stacklevel=2,
         )
-    # Geometry holds targets; packing can jam below them, so record the result.
+    manifest = {
+        "geometry": {"kind": kind, **geometry},
+        "height_axis": "z",
+        "count": count,
+        "seed": seed,
+        "measured": measured,
+    }
     (root / "simulation.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "geometry": {"kind": kind, **geometry},
-                "height_axis": "z",
-                "count": count,
-                "seed": seed,
-                "measured": measured,
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
     )
     return Export(
-        volumes=tuple(volumes),
-        slices={axis: tuple(paths) for axis, paths in slices.items()},
-        measured=tuple(measured),
-        targets=targets,
+        tuple(volumes),
+        {axis: tuple(paths) for axis, paths in slices.items()},
+        tuple(measured),
+        targets,
     )
 
 
-def make_dirs(root: Path) -> tuple[Path, dict[int, Path]]:
-    vol_dir = root / "volumes"
-    slice_dirs = {axis: root / "slices" / str(axis) for axis in AXES}
-    paths = (vol_dir,) + tuple(slice_dirs.values())
-    for path in paths:
-        if path.exists() and (not path.is_dir() or any(path.iterdir())):
-            raise FileExistsError(f"output directory is not empty: {path}")
-    for path in paths:
-        path.mkdir(parents=True, exist_ok=True)
-    return vol_dir, slice_dirs
+def prepare_geometry(values):
+    values = dict(values)
+    kind = values.pop("kind", "particles")
+    if kind == "particles":
+        geometry = {"big_elongation": 1.0, "radius_gradient": [1.0, 1.0], **values}
+        check_geometry(**geometry)
+        return kind, geometry, pack, {"big_vf": 2, "small_vf": 1}
+    if kind == "anode":
+        geometry = {"size_spread": 0.0, "min_section": 0, **values}
+        check_anode(**geometry)
+        return (
+            kind,
+            geometry,
+            pack_anode,
+            {"graphite_vf": GRAPHITE, "silicon_vf": SILICON},
+        )
+    raise ValueError("geometry kind must be one of ['anode', 'particles'].")
 
 
-def save_slices(vol: np.ndarray, dst: Path, axis: int, stem: str) -> list[Path]:
-    stack = np.moveaxis(vol, axis, 0)
-    paths: list[Path] = []
-    for idx in range(stack.shape[0]):
-        path = dst / f"{stem}_{axis}_{idx:03d}.png"
-        image = Image.fromarray(stack[idx])
+def write_slices(volume, axis, folder, stem):
+    for index, labels in enumerate(np.moveaxis(volume, axis, 0)):
+        path = folder / f"{stem}_{axis}_{index:03d}.png"
+        image = Image.fromarray(labels)
         image.putpalette(PALETTE)
         image.save(path)
-        paths.append(path)
-    return paths
+        yield path

@@ -31,10 +31,3 @@ def test_generator_is_the_best_scored_step(tiny_configs, tmp_path):
     assert read_export(run, "lr")["step"] == best
     kept = sorted(path.name for path in (run / "selection").glob("generator_*.pt"))
     assert kept == [f"generator_{best:08d}.pt"]
-
-
-def test_without_selection_the_last_step_is_exported(tiny_configs, tmp_path):
-    config = update(tiny_configs["lr"], "selection.enabled", False)
-    run = _train(config, tmp_path / "last", steps=1)
-    assert read_export(run, "lr")["step"] == 1
-    assert not (run / "selection").exists()

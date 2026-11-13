@@ -15,9 +15,9 @@ from paper.scripts.common import (
     cache_dir,
     cached,
     connectivity,
+    describe_volumes,
     first_image,
     mean_std,
-    normalized,
     parse_args,
     real_crops,
     wall_minutes,
@@ -27,7 +27,6 @@ from src.config.io import load_config, load_generation_settings, load_yaml, stor
 from src.data.crops import phase_channels, resize_phases
 from src.stats.anchor import measure_boundaries, measure_slice_smoothness
 from src.stats.sections import (
-    compare_sections,
     label_sections,
     section_errors,
     section_statistics,
@@ -37,12 +36,11 @@ from src.stats.volume import (
     interface_density,
     tilt_balance,
 )
-from src.train.selection import pick_sections
 
 DESCRIPTION = (
     "Evaluate one run's LR stage for the paper: structure, selection and anchors. "
     "Writes lr-results.json to --out and caches the generated volumes in its "
-    "cache/<run>/; --reuse recomputes the metrics from them without sampling."
+    "cache/; --reuse recomputes the metrics from them without sampling."
 )
 REFERENCE_OFFSET = 1000
 DISTANCES = (0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32)
@@ -63,8 +61,11 @@ FULL = Budget(
 SMOKE = Budget(2, (0,), (0,), (0, 1), (0, 0))
 
 
-def main(argv=None) -> None:
-    args = parse_args(DESCRIPTION, "LR run directory.", argv)
+def main(argv=None):
+    evaluate(parse_args(DESCRIPTION, "LR run directory.", argv))
+
+
+def evaluate(args):
     run = args.run
     budget = SMOKE if args.smoke else FULL
     config = load_config(run / "train.yaml")
@@ -75,15 +76,9 @@ def main(argv=None) -> None:
 
     real_labels = label_sections(real_crops(config, config.data.lo_res_size))
     noise = section_errors(real_labels[0::2], real_labels[1::2])
+    reference = section_statistics(real_labels)
     weights = {best: run / "generator.pt"} | archived_generators(run)
     source = first_image(config)[1]
-
-    def sample(step):
-        api = LowResolutionAPI(weights[step], args.device)
-        return [
-            api.generate(seed=seed, guidance=settings.guidance)
-            for seed in range(budget.samples)
-        ]
 
     results = {
         "run": stored_path(run),
@@ -96,13 +91,17 @@ def main(argv=None) -> None:
         "selection": scores["steps"],
         "steps": {},
     }
-    for step in sorted(weights):
+    for step, weight in sorted(weights.items()):
         volumes = cached(
-            cache / f"step{step}.pt", args.reuse, lambda step=step: sample(step)
+            cache / f"step{step}.pt",
+            args.reuse,
+            lambda: generate_samples(
+                weight, args.device, budget.samples, settings.guidance
+            ),
         )
         print(f"step {step}: {len(volumes)} volumes")
         results["steps"][str(step)] = volume_summary(
-            volumes, real_labels, noise, full=step == best
+            volumes, real_labels, reference, noise, full=step == best
         )
 
     api = LowResolutionAPI(weights[best], args.device)
@@ -114,7 +113,12 @@ def main(argv=None) -> None:
     print(f"Results: {output}")
 
 
-def external_anchor(api: LowResolutionAPI, source: np.ndarray, crop) -> torch.Tensor:
+def generate_samples(weights, device, count, guidance):
+    model = LowResolutionAPI(weights, device)
+    return [model.generate(seed=seed, guidance=guidance) for seed in range(count)]
+
+
+def external_anchor(api, source, crop):
     """The external crop of the training image on the LR grid, as uint8 labels."""
     left, top = crop
     size = api.crop_size
@@ -123,7 +127,7 @@ def external_anchor(api: LowResolutionAPI, source: np.ndarray, crop) -> torch.Te
     return label_sections(image[None])[0].argmax(0).to(torch.uint8)
 
 
-def real_tilt(source: np.ndarray, config) -> dict:
+def real_tilt(source, config):
     """Solid tilt balance of the whole training image on the LR grid."""
     data = config.data
     shape = tuple(n * data.lo_res_size // data.crop_size for n in source.shape)
@@ -134,7 +138,7 @@ def real_tilt(source: np.ndarray, config) -> dict:
     return {key: tilt[key] for key in TILT_KEYS}
 
 
-def real_summary(real_labels: torch.Tensor, noise) -> dict:
+def real_summary(real_labels, noise):
     labels = real_labels.argmax(1)
     return {
         "crops": len(labels),
@@ -146,29 +150,12 @@ def real_summary(real_labels: torch.Tensor, noise) -> dict:
     }
 
 
-def volume_summary(volumes, real_labels, noise, full: bool) -> dict:
-    real = section_statistics(real_labels)
-    planes = {}
-    structure = []
-    for axis, name in enumerate(("xy", "xz", "yz")):
-        fake = pick_sections(volumes, axis, real_labels.shape[1])
-        errors = compare_sections(real, section_statistics(fake))
-        planes[name] = errors._asdict()
-        structure.append(normalized(errors, noise))
-    fraction = mean_std([(v == 0).float().mean() for v in volumes])
-    summary = {
-        "samples": len(volumes),
-        "planes": planes,
-        "structure": float(np.mean(structure)),
-        "phase0_fraction": fraction,
-        "interface_density": mean_std(
-            [interface_density(v, (0, 1, 2)) for v in volumes]
-        ),
-    }
+def volume_summary(volumes, real_labels, reference, noise, full):
+    summary, _ = describe_volumes(volumes, reference, real_labels.shape[1], noise)
     if not full:
         return summary
     summary["two_point_from_fraction"] = fraction_offset_error(
-        real_labels, fraction["mean"]
+        real_labels, summary["phase0_fraction"]["mean"]
     )
     summary |= connectivity(volumes)
     tilt = tilt_balance([v.numpy() for v in volumes], phase=1)
@@ -178,7 +165,7 @@ def volume_summary(volumes, real_labels, noise, full: bool) -> dict:
     return summary
 
 
-def fraction_offset_error(real_labels: torch.Tensor, phase0: float) -> float:
+def fraction_offset_error(real_labels, phase0):
     """Two-point error a phase-fraction change alone would cause.
 
     Keeps the real normalized correlation (S2 - p^2) / (p - p^2) of each phase
@@ -196,7 +183,7 @@ def fraction_offset_error(real_labels: torch.Tensor, phase0: float) -> float:
     return float(np.mean(errors))
 
 
-def nested_plane_order(size: int) -> tuple[int, ...]:
+def nested_plane_order(size):
     """Farthest-point plane order, so every prefix covers the volume broadly."""
     selected: list[int] = []
     remaining = set(range(size))
@@ -217,7 +204,7 @@ def nested_plane_order(size: int) -> tuple[int, ...]:
     return tuple(selected)
 
 
-def pool_similarity(first: torch.Tensor, second: torch.Tensor, cell: int = 4) -> float:
+def pool_similarity(first, second, cell=4):
     """One minus the mean total variation of 4x4-cell phase fractions."""
     pool = torch.nn.functional.avg_pool2d
 
@@ -228,7 +215,7 @@ def pool_similarity(first: torch.Tensor, second: torch.Tensor, cell: int = 4) ->
     return float(1 - 0.5 * (fractions(first) - fractions(second)).abs().sum(0).mean())
 
 
-def plane_metrics(anchored, baseline, plane, axis, index, reference=None) -> dict:
+def plane_metrics(anchored, baseline, plane, axis, index, reference=None):
     """How one anchored plane is met, against a same-noise baseline."""
     got = anchored.movedim(axis, 0)
     base = baseline.movedim(axis, 0)
@@ -263,7 +250,7 @@ def plane_metrics(anchored, baseline, plane, axis, index, reference=None) -> dic
     return row
 
 
-def anchor_experiments(api, settings, source, budget, cache, reuse) -> dict:
+def anchor_experiments(api, settings, source, budget, cache, reuse):
     size = api.input_size
     center = size // 2
     strength = settings.anchor_strength

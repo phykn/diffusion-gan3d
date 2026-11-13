@@ -1,7 +1,7 @@
 import torch
 
 
-def vf_loss(probs: torch.Tensor, target: torch.Tensor, present: torch.Tensor):
+def vf_loss(probs, target, present):
     present = present.to(probs.device)
     predicted = probs.to(torch.float32).mean(dim=(2, 3, 4))
     target = target.to(torch.float32)

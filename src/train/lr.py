@@ -1,5 +1,6 @@
 import torch
 
+from src.axes import PLANES
 from src.config.schema import LRConfig
 from src.data.height import image_profile, rebin_profile
 from src.data.pairs import sample_pairs
@@ -14,7 +15,7 @@ from src.train.losses.volume_fraction import vf_loss
 class LRTrainer(Trainer):
     config: LRConfig
 
-    def prepare(self, step: int, transition: int | None) -> StepInputs:
+    def prepare(self, step, transition):
         config = self.config
         conditioning = config.conditioning
         height = self.height
@@ -22,13 +23,16 @@ class LRTrainer(Trainer):
         batch = config.train.volume_batch_size
         real = self.real_crops()
         # Height, profile and vf of a volume share one side crop.
-        side = next((axis for axis in self.axes if axis != 0), None) if height else None
-        if side is None:
-            axis = self.axes[
-                int(torch.randint(len(self.axes), (), generator=self.random["train"]))
+        candidates = (
+            tuple(axis for axis in self.axes if axis != 0) if height else self.axes
+        )
+        axis = (
+            candidates[0]
+            if height and len(candidates) == 1
+            else candidates[
+                int(torch.randint(len(candidates), (), generator=self.random["train"]))
             ]
-        else:
-            axis = side
+        )
         fractions = real[axis].images.float().mean((2, 3))
         indices = torch.arange(batch, device=fractions.device) % len(fractions)
         target_vf = fractions[indices]
@@ -41,12 +45,12 @@ class LRTrainer(Trainer):
         extra = {}
         if height:
             conditions["height"] = self.volume_height(
-                real[side].origins[:batch], real[side].extents[:batch]
+                real[axis].origins[:batch], real[axis].extents[:batch]
             )
         if profile_enabled:
             profile = rebin_profile(
                 image_profile(
-                    real[side].images, bins=conditioning.spatial_profile.num_bins
+                    real[axis].images, bins=conditioning.spatial_profile.num_bins
                 ),
                 self.patch_size,
             )[:batch]
@@ -58,16 +62,24 @@ class LRTrainer(Trainer):
             )
             extra["profile"] = profile
         extra.update(target_vf=target_vf, vf_present=vf_present)
+        diagnostics = {
+            "conditioning/vf_active": vf_present.any(),
+            "conditioning/vf_fraction": vf_present.float().mean(),
+        }
+        if height:
+            diagnostics.update(
+                {
+                    f"conditioning/source/{PLANES[side]}": int(axis == side)
+                    for side in candidates
+                }
+            )
         return StepInputs(
             step=step,
             transition=self.sample_transition() if transition is None else transition,
             real=real,
             conditions=conditions,
             extra=extra,
-            diagnostics={
-                "conditioning/vf_active": vf_present.any(),
-                "conditioning/vf_fraction": vf_present.float().mean(),
-            },
+            diagnostics=diagnostics,
         )
 
     def objective(self, inputs, clean_probs):
@@ -78,9 +90,7 @@ class LRTrainer(Trainer):
         diagnostics["loss/vf"] = vf.detach()
         total = loss.volume_fraction_weight * vf
         real_transition = loss.real_transition
-        ramp = schedule_ramp(
-            inputs.step, real_transition.start_step, real_transition.ramp_steps
-        )
+        ramp = schedule_ramp(inputs.step, real_transition.ramp_steps)
         diagnostics["loss/real_transition_ramp"] = ramp
         if real_transition.weight > 0 and inputs.transition == 0:
             value = self.real_transition(inputs, clean_probs, diagnostics)
@@ -100,7 +110,7 @@ class LRTrainer(Trainer):
             total = total + self.profile(clean_probs, extra["profile"], diagnostics)
         return total, diagnostics
 
-    def real_transition(self, inputs, clean_probs, diagnostics) -> torch.Tensor:
+    def real_transition(self, inputs, clean_probs, diagnostics):
         real, fake, real_heights, fake_heights = {}, {}, {}, {}
         height = inputs.conditions.get("height")
         for axis in self.axes:
@@ -132,7 +142,7 @@ class LRTrainer(Trainer):
         diagnostics.update(values)
         return value
 
-    def profile(self, clean_probs, target, diagnostics) -> torch.Tensor:
+    def profile(self, clean_probs, target, diagnostics):
         # The real crop profile is the target for CFG-dropped samples too: the
         # height field alone must carry the depth gradient at generation.
         config = self.config

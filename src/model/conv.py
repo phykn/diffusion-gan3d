@@ -10,11 +10,7 @@ CHUNK_BYTES = 64 * 2**20
 MIN_VOXELS = 32**3
 
 
-def conv3d_weight(x: torch.Tensor, grad: torch.Tensor, kernel: int) -> torch.Tensor:
-    """Weight gradient of a stride-1, same-padded cube convolution via im2col.
-
-    Chunks add up in at least float32, also for half-precision inputs.
-    """
+def conv3d_weight(x, grad, kernel):
     batch, channels, depth, height, width = x.shape
     out_channels = grad.shape[1]
     pad = kernel // 2
@@ -78,8 +74,6 @@ class _Conv3dFunction(torch.autograd.Function):
 
 
 class Conv3d(nn.Conv3d):
-    """nn.Conv3d whose MPS gradients avoid the slow native kernels."""
-
     def _conv_forward(self, x, weight, bias):
         if not (
             x.device.type == "mps"
@@ -93,10 +87,7 @@ class Conv3d(nn.Conv3d):
         ):
             return super()._conv_forward(x, weight, bias)
         if self.kernel_size == (1, 1, 1) and self.padding == (0, 0, 0):
-            # A pointwise convolution is a matrix product, whose backward on
-            # MPS is about six times faster than the convolution's. It stays
-            # fp32 under autocast: fp16 is no faster here, and its gradient
-            # sums over all voxels overflow.
+            # Summing pointwise gradients over the whole grid can overflow fp16.
             with torch.autocast("mps", enabled=False):
                 out = torch.matmul(weight.flatten(1), x.flatten(2).float())
             if bias is not None:

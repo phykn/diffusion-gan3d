@@ -1,5 +1,4 @@
 matplotlib
-anyio
 fastapi
 napari[all]
 numpy

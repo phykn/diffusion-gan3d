@@ -36,7 +36,7 @@ tune:
       generator: {channels: [8, 16, 32, 32], embedding_channels: 32, latent_channels: 16}
       diffusion: {num_steps: 2}
       critic: {channels: [8, 16, 32]}
-    lr_bank: {samples_per_domain: 2, refresh_every_steps: 1}
+    lr_bank: {size: 2, refresh_every_steps: 1}
     train:
       total_steps: 1
       real_batch_size: 2

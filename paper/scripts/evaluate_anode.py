@@ -20,6 +20,7 @@ from paper.scripts.common import (
 )
 from paper.scripts.evaluate_sr import lr_agreement, upsample_linear, upsample_nearest
 from src.api import SuperResolutionAPI
+from src.axes import AXIS_NAMES, PLANES
 from src.config.io import load_yaml, project_path, stored_path
 from src.data.crops import downsample, phase_channels
 from src.stats.sections import compare_sections, label_sections, section_statistics
@@ -40,7 +41,7 @@ DESCRIPTION = (
     "conditioned on the training depth profile, and refined by SR. Both are "
     "compared with the real volumes on their own grid: LR with the real volumes "
     "area-downsampled to the LR grid, SR with them at source resolution. Writes "
-    "anode-results.json to --out and caches the volumes in its cache/<SR run>/; "
+    "anode-results.json to --out and caches the volumes in its cache/; "
     "--reuse recomputes the metrics from them."
 )
 SAMPLES = 8
@@ -48,13 +49,14 @@ HR_SAMPLES = 4
 SMOKE_SAMPLES = 2
 SMOKE_HR_SAMPLES = 2
 GRAPHITE = 1
-PLANES = ("xy", "xz", "yz")
-AXES = "zyx"
 BANDS = 8
 
 
-def main(argv=None) -> None:
-    args = parse_args(DESCRIPTION, "SR run directory.", argv)
+def main(argv=None):
+    evaluate(parse_args(DESCRIPTION, "SR run directory.", argv))
+
+
+def evaluate(args):
     run = args.run
     samples, hr_samples = (
         (SMOKE_SAMPLES, SMOKE_HR_SAMPLES) if args.smoke else (SAMPLES, HR_SAMPLES)
@@ -73,26 +75,10 @@ def main(argv=None) -> None:
             "the training slices."
         )
     real_low = [lr_grid(volume, scale, phases) for volume in real]
-    shape = tuple(real_low[0].shape)
-
-    def sample_lr():
-        return [
-            api.lr.generate_probs(shape=shape, seed=seed) for seed in range(samples)
-        ]
-
-    probs = cached(cache / "lr.pt", args.reuse, sample_lr)
-    low = [p.argmax(0).to(torch.uint8) for p in probs]
-    print(f"LR: {len(low)} volumes of {shape}")
-
-    def refine():
-        tile_size, overlap = api.default_tiling()
-        return [
-            api.refine(p, seed=seed, tile_size=tile_size, overlap=overlap)
-            for seed, p in enumerate(probs[:hr_samples])
-        ]
-
-    high = cached(cache / "hr.pt", args.reuse, refine)
-    print(f"SR: {len(high)} volumes of {tuple(high[0].shape)}")
+    probs, high = generate_volumes(
+        api, cache, args.reuse, real_low[0].shape, samples, hr_samples
+    )
+    low = [volume.argmax(0).to(torch.uint8) for volume in probs]
 
     results = {
         "run": stored_path(run),
@@ -118,7 +104,29 @@ def main(argv=None) -> None:
     print(f"Results: {output}")
 
 
-def real_volume_paths(data) -> list[Path]:
+def generate_volumes(api, cache, reuse, shape, samples, hr_samples):
+    probs = cached(
+        cache / "lr.pt",
+        reuse,
+        lambda: [
+            api.lr.generate_probs(shape=shape, seed=seed) for seed in range(samples)
+        ],
+    )
+    print(f"LR: {len(probs)} volumes of {tuple(shape)}")
+    tile_size, overlap = api.default_tiling()
+    high = cached(
+        cache / "hr.pt",
+        reuse,
+        lambda: [
+            api.refine(volume, seed=seed, tile_size=tile_size, overlap=overlap)
+            for seed, volume in enumerate(probs[:hr_samples])
+        ],
+    )
+    print(f"SR: {len(high)} volumes of {tuple(high[0].shape)}")
+    return probs, high
+
+
+def real_volume_paths(data):
     """Ground-truth volumes saved beside the slices the sample trains on."""
     slices = project_path(data.images["xy"][0])
     paths = sorted((slices.parents[1] / "volumes").glob("*.tiff"))
@@ -127,14 +135,14 @@ def real_volume_paths(data) -> list[Path]:
     return paths
 
 
-def lr_grid(volume: torch.Tensor, scale: int, phases: int) -> torch.Tensor:
+def lr_grid(volume, scale, phases):
     """Real labels area-downsampled like training crops, ties broken at random."""
     shape = tuple(n // scale for n in volume.shape)
     probs = downsample(phase_channels(volume.long()[None], phases), shape)[0]
     return label_sections(probs.movedim(0, 1)).argmax(1).to(torch.uint8)
 
 
-def summary(volumes, real, phases: int, full: bool = True) -> dict:
+def summary(volumes, real, phases, full=True):
     result = {
         "samples": len(volumes),
         "shape": list(volumes[0].shape),
@@ -162,14 +170,14 @@ def summary(volumes, real, phases: int, full: bool = True) -> dict:
         )
         result["percolation"][str(phase)] = {
             axis: pair([f[index] for f in fake], [t[index] for t in true])
-            for index, axis in enumerate(AXES)
+            for index, axis in enumerate(AXIS_NAMES)
         }
     result["tortuosity_phase0"] = {
         axis: pair(
             [tortuosity(v, 0, index, device="cpu") for v in volumes],
             [tortuosity(v, 0, index, device="cpu") for v in real],
         )
-        for index, axis in enumerate(AXES)
+        for index, axis in enumerate(AXIS_NAMES)
     }
     result["chord_mean"] = {
         str(phase): {
@@ -177,7 +185,7 @@ def summary(volumes, real, phases: int, full: bool = True) -> dict:
                 [chord_mean(v, phase, index) for v in volumes],
                 [chord_mean(v, phase, index) for v in real],
             )
-            for index, axis in enumerate(AXES)
+            for index, axis in enumerate(AXIS_NAMES)
         }
         for phase in range(phases)
     }
@@ -195,7 +203,7 @@ def summary(volumes, real, phases: int, full: bool = True) -> dict:
     return result
 
 
-def largest_component(volume: torch.Tensor, phase: int) -> float:
+def largest_component(volume, phase):
     """Fraction of a phase in its largest 6-connected component."""
     components, count = ndi.label(volume.numpy() == phase)
     if not count:
@@ -204,7 +212,7 @@ def largest_component(volume: torch.Tensor, phase: int) -> float:
     return float(sizes.max() / sizes.sum())
 
 
-def pair(generated, real) -> dict:
+def pair(generated, real):
     return {
         "generated": mean_std([float(value) for value in generated]),
         "real": mean_std([float(value) for value in real]),
@@ -212,7 +220,7 @@ def pair(generated, real) -> dict:
     }
 
 
-def section_summary(volumes, real, phases: int) -> dict:
+def section_summary(volumes, real, phases):
     """Section errors per plane against all real sections, on the scale of the
     errors between the real volumes themselves."""
     planes = {}
@@ -238,7 +246,7 @@ def section_summary(volumes, real, phases: int) -> dict:
     }
 
 
-def profile_summary(volumes, real, phases: int) -> dict:
+def profile_summary(volumes, real, phases):
     """Phase fractions per depth slice and in equal depth bands."""
 
     def profiles(items):
@@ -266,7 +274,7 @@ def profile_summary(volumes, real, phases: int) -> dict:
     }
 
 
-def tilt_summary(volumes) -> dict:
+def tilt_summary(volumes):
     labels = [v.numpy() for v in volumes]
     balance = tilt_balance(labels, GRAPHITE)
     slopes = [component_slopes(v, GRAPHITE) for v in labels]

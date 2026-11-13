@@ -1,27 +1,20 @@
 import warnings
-from dataclasses import dataclass
 
 import numpy as np
 
 PROBE_STRIDE = 16
 
 
-@dataclass(frozen=True)
-class Particle:
-    center: tuple[int, int, int]
-    axes: tuple[float, float, float]
-
-
 def pack(
-    size: int,
-    big_radius: int,
-    small_radius: int,
-    big_vf: float,
-    small_vf: float,
-    big_elongation: float,
-    radius_gradient: tuple[float, float] = (1.0, 1.0),
-    rng: np.random.Generator | None = None,
-) -> np.ndarray:
+    size,
+    big_radius,
+    small_radius,
+    big_vf,
+    small_vf,
+    big_elongation,
+    radius_gradient=(1.0, 1.0),
+    rng=None,
+):
     """Pack particles and return a size³ volume without boundary bias.
 
     Random packing oscillates in density near any boundary, so y and x wrap
@@ -30,24 +23,21 @@ def pack(
     Volume fractions are targets; random packing can jam before reaching them.
     """
     rng = np.random.default_rng() if rng is None else rng
-    largest_radius = max(
-        small_radius,
-        big_radius * max(big_elongation ** (2 / 3), big_elongation ** (-1 / 3)),
-    )
     graded = radius_gradient[0] != radius_gradient[1]
-    padding = (
-        max(size // 4, int(np.ceil(largest_radius * max(radius_gradient))))
-        if graded
-        else 0
-    )
+    padding = 0
+    if graded:
+        long = big_radius * big_elongation ** (2 / 3)
+        short = big_radius * big_elongation ** (-1 / 3)
+        radius = max(small_radius, long, short) * max(radius_gradient)
+        padding = max(size // 4, int(np.ceil(radius)))
     volume = np.zeros((size + 2 * padding, size, size), dtype=np.uint8)
-    particles: list[Particle] = []
+    particles = []
     region = (slice(padding, padding + size), slice(None), slice(None))
     periodic = np.array((not graded, True, True))
     radius_scales = radius_profile(size, padding, radius_gradient)
     for label, vf in ((2, big_vf), (1, small_vf)):
         target = round(vf * size**3)
-        placed = place(
+        placed = place_particles(
             volume=volume,
             particles=particles,
             label=label,
@@ -70,14 +60,14 @@ def pack(
 
 
 def check_geometry(
-    size: int,
-    big_radius: int,
-    small_radius: int,
-    big_vf: float,
-    small_vf: float,
-    big_elongation: float,
-    radius_gradient: tuple[float, float],
-) -> None:
+    size,
+    big_radius,
+    small_radius,
+    big_vf,
+    small_vf,
+    big_elongation,
+    radius_gradient,
+):
     if type(size) is not int or size < 1:
         raise ValueError("size must be a positive integer.")
     if big_radius < 1 or small_radius < 1:
@@ -97,90 +87,72 @@ def check_geometry(
         raise ValueError("radius_gradient must contain two finite positive scales.")
 
 
-def radius_profile(size: int, padding: int, gradient) -> np.ndarray:
-    height = np.clip((np.arange(size + 2 * padding) - padding) / max(size - 1, 1), 0, 1)
+def radius_profile(size, padding, gradient):
+    height = np.arange(-padding, size + padding) / max(size - 1, 1)
+    height = height.clip(0, 1)
     return gradient[0] + (gradient[1] - gradient[0]) * height
 
 
-def place(
-    volume: np.ndarray,
-    particles: list[Particle],
-    label: int,
-    target_voxels: int,
-    big_radius: float,
-    small_radius: float,
-    elongation: float,
-    radius_scales: np.ndarray,
-    region: tuple[slice, slice, slice] | None = None,
-    periodic=(False, False, False),
-    rng: np.random.Generator | None = None,
-) -> int:
-    """Place particles until region holds target_voxels of label; return the count.
-
-    Particles wrap around periodic axes and are clipped at the other edges.
-    A voxel is occupied once it holds any nonzero label.
-    """
+def place_particles(
+    volume,
+    particles,
+    label,
+    target_voxels,
+    big_radius,
+    small_radius,
+    elongation,
+    radius_scales,
+    region,
+    periodic,
+    rng,
+):
     if target_voxels <= 0:
         return 0
-    rng = np.random.default_rng() if rng is None else rng
+
     shape = np.asarray(volume.shape)
-    region = (slice(None),) * 3 if region is None else region
     bounds = [part.indices(n) for part, n in zip(region, volume.shape, strict=True)]
-    low = np.asarray([start for start, _, _ in bounds])
-    high = np.asarray([stop for _, stop, _ in bounds])
-    periodic = np.asarray(periodic, dtype=bool)
-    shapes = {
+    lower = np.asarray([start for start, _, _ in bounds])
+    upper = np.asarray([stop for _, stop, _ in bounds])
+    templates = {
         scale: make_particle_shape(
             label, big_radius * scale, small_radius * scale, elongation
         )
         for scale in np.unique(radius_scales)
     }
-    minimum_axes = shapes[min(shapes)][0]
-    valid_centers = np.ones(volume.shape, dtype=bool)
-    for particle in particles:
-        invalidate_centers(
-            valid_centers,
-            np.asarray(particle.center),
-            minimum_axes,
-            np.asarray(particle.axes),
-            periodic,
-        )
+    minimum_axes = templates[min(templates)][0]
+    available = np.ones(volume.shape, dtype=bool)
+    for center, axes in particles:
+        invalidate_centers(available, center, minimum_axes, axes, periodic)
 
-    placed = 0
+    occupied = 0
     for flat in rng.permutation(volume.size):
-        if placed >= target_voxels:
+        if occupied >= target_voxels:
             break
-        if not valid_centers.flat[flat]:
+        if not available.flat[flat]:
             continue
         center = np.asarray(np.unravel_index(flat, volume.shape), dtype=np.int32)
-        axes, offsets = shapes[radius_scales[center[0]]]
-        # A sparse probe rejects most overlapping candidates cheaply; the full
-        # check below still decides every acceptance exactly.
+        axes, offsets = templates[radius_scales[center[0]]]
+        # Test sparse offsets first. Only a full overlap check can accept a center.
         probe = locate(offsets[::PROBE_STRIDE], center, shape, periodic)
         if volume[tuple(probe.T)].any():
-            valid_centers.flat[flat] = False
+            available.flat[flat] = False
             continue
         positions = locate(offsets, center, shape, periodic)
-        indices = tuple(positions.T)
-        if volume[indices].any():
-            valid_centers.flat[flat] = False
+        labels = tuple(positions.T)
+        if volume[labels].any():
+            available.flat[flat] = False
             continue
 
-        volume[indices] = label
-        particles.append(
-            Particle(
-                center=tuple(int(value) for value in center),
-                axes=tuple(float(value) for value in axes),
-            )
+        volume[labels] = label
+        particles.append((center, axes))
+        occupied += int(
+            np.count_nonzero(np.all((positions >= lower) & (positions < upper), axis=1))
         )
-        placed += int(((positions >= low) & (positions < high)).all(1).sum())
-        # Conservative candidate pruning; exact voxel overlap is still checked
-        # above because subsequent particles can have different radii.
-        invalidate_centers(valid_centers, center, minimum_axes, axes, periodic)
-    return placed
+        invalidate_centers(available, center, minimum_axes, axes, periodic)
+    return occupied
 
 
-def locate(offsets, center, shape, periodic) -> np.ndarray:
+def locate(offsets, center, shape, periodic):
     positions = offsets + center
     np.remainder(positions, shape, out=positions, where=periodic)
     if periodic.all():
@@ -189,11 +161,11 @@ def locate(offsets, center, shape, periodic) -> np.ndarray:
 
 
 def make_particle_shape(
-    label: int,
-    big_radius: float,
-    small_radius: float,
-    elongation: float,
-) -> tuple[np.ndarray, np.ndarray]:
+    label,
+    big_radius,
+    small_radius,
+    elongation,
+):
     if label == 1:
         axes = np.full(3, small_radius, dtype=np.float64)
     else:
@@ -203,26 +175,21 @@ def make_particle_shape(
     return axes, make_offsets(axes)
 
 
-def make_offsets(axes: np.ndarray) -> np.ndarray:
+def make_offsets(axes):
     bounds = np.ceil(axes).astype(np.int32)
-    z, y, x = np.meshgrid(
-        np.arange(-bounds[0], bounds[0] + 1, dtype=np.int32),
-        np.arange(-bounds[1], bounds[1] + 1, dtype=np.int32),
-        np.arange(-bounds[2], bounds[2] + 1, dtype=np.int32),
-        indexing="ij",
-    )
-    offsets = np.column_stack((z.ravel(), y.ravel(), x.ravel()))
+    grid = [np.arange(-bound, bound + 1, dtype=np.int32) for bound in bounds]
+    offsets = np.stack(np.meshgrid(*grid, indexing="ij"), axis=-1).reshape(-1, 3)
     keep = np.sum((offsets / axes) ** 2, axis=1) <= 1.0 + 1e-12
     return offsets[keep]
 
 
 def invalidate_centers(
-    valid_centers: np.ndarray,
-    center: np.ndarray,
-    candidate: np.ndarray,
-    previous: np.ndarray,
+    valid_centers,
+    center,
+    candidate,
+    previous,
     periodic,
-) -> None:
+):
     span = candidate + previous
     bounds = np.ceil(span).astype(np.int32)
     offsets, indices = [], []

@@ -1,48 +1,48 @@
 import hashlib
 import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 import tifffile
 import torch
 
 
-def file_hash(path: str | Path) -> str:
+def file_hash(path):
     with Path(path).open("rb") as file:
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
-def torch_save(payload, path: str | Path, *, overwrite: bool = True) -> Path:
-    """Write to a temporary file, fsync, then rename it into place.
-
-    Readers never see a partly written file. overwrite=False refuses an
-    existing path.
-    """
+def torch_save(payload, path, *, overwrite=True):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not overwrite and path.exists():
-        raise FileExistsError(f"{path} already exists.")
-    partial = path.with_name(f".{path.name}.partial")
+    file = NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False)
+    partial = Path(file.name)
     try:
-        with partial.open("wb") as file:
+        with file:
             torch.save(payload, file)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(partial, path)
-    except BaseException:
+        if overwrite:
+            partial.replace(path)
+        else:
+            try:
+                os.link(partial, path)
+            except FileExistsError:
+                raise FileExistsError(f"{path} already exists.") from None
+    finally:
         partial.unlink(missing_ok=True)
-        raise
     return path
 
 
-def load_volume(path: str | Path) -> torch.Tensor:
+def load_volume(path):
     values = np.asarray(tifffile.imread(Path(path)))
     if values.ndim != 3 or not np.issubdtype(values.dtype, np.integer):
         raise ValueError("volume must be a 3D TIFF with integer phase labels.")
-    return torch.from_numpy(np.array(values, copy=True)).to(torch.long)
+    return torch.from_numpy(values.astype(np.int64, copy=True))
 
 
-def save_volume(volume: torch.Tensor, path: str | Path) -> Path:
+def save_volume(volume, path):
     if (
         volume.ndim != 3
         or volume.numel() == 0
@@ -64,7 +64,7 @@ def save_volume(volume: torch.Tensor, path: str | Path) -> Path:
     return path
 
 
-def validate_probabilities(probs: torch.Tensor) -> torch.Tensor:
+def validate_probabilities(probs):
     if (
         not isinstance(probs, torch.Tensor)
         or probs.ndim != 4
@@ -75,11 +75,11 @@ def validate_probabilities(probs: torch.Tensor) -> torch.Tensor:
     return probs
 
 
-def load_probabilities(path: str | Path) -> torch.Tensor:
+def load_probabilities(path):
     probs = torch.load(path, map_location="cpu", weights_only=True)
     return validate_probabilities(probs)
 
 
-def save_probabilities(probs: torch.Tensor, path: str | Path) -> Path:
+def save_probabilities(probs, path):
     probs = validate_probabilities(probs)
     return torch_save(probs.detach().float().cpu(), path)

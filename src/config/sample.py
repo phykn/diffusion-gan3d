@@ -1,16 +1,10 @@
-import copy
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
+from src.axes import PLANES, validate_num_phases
 from src.config.io import PROJECT_ROOT, load_yaml, project_path, stored_path
-from src.config.schema import (
-    STAGES,
-    StageConfig,
-    build_config,
-    to_dict,
-)
-from src.phase import validate_num_phases
-from src.plane import PLANES
+from src.config.schema import STAGES, build_config, freeze
 
 SAMPLES_DIR = PROJECT_ROOT / "config" / "samples"
 SAMPLE_KEYS = ("images", "structure", "tune", "num_phases", "resolution")
@@ -19,8 +13,7 @@ STRUCTURE = ("isotropic", "depth_gradient", "mirror_symmetric")
 TEMPLATE = "config/samples/default.yaml"
 
 
-def find_sample(sample: str | Path) -> Path:
-    """Resolve a sample name in config/samples/, or a path to a sample YAML."""
+def find_sample(sample):
     path = Path(sample).expanduser()
     if path.suffix not in (".yaml", ".yml"):
         path = SAMPLES_DIR / f"{sample}.yaml"
@@ -30,7 +23,7 @@ def find_sample(sample: str | Path) -> Path:
     return path
 
 
-def load_sample(sample: str | Path) -> dict:
+def load_sample(sample):
     path = find_sample(sample)
     cfg = load_yaml(path)
     unknown = set(cfg) - set(SAMPLE_KEYS)
@@ -77,7 +70,7 @@ def load_sample(sample: str | Path) -> dict:
     return cfg
 
 
-def sample_images(sample: Mapping) -> dict[str, list[str]]:
+def sample_images(sample):
     images = sample["images"]
     if not isinstance(images, Mapping) or not images:
         raise ValueError(f"images must map xy, xz and yz to folders; see {TEMPLATE}.")
@@ -100,8 +93,7 @@ def sample_images(sample: Mapping) -> dict[str, list[str]]:
     return result
 
 
-def structure_settings(structure: Mapping, planes: list[str], stage: str) -> dict:
-    """The one place the structure flags become stage settings."""
+def structure_settings(structure, planes, stage):
     if structure["isotropic"]:
         groups = [planes]
     else:
@@ -134,16 +126,15 @@ def structure_settings(structure: Mapping, planes: list[str], stage: str) -> dic
     return cfg
 
 
-def merge(base: dict, override: Mapping) -> None:
+def merge(base, override):
     for key, value in override.items():
         if isinstance(value, Mapping) and isinstance(base.get(key), dict):
             merge(base[key], value)
         else:
-            base[key] = copy.deepcopy(value)
+            base[key] = value
 
 
-def stage_values(sample: Mapping, stage: str, num_phases: int) -> dict:
-    """Schema input for one stage: data, then structure flags, then tune."""
+def stage_values(sample, stage, num_phases):
     resolution = sample["resolution"]
     values = {
         "stage": stage,
@@ -163,9 +154,7 @@ def stage_values(sample: Mapping, stage: str, num_phases: int) -> dict:
     return values
 
 
-def build_stage_configs(sample: Mapping) -> dict[str, StageConfig]:
-    """Both stage configs, with phase count, height extent and depth profile
-    measured from the images. Fails before any training on a bad tune."""
+def build_stage_configs(sample):
     from src.data.images import infer_num_phases, load_images
 
     folders = {
@@ -183,20 +172,18 @@ def build_stage_configs(sample: Mapping) -> dict[str, StageConfig]:
     return configs
 
 
-def measure_data(config: StageConfig, planes: Mapping) -> StageConfig:
-    """Fill data.height_extent and data.depth_profile from the images."""
+def measure_data(config, planes):
     from src.data.height import depth_profile, height_extent
 
     values = {}
     if config.conditioning.height_enabled:
         values["height_extent"] = height_extent(planes)
     if config.profile_enabled:
-        values["depth_profile"] = depth_profile(
-            planes,
-            config.data.num_phases,
-            config.conditioning.spatial_profile.num_bins,
+        values["depth_profile"] = freeze(
+            depth_profile(
+                planes,
+                config.data.num_phases,
+                config.conditioning.spatial_profile.num_bins,
+            )
         )
-    if not values:
-        return config
-    data = to_dict(config.data) | values
-    return build_config(to_dict(config) | {"data": data})
+    return replace(config, data=replace(config.data, **values)) if values else config

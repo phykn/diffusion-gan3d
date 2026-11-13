@@ -1,68 +1,50 @@
-async function request(path, body, signal) {
-  const response = await fetch(path, {
-    signal,
-    ...(body === undefined ? {} : {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }),
-  })
-  if (!response.ok) {
-    const problem = await response.json().catch(() => ({}))
-    throw new Error(errorDetail(response, problem.detail))
+async function request(path, signal, payload) {
+  const options = { signal }
+  if (payload !== undefined) {
+    options.method = 'POST'
+    options.headers = { 'Content-Type': 'application/json' }
+    options.body = JSON.stringify(payload)
   }
-  return response
-}
+  const response = await fetch(path, options)
+  if (response.ok) return response
 
-function errorDetail(response, detail) {
-  if (typeof detail === 'string') return detail
-  // FastAPI reports request validation failures as a list of {loc, msg}.
+  const { detail } = await response.json().catch(() => ({}))
+  if (typeof detail === 'string') throw new Error(detail)
   if (Array.isArray(detail) && detail.length) {
-    return detail.map(item => item?.msg ?? String(item)).join('; ')
+    throw new Error(detail.map(item => item?.msg ?? String(item)).join('; '))
   }
-  return `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`
+  throw new Error([`HTTP ${response.status}`, response.statusText].filter(Boolean).join(' '))
 }
 
 export async function getHealth(signal) {
-  return (await request('/api/health', undefined, signal)).json()
+  const response = await request('/api/health', signal)
+  return response.json()
 }
 
 export async function prepareImage(image, signal) {
-  const response = await request('/api/prepare', { image }, signal)
-  return (await response.json()).image
+  const response = await request('/api/prepare', signal, { image })
+  const prepared = await response.json()
+  return prepared.image
 }
 
-function parseTortuosity(value) {
-  if (value === null || value.trim() === '' || value === 'unavailable') return null
-  // A phase without a spanning path has infinite tortuosity.
-  if (value === 'inf') return Infinity
-  const number = Number(value)
-  return Number.isFinite(number) ? number : null
-}
-
-export async function generateVolume(
-  { image, axis, seed, blocks, heightOrigin, heightExtent, tortuosity }, signal,
-) {
-  const response = await request('/api/generate', {
-    // position null: the server centers the crop on the first section.
-    anchors: [{ image, axis, index: 0, position: null }],
-    ...(heightOrigin === undefined ? {} : { height_origin: heightOrigin, height_extent: heightExtent }),
-    seed,
-    ...(blocks.some(value => value > 1) ? { blocks } : {}),
-    format: 'raw',
-    // The server solves tortuosity before streaming.
-    tortuosity,
-  }, signal)
-  const shape = response.headers.get('X-Volume-Shape')?.split(',').map(Number)
-  const size = shape?.reduce((total, value) => total * value, 1)
-  if (
-    !shape || shape.length !== 3
-    || !shape.every(value => Number.isSafeInteger(value) && value > 0)
-    || !Number.isSafeInteger(size)
-  ) {
+export async function generateVolume(options, signal) {
+  const { image, axis, seed, blocks, heightOrigin, heightExtent, tortuosity } = options
+  const payload = { anchors: [{ image, axis, index: 0, position: null }], seed, tortuosity }
+  if (blocks.some(count => count > 1)) payload.blocks = blocks
+  if (heightOrigin !== undefined) {
+    payload.height_origin = heightOrigin
+    payload.height_extent = heightExtent
+  }
+  const response = await request('/api/generate', signal, payload)
+  const shape = (response.headers.get('X-Volume-Shape') ?? '').split(',').map(Number)
+  const size = shape.reduce((product, count) => product * count, 1)
+  if (shape.length !== 3 || shape.some(count => count < 1 || !Number.isSafeInteger(count)) || !Number.isSafeInteger(size)) {
     throw new Error('The API returned an invalid volume shape.')
   }
   const values = new Uint8Array(await response.arrayBuffer())
   if (values.length !== size) throw new Error('The returned volume size does not match its header.')
-  return { shape, values, tortuosity: parseTortuosity(response.headers.get('X-Tortuosity')) }
+
+  const header = response.headers.get('X-Tortuosity')?.trim()
+  const factor = header ? Number(header) : NaN
+  return { shape, values, tortuosity: header === 'inf' ? Infinity : Number.isFinite(factor) ? factor : null }
 }

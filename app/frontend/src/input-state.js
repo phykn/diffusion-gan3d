@@ -1,43 +1,24 @@
 export const MIN_BLOCKS = 1
 
-function integerInRange(value, minimum, maximum, fallback) {
-  const number = Number(value)
-  if (!Number.isFinite(number)) return fallback
-  return Math.min(maximum, Math.max(minimum, Math.trunc(number)))
+function readInteger(value, min, max) {
+  const integer = Math.trunc(Number(value))
+  return Number.isFinite(integer) ? Math.max(min, Math.min(integer, max)) : min
 }
 
 export function normalizeSeed(value) {
-  return integerInRange(value, 0, Number.MAX_SAFE_INTEGER, 0)
+  return readInteger(value, 0, Number.MAX_SAFE_INTEGER)
 }
 
-// maximum is the server's per-axis limit from /api/health.
 export function normalizeBlock(value, maximum) {
-  return integerInRange(value, MIN_BLOCKS, maximum, MIN_BLOCKS)
+  return readInteger(value, MIN_BLOCKS, maximum)
 }
 
 export function normalizeBlocks(values, maximum) {
-  return Array.from({ length: 3 }, (_, index) => normalizeBlock(values?.[index], maximum))
+  return [0, 1, 2].map(axis => normalizeBlock(values?.[axis], maximum))
 }
 
-// The server centers the anchor crop on the first section of a larger volume.
 export function anchorNote(blocks, cropSize) {
-  if (!Array.isArray(blocks) || blocks.every(value => value === 1)) return null
-  return `Anchor covers the center ${cropSize}×${cropSize} of the first section`
-}
-
-// Inputs changed after begin() make that request's result stale.
-export function createRequestGate() {
-  let revision = 0
-
-  return {
-    invalidate() {
-      revision += 1
-    },
-    begin() {
-      return revision
-    },
-    accepts(token) {
-      return token === revision
-    },
-  }
+  return blocks?.some(count => count > 1)
+    ? `Anchor covers the center ${cropSize}×${cropSize} of the first section`
+    : null
 }

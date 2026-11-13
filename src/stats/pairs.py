@@ -1,7 +1,7 @@
 import torch
 
 
-def section_pairs(images: torch.Tensor, dim: int, gap: int) -> torch.Tensor:
+def section_pairs(images, dim, gap):
     """Pair tables per row of [B, K, H, W] sections along dim (2 or 3): [B, R, K, K]."""
     length = images.shape[dim] - gap
     left = images.narrow(dim, 0, length).float()
@@ -9,9 +9,7 @@ def section_pairs(images: torch.Tensor, dim: int, gap: int) -> torch.Tensor:
     return torch.einsum("bcrw,bdrw->brcd", left, right) / left.shape[-1]
 
 
-def volume_pairs(
-    probs: torch.Tensor, axis: int, gap: int, preserve_height: bool = False
-) -> torch.Tensor:
+def volume_pairs(probs, axis, gap, preserve_height=False):
     """Undirected pair tables of [B, K, D, H, W] volumes along a volume axis.
 
     [B, K, K], or [B, D, K, K] per z when preserve_height keeps the z layers.
@@ -21,17 +19,15 @@ def volume_pairs(
     left = probs.narrow(dim, 0, length)
     right = probs.narrow(dim, gap, length)
     dims = (-2, -1) if preserve_height else (-3, -2, -1)
-    rows = []
-    for phase in range(probs.shape[1]):
-        row = (left[:, phase : phase + 1] * right).mean(dims)
-        rows.append(row.movedim(1, -1) if preserve_height else row)
     # Slice views avoid retaining a flattened volume copy for each axis/gap.
-    pairs = torch.stack(rows, dim=-2)
-    # Reversing an axis changes pair order, not its undirected structure.
+    rows = [(phase * right).mean(dims) for phase in left.split(1, dim=1)]
+    pairs = torch.stack(rows, dim=1)
+    if preserve_height:
+        pairs = pairs.movedim(-1, 1)
     return (pairs + pairs.transpose(-1, -2)) * 0.5
 
 
-def pair_correlations(probs: torch.Tensor, reach: int) -> torch.Tensor:
+def pair_correlations(probs, reach):
     """Sums of probs[:, p](x) * probs[:, q](x + o) over x, indexed [b, p, q, *o].
 
     Zero padding keeps offsets up to reach along each axis free of wraparound;
@@ -47,13 +43,7 @@ def pair_correlations(probs: torch.Tensor, reach: int) -> torch.Tensor:
     return torch.fft.irfftn(cross, s=sizes, dim=(-3, -2, -1))
 
 
-def mirror_differences(
-    correlations: torch.Tensor,
-    shape: torch.Size,
-    first: int,
-    second: int,
-    offsets: list[tuple[int, int]],
-) -> torch.Tensor:
+def mirror_differences(correlations, shape, first, second, offsets):
     """Per volume and offset (a, b), half the L1 distance between the pair tables
     at (+a, +b) and (+a, -b) in the plane of volume axes first and second."""
     a, b = (torch.tensor(side, device=correlations.device) for side in zip(*offsets))

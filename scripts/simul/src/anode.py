@@ -20,17 +20,17 @@ COARSE_PROBE = 24  # points in the first, cheap overlap screen
 
 
 def pack_anode(
-    size: int,
-    graphite_radius: float,
-    graphite_aspect: float,
-    graphite_tilt: float,
+    size,
+    graphite_radius,
+    graphite_aspect,
+    graphite_tilt,
     graphite_vf,
-    silicon_radius: float,
+    silicon_radius,
     silicon_vf,
-    size_spread: float = 0.0,
-    min_section: int = 0,
-    rng: np.random.Generator | None = None,
-) -> np.ndarray:
+    size_spread=0.0,
+    min_section=0,
+    rng=None,
+):
     """Pack a battery-anode-like size³ volume: 0 pore, 1 graphite, 2 silicon.
 
     Graphite flakes are oblate ellipsoids, graphite_aspect thick relative to
@@ -74,7 +74,7 @@ def pack_anode(
     )
     for name, label, vf, shapes in phases:
         profile = vf_profile(size, padding, vf)
-        fill(volume, inscribed, label, profile * size**2, shapes, periodic, rng)
+        pack_phase(volume, inscribed, label, profile * size**2, shapes, periodic, rng)
         reached = (volume[region] == label).mean()
         target = profile[padding : padding + size].mean()
         if reached < target - 0.005:
@@ -86,27 +86,27 @@ def pack_anode(
     return volume[region].copy()
 
 
-def vf_profile(size: int, padding: int, vf) -> np.ndarray:
+def vf_profile(size, padding, vf):
     points = np.atleast_1d(np.asarray(vf, dtype=float))
     height = radius_profile(size, padding, (0.0, 1.0))
     return np.interp(height, np.linspace(0.0, 1.0, len(points)), points)
 
 
-def depth_profile(geometry: dict) -> dict:
+def depth_profile(geometry):
     """Target [pore, graphite, silicon] fractions over z, as a generation vf_profile."""
-    vfs = [
-        np.atleast_1d(np.asarray(geometry[name], dtype=float))
-        for name in ("graphite_vf", "silicon_vf")
-    ]
-    knots = [np.linspace(0.0, 1.0, len(vf)) for vf in vfs]
-    heights = np.union1d(np.union1d(*knots), (0.0, 1.0))
+    graphite = np.atleast_1d(np.asarray(geometry["graphite_vf"], dtype=float))
+    silicon = np.atleast_1d(np.asarray(geometry["silicon_vf"], dtype=float))
+    graphite_knots = np.linspace(0, 1, len(graphite))
+    silicon_knots = np.linspace(0, 1, len(silicon))
+    heights = np.unique(np.concatenate(([0.0, 1.0], graphite_knots, silicon_knots)))
+    graphite_fractions = np.interp(heights, graphite_knots, graphite)
+    silicon_fractions = np.interp(heights, silicon_knots, silicon)
     points = []
-    for height in heights:
-        graphite, silicon = (
-            round(float(np.interp(height, knot, vf)), 6) for knot, vf in zip(knots, vfs)
-        )
-        pore = round(1.0 - graphite - silicon, 6)
-        points.append([round(float(height), 6), [pore, graphite, silicon]])
+    for height, g, s in zip(
+        heights, graphite_fractions, silicon_fractions, strict=True
+    ):
+        g, s = round(float(g), 6), round(float(s), 6)
+        points.append([round(float(height), 6), [round(1.0 - g - s, 6), g, s]])
     return {"axis": "z", "interpolation": "linear", "points": points}
 
 
@@ -120,7 +120,7 @@ def check_anode(
     silicon_vf,
     size_spread,
     min_section,
-) -> None:
+):
     if type(size) is not int or size < 1:
         raise ValueError("size must be a positive integer.")
     if graphite_radius < 1 or silicon_radius < 1:
@@ -171,24 +171,24 @@ def nonempty(shapes, name):
     return kept
 
 
-def flake_rotation(tilt: float, rng: np.random.Generator) -> np.ndarray:
+def flake_rotation(tilt, rng):
     """Rotate body (z, y, x) so the flake normal leaves z by a random tilt."""
     angle = np.deg2rad(rng.normal(0.0, tilt))
     azimuth, spin = rng.uniform(0.0, 2 * np.pi, 2)
     return about_z(azimuth) @ tilt_toward_x(angle) @ about_z(spin)
 
 
-def about_z(angle: float) -> np.ndarray:
+def about_z(angle):
     c, s = np.cos(angle), np.sin(angle)
     return np.array(((1, 0, 0), (0, c, -s), (0, s, c)))
 
 
-def tilt_toward_x(angle: float) -> np.ndarray:
+def tilt_toward_x(angle):
     c, s = np.cos(angle), np.sin(angle)
     return np.array(((c, 0, -s), (0, 1, 0), (s, 0, c)))
 
 
-def make_shape(axes: np.ndarray, rotation: np.ndarray, min_section: int):
+def make_shape(axes, rotation, min_section):
     """Return (voxel offsets, inscribed radius) of a rotated ellipsoid.
 
     Along each axis, every voxel layer keeps only its largest 2D component, and
@@ -215,58 +215,58 @@ def make_shape(axes: np.ndarray, rotation: np.ndarray, min_section: int):
     return offsets[mask.ravel()], max(0.8 * axes.min() - 1.0, 0.0)
 
 
-def fill(volume, inscribed, label, budget, shapes, periodic, rng):
-    """Place random library shapes while each center slice is under budget.
-
-    budget holds the target voxel count of label per z slice. Each pass tries
-    one random shape at every valid center in a slice still under budget;
-    passes repeat while they add volume, since a center that rejected one
-    rotation or size may accept another. inscribed collects (center, radius)
-    of every placed particle, across phases, for pruning centers.
-    """
-    shape = np.asarray(volume.shape)
-    counts = np.zeros(volume.shape[0])
+def pack_phase(volume, placed, label, budget, shapes, periodic, rng):
+    extent = np.asarray(volume.shape)
+    occupancy = np.zeros(volume.shape[0])
     smallest = min(radius for _, radius in shapes)
-    valid = np.ones(volume.shape, dtype=bool)
-    for center, radius in inscribed:
-        prune(valid, center, smallest + radius, periodic)
-    total = budget.sum()
+    available = np.ones(volume.shape, dtype=bool)
+    for center, radius in placed:
+        prune(available, center, smallest + radius, periodic)
+
+    min_gain = MIN_PASS_GAIN * budget.sum()
     for _ in range(MAX_PASSES):
-        before = counts.sum()
-        open_slices = counts < budget
-        if not open_slices.any():
+        open_layers = occupancy < budget
+        if not open_layers.any():
             break
-        candidates = rng.permutation(np.flatnonzero(valid & open_slices[:, None, None]))
+        before = occupancy.sum()
+        candidates = rng.permutation(
+            np.flatnonzero(available & open_layers[:, None, None])
+        )
         start = 0
         while start < len(candidates):
             offsets, radius = shapes[rng.integers(len(shapes))]
             probe = offsets[::PROBE_STRIDE]
-            stop = start + max(64, PROBE_BUDGET // len(probe))
-            batch = candidates[start:stop]
-            start = stop
-            centers = np.stack(np.unravel_index(batch, volume.shape), 1)
-            keep = valid.flat[batch] & (counts[centers[:, 0]] < budget[centers[:, 0]])
-            # Vectorized sparse probes, a few spread points first, reject most
-            # overlapping centers; survivors are rechecked one by one because
-            # earlier survivors in the batch may land first.
-            for points in (probe[:: max(1, len(probe) // COARSE_PROBE)], probe):
-                keep[keep] = ~probe_hits(volume, centers[keep], points)
-            for center in centers[keep].astype(np.int32):
-                if not valid[tuple(center)] or counts[center[0]] >= budget[center[0]]:
+            end = start + max(64, PROBE_BUDGET // len(probe))
+            batch = candidates[start:end]
+            start = end
+            centers = filter_centers(volume, available, occupancy, budget, batch, probe)
+            for center in centers:
+                # Previous acceptances in this batch can change both checks.
+                z = center[0]
+                if not available[tuple(center)] or occupancy[z] >= budget[z]:
                     continue
-                positions = locate(offsets, center, shape, periodic)
+                positions = locate(offsets, center, extent, periodic)
                 indices = tuple(positions.T)
                 if volume[indices].any():
                     continue
                 volume[indices] = label
-                inscribed.append((center, radius))
-                counts += np.bincount(positions[:, 0], minlength=len(counts))
-                prune(valid, center, smallest + radius, periodic)
-        if counts.sum() - before < MIN_PASS_GAIN * total:
+                placed.append((center, radius))
+                occupancy += np.bincount(positions[:, 0], minlength=len(occupancy))
+                prune(available, center, smallest + radius, periodic)
+        if occupancy.sum() - before < min_gain:
             break
 
 
-def probe_hits(volume, centers, probe) -> np.ndarray:
+def filter_centers(volume, available, occupancy, budget, batch, probe):
+    centers = np.stack(np.unravel_index(batch, volume.shape), axis=1)
+    z = centers[:, 0]
+    viable = centers[available.flat[batch] & (occupancy[z] < budget[z])]
+    stride = max(1, len(probe) // COARSE_PROBE)
+    viable = viable[~probe_hits(volume, viable, probe[::stride])]
+    return viable[~probe_hits(volume, viable, probe)].astype(np.int32)
+
+
+def probe_hits(volume, centers, probe):
     """Return which centers' probe points touch an occupied voxel (z clipped)."""
     depth_n, height, width = volume.shape
     depth = centers[:, None, 0] + probe[None, :, 0]
@@ -278,6 +278,6 @@ def probe_hits(volume, centers, probe) -> np.ndarray:
     return (occupied & inside).any(1)
 
 
-def prune(valid, center, reach, periodic) -> None:
+def prune(valid, center, reach, periodic):
     if reach > 0:
         invalidate_centers(valid, center, np.zeros(3), np.full(3, reach), periodic)

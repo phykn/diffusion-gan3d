@@ -6,16 +6,16 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import torch
 
-from src.config.schema import CONFIG_TYPES, StageConfig, build_config, to_dict
-from src.export import STAGE_NAMES, V1_HINT
+from src.config.schema import CONFIG_TYPES, build_config
+from src.export import STAGE_NAMES
 from src.storage import torch_save
 
 FORMAT = "diffusion-gan3d.train"
-VERSION = 2
+VERSION = 3
 _NAME = re.compile(r"step_(\d+)\.pt")
 
 
-def checkpoint_paths(root: Path, step: int) -> tuple[Path, Path]:
+def checkpoint_paths(root, step):
     """A new step's training and EMA export files under root/checkpoints."""
     folder = root / "checkpoints"
     path = folder / f"step_{step:08d}.pt"
@@ -26,7 +26,7 @@ def checkpoint_paths(root: Path, step: int) -> tuple[Path, Path]:
     return path, export
 
 
-def complete_checkpoint(path: Path) -> None:
+def complete_checkpoint(path):
     """Publish completion only after the checkpoint has been flushed and closed."""
     with path.with_suffix(".complete").open("x", encoding="ascii") as file:
         file.write(f"{path.stat().st_size}\n")
@@ -34,7 +34,7 @@ def complete_checkpoint(path: Path) -> None:
         os.fsync(file.fileno())
 
 
-def is_complete(path: Path) -> bool:
+def is_complete(path):
     try:
         return path.with_suffix(".complete").read_text(encoding="ascii") == (
             f"{path.stat().st_size}\n"
@@ -43,7 +43,7 @@ def is_complete(path: Path) -> bool:
         return False
 
 
-def resolve_checkpoint(value: str | Path) -> Path:
+def resolve_checkpoint(value):
     """The latest completed step of a run folder, or a completed step file."""
     path = Path(value).expanduser().resolve()
     if path.is_dir():
@@ -64,50 +64,15 @@ def resolve_checkpoint(value: str | Path) -> Path:
     return path
 
 
-def capture(trainer) -> dict:
-    """Everything a resume needs to continue the run exactly."""
-    critics = {group: critic.state_dict() for group, critic in trainer.critics.items()}
-    selection = trainer.selection
-    return {
-        "format": FORMAT,
-        "version": VERSION,
-        "stage": trainer.config.stage,
-        "step": trainer.completed_steps,
-        "config": to_dict(trainer.config),
-        "models": {
-            "generator": trainer.denoiser.state_dict(),
-            "ema": trainer.ema.state_dict(),
-            "critics": critics,
-        },
-        "optimizers": {
-            "generator": trainer.optimizers["generator"].state_dict(),
-            "critics": {
-                group: trainer.optimizers[group].state_dict() for group in critics
-            },
-        },
-        "scaler": trainer.scaler.state_dict(),
-        "updates": {
-            "generator": trainer.updates["generator"],
-            "critics": {group: trainer.updates[group] for group in critics},
-        },
-        "rng": trainer.random.state(),
-        "selection": None if selection is None else selection.state_dict(),
-        "data_fingerprint": trainer.data_fingerprint,
-        "path_maps": list(trainer.path_maps),
-        **trainer.stage_state(),
-    }
-
-
-def save_checkpoint(trainer, root: Path, export_payload: dict) -> Path:
-    path, export = checkpoint_paths(root, trainer.completed_steps)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch_save(capture(trainer), path, overwrite=False)
+def save_checkpoint(payload, root, export_payload):
+    path, export = checkpoint_paths(root, payload["step"])
+    torch_save(payload, path, overwrite=False)
     torch_save(export_payload, export, overwrite=False)
     complete_checkpoint(path)
     return path
 
 
-def load_checkpoint(path: Path) -> dict:
+def load_checkpoint(path):
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if (
         not isinstance(payload, Mapping)
@@ -115,11 +80,11 @@ def load_checkpoint(path: Path) -> dict:
         or payload.get("version") != VERSION
         or payload.get("stage") not in STAGE_NAMES
     ):
-        raise ValueError(f"not a v2 training checkpoint: {path}. {V1_HINT}")
+        raise ValueError(f"not a v{VERSION} training checkpoint: {path}.")
     return dict(payload)
 
 
-def _missing_keys(cls, values: Mapping, path: str = "") -> list[str]:
+def _missing_keys(cls, values, path=""):
     missing = []
     for item in fields(cls):
         key = f"{path}{item.name}"
@@ -130,7 +95,7 @@ def _missing_keys(cls, values: Mapping, path: str = "") -> list[str]:
     return missing
 
 
-def saved_config(payload: Mapping) -> StageConfig:
+def saved_config(payload):
     """The checkpoint config under the current schema; no key is filled in."""
     values = payload["config"]
     stage = values.get("stage") if isinstance(values, Mapping) else None
@@ -149,7 +114,7 @@ def saved_config(payload: Mapping) -> StageConfig:
     return config
 
 
-def fingerprint_changes(saved: Mapping, current: Mapping) -> list[str]:
+def fingerprint_changes(saved, current):
     """plane/file names whose images were added, removed or changed."""
     changes = []
     for plane in sorted(set(saved) | set(current)):
@@ -160,7 +125,7 @@ def fingerprint_changes(saved: Mapping, current: Mapping) -> list[str]:
     return changes
 
 
-def check_fingerprint(saved: Mapping, current: Mapping) -> None:
+def check_fingerprint(saved, current):
     changes = fingerprint_changes(saved, current)
     if changes:
         shown = ", ".join(changes[:5]) + (" ..." if len(changes) > 5 else "")
@@ -172,7 +137,7 @@ def _pure_path(value):
     return PureWindowsPath(text) if PureWindowsPath(text).drive else PurePosixPath(text)
 
 
-def _remap(value: str, pairs, matched: set) -> str:
+def _remap(value, pairs, matched):
     for old, new in pairs:
         try:
             relative = _pure_path(value).relative_to(old)
@@ -183,7 +148,7 @@ def _remap(value: str, pairs, matched: set) -> str:
     return value
 
 
-def relocate(payload: dict, path_map) -> dict:
+def relocate(payload, path_map):
     """Replace saved path prefixes (image folders, source.lr_run) OLD by NEW."""
     if not path_map:
         return payload
@@ -221,31 +186,3 @@ def relocate(payload: dict, path_map) -> dict:
         [[old.as_posix(), new.as_posix()] for old, new in pairs],
     ]
     return result
-
-
-def restore(trainer, payload: Mapping) -> None:
-    """Load a checked checkpoint into a trainer built from its config."""
-    models, optimizers = payload["models"], payload["optimizers"]
-    groups = set(trainer.critics)
-    if set(models["critics"]) != groups or set(optimizers["critics"]) != groups:
-        raise ValueError("critic groups do not match the checkpoint.")
-    trainer.denoiser.load_state_dict(models["generator"])
-    trainer.ema.load_state_dict(models["ema"])
-    for group, critic in trainer.critics.items():
-        critic.load_state_dict(models["critics"][group])
-    trainer.optimizers["generator"].load_state_dict(optimizers["generator"])
-    for group in groups:
-        trainer.optimizers[group].load_state_dict(optimizers["critics"][group])
-    # Runs without AMP save an empty scaler state; an enabled scaler then starts
-    # from its initial scale.
-    if payload["scaler"]:
-        trainer.scaler.load_state_dict(payload["scaler"])
-    trainer.updates = {
-        "generator": payload["updates"]["generator"],
-        **dict(payload["updates"]["critics"]),
-    }
-    trainer.random.load_state(payload["rng"])
-    if trainer.selection is not None:
-        trainer.selection.load_state_dict(payload["selection"])
-    trainer.completed_steps = payload["step"]
-    trainer.path_maps = list(payload["path_maps"])

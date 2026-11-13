@@ -6,7 +6,7 @@ from torch import nn
 from src.device import assert_all
 
 
-def _stats_dtype(values: torch.Tensor) -> torch.dtype:
+def _stats_dtype(values):
     # Half-precision noise coefficients lose the small step sizes.
     if values.dtype in (torch.float16, torch.bfloat16):
         return torch.float32
@@ -14,17 +14,7 @@ def _stats_dtype(values: torch.Tensor) -> torch.dtype:
 
 
 class Diffusion(nn.Module):
-    """Variance-preserving schedule with a clean-prediction posterior.
-
-    Noise is always passed in: every random draw comes from src.rng.
-    """
-
-    def __init__(
-        self,
-        timesteps: int,
-        beta_min: float = 0.1,
-        beta_max: float = 20.0,
-    ) -> None:
+    def __init__(self, timesteps, beta_min=0.1, beta_max=20.0):
         super().__init__()
         if (
             isinstance(timesteps, bool)
@@ -44,10 +34,9 @@ class Diffusion(nn.Module):
         time = torch.linspace(0.0, 1.0, timesteps + 1, dtype=torch.float64)
         log_alpha_bars = -0.5 * (beta_max - beta_min) * time.square() - beta_min * time
         alpha_bars = log_alpha_bars.exp()
-        alphas = torch.ones_like(alpha_bars)
-        alphas[1:] = (log_alpha_bars[1:] - log_alpha_bars[:-1]).exp()
-        betas = torch.zeros_like(alphas)
-        betas[1:] = -(log_alpha_bars[1:] - log_alpha_bars[:-1]).expm1()
+        log_step = log_alpha_bars.diff()
+        alphas = torch.cat((alpha_bars[:1], log_step.exp()))
+        betas = torch.cat((time[:1], -log_step.expm1()))
         variances = -log_alpha_bars.expm1()
         clean_coef = betas[1:] * alpha_bars[:-1].sqrt() / variances[1:]
         current_coef = alphas[1:].sqrt() * variances[:-1] / variances[1:]
@@ -66,23 +55,7 @@ class Diffusion(nn.Module):
         ):
             self.register_buffer(name, values.to(torch.float32), persistent=False)
 
-    def add_noise(
-        self,
-        clean: torch.Tensor,
-        state: int | torch.Tensor,
-        noise: torch.Tensor,
-    ) -> torch.Tensor:
-        states = self.prepare_time(state, clean, self.timesteps, "state")
-        return self.mix_noise(clean, states, noise)
-
-    def sample_pair(
-        self,
-        clean: torch.Tensor,
-        transition: int | torch.Tensor,
-        previous_noise: torch.Tensor,
-        step_noise: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Draw (x_t, x_t+1) for transition t from a clean volume."""
+    def sample_pair(self, clean, transition, previous_noise, step_noise):
         transitions = self.prepare_time(
             transition, clean, self.timesteps - 1, "transition"
         )
@@ -98,20 +71,13 @@ class Diffusion(nn.Module):
         )
         return previous, current
 
-    def sample_posterior(
-        self,
-        current: torch.Tensor,
-        pred: torch.Tensor,
-        transition: int | torch.Tensor,
-        noise: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Step x_t+1 to x_t; transition 0 returns the prediction itself."""
+    def sample_posterior(self, current, pred, transition, noise=None):
         pred = self.validate_shape("pred", pred, current)
+        if type(transition) is int and transition == 0:
+            return pred
         transitions = self.prepare_time(
             transition, current, self.timesteps - 1, "transition"
         )
-        if isinstance(transition, int) and transition == 0:
-            return pred
         if transitions.device.type == "cpu" and not bool(transitions.any()):
             return pred
         if noise is None:
@@ -122,23 +88,13 @@ class Diffusion(nn.Module):
         sample = mean + variance.sqrt().to(current.dtype) * noise
         return torch.where(active, sample, pred)
 
-    def mix_noise(
-        self,
-        clean: torch.Tensor,
-        states: torch.Tensor,
-        noise: torch.Tensor,
-    ) -> torch.Tensor:
+    def mix_noise(self, clean, states, noise):
         noise = self.validate_shape("noise", noise, clean)
         alpha_bar = self.extract(self.alpha_bars, states, clean)
         std = self.extract(self.noise_std, states, clean)
         return alpha_bar.sqrt() * clean + std * noise
 
-    def get_posterior(
-        self,
-        current: torch.Tensor,
-        pred: torch.Tensor,
-        transitions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_posterior(self, current, pred, transitions):
         clean_coef = self.extract(self.posterior_clean_coef, transitions, current)
         current_coef = self.extract(self.posterior_current_coef, transitions, current)
         mean = clean_coef * pred + current_coef * current
@@ -148,12 +104,7 @@ class Diffusion(nn.Module):
         return mean, variance
 
     @staticmethod
-    def extract(
-        values: torch.Tensor,
-        timesteps: torch.Tensor,
-        ref: torch.Tensor,
-        dtype: torch.dtype | None = None,
-    ) -> torch.Tensor:
+    def extract(values, timesteps, ref, dtype=None):
         coeff = values.to(
             device=ref.device,
             dtype=ref.dtype if dtype is None else dtype,
@@ -161,22 +112,13 @@ class Diffusion(nn.Module):
         return coeff.reshape((ref.shape[0],) + (1,) * (ref.ndim - 1))
 
     @staticmethod
-    def validate_shape(
-        name: str,
-        values: torch.Tensor,
-        ref: torch.Tensor,
-    ) -> torch.Tensor:
+    def validate_shape(name, values, ref):
         if values is None or values.shape != ref.shape:
             raise ValueError(f"{name} must have shape {tuple(ref.shape)}.")
         return values
 
     @staticmethod
-    def prepare_time(
-        value: int | torch.Tensor,
-        ref: torch.Tensor,
-        limit: int,
-        name: str,
-    ) -> torch.Tensor:
+    def prepare_time(value, ref, limit, name):
         if type(value) is int:
             if not 0 <= value <= limit:
                 raise ValueError(f"{name} must be between 0 and {limit}.")

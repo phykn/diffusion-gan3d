@@ -1,24 +1,34 @@
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F
 from tqdm import trange
 
-from src.api import LowResolutionAPI
+from src.axes import PLANES
+from src.config.io import load_generation_settings
 from src.config.schema import SRConfig
 from src.data.crops import CropSampler, phase_channels, resize_phases
 from src.data.height import image_profile
 from src.data.orientation import augment_volumes, bank_symmetries
-from src.export import check_export, check_lr_source, export_config, export_payload
-from src.plane import PLANES
+from src.export import (
+    build_diffusion,
+    check_export,
+    check_lr_source,
+    export_config,
+    export_payload,
+    load_denoiser,
+)
 from src.rng import rand, randint
+from src.sampling.conditions import LRConditions
+from src.sampling.memory import check_memory, estimate_memory
+from src.sampling.plan import make_plan
+from src.sampling.sampler import Predictor, TileSampler
 from src.stats.labels import phase_profile
 from src.train.core import StepInputs, Trainer
 from src.train.losses.consistency import consistency_loss
 
 
-def corrupt_coarse(low, probability: float, strength: float, generator):
+def corrupt_coarse(low, probability, strength, generator):
     """Replace random blocks of the LR input by random phases.
 
     Returns the corrupted input and the realized corruption level per volume.
@@ -52,7 +62,7 @@ class Bank:
     conditions: list[dict] = field(default_factory=list)
     next_index: int = 0
 
-    def state_dict(self) -> dict:
+    def state_dict(self):
         return {
             "volumes": self.volumes,
             "height_origins": self.height_origins,
@@ -62,7 +72,7 @@ class Bank:
         }
 
     @classmethod
-    def from_state(cls, state: Mapping) -> "Bank":
+    def from_state(cls, state):
         return cls(
             volumes=state["volumes"],
             height_origins=state["height_origins"],
@@ -72,7 +82,7 @@ class Bank:
         )
 
 
-def crop_profile(image: torch.Tensor, origin, extent, crop_size, bins) -> dict:
+def crop_profile(image, origin, extent, crop_size, bins):
     """The depth profile of one side crop as a constant profile over the
     whole source height, flat beyond the crop."""
     values = image_profile(image[None], bins)[0].T.tolist()  # [bins][K]
@@ -99,11 +109,11 @@ class SRTrainer(Trainer):
 
     def __init__(
         self,
-        config: SRConfig,
-        device: torch.device,
-        planes: dict,
-        lr: Mapping,
-        bank: Bank | None = None,
+        config,
+        device,
+        planes,
+        lr,
+        bank=None,
     ):
         super().__init__(config, device, planes)
         self.lr_export = check_export(lr, "lr")
@@ -125,17 +135,38 @@ class SRTrainer(Trainer):
             if self.height
             else {}
         )
-        self._lr_api = None
+        self._lr_sampling = None
         self.bank = self.create_bank() if bank is None else bank
 
     # Bank ------------------------------------------------------------------
 
-    def lr_api(self):
-        if self._lr_api is None:
-            self._lr_api = LowResolutionAPI(self.lr_export, self.device)
-        return self._lr_api
+    def bank_sampling(self):
+        if self._lr_sampling is None:
+            cfg = self.lr_config
+            model = load_denoiser(self.lr_export, cfg).to(self.device)
+            diffusion = build_diffusion(cfg).to(self.device)
+            sampler = TileSampler(
+                Predictor.from_config(model, diffusion, cfg, self.device)
+            )
+            patch = cfg.patch_size
+            plan = make_plan(
+                (patch,) * 3,
+                patch,
+                model.downsample_factor,
+                load_generation_settings().overlap,
+            )
+            estimate = estimate_memory(
+                plan,
+                self.num_phases,
+                cfg.model.generator.channels[0],
+                self.device,
+                probabilities=True,
+                profile=cfg.profile_enabled,
+            )
+            self._lr_sampling = sampler, plan, estimate
+        return self._lr_sampling
 
-    def bank_condition(self) -> dict:
+    def bank_condition(self):
         """Height and profile of a random real side crop (none without height)."""
         if not self.height:
             return {}
@@ -160,19 +191,26 @@ class SRTrainer(Trainer):
             )
         return record
 
-    def bank_volume(self, record: Mapping) -> torch.Tensor:
+    def bank_volume(self, record):
         seed = int(randint(2**62, (), self.random["bank"]))
         options = {
             key: record[key]
             for key in ("height_origin", "height_extent", "vf_profile")
             if key in record
         }
-        return self.lr_api().generate_probs(
-            seed=seed, guidance=self.config.lr_bank.guidance, **options
+        sampler, plan, estimate = self.bank_sampling()
+        conditions = LRConditions(self.lr_config, plan, self.device, **options)
+        return sampler.sample(
+            plan,
+            seed=seed,
+            conditions=conditions,
+            guidance=self.config.lr_bank.guidance,
+            probabilities=True,
+            storage=check_memory(estimate, self.device, "auto"),
         )
 
-    def create_bank(self) -> Bank:
-        count = self.config.lr_bank.samples_per_domain
+    def create_bank(self):
+        count = self.config.lr_bank.size
         records, volumes = [], []
         for _ in trange(count, desc="LR bank", dynamic_ncols=True):
             record = self.bank_condition()
@@ -190,7 +228,7 @@ class SRTrainer(Trainer):
             return None
         return torch.tensor([record[key] for record in records])
 
-    def refresh_bank(self, step: int) -> None:
+    def refresh_bank(self, step):
         """Replace the oldest bank volume every refresh_every_steps."""
         every = self.config.lr_bank.refresh_every_steps
         if not every or not step or step % every:
@@ -207,17 +245,17 @@ class SRTrainer(Trainer):
 
     # Stage hooks -------------------------------------------------------------
 
-    def export_payload(self, step: int, model: Mapping) -> dict:
+    def export_payload(self, step, model):
         return export_payload(self.config, step, model, lr=self.lr_export)
 
-    def stage_state(self) -> dict:
+    def stage_state(self):
         return {"lr": self.lr_export, "bank": self.bank.state_dict()}
 
-    def step(self, step: int, transition: int | None = None) -> dict:
+    def step(self, step, transition=None):
         self.refresh_bank(step)
         return super().step(step, transition)
 
-    def prepare(self, step: int, transition: int | None) -> StepInputs:
+    def prepare(self, step, transition):
         config = self.config
         batch = config.train.volume_batch_size
         generator = self.random["bank"]

@@ -3,7 +3,6 @@ import test from 'node:test'
 
 import {
   anchorNote,
-  createRequestGate,
   normalizeBlocks,
   normalizeSeed,
 } from '../src/input-state.js'
@@ -19,17 +18,6 @@ test('three block counts are clamped to the server limit', () => {
   assert.deepEqual(normalizeBlocks([0, 3.8, 99], 4), [1, 3, 4])
   assert.deepEqual(normalizeBlocks([0, 3.8, 99], 9), [1, 3, 9])
   assert.deepEqual(normalizeBlocks(undefined, 4), [1, 1, 1])
-})
-
-test('an input change rejects an in-flight response', () => {
-  const gate = createRequestGate()
-  const request = gate.begin()
-  assert.equal(gate.accepts(request), true)
-
-  gate.invalidate()
-
-  assert.equal(gate.accepts(request), false)
-  assert.equal(gate.accepts(gate.begin()), true)
 })
 
 test('the anchor note appears only for more than one block', () => {

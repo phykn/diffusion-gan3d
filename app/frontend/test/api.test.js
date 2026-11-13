@@ -12,7 +12,6 @@ test('generation sends a prepared boundary anchor and decodes volume metadata', 
       anchors: [{ image, axis: 0, index: 0, position: null }],
       seed: 7,
       blocks: [2, 1, 1],
-      format: 'raw',
       tortuosity: true,
     })
     return new Response(new Uint8Array([0, 1]), { headers: {

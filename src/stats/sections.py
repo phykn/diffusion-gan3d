@@ -8,15 +8,14 @@ import torch
 def two_point(probs, max_lag=16):
     """Per in-plane axis, S2 per phase and lag of [B, K, H, W] sections: [K, L]."""
     values = []
+    mean = probs.mean((0, 2, 3))
     for axis in (-2, -1):
-        curve = []
-        for lag in range(min(max_lag + 1, probs.shape[axis])):
-            if lag == 0:
-                curve.append(probs.mean((0, 2, 3)))
-            else:
-                left, right = [slice(None)] * 4, [slice(None)] * 4
-                left[axis], right[axis] = slice(None, -lag), slice(lag, None)
-                curve.append((probs[tuple(left)] * probs[tuple(right)]).mean((0, 2, 3)))
+        curve = [mean]
+        for lag in range(1, min(max_lag + 1, probs.shape[axis])):
+            length = probs.shape[axis] - lag
+            left = probs.narrow(axis, 0, length)
+            right = probs.narrow(axis, lag, length)
+            curve.append((left * right).mean((0, 2, 3)))
         values.append(torch.stack(curve, -1))
     return values
 
@@ -59,7 +58,7 @@ class SectionErrors(NamedTuple):
     cluster_error: float
 
 
-def label_sections(sections, seed: int = 0) -> torch.Tensor:
+def label_sections(sections, seed=0):
     """One-hot sections, with exact phase ties broken at random.
 
     Area-downsampled crops hold exact ties such as 0.5/0.5, which argmax would
@@ -77,8 +76,7 @@ class SectionStatistics(NamedTuple):
     clusters: tuple
 
 
-def section_statistics(sections) -> SectionStatistics:
-    """The statistics compare_sections uses, computed once for fixed sections."""
+def section_statistics(sections):
     phases = sections.shape[1]
     labels = sections.argmax(1).numpy()
     return SectionStatistics(
@@ -88,7 +86,7 @@ def section_statistics(sections) -> SectionStatistics:
     )
 
 
-def compare_sections(real: SectionStatistics, fake: SectionStatistics) -> SectionErrors:
+def compare_sections(real, fake):
     two_point_mae = float(
         torch.cat(
             [(a - b).abs().flatten() for a, b in zip(real.two_point, fake.two_point)]
@@ -114,12 +112,11 @@ def compare_sections(real: SectionStatistics, fake: SectionStatistics) -> Sectio
     return SectionErrors(two_point_mae, chord_tv, cluster_error)
 
 
-def section_errors(real, fake) -> SectionErrors:
-    """How far generated sections are from real ones in three statistics."""
+def section_errors(real, fake):
     return compare_sections(section_statistics(real), section_statistics(fake))
 
 
-def half_split_errors(sections) -> list[float]:
+def half_split_errors(sections):
     """Errors between the even and odd halves of real one-hot sections.
 
     The sampling noise of the real data puts every error on one scale.
