@@ -1,7 +1,6 @@
 import signal
 import sys
 from contextlib import contextmanager
-from dataclasses import replace
 from datetime import datetime
 from threading import Event, current_thread, main_thread
 
@@ -286,7 +285,8 @@ def show(configs, run_name):
     sr = configs["sr"]
     if run_name is not None:
         lr_run = str(stage_dir(run_name, "lr"))
-        sr = replace(sr, source=replace(sr.source, lr_run=lr_run))
+        source = sr.source.model_copy(update={"lr_run": lr_run})
+        sr = sr.model_copy(update={"source": source})
     for stage, config in (("lr", configs["lr"]), ("sr", sr)):
         print(f"# {stage}\n{dump_yaml(config)}")
 

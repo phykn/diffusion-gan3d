@@ -4,6 +4,7 @@ napari[all]
 numpy
 Pillow
 psutil
+pydantic
 PyYAML
 scipy
 tensorboard

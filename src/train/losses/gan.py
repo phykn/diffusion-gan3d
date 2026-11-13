@@ -19,21 +19,12 @@ def relativistic_loss(preferred, other):
     the logistic loss, where a generator covering one mode of the data already
     looks real. The smaller batch is reused to pair every sample.
     """
-    if preferred.levels or other.levels:
-        return torch.stack(
-            [
-                relativistic_loss(first, second)
-                for first, second in zip(
-                    preferred.levels or (preferred,),
-                    other.levels or (other,),
-                    strict=True,
-                )
-            ]
-        ).mean()
-    first, second = preferred.logits_global, other.logits_global
-    index = torch.arange(max(len(first), len(second)), device=first.device)
-    margin = second[index % len(second)] - first[index % len(first)]
-    return F.softplus(margin).mean()
+    losses = []
+    for first, second in zip(preferred, other, strict=True):
+        index = torch.arange(max(len(first), len(second)), device=first.device)
+        margin = second[index % len(second)] - first[index % len(first)]
+        losses.append(F.softplus(margin).mean())
+    return torch.stack(losses).mean()
 
 
 def critic_objective(
@@ -60,11 +51,9 @@ def critic_objective(
 
 
 def gradient_penalty(scores, inputs):
-    if scores.levels:
-        return torch.stack(
-            [gradient_penalty(level, inputs) for level in scores.levels]
-        ).mean()
-    return input_gradient_penalty(scores.logits_global, inputs)
+    return torch.stack(
+        [input_gradient_penalty(logits, inputs) for logits in scores]
+    ).mean()
 
 
 def input_gradient_penalty(logits, inputs):

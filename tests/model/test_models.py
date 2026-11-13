@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.model.critic import CriticScores, PairCritic2D
+from src.model.critic import PairCritic2D
 from src.model.denoiser import ChannelNormSiLU3D, Denoiser3D, apply_norm_silu
 
 MPS = torch.backends.mps.is_available()
@@ -132,25 +132,6 @@ def test_clean_output_is_a_latent_conditioned_simplex_with_gradients():
         assert bool(torch.isfinite(grad).all()) and float(grad.abs().sum()) > 0
 
 
-def test_forward_is_the_body_of_the_embedding():
-    model = _denoiser(height_enabled=True, profile_enabled=True).eval()
-    x, time, latent = _inputs(2)
-    vf = torch.tensor([[0.2, 0.3, 0.5], [0.6, 0.2, 0.2]])
-    present = torch.tensor([True, False])
-    conditions = dict(
-        height=torch.rand(2, 1, 4, 4, 4),
-        profile=torch.full((2, 3, 4), 1 / 3),
-        profile_present=present,
-    )
-    with torch.no_grad():
-        logits = model.predict_logits(
-            x, time, latent, vf=vf, vf_present=present, **conditions
-        )
-        emb = model.embed(time, latent, vf, present)
-        body = model.run_network(x, emb, **conditions)
-    torch.testing.assert_close(logits, body)
-
-
 def test_vf_presence_mask_matches_the_null_and_conditioned_paths():
     model = _denoiser()
     with torch.no_grad():
@@ -275,13 +256,9 @@ def test_critic_scores_pairs_at_every_pyramid_level():
     current = torch.randn(2, 3, 16, 16, requires_grad=True)
     time = torch.tensor([0, 9])
     scores = critic(previous, current, time)
-    assert isinstance(scores, CriticScores)
-    assert scores.logits_global.shape == (2,)
-    assert [level.logits_global.shape for level in scores.levels] == [(2,)] * 3
-    assert not torch.equal(
-        scores.logits_global, critic(previous, current, time.flip(0)).logits_global
-    )
-    sum(level.logits_global.sum() for level in scores.levels).backward()
+    assert [logits.shape for logits in scores] == [(2,)] * 3
+    assert not torch.equal(scores[0], critic(previous, current, time.flip(0))[0])
+    sum(logits.sum() for logits in scores).backward()
     assert float(current.grad.abs().sum()) > 0
 
 
@@ -294,11 +271,9 @@ def test_height_critic_scores_xy_sections_without_a_height_field():
     critic = _critic(height_channels=1)
     x = torch.randn(1, 3, 8, 8)
     time = torch.zeros(1, dtype=torch.long)
-    plain = critic(x, x, time).logits_global
+    plain = critic(x, x, time)[0]
     assert plain.shape == (1,)
-    assert not torch.equal(
-        plain, critic(x, x, time, torch.rand(1, 1, 8, 8)).logits_global
-    )
+    assert not torch.equal(plain, critic(x, x, time, torch.rand(1, 1, 8, 8))[0])
 
 
 def test_gradient_checkpointing_keeps_outputs_and_gradients():
@@ -311,7 +286,7 @@ def test_gradient_checkpointing_keeps_outputs_and_gradients():
         x, time, latent = _inputs()
         out = model(x, time, latent)
         scores = critic(out[:, :, 0], out[:, :, 1], time)
-        scores.logits_global.sum().backward()
+        scores[0].sum().backward()
         results.append(
             [
                 out.detach(),

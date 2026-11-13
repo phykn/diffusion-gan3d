@@ -7,13 +7,12 @@ from src.device import adaptive_pool, wide_dtype
 def resize_phases(fractions, shape):
     shape = tuple(shape)
     current = tuple(fractions.shape[2:])
-    if current == shape:
-        return fractions
     shrunk = tuple(min(new, old) for new, old in zip(shape, current, strict=True))
-    fractions = _shrink(fractions, shrunk)
-    if shrunk == shape:
-        return fractions
-    return _grow(fractions, shape)
+    if shrunk != current:
+        fractions = _shrink(fractions, shrunk)
+    if shrunk != shape:
+        fractions = _grow(fractions, shape)
+    return fractions
 
 
 def downsample(fractions, shape):
@@ -54,8 +53,6 @@ def rebin_profile(profile, bins):
 
 def _shrink(fractions, shape):
     current = tuple(fractions.shape[2:])
-    if current == shape:
-        return fractions
     if all(old % new == 0 for old, new in zip(current, shape)):
         return adaptive_pool(fractions, shape)
     for axis, (old, new) in enumerate(zip(current, shape), 2):

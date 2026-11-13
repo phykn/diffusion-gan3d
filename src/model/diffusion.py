@@ -1,5 +1,3 @@
-import math
-
 import torch
 from torch import nn
 
@@ -9,20 +7,8 @@ from src.device import assert_all
 class Diffusion(nn.Module):
     def __init__(self, timesteps, beta_min=0.1, beta_max=20.0):
         super().__init__()
-        if (
-            isinstance(timesteps, bool)
-            or not isinstance(timesteps, int)
-            or timesteps < 1
-        ):
-            raise ValueError("timesteps must be a positive integer.")
-        if not (
-            math.isfinite(beta_min)
-            and math.isfinite(beta_max)
-            and 0 <= beta_min < beta_max
-        ):
-            raise ValueError(
-                "beta_min/beta_max must be finite with 0 <= beta_min < beta_max."
-            )
+        if not beta_min < beta_max:
+            raise ValueError("beta_min must be below beta_max.")
 
         time = torch.linspace(0.0, 1.0, timesteps + 1, dtype=torch.float64)
         log_alpha_bars = -0.5 * (beta_max - beta_min) * time.square() - beta_min * time

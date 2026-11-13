@@ -151,21 +151,33 @@ class Denoiser3D(nn.Module):
     ):
         if self.coarse_enabled and vf_present is not None:
             raise ValueError("SR denoisers do not accept volume fractions.")
-        embedding = self.embed(
-            time,
-            latent.to(x_current),
-            vf=vf,
-            vf_present=vf_present,
-        )
-        return self.run_network(
-            x_current,
-            embedding,
-            height=height,
-            profile=profile,
-            profile_present=profile_present,
-            coarse=coarse,
-            corruption_level=corruption_level,
-        )
+        embedding = self.embed(time, latent.to(x_current), vf, vf_present)
+        if self.coarse_enabled:
+            if profile is not None or profile_present is not None:
+                raise ValueError("SR denoisers do not accept a depth profile.")
+            if coarse is None or coarse.shape != x_current.shape:
+                raise ValueError(
+                    "SR requires coarse phase fractions on the output grid."
+                )
+        elif coarse is not None or corruption_level is not None:
+            raise ValueError("coarse conditioning requires an SR denoiser.")
+        x = self.input(x_current)
+        if self.coarse_enabled:
+            if corruption_level is None:
+                corruption_level = x_current.new_zeros(x_current.shape[0])
+            embedding = embedding + self.corruption_embedding(
+                corruption_level.to(x_current).reshape(-1, 1)
+            )
+            x = x + self.coarse_input(coarse.to(x_current).mul(2).sub(1))
+        if self.height_input is not None:
+            if height is None:
+                raise ValueError("height-conditioned denoiser requires a height field.")
+            x = x + self.height_input(height.to(x_current))
+        elif height is not None:
+            raise ValueError("height conditioning is disabled.")
+        if profile is not None:
+            x = x + self._embed_profile(x_current, profile, profile_present)
+        return self._run_unet(x, embedding)
 
     def predict_guided_logits(self, x_current, time, latent, guidance, **conditions):
         if (
@@ -200,43 +212,6 @@ class Denoiser3D(nn.Module):
             return embedding + vf_embedding
         vf_present = vf_present.to(device=latent.device)
         return torch.where(vf_present[:, None], embedding + vf_embedding, embedding)
-
-    def run_network(
-        self,
-        x_current,
-        embedding,
-        height=None,
-        profile=None,
-        profile_present=None,
-        coarse=None,
-        corruption_level=None,
-    ):
-        if self.coarse_enabled:
-            if profile is not None or profile_present is not None:
-                raise ValueError("SR denoisers do not accept a depth profile.")
-            if coarse is None or coarse.shape != x_current.shape:
-                raise ValueError(
-                    "SR requires coarse phase fractions on the output grid."
-                )
-        elif coarse is not None or corruption_level is not None:
-            raise ValueError("coarse conditioning requires an SR denoiser.")
-        x = self.input(x_current)
-        if self.coarse_enabled:
-            if corruption_level is None:
-                corruption_level = x_current.new_zeros(x_current.shape[0])
-            embedding = embedding + self.corruption_embedding(
-                corruption_level.to(x_current).reshape(-1, 1)
-            )
-            x = x + self.coarse_input(coarse.to(x_current).mul(2).sub(1))
-        if self.height_input is not None:
-            if height is None:
-                raise ValueError("height-conditioned denoiser requires a height field.")
-            x = x + self.height_input(height.to(x_current))
-        elif height is not None:
-            raise ValueError("height conditioning is disabled.")
-        if profile is not None:
-            x = x + self._embed_profile(x_current, profile, profile_present)
-        return self._run_unet(x, embedding)
 
     @staticmethod
     def decode(logits):

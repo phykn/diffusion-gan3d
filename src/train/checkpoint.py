@@ -1,13 +1,12 @@
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import fields, is_dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import torch
 
 from src.config.build import build_config
-from src.config.schema import CONFIG_TYPES
+from src.config.schema import CONFIG_TYPES, is_section
 from src.export import STAGE_NAMES
 from src.storage import torch_save
 
@@ -87,12 +86,12 @@ def load_checkpoint(path):
 
 def _missing_keys(cls, values, path=""):
     missing = []
-    for item in fields(cls):
-        key = f"{path}{item.name}"
-        if item.name not in values:
+    for name, setting in cls.model_fields.items():
+        key = f"{path}{name}"
+        if name not in values:
             missing.append(key)
-        elif is_dataclass(item.type) and isinstance(values[item.name], Mapping):
-            missing.extend(_missing_keys(item.type, values[item.name], f"{key}."))
+        elif is_section(setting) and isinstance(values[name], Mapping):
+            missing.extend(_missing_keys(setting.annotation, values[name], f"{key}."))
     return missing
 
 

@@ -1,16 +1,23 @@
-from collections.abc import Mapping
+from typing import Annotated, Literal
 
 import numpy as np
 import torch
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.data.height import measure_height
 from src.data.images import list_side_images
 from src.data.resize import rebin_profile
 
-PROFILE_KEYS = {"axis", "points", "interpolation"}
-INTERPOLATIONS = ("linear", "constant")
 ROUND_DIGITS = 4
 SUM_TOLERANCE = 1e-6
+Number = Annotated[float, Field(strict=True)]
+
+
+class ProfileSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    axis: Literal["z"]
+    interpolation: Literal["linear", "constant"]
+    points: tuple[tuple[Number, tuple[Number, ...]], ...] = Field(min_length=2)
 
 
 def measure_depth_profile(planes, num_phases, num_bins):
@@ -38,35 +45,21 @@ def measure_image_profile(images, bins):
 
 
 def validate_profile(spec, num_phases):
-    if not isinstance(spec, Mapping) or set(spec) != PROFILE_KEYS:
-        raise ValueError("vf_profile requires axis, points and interpolation.")
-    if spec["axis"] != "z" or spec["interpolation"] not in INTERPOLATIONS:
-        raise ValueError(
-            "vf_profile requires z axis and linear or constant interpolation."
-        )
-    points = spec["points"]
-    if not isinstance(points, (list, tuple)) or any(
-        not isinstance(point, (list, tuple))
-        or len(point) != 2
-        or not isinstance(point[1], (list, tuple))
-        for point in points
-    ):
-        raise ValueError("profile points must be [position, phase fractions] pairs.")
     try:
-        positions = torch.tensor([point[0] for point in points], dtype=torch.float64)
-        fractions = torch.tensor(
-            [list(point[1]) for point in points], dtype=torch.float64
-        )
-    except (TypeError, ValueError, IndexError, OverflowError) as error:
-        raise ValueError("invalid profile points.") from error
+        points = ProfileSpec.model_validate(spec).points
+    except ValidationError as error:
+        problem = error.errors()[0]
+        place = ".".join(map(str, problem["loc"]))
+        raise ValueError(f"vf_profile {place}: {problem['msg']}") from None
     invalid = ValueError(
         "profile points must span 0..1 with increasing knots and phase simplex values."
     )
-    count = len(positions)
-    if positions.ndim != 1 or count < 2 or fractions.shape != (count, num_phases):
+    if any(len(fractions) != num_phases for _, fractions in points):
         raise invalid
-    if not (torch.isfinite(positions).all() and torch.isfinite(fractions).all()):
-        raise invalid
+    positions = torch.tensor([position for position, _ in points], dtype=torch.float64)
+    fractions = torch.tensor(
+        [fractions for _, fractions in points], dtype=torch.float64
+    )
     if positions[0] != 0 or positions[-1] != 1 or (positions.diff() <= 0).any():
         raise invalid
     if (fractions < 0).any() or (fractions > 1).any():

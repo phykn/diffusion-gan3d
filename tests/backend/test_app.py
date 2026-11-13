@@ -1,6 +1,5 @@
 """HTTP API on the tiny SR run."""
 
-import dataclasses
 from pathlib import Path
 
 import pytest
@@ -48,7 +47,7 @@ class Recorder:
 def tiny_pipeline(run):
     pipeline = HighResolutionPipeline(run, device="cpu")
     # config/gen.yaml's overlap 8 cannot tile the tiny 16-voxel LR patch.
-    pipeline.lr.settings = dataclasses.replace(pipeline.lr.settings, overlap=4)
+    pipeline.lr.settings = pipeline.lr.settings.model_copy(update={"overlap": 4})
     return pipeline
 
 
@@ -376,7 +375,7 @@ def test_health_reports_settings_the_model_cannot_tile_with(
     service, pipeline, monkeypatch
 ):
     # config/gen.yaml's own overlap 8 is half the tiny 16-voxel patch.
-    settings = dataclasses.replace(pipeline.lr.settings, overlap=8)
+    settings = pipeline.lr.settings.model_copy(update={"overlap": 8})
     monkeypatch.setattr(pipeline.lr, "settings", settings)
     with TestClient(create_app(inference=service, config=CONFIG)) as client:
         response = client.get("/api/health")

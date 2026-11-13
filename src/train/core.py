@@ -492,12 +492,8 @@ class Trainer:
                         interval=interval,
                     )
                 prefix = f"{group}/{axis}"
-                self.diagnostics[f"score/{prefix}/real"] = (
-                    real_score.logits_global.detach().mean()
-                )
-                self.diagnostics[f"score/{prefix}/fake"] = (
-                    fake_score.logits_global.detach().mean()
-                )
+                self.diagnostics[f"score/{prefix}/real"] = real_score[0].detach().mean()
+                self.diagnostics[f"score/{prefix}/fake"] = fake_score[0].detach().mean()
                 if r1_weight > 0:
                     r1 = losses.r1.detach() * weight
                     r1_sum = r1 if r1_sum is None else r1_sum + r1

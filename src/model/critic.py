@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -13,12 +11,6 @@ from src.model.layers import (
 )
 
 MAX_NORM_GROUPS = 32
-
-
-@dataclass(frozen=True)
-class CriticScores:
-    logits_global: torch.Tensor
-    levels: tuple = ()
 
 
 class GroupNormSiLU(nn.GroupNorm):
@@ -81,11 +73,11 @@ class PairCritic2D(nn.Module):
         embedding = self.time_mlp(
             self.time_embedding(time.to(device=pair.device)).to(dtype=pair.dtype)
         )
-        scores = tuple(
+        # One score per section size, full size first.
+        return tuple(
             self._score_one_size(resized, embedding, height)
             for resized in self._build_pyramid(pair)
         )
-        return CriticScores(scores[0].logits_global, scores if len(scores) > 1 else ())
 
     def _build_pyramid(self, pair):
         yield pair
@@ -104,4 +96,4 @@ class PairCritic2D(nn.Module):
             if level < len(self.downsample):
                 x = self.downsample[level](x)
         x = self.output_norm(x).mean(dim=(-2, -1))
-        return CriticScores(logits_global=self.output(x).squeeze(1))
+        return self.output(x).squeeze(1)

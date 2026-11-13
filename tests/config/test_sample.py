@@ -27,5 +27,5 @@ def test_sample_rejects_a_bad_phase_count(tmp_path, value):
     sample["num_phases"] = value
     path = tmp_path / "bad.yaml"
     path.write_text(yaml.safe_dump(sample), encoding="utf-8")
-    with pytest.raises(ValueError, match="num_phases must be an integer"):
+    with pytest.raises(ValueError, match="num_phases"):
         load_sample(path)

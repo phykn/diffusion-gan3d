@@ -1,20 +1,18 @@
 """Each schema field is read somewhere."""
 
 import re
-from dataclasses import fields, is_dataclass
 
 from src.config.io import PROJECT_ROOT
-from src.config.schema import LRConfig, SRConfig
+from src.config.schema import LRConfig, SRConfig, is_section
 
 ROOTS = ("train.py", "src", "scripts", "paper/scripts", "app/backend")
 
 
 def _leaf_paths(cls, prefix=()):
-    for item in fields(cls):
-        path = (*prefix, item.name)
-        kind = item.type
-        if is_dataclass(kind):
-            yield from _leaf_paths(kind, path)
+    for name, setting in cls.model_fields.items():
+        path = (*prefix, name)
+        if is_section(setting):
+            yield from _leaf_paths(setting.annotation, path)
         else:
             yield ".".join(path)
 
