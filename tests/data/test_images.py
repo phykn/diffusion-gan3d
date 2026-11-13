@@ -18,10 +18,10 @@ def test_missing_label_names_the_file(tmp_path):
     image[:, 4:] = 2
     path = _save(tmp_path / "gap.png", image)
     with pytest.raises(ValueError) as error:
-        infer_num_phases(load_images({"xy": [tmp_path]}))
+        infer_num_phases(load_images({"xy": [tmp_path]}, None))
     assert "label 1 never appears below the largest label 2" in str(error.value)
     assert str(path) in str(error.value)
-    assert load_images({"xy": [tmp_path]}, num_phases=3)["xy"].all_images()
+    assert load_images({"xy": [tmp_path]}, 3)["xy"].images
 
 
 def test_bad_images_name_the_file(tmp_path):
@@ -32,16 +32,16 @@ def test_bad_images_name_the_file(tmp_path):
     wide = _save(tmp_path / "wide" / "wide.tif", np.zeros((4, 4), dtype=np.uint16))
     for path in (stack, wide):
         with pytest.raises(ValueError, match=path.name):
-            load_images({"xy": [path.parent]})
+            load_images({"xy": [path.parent]}, None)
 
 
 def test_only_direct_images_are_read(tmp_path):
     _save(tmp_path / "a.png", np.zeros((4, 4), dtype=np.uint8))
     _save(tmp_path / "nested" / "b.png", np.ones((4, 4), dtype=np.uint8))
     (tmp_path / "notes.txt").write_text("not an image")
-    images = load_images({"xy": [tmp_path]})["xy"]
+    images = load_images({"xy": [tmp_path]}, None)["xy"]
     assert [path.name for path in images.paths[0]] == ["a.png"]
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(ValueError, match="no images"):
-        load_images({"xy": [empty]})
+        load_images({"xy": [empty]}, None)

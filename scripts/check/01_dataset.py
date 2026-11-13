@@ -78,7 +78,7 @@ def preview_dataset(args):
     for label, size in sizes.items():
         field(label, f"{crop} px -> {size}x{size} (1 cell = {crop / size:g} px)")
     for plane, images in planes.items():
-        count = len(images.all_images())
+        count = sum(map(len, images.images))
         field(plane, f"{count} image" if count == 1 else f"{count} images")
     fig = crop_figure(samplers, data.num_phases, args.seed)
     lr, sr = (f"{size}x{size}" for size in sizes.values())

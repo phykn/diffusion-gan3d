@@ -71,7 +71,7 @@ def _rewrite(source, target, change):
     return target
 
 
-def test_resume_rejects_changed_settings_and_images(tiny_lr_run, tmp_path):
+def test_resume_rejects_changed_settings(tiny_lr_run, tmp_path):
     source = resolve_checkpoint(tiny_lr_run)
 
     def add(payload):
@@ -80,13 +80,9 @@ def test_resume_rejects_changed_settings_and_images(tiny_lr_run, tmp_path):
     def remove(payload):
         del payload["config"]["train"]["seed"]
 
-    def image(payload):
-        payload["data_fingerprint"]["xy"]["sample.png"] = "0" * 64
-
     for name, change, message in (
         ("added", add, "train.extra"),
         ("removed", remove, "missing train.seed"),
-        ("image", image, "changed since the checkpoint: xy/sample.png"),
     ):
         path = _rewrite(source, tmp_path / name / source.name, change)
         with pytest.raises(ValueError, match=message):

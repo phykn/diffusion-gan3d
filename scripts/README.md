@@ -80,7 +80,7 @@ A sample is one file in [config/samples/](../config/samples/); copy
 [default.yaml](../config/samples/default.yaml) to add one.
 
 - `images` maps `xy`, `xz`, and `yz` to folders of 2D uint8 label images (`.png`, `.tif`,
-  or `.tiff` directly inside) with one shared pixel size; in `xz` and `yz` images, z runs
+  `.tiff`, `.bmp`, or `.pgm` directly inside) with one shared pixel size; in `xz` and `yz` images, z runs
   down the rows. The default sample reads `data/`. Labels are phases `0..K-1`,
   and phase 0 is pore. `K` is the largest label plus one, and every smaller label must
   appear, unless `num_phases` is set.
@@ -152,8 +152,7 @@ do, since MPS kernels are not bitwise deterministic. After an LR resume,
 `python train.py <sample> --run-dir "run/my-run-2"` reuses it and trains SR. Pass
 `--path-map OLD NEW` (repeatable) when the training images or the LR run have moved.
 Use the saved prefix from the run's `train.yaml` as OLD. Paths within the project are
-saved relative to its root. A resume stops if OLD matches no saved paths or the
-training images have changed.
+saved relative to its root. A resume stops if OLD matches no saved paths.
 
 - A finished stage holds a `.done` file. While `NAME-lr` or `NAME-sr` exists unfinished,
   `train.py --run-dir NAME` stops and says how to resume or delete it.

@@ -41,7 +41,8 @@ def side_images(planes):
         image
         for plane, images in planes.items()
         if plane != PLANES[0]
-        for image in images.all_images()
+        for group in images.images
+        for image in group
     ]
 
 

@@ -426,8 +426,6 @@ def validate_stage(config):
     for plane, folders in data.images.items():
         if not folders:
             raise ValueError(f"data.images.{plane} must list at least one folder.")
-        if len(set(folders)) != len(folders):
-            raise ValueError(f"data.images.{plane} must not repeat a folder.")
     if data.hi_res_size < data.lo_res_size:
         raise ValueError("data.hi_res_size must be at least data.lo_res_size.")
     if isinstance(config, SRConfig) and data.hi_res_size % data.lo_res_size:

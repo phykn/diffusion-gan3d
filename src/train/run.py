@@ -12,13 +12,12 @@ from src.config.io import PROJECT_ROOT, dump_yaml, project_path, save_yaml, stor
 from src.config.sample import build_stage_configs, load_sample
 from src.config.schema import to_dict, update
 from src.console import field, paint, path_field, section, success, warning
-from src.data.images import fingerprint, load_images
+from src.data.images import load_images
 from src.device import check_device
 from src.export import check_lr_source, export_config, read_export, write_export
 from src.train.checkpoint import (
     FORMAT,
     VERSION,
-    check_fingerprint,
     load_checkpoint,
     relocate,
     resolve_checkpoint,
@@ -78,10 +77,9 @@ def build_trainer(config, device, planes=None, *, lr=None, payload=None):
 
 
 class TrainingRun:
-    def __init__(self, trainer, root, data_fingerprint, payload=None):
+    def __init__(self, trainer, root, payload=None):
         self.trainer = trainer
         self.root = root
-        self.data_fingerprint = data_fingerprint
         self.path_maps = [] if payload is None else payload["path_maps"]
         config = trainer.config
         reference = build_reference(trainer.samplers)
@@ -119,7 +117,6 @@ class TrainingRun:
             "step": trainer.completed_steps,
             "config": to_dict(trainer.config),
             "selection": self.selection.state_dict(),
-            "data_fingerprint": self.data_fingerprint,
             "path_maps": self.path_maps,
             **trainer.state_dict(),
         }
@@ -249,7 +246,7 @@ def train_stage(config, device, run_dir, lr_dir=None):
         config, lr = sr_config(config, lr_dir)
     planes = training_images(config)
     trainer = build_trainer(config, device, planes, lr=lr)
-    run = TrainingRun(trainer, run_dir, fingerprint(planes))
+    run = TrainingRun(trainer, run_dir)
     describe(config, run_dir)
     return run.train()
 
@@ -265,10 +262,8 @@ def resume_stage(resume, device, run_dir, *, steps=None, path_map=None):
     if config.train.total_steps <= payload["step"]:
         raise ValueError(f"--steps must exceed the {payload['step']} completed steps.")
     planes = training_images(config)
-    data_fingerprint = fingerprint(planes)
-    check_fingerprint(payload["data_fingerprint"], data_fingerprint)
     trainer = build_trainer(config, device, planes, payload=payload)
-    run = TrainingRun(trainer, run_dir, data_fingerprint, payload)
+    run = TrainingRun(trainer, run_dir, payload)
     describe(config, run_dir)
     path_field("Resume", resume)
     return config.stage, run.train()

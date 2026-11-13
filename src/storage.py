@@ -1,4 +1,3 @@
-import hashlib
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -6,11 +5,6 @@ from tempfile import NamedTemporaryFile
 import numpy as np
 import tifffile
 import torch
-
-
-def file_hash(path):
-    with Path(path).open("rb") as file:
-        return hashlib.file_digest(file, "sha256").hexdigest()
 
 
 def torch_save(payload, path, *, overwrite=True):

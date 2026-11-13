@@ -114,24 +114,6 @@ def saved_config(payload):
     return config
 
 
-def fingerprint_changes(saved, current):
-    """plane/file names whose images were added, removed or changed."""
-    changes = []
-    for plane in sorted(set(saved) | set(current)):
-        before, after = saved.get(plane, {}), current.get(plane, {})
-        for name in sorted(set(before) | set(after)):
-            if before.get(name) != after.get(name):
-                changes.append(f"{plane}/{name}")
-    return changes
-
-
-def check_fingerprint(saved, current):
-    changes = fingerprint_changes(saved, current)
-    if changes:
-        shown = ", ".join(changes[:5]) + (" ..." if len(changes) > 5 else "")
-        raise ValueError(f"training images changed since the checkpoint: {shown}")
-
-
 def _pure_path(value):
     text = str(value).replace("\\", "/")
     return PureWindowsPath(text) if PureWindowsPath(text).drive else PurePosixPath(text)
