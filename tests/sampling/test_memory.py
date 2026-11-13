@@ -73,7 +73,7 @@ def test_measured_gpu_sr_memory_stays_under_the_estimate(default_sr_export, opti
 
 
 def test_a_generation_over_the_ram_budget_stops_before_sampling(monkeypatch):
-    monkeypatch.setattr("src.sampling.memory.ram_budget", lambda: 1024**3)
+    monkeypatch.setattr("src.sampling.memory.get_ram_budget", lambda: 1024**3)
     estimate = MemoryEstimate(512 * 1024**2, 256 * 1024**2, 8, (96, 96, 96), 1024**3)
     with pytest.raises(MemoryError, match=r"96x96x96 output in 8 tiles"):
         check_memory(estimate, torch.device("cpu"), "auto")

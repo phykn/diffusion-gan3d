@@ -147,9 +147,7 @@ class SRTrainer(Trainer):
             cfg = self.lr_config
             model = load_denoiser(self.lr_export, cfg).to(self.device)
             diffusion = build_diffusion(cfg).to(self.device)
-            sampler = TileSampler(
-                Predictor.from_config(model, diffusion, cfg, self.device)
-            )
+            sampler = TileSampler(Predictor(model, diffusion, cfg, self.device))
             patch = cfg.patch_size
             plan = make_plan(
                 (patch,) * 3,

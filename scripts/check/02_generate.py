@@ -78,7 +78,7 @@ def check_generation(args):
     plan = api.plan(blocks=blocks, overlap=args.overlap, margin=args.margin)
     field(
         "Plan",
-        f"{' × '.join(map(str, plan.grid))} tiles ({plan.tile_count} total), "
+        f"{' × '.join(map(str, plan.tiles_per_axis))} tiles ({plan.tile_count} total), "
         f"overlap {plan.overlap}, margin {plan.margin}, {api.device}",
     )
     field("Output", " × ".join(map(str, plan.output_shape)))
@@ -90,13 +90,11 @@ def check_generation(args):
     section("Quality")
     metric("Phase VF", format_phases(phase_fractions(volume, api.num_phases)))
     if plan.tile_count > 1:
-        quality = measure_seams(
-            volume, plan.output_seams(), plan.overlap, api.num_phases
-        )
+        quality = measure_seams(volume, plan.output_seams, plan.overlap, api.num_phases)
         metric("Seam TV", format_axes(quality.transition_tv))
         metric("Seam continuity", format_axes(quality.continuation_delta))
         report = dataclasses.asdict(quality) | {
-            "seams": [list(axis) for axis in plan.output_seams()],
+            "seams": [list(axis) for axis in plan.output_seams],
             "overlap": plan.overlap,
         }
         path_field("Seams", write_json(args.out / "seams.json", report))

@@ -43,8 +43,8 @@ def test_each_z_tile_gets_the_height_and_profile_of_its_depth(height_api, monkey
     calls = []
 
     class Recorded(LRConditions):
-        def __call__(self, index, tile):
-            result = super().__call__(index, tile)
+        def __call__(self, tile):
+            result = super().__call__(tile)
             calls.append((tile, result))
             return result
 

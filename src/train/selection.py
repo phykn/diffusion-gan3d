@@ -6,7 +6,7 @@ from src.data.resize import downsample
 from src.export import write_export
 from src.rng import make_generator
 from src.sampling.conditions import LRConditions, SRConditions
-from src.sampling.plan import make_plan, sr_margin
+from src.sampling.plan import choose_sr_margin, make_plan
 from src.sampling.sampler import Predictor, TileSampler
 from src.stats.sections import (
     SectionErrors,
@@ -58,9 +58,7 @@ def pick_sections(volumes, axis, phases):
 
 
 def ema_predictor(trainer):
-    return Predictor.from_config(
-        trainer.ema, trainer.diffusion, trainer.config, trainer.device
-    )
+    return Predictor(trainer.ema, trainer.diffusion, trainer.config, trainer.device)
 
 
 def lr_mse(high, low):
@@ -243,7 +241,7 @@ class SRCheckpointSelection(CheckpointSelection):
     def evaluate(self, trainer):
         config = trainer.config
         patch = config.patch_size
-        plan = make_plan((patch,) * 3, patch, sr_margin(config.scale_factor), 0)
+        plan = make_plan((patch,) * 3, patch, choose_sr_margin(config.scale_factor), 0)
         sampler = TileSampler(ema_predictor(trainer))
         low = self.inputs["volumes"]
         volumes, errors = [], []

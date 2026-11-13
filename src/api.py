@@ -21,9 +21,9 @@ from src.sampling.memory import check_memory, estimate_memory
 from src.sampling.plan import (
     TilePlan,
     check_non_negative,
+    choose_sr_margin,
     make_plan,
     parse_shape,
-    sr_margin,
 )
 from src.sampling.sampler import Predictor, TileSampler
 
@@ -95,9 +95,7 @@ class LowResolutionAPI:
         self.num_phases = data.num_phases
         self.default_margin = model.downsample_factor
         self.settings = load_generation_settings()
-        self.predictor = Predictor.from_config(
-            model, diffusion, self.config, self.device
-        )
+        self.predictor = Predictor(model, diffusion, self.config, self.device)
 
     def prepare_image(self, image):
         if image.shape != (self.crop_size, self.crop_size):
@@ -208,14 +206,14 @@ class LowResolutionAPI:
             else anchor_strength
         )
         anchors = TileAnchors(anchors, plan, self.num_phases, strength, self.device)
-        cfg = conditions.guided and guidance not in (0.0, 1.0)
-        request = self._request(plan, anchors.active, probabilities, cfg)
+        cfg = conditions.has_measured_condition and guidance not in (0.0, 1.0)
+        request = self._request(plan, anchors.is_active, probabilities, cfg)
         return request.sample(
             storage,
             seed=seed,
             conditions=conditions,
             guidance=guidance,
-            guide=anchors if anchors.active else None,
+            guide=anchors if anchors.is_active else None,
             progress=progress,
         )
 
@@ -255,10 +253,8 @@ class SuperResolutionAPI:
         self.hi_res_size = data.hi_res_size
         self.scale_factor = self.config.scale_factor
         self.num_phases = data.num_phases
-        self.default_margin = sr_margin(self.scale_factor)
-        self.predictor = Predictor.from_config(
-            model, diffusion, self.config, self.device
-        )
+        self.default_margin = choose_sr_margin(self.scale_factor)
+        self.predictor = Predictor(model, diffusion, self.config, self.device)
         self.lr = LowResolutionAPI(
             payload["lr"] if lr_weights is None else lr_weights, self.device
         )
@@ -309,7 +305,7 @@ class SuperResolutionAPI:
     def _request(self, plan, probabilities):
         scale = self.scale_factor
         low = math.prod(n // scale for n in plan.output_shape)
-        padded = math.prod(n // scale for n in plan.shape)
+        padded = math.prod(n // scale for n in plan.region_shape)
         return SamplingRequest(
             TileSampler(self.predictor),
             plan,

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from src.api import LowResolutionAPI, PlaneAnchor
-from src.sampling.anchor import TileAnchors, encode, place_anchors
+from src.sampling.anchor import TileAnchors, encode_anchors, place_anchors
 from src.sampling.plan import make_plan
 
 SHAPE = (6, 8, 10)
@@ -20,7 +20,7 @@ def test_conflicting_intersections_are_rejected():
     anchors[1] = replace(anchors[1], image=torch.ones_like(anchors[1].image))
     shape = SHAPE
     with pytest.raises(ValueError, match="conflicting intersections"):
-        encode(place_anchors(anchors, shape, 3), shape, check=True)
+        encode_anchors(place_anchors(anchors, shape, 3), shape, check=True)
     # The tiles check the same intersection before sampling.
     plan = make_plan(shape, 4, margin=2, overlap=1)
     with pytest.raises(ValueError, match="conflicting intersections"):
@@ -31,8 +31,8 @@ def test_each_tile_gets_its_part_of_the_anchors():
     anchors = reference_anchors()
     plan = make_plan(SHAPE, 4, margin=2, overlap=1)
     assert plan.tile_count > 1
-    whole_image, whole_mask = encode(
-        place_anchors(anchors, plan.output_shape, 3, plan.margin), plan.shape
+    whole_image, whole_mask = encode_anchors(
+        place_anchors(anchors, plan.output_shape, 3, plan.margin), plan.region_shape
     )
     tiles = TileAnchors(anchors, plan, 3, 1.0)
     for index, tile in enumerate(plan.tiles):
