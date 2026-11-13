@@ -1,4 +1,4 @@
-from src.data.phases import downsample
+from src.data.resize import downsample
 
 
 def consistency_loss(

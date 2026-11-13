@@ -1,6 +1,6 @@
 import torch
 
-from src.data.phases import rebin_profile
+from src.data.resize import rebin_profile
 from src.device import assert_all, wide_dtype
 
 LABEL_CHUNK_ELEMENTS = 1024**2

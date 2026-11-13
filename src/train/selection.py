@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 from src.config.io import save_yaml
-from src.data.phases import downsample
+from src.data.resize import downsample
 from src.export import write_export
 from src.rng import make_generator
 from src.sampling.conditions import LRConditions, SRConditions
@@ -34,8 +34,8 @@ def build_reference(samplers):
         crops = sampler.sample(REFERENCE_CROPS, generator)
         reference[axis] = {
             "images": crops.images.cpu(),
-            "height_origins": crops.origins,
-            "height_extents": crops.extents,
+            "height_origins": crops.height_origins,
+            "height_extents": crops.height_extents,
         }
     return reference
 

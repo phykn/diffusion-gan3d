@@ -5,7 +5,8 @@ from functools import cached_property
 import torch
 
 from src.config.io import load_generation_settings
-from src.data.phases import encode_phases, resize_phases
+from src.data.phases import encode_phases
+from src.data.resize import resize_phases
 from src.device import check_device, default_device
 from src.export import (
     build_diffusion,

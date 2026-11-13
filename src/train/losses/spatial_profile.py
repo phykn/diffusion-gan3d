@@ -1,6 +1,6 @@
 import torch.nn.functional as F
 
-from src.data.phases import rebin_profile
+from src.data.resize import rebin_profile
 
 
 def profile_loss(probs, target, bins, weight=1.0):

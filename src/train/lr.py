@@ -2,7 +2,8 @@ import torch
 
 from src.axes import PLANES
 from src.config.schema import LRConfig
-from src.data.phases import measure_image_profile, rebin_profile
+from src.data.profile import measure_image_profile
+from src.data.resize import rebin_profile
 from src.stats.labels import phase_profile
 from src.train.core import StepInputs, Trainer, sample_sections, schedule_ramp
 from src.train.losses.mirror_balance import mirror_balance_loss
@@ -137,7 +138,7 @@ class LRTrainer(Trainer):
             self.config.loss.real_transition.max_gap,
             real_heights if height is not None else None,
             fake_heights if height is not None else None,
-            self.augment.rotated_axes,
+            self.augment.rotatable_axes,
         )
         diagnostics.update(values)
         return value

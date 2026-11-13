@@ -3,24 +3,25 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from src.data.phases import encode_phases, resize_phases
+from src.data.phases import encode_phases
+from src.data.resize import resize_phases
 
 
 @dataclass(frozen=True)
 class Crops:
     images: torch.Tensor
-    origins: torch.Tensor
-    extents: torch.Tensor
+    height_origins: torch.Tensor
+    height_extents: torch.Tensor
 
 
 class CropSampler:
     def __init__(self, plane, crop_size, patch_size, num_phases):
-        self.groups = plane.images
+        self.folders = plane.images
         self.crop_size = crop_size
         self.patch_size = patch_size
         self.num_phases = num_phases
-        for group, paths in zip(plane.images, plane.paths):
-            for image, path in zip(group, paths):
+        for images, paths in zip(plane.images, plane.paths):
+            for image, path in zip(images, paths):
                 if crop_size > min(image.shape):
                     raise ValueError(
                         f"crop_size {crop_size} does not fit inside {path} "
@@ -28,23 +29,26 @@ class CropSampler:
                     )
 
     def sample(self, count, generator):
-        group = self.groups[
-            int(torch.randint(len(self.groups), (), generator=generator))
-        ]
-        choices = torch.randint(len(group), (count,), generator=generator).tolist()
+        images = self.folders[self._draw(len(self.folders), generator)]
+        picks = torch.randint(len(images), (count,), generator=generator).tolist()
         size = self.crop_size
-        crops, origins, extents = [], [], []
-        for choice in choices:
-            image = group[choice]
+        crops, top_rows, image_heights = [], [], []
+        for pick in picks:
+            image = images[pick]
             height, width = image.shape
-            top = int(torch.randint(height - size + 1, (), generator=generator))
-            left = int(torch.randint(width - size + 1, (), generator=generator))
+            top = self._draw(height - size + 1, generator)
+            left = self._draw(width - size + 1, generator)
             crops.append(image[top : top + size, left : left + size])
-            origins.append(float(top))
-            extents.append(float(height))
-        probs = encode_phases(torch.from_numpy(np.stack(crops)), self.num_phases)
+            top_rows.append(float(top))
+            image_heights.append(float(height))
+        labels = torch.from_numpy(np.stack(crops))
+        fractions = encode_phases(labels, self.num_phases)
         return Crops(
-            images=resize_phases(probs, (self.patch_size,) * 2),
-            origins=torch.tensor(origins),
-            extents=torch.tensor(extents),
+            images=resize_phases(fractions, (self.patch_size,) * 2),
+            height_origins=torch.tensor(top_rows),
+            height_extents=torch.tensor(image_heights),
         )
+
+    @staticmethod
+    def _draw(limit, generator):
+        return int(torch.randint(limit, (), generator=generator))

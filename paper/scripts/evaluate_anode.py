@@ -22,7 +22,8 @@ from paper.scripts.evaluate_sr import lr_agreement, upsample_linear, upsample_ne
 from src.api import SuperResolutionAPI
 from src.axes import AXIS_NAMES, PLANES
 from src.config.io import load_yaml, project_path, stored_path
-from src.data.phases import downsample, encode_phases
+from src.data.phases import encode_phases
+from src.data.resize import downsample
 from src.stats.sections import compare_sections, label_sections, section_statistics
 from src.stats.volume import (
     chord_mean,

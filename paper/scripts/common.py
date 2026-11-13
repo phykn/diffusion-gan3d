@@ -10,7 +10,8 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 from src.axes import AXIS_NAMES, PLANES, PORE_PHASE
 from src.config.io import PROJECT_ROOT, project_path
 from src.data.images import list_images, read_labels
-from src.data.phases import encode_phases, resize_phases
+from src.data.phases import encode_phases
+from src.data.resize import resize_phases
 from src.device import default_device
 from src.stats.sections import compare_sections, section_statistics
 from src.stats.volume import interface_density, spanning_fractions, tortuosity

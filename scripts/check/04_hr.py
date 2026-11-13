@@ -23,7 +23,7 @@ from src.api import SuperResolutionAPI, lr_fractions
 from src.axes import PLANES
 from src.config.io import PROJECT_ROOT
 from src.console import field, metric, path_field, section, status
-from src.data.phases import downsample
+from src.data.resize import downsample
 from src.device import empty_cache
 from src.export import VERSION, read_export, resolve_export
 from src.stats.labels import phase_fractions

@@ -24,7 +24,8 @@ from paper.scripts.common import (
 )
 from src.api import LowResolutionAPI, PlaneAnchor
 from src.config.io import load_config, load_generation_settings, load_yaml, stored_path
-from src.data.phases import encode_phases, resize_phases
+from src.data.phases import encode_phases
+from src.data.resize import resize_phases
 from src.stats.anchor import measure_boundaries, measure_slice_smoothness
 from src.stats.sections import (
     label_sections,

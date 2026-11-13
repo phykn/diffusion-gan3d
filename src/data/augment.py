@@ -5,137 +5,158 @@ import torch
 
 from src.axes import PLANE_DIRECTIONS, PLANES
 
+# Transform n turns a section n % 4 quarter turns, mirrored first when n >= 4.
+IDENTITY, HALF_TURN, FLIP_LEFT_RIGHT, FLIP_UP_DOWN = 0, 2, 4, 6
+
 
 @dataclass(frozen=True)
-class PlanePolicy:
-    flip_axes: tuple
-    rotate_90: bool
+class PlaneTransforms:
+    flippable_axes: tuple
+    rotatable: bool
 
 
-def build_plane_policies(config):
-    height = config.conditioning.height_enabled
-    groups = config.model.critic.plane_groups
-    # A side rotation would hide a depth gradient or exchange anisotropic axes.
-    fixed = height or not any("xy" in group and len(group) > 1 for group in groups)
-    return {
-        plane: PlanePolicy(
-            flip_axes=tuple(axis for axis in axes if not (height and axis == "z")),
-            rotate_90=not (fixed and "z" in axes),
-        )
-        for plane, axes in PLANE_DIRECTIONS.items()
-    }
+@dataclass(frozen=True)
+class VolumeTransforms:
+    axis_orders: tuple
+    flippable_axes: tuple
 
 
 class SectionAugment:
-    def __init__(self, policies, probability):
-        self.probability = float(probability)
-        self.transforms = {
-            PLANES.index(plane): _list_transforms(plane, policy)
-            for plane, policy in policies.items()
+    def __init__(self, plane_transforms, probability):
+        self.probability = probability
+        self.allowed_transforms = {
+            PLANES.index(plane): self._list_transforms(plane, allowed)
+            for plane, allowed in plane_transforms.items()
         }
-        self._maps = {}
+        self._pixel_maps = {}
 
     def __call__(self, sections, axis, generator):
         sections = tuple(sections)
         if self.probability <= 0.0:
             return sections
-        batch, *_, height, width = sections[0].shape
-        allowed = self.transforms[axis]
-        if height != width:
-            allowed = tuple(index for index in allowed if index % 2 == 0)
-        choices = torch.tensor(tuple(index for index in allowed if index != 0) or (0,))
-        selected = choices[torch.randint(len(choices), (batch,), generator=generator)]
-        keep = torch.rand(batch, generator=generator) >= self.probability
-        selected.masked_fill_(keep, 0)
-        return tuple(self._transform(section, selected) for section in sections)
-
-    def _transform(self, sections, selected):
-        height, width = sections.shape[-2:]
-        maps = self._build_maps(sections.device, height, width)
-        indices = maps.index_select(0, selected.to(sections.device))
-        flattened = sections.reshape(sections.shape[0], -1, height * width)
-        indices = indices.unsqueeze(1).expand(-1, flattened.shape[1], -1)
-        return flattened.gather(2, indices).reshape_as(sections)
-
-    def _build_maps(self, device, height, width):
-        key = (device, height, width)
-        if key not in self._maps:
-            source = torch.arange(height * width, device=device).reshape(height, width)
-            maps = []
-            for index in range(8):
-                grid = torch.flip(source, dims=(-1,)) if index >= 4 else source
-                maps.append(torch.rot90(grid, index % 4, dims=(-2, -1)).reshape(-1))
-            self._maps[key] = torch.stack(maps)
-        return self._maps[key]
+        count, *_, height, width = sections[0].shape
+        candidates = [
+            transform
+            for transform in self.allowed_transforms[axis]
+            if transform != IDENTITY
+            and (height == width or not self._is_quarter_turn(transform))
+        ]
+        candidates = torch.tensor(candidates or [IDENTITY])
+        chosen = candidates[
+            torch.randint(len(candidates), (count,), generator=generator)
+        ]
+        untouched = torch.rand(count, generator=generator) >= self.probability
+        chosen.masked_fill_(untouched, IDENTITY)
+        return tuple(self._transform(section, chosen) for section in sections)
 
     @property
-    def rotated_axes(self):
+    def rotatable_axes(self):
         if self.probability <= 0.0:
             return ()
         return tuple(
             axis
-            for axis, allowed in self.transforms.items()
-            if any(index % 2 for index in allowed)
+            for axis, transforms in self.allowed_transforms.items()
+            if any(map(self._is_quarter_turn, transforms))
         )
 
+    @staticmethod
+    def _list_transforms(plane, allowed):
+        if allowed.rotatable:
+            return tuple(range(8 if allowed.flippable_axes else 4))
+        row_axis, column_axis = PLANE_DIRECTIONS[plane]
+        flip_rows = row_axis in allowed.flippable_axes
+        flip_columns = column_axis in allowed.flippable_axes
+        transforms = [IDENTITY]
+        if flip_rows and flip_columns:
+            transforms.append(HALF_TURN)
+        if flip_columns:
+            transforms.append(FLIP_LEFT_RIGHT)
+        if flip_rows:
+            transforms.append(FLIP_UP_DOWN)
+        return tuple(transforms)
 
-def _list_transforms(plane, policy):
-    if policy.rotate_90:
-        return tuple(range(8 if policy.flip_axes else 4))
-    rows, cols = PLANE_DIRECTIONS[plane]
-    flips = policy.flip_axes
-    # Without rotation: 2 flips both axes, 4 flips the columns, 6 flips the rows.
-    return tuple(
-        index
-        for index, enabled in (
-            (0, True),
-            (2, len(flips) == 2),
-            (4, cols in flips),
-            (6, rows in flips),
-        )
-        if enabled
+    @staticmethod
+    def _is_quarter_turn(transform):
+        return transform % 2 == 1
+
+    def _transform(self, sections, chosen):
+        height, width = sections.shape[-2:]
+        pixel_maps = self._build_pixel_maps(sections.device, height, width)
+        flat = sections.reshape(len(sections), -1, height * width)
+        source_pixels = pixel_maps[chosen.to(sections.device)]
+        source_pixels = source_pixels[:, None].expand(-1, flat.shape[1], -1)
+        return flat.gather(2, source_pixels).reshape_as(sections)
+
+    def _build_pixel_maps(self, device, height, width):
+        key = (device, height, width)
+        if key not in self._pixel_maps:
+            pixels = torch.arange(height * width, device=device).reshape(height, width)
+            mirrored = pixels.flip(-1)
+            self._pixel_maps[key] = torch.stack(
+                [
+                    torch.rot90(
+                        mirrored if transform >= FLIP_LEFT_RIGHT else pixels,
+                        transform % 4,
+                        dims=(-2, -1),
+                    ).reshape(-1)
+                    for transform in range(8)
+                ]
+            )
+        return self._pixel_maps[key]
+
+
+def build_plane_transforms(config):
+    has_height = config.conditioning.height_enabled
+    sides_match_xy = any(
+        "xy" in group and len(group) > 1 for group in config.model.critic.plane_groups
     )
+    side_rotatable = sides_match_xy and not has_height
+    result = {}
+    for plane, axes in PLANE_DIRECTIONS.items():
+        is_side = "z" in axes
+        result[plane] = PlaneTransforms(
+            flippable_axes=tuple(
+                axis for axis in axes if not (has_height and axis == "z")
+            ),
+            rotatable=side_rotatable or not is_side,
+        )
+    return result
 
 
-@dataclass(frozen=True)
-class VolumeSymmetries:
-    orders: tuple
-    flip_axes: tuple
-
-
-def build_symmetries(config):
+def build_volume_transforms(config):
     # Swaps are reflections too and can reverse the tilt carried by LR.
     if not config.lr_bank.flips:
-        return VolumeSymmetries(orders=((0, 1, 2),), flip_axes=())
-    policies = build_plane_policies(config)
-    z_policies = [
-        policy for plane, policy in policies.items() if "z" in PLANE_DIRECTIONS[plane]
-    ]
-    free_z = not config.conditioning.height_enabled
-    permute_z = free_z and any(policy.rotate_90 for policy in z_policies)
-    flip_z = free_z and any("z" in policy.flip_axes for policy in z_policies)
-    orders = tuple(
-        order for order in permutations(range(3)) if permute_z or order[0] == 0
+        return VolumeTransforms(axis_orders=((0, 1, 2),), flippable_axes=())
+    side = build_plane_transforms(config)["xz"]
+    z_swappable = side.rotatable
+    z_flippable = "z" in side.flippable_axes
+    return VolumeTransforms(
+        axis_orders=tuple(
+            order for order in permutations(range(3)) if z_swappable or order[0] == 0
+        ),
+        flippable_axes=(0, 1, 2) if z_flippable else (1, 2),
     )
-    return VolumeSymmetries(orders=orders, flip_axes=((0,) if flip_z else ()) + (1, 2))
 
 
-def augment_volumes(volumes, symmetries, generator):
+def augment_volumes(volumes, transforms, generator):
     shape = volumes.shape[-3:]
-    orders = [
+    # An order that changes the shape could not be stacked with the others.
+    axis_orders = [
         order
-        for order in symmetries.orders
+        for order in transforms.axis_orders
         if tuple(shape[axis] for axis in order) == shape
     ]
-    flips = symmetries.flip_axes
-    flip_count = 2 ** len(flips)
+    flippable_axes = transforms.flippable_axes
+    flip_patterns = 2 ** len(flippable_axes)
     choices = torch.randint(
-        len(orders) * flip_count, (len(volumes),), generator=generator
+        len(axis_orders) * flip_patterns, (len(volumes),), generator=generator
     ).tolist()
-    result = []
+    augmented = []
     for volume, choice in zip(volumes, choices):
-        order_index, flip_mask = divmod(choice, flip_count)
-        volume = volume.permute(0, *(axis + 1 for axis in orders[order_index]))
-        dims = [axis + 1 for bit, axis in enumerate(flips) if flip_mask & (1 << bit)]
-        result.append(volume.flip(dims) if dims else volume)
-    return torch.stack(result)
+        order_index, flip_bits = divmod(choice, flip_patterns)
+        volume = volume.permute(0, *(axis + 1 for axis in axis_orders[order_index]))
+        flipped_dims = [
+            axis + 1 for bit, axis in enumerate(flippable_axes) if flip_bits >> bit & 1
+        ]
+        augmented.append(volume.flip(flipped_dims) if flipped_dims else volume)
+    return torch.stack(augmented)

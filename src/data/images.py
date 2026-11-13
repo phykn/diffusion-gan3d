@@ -6,6 +6,8 @@ from PIL import Image
 from src.axes import PLANES
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff", ".bmp", ".pgm"}
+UINT8_LABELS = 256
+XY_PLANE = PLANES[0]
 
 
 @dataclass(frozen=True)
@@ -14,24 +16,26 @@ class PlaneImages:
     images: tuple
 
 
-def load_images(folders, num_phases):
+def load_images(folders_by_plane, num_phases):
     planes = {}
-    loaded = {}
+    already_read = {}
     for plane in PLANES:
-        if plane not in folders:
+        if plane not in folders_by_plane:
             continue
-        sources = folders[plane]
-        if len({folder.resolve() for folder in sources}) != len(sources):
+        folders = folders_by_plane[plane]
+        if len({folder.resolve() for folder in folders}) != len(folders):
             raise ValueError(f"{plane} folders must not contain duplicates.")
-        groups = []
-        for folder in sources:
+        paths_per_folder, images_per_folder = [], []
+        for folder in folders:
             key = folder.resolve()
-            if key not in loaded:
+            if key not in already_read:
                 paths = list_images(folder)
                 images = tuple(read_labels(path, num_phases) for path in paths)
-                loaded[key] = paths, images
-            groups.append(loaded[key])
-        planes[plane] = PlaneImages(*zip(*groups))
+                already_read[key] = paths, images
+            paths, images = already_read[key]
+            paths_per_folder.append(paths)
+            images_per_folder.append(images)
+        planes[plane] = PlaneImages(tuple(paths_per_folder), tuple(images_per_folder))
     return planes
 
 
@@ -56,8 +60,8 @@ def read_labels(path, num_phases=None):
             if getattr(image, "n_frames", 1) != 1:
                 raise ValueError(f"training images must contain one 2D frame: {path}")
             labels = np.asarray(image)
-    except OSError as exc:
-        raise ValueError(f"cannot read image {path}: {exc}") from exc
+    except OSError as error:
+        raise ValueError(f"cannot read image {path}: {error}") from error
     if labels.ndim != 2:
         raise ValueError(f"training images must be two-dimensional: {path}")
     if labels.dtype != np.uint8:
@@ -70,21 +74,21 @@ def read_labels(path, num_phases=None):
 
 
 def infer_num_phases(planes):
-    present = np.zeros(256, dtype=bool)
-    largest, source = -1, None
+    label_seen = np.zeros(UINT8_LABELS, dtype=bool)
+    largest, largest_path = -1, None
     for plane in planes.values():
-        for group, paths in zip(plane.images, plane.paths):
-            for image, path in zip(group, paths):
-                labels = np.flatnonzero(np.bincount(image.ravel()))
-                present[labels] = True
+        for images, paths in zip(plane.images, plane.paths):
+            for image, path in zip(images, paths):
+                labels = np.unique(image)
+                label_seen[labels] = True
                 if labels[-1] > largest:
-                    largest, source = int(labels[-1]), path
-    missing = np.flatnonzero(~present[:largest])
+                    largest, largest_path = int(labels[-1]), path
+    missing = np.flatnonzero(~label_seen[:largest])
     if missing.size:
         raise ValueError(
             f"label {missing[0]} never appears below the largest label {largest}; "
             "use labels 0..K-1, or set num_phases to keep an unused phase. "
-            f"Largest label in: {source}"
+            f"Largest label in: {largest_path}"
         )
     return largest + 1
 
@@ -93,7 +97,7 @@ def list_side_images(planes):
     return [
         image
         for name, plane in planes.items()
-        if name != PLANES[0]
-        for group in plane.images
-        for image in group
+        if name != XY_PLANE
+        for images in plane.images
+        for image in images
     ]

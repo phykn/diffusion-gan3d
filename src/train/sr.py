@@ -7,9 +7,11 @@ from tqdm import trange
 from src.axes import PLANES
 from src.config.io import load_generation_settings
 from src.config.schema import SRConfig
-from src.data.augment import augment_volumes, build_symmetries
+from src.data.augment import augment_volumes, build_volume_transforms
 from src.data.crops import CropSampler
-from src.data.phases import encode_phases, measure_image_profile, resize_phases
+from src.data.phases import encode_phases
+from src.data.profile import measure_image_profile
+from src.data.resize import resize_phases
 from src.export import (
     build_diffusion,
     check_export,
@@ -119,7 +121,7 @@ class SRTrainer(Trainer):
         self.lr_export = check_export(lr, "lr")
         self.lr_config = export_config(self.lr_export)
         check_lr_source(self.lr_config, config)
-        self.symmetries = build_symmetries(config)
+        self.volume_transforms = build_volume_transforms(config)
         # LR-grid side crops: the conditions of each bank volume.
         self.side_samplers = (
             {
@@ -174,7 +176,7 @@ class SRTrainer(Trainer):
         axes = sorted(self.side_samplers)
         axis = axes[int(randint(len(axes), (), generator))]
         crop = self.side_samplers[axis].sample(1, generator)
-        origin, extent = float(crop.origins[0]), float(crop.extents[0])
+        origin, extent = float(crop.height_origins[0]), float(crop.height_extents[0])
         record = {
             "plane": PLANES[axis],
             "height_origin": origin,
@@ -262,7 +264,7 @@ class SRTrainer(Trainer):
         real = self.real_crops()
         indices = randint(len(self.bank.volumes), (batch,), generator)
         low = self.bank.volumes[indices].to(self.device)
-        low = augment_volumes(low, self.symmetries, generator)
+        low = augment_volumes(low, self.volume_transforms, generator)
         conditioning = config.conditioning
         coarse, level = corrupt_coarse(
             low,

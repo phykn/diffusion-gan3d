@@ -23,7 +23,7 @@ from paper.scripts.common import (
 from paper.scripts.evaluate_lr import FULL, SMOKE
 from src.api import SuperResolutionAPI
 from src.config.io import load_generation_settings, load_yaml, stored_path
-from src.data.phases import downsample
+from src.data.resize import downsample
 from src.stats.sections import (
     label_sections,
     section_errors,

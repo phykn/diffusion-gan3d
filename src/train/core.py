@@ -6,7 +6,7 @@ from torch import nn
 
 from src.axes import AXES, PLANES
 from src.config.schema import plane_groups
-from src.data.augment import SectionAugment, build_plane_policies
+from src.data.augment import SectionAugment, build_plane_transforms
 from src.data.crops import CropSampler
 from src.data.height import build_heights
 from src.device import gpu_amp, wide_dtype
@@ -183,7 +183,7 @@ class Trainer:
         self.critic_amp = mixed and self.device.type == "cuda"
         self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.denoiser_amp)
         self.augment = SectionAugment(
-            build_plane_policies(config), config.augmentation.probability
+            build_plane_transforms(config), config.augmentation.probability
         )
         self.spacing = config.data.crop_size / self.patch_size
         self.updates = {name: 0 for name in (*self.critics, "generator")}
@@ -316,12 +316,13 @@ class Trainer:
             sample = self.samplers[axis].sample(count, self.random["data"])
             real = RealCrops(images=sample.images.to(self.device))
             if self.height and axis != 0:
-                real.origins, real.extents = sample.origins, sample.extents
+                real.origins = sample.height_origins
+                real.extents = sample.height_extents
                 real.heights = build_heights(
                     sample.images.shape[-2:],
-                    sample.origins,
+                    sample.height_origins,
                     self.spacing,
-                    sample.extents,
+                    sample.height_extents,
                     self.device,
                 )
             crops[axis] = real

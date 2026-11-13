@@ -4,8 +4,8 @@ import torch
 import torch.nn.functional as F
 
 from src.data.height import build_heights, check_extent
-from src.data.phases import upsample_region
 from src.data.profile import integrate_profile, validate_profile
+from src.data.resize import upsample_region
 from src.device import wide_dtype
 
 
