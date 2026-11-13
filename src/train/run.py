@@ -8,9 +8,9 @@ from threading import Event, current_thread, main_thread
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.config.io import PROJECT_ROOT, dump_yaml, project_path, save_yaml, stored_path
+from src.config.build import change_setting, to_dict
+from src.config.io import PROJECT_ROOT, dump_yaml, resolve_path, save_yaml, shorten_path
 from src.config.sample import build_stage_configs, load_sample
-from src.config.schema import to_dict, update
 from src.console import field, paint, path_field, section, success, warning
 from src.data.images import load_images
 from src.device import check_device
@@ -59,7 +59,7 @@ def is_done(run_dir):
 
 def training_images(config):
     folders = {
-        plane: [project_path(path) for path in paths]
+        plane: [resolve_path(path) for path in paths]
         for plane, paths in config.data.images.items()
     }
     return load_images(folders, config.data.num_phases)
@@ -233,8 +233,8 @@ def sr_config(config, lr_dir):
     """The SR config pointing at the finished LR run, and that run's export."""
     lr = read_export(lr_dir, "lr")
     check_lr_source(export_config(lr), config)
-    config = update(config, "source.lr_run", stored_path(lr_dir))
-    return update(config, "source.lr_step", lr["step"]), lr
+    config = change_setting(config, "source.lr_run", shorten_path(lr_dir))
+    return change_setting(config, "source.lr_step", lr["step"]), lr
 
 
 def train_stage(config, device, run_dir, lr_dir=None):
@@ -258,7 +258,7 @@ def resume_stage(resume, device, run_dir, *, steps=None, path_map=None):
     payload = relocate(load_checkpoint(resolve_checkpoint(resume)), path_map)
     config = saved_config(payload)
     if steps is not None:
-        config = update(config, "train.total_steps", steps)
+        config = change_setting(config, "train.total_steps", steps)
     if config.train.total_steps <= payload["step"]:
         raise ValueError(f"--steps must exceed the {payload['step']} completed steps.")
     planes = training_images(config)
@@ -272,11 +272,13 @@ def resume_stage(resume, device, run_dir, *, steps=None, path_map=None):
 def stage_configs(args):
     configs = build_stage_configs(load_sample(args.sample or "default"))
     if args.steps is not None:
-        configs["lr"] = update(configs["lr"], "train.total_steps", args.steps)
+        configs["lr"] = change_setting(configs["lr"], "train.total_steps", args.steps)
     if args.sr_steps is not None:
-        configs["sr"] = update(configs["sr"], "train.total_steps", args.sr_steps)
+        configs["sr"] = change_setting(
+            configs["sr"], "train.total_steps", args.sr_steps
+        )
     if args.bank_size is not None:
-        configs["sr"] = update(configs["sr"], "lr_bank.size", args.bank_size)
+        configs["sr"] = change_setting(configs["sr"], "lr_bank.size", args.bank_size)
     return configs
 
 
@@ -286,7 +288,7 @@ def show(configs, run_name):
         lr_run = str(stage_dir(run_name, "lr"))
         sr = replace(sr, source=replace(sr.source, lr_run=lr_run))
     for stage, config in (("lr", configs["lr"]), ("sr", sr)):
-        print(f"# {stage}\n{dump_yaml(to_dict(config))}")
+        print(f"# {stage}\n{dump_yaml(config)}")
 
 
 def stage_dirs(name):

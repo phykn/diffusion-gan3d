@@ -27,7 +27,7 @@ def _sources():
         texts.extend(
             path.read_text(encoding="utf-8")
             for path in files
-            if path.name != "schema.py"
+            if path.name not in ("schema.py", "build.py")
         )
     return "\n".join(texts)
 

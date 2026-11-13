@@ -22,7 +22,7 @@ from paper.scripts.common import (
 )
 from paper.scripts.evaluate_lr import FULL, SMOKE
 from src.api import SuperResolutionAPI
-from src.config.io import load_generation_settings, load_yaml, stored_path
+from src.config.io import load_generation_settings, load_yaml, shorten_path
 from src.data.resize import downsample
 from src.stats.sections import (
     label_sections,
@@ -75,7 +75,7 @@ def evaluate(args):
     weights = {best: run / "generator.pt"} | archived_generators(run)
 
     results = {
-        "run": stored_path(run),
+        "run": shorten_path(run),
         "lr_run": config.source.lr_run,
         "best_step": best,
         "training_minutes": wall_minutes(run / "tensorboard"),

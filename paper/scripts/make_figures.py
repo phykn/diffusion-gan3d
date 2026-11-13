@@ -19,7 +19,7 @@ from paper.scripts.common import cache_dir, first_image, read_metrics, real_crop
 from paper.scripts.evaluate_anode import lr_grid, real_volume_paths
 from paper.scripts.evaluate_lr import DISTANCES
 from paper.scripts.evaluate_sr import upsample_linear, upsample_nearest
-from src.config.io import load_config, project_path
+from src.config.io import load_config, resolve_path
 from src.stats.sections import label_sections
 from src.storage import load_volume
 
@@ -62,7 +62,7 @@ def render_figures(root, out):
     out.mkdir(parents=True, exist_ok=True)
 
     results = read_results(root, "lr")
-    run = project_path(results["run"])
+    run = resolve_path(results["run"])
     best = results["best_step"]
     config = load_config(run / "train.yaml")
     plt.rcParams.update(
@@ -421,7 +421,7 @@ def render_anchor(results, external, out):
 
 
 def render_sr(results, root, out):
-    run = project_path(results["run"])
+    run = resolve_path(results["run"])
     config = load_config(run / "train.yaml")
     best = results["best_step"]
     cache = cache_dir(root, run)
@@ -483,8 +483,8 @@ def render_sr_sections(low, high, config, out):
 
 
 def render_anode(results, root, out):
-    run = project_path(results["run"])
-    config = load_config(project_path(results["lr_run"]) / "train.yaml")
+    run = resolve_path(results["run"])
+    config = load_config(resolve_path(results["lr_run"]) / "train.yaml")
     cache = cache_dir(root, run)
     probs = torch.load(cache / "lr.pt", weights_only=True)
     high = torch.load(cache / "hr.pt", weights_only=True)

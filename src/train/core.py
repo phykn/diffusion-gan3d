@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from src.axes import AXES, PLANES
-from src.config.schema import plane_groups
+from src.config.schema import group_planes
 from src.data.augment import SectionAugment, build_plane_transforms
 from src.data.crops import CropSampler
 from src.data.height import build_heights
@@ -82,7 +82,7 @@ def build_critics(config):
                 height_channels=int(config.conditioning.height_enabled),
                 pyramid_min_size=critic.pyramid_min_size,
             )
-            for group in plane_groups(config)
+            for group in group_planes(config)
         }
     )
 
@@ -145,7 +145,7 @@ class Trainer:
         self.config = config
         self.device = torch.device(device)
         self.random = RunRandom(config.train.seed, device)
-        self.groups = plane_groups(config)
+        self.groups = group_planes(config)
         self.axes = tuple(
             sorted(axis for axes in self.groups.values() for axis in axes)
         )

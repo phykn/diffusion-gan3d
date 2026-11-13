@@ -15,7 +15,7 @@ from scripts.simul.src.anode import (
 )
 from scripts.simul.src.geometry import check_geometry, pack
 from src.axes import AXES
-from src.config.io import project_path
+from src.config.io import resolve_path
 
 PALETTE = [0, 0, 0, 140, 140, 140, 255, 255, 255] + [0, 0, 0] * 253
 
@@ -38,7 +38,7 @@ def generate(cfg):
     if seed is not None and (type(seed) is not int or seed < 0):
         raise ValueError("output seed must be a non-negative integer or null.")
 
-    root = project_path(output["data_dir"])
+    root = resolve_path(output["data_dir"])
     volume_dir = root / "volumes"
     slice_dirs = {axis: root / "slices" / str(axis) for axis in AXES}
     directories = (volume_dir, *slice_dirs.values())

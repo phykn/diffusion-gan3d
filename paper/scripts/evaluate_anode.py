@@ -21,7 +21,7 @@ from paper.scripts.common import (
 from paper.scripts.evaluate_sr import lr_agreement, upsample_linear, upsample_nearest
 from src.api import SuperResolutionAPI
 from src.axes import AXIS_NAMES, PLANES
-from src.config.io import load_yaml, project_path, stored_path
+from src.config.io import load_yaml, resolve_path, shorten_path
 from src.data.phases import encode_phases
 from src.data.resize import downsample
 from src.stats.sections import compare_sections, label_sections, section_statistics
@@ -63,7 +63,7 @@ def evaluate(args):
         (SMOKE_SAMPLES, SMOKE_HR_SAMPLES) if args.smoke else (SAMPLES, HR_SAMPLES)
     )
     api = SuperResolutionAPI(run, args.device)
-    lr_run = project_path(api.config.source.lr_run)
+    lr_run = resolve_path(api.config.source.lr_run)
     data = api.lr.config.data
     phases = data.num_phases
     scale = data.crop_size // data.lo_res_size
@@ -82,7 +82,7 @@ def evaluate(args):
     low = [volume.argmax(0).to(torch.uint8) for volume in probs]
 
     results = {
-        "run": stored_path(run),
+        "run": shorten_path(run),
         "lr_run": api.config.source.lr_run,
         "best_step": load_yaml(run / "selection" / "scores.yaml")["best_step"],
         "lr_best_step": load_yaml(lr_run / "selection" / "scores.yaml")["best_step"],
@@ -129,7 +129,7 @@ def generate_volumes(api, cache, reuse, shape, samples, hr_samples):
 
 def real_volume_paths(data):
     """Ground-truth volumes saved beside the slices the sample trains on."""
-    slices = project_path(data.images["xy"][0])
+    slices = resolve_path(data.images["xy"][0])
     paths = sorted((slices.parents[1] / "volumes").glob("*.tiff"))
     if not paths:
         raise FileNotFoundError(f"no real volumes beside {slices}.")

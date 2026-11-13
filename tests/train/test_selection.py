@@ -2,15 +2,15 @@
 
 import yaml
 
-from src.config.schema import update
+from src.config.build import change_setting
 from src.export import read_export
 from src.train.run import train_stage
 
 
 def _train(config, path, steps=2, every=1):
-    config = update(config, "train.total_steps", steps)
-    config = update(config, "train.weights_every_steps", every)
-    config = update(config, "train.structure_every_steps", 0)
+    config = change_setting(config, "train.total_steps", steps)
+    config = change_setting(config, "train.weights_every_steps", every)
+    config = change_setting(config, "train.structure_every_steps", 0)
     return train_stage(config, "cpu", path)
 
 

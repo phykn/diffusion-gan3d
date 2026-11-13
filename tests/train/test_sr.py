@@ -10,7 +10,7 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 import train
 from src.api import SuperResolutionAPI
-from src.config.schema import update
+from src.config.build import change_setting
 from src.export import read_export
 from src.train.run import resume_stage, train_stage
 from src.train.sr import corrupt_coarse
@@ -43,9 +43,9 @@ def test_sr_resume_matches_an_unbroken_run_without_the_lr_run(
 ):
     # The bank refreshes every step, so the bank must resume exactly too.
     lr = Path(shutil.copytree(tiny_lr_run, tmp_path / "copy-lr"))
-    config = update(tiny_configs["sr"], "train.structure_every_steps", 0)
+    config = change_setting(tiny_configs["sr"], "train.structure_every_steps", 0)
     whole = train_stage(
-        update(config, "train.total_steps", 2), "cpu", tmp_path / "whole", lr
+        change_setting(config, "train.total_steps", 2), "cpu", tmp_path / "whole", lr
     )
     first = train_stage(config, "cpu", tmp_path / "first", lr)
     shutil.rmtree(lr)

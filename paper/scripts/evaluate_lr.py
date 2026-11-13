@@ -23,7 +23,7 @@ from paper.scripts.common import (
     wall_minutes,
 )
 from src.api import LowResolutionAPI, PlaneAnchor
-from src.config.io import load_config, load_generation_settings, load_yaml, stored_path
+from src.config.io import load_config, load_generation_settings, load_yaml, shorten_path
 from src.data.phases import encode_phases
 from src.data.resize import resize_phases
 from src.stats.anchor import measure_boundaries, measure_slice_smoothness
@@ -82,7 +82,7 @@ def evaluate(args):
     source = first_image(config)[1]
 
     results = {
-        "run": stored_path(run),
+        "run": shorten_path(run),
         "best_step": best,
         "training_minutes": wall_minutes(run / "tensorboard"),
         "guidance": settings.guidance,

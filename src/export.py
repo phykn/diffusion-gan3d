@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 
-from src.config.schema import build_config, to_dict
+from src.config.build import build_config, to_dict
 from src.model.denoiser import Denoiser3D
 from src.model.diffusion import Diffusion
 from src.storage import torch_save

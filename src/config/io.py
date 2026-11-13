@@ -2,17 +2,26 @@ from pathlib import Path
 
 import yaml
 
-from src.config.schema import build_config, build_generation_settings, to_dict
+from src.config.build import build_config, build_generation_settings, to_dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+GENERATION_SETTINGS = PROJECT_ROOT / "config" / "gen.yaml"
 
 
-def project_path(path):
+class _FlowListDumper(yaml.SafeDumper):
+    def represent_list(self, values):
+        return self.represent_sequence("tag:yaml.org,2002:seq", values, flow_style=True)
+
+
+_FlowListDumper.add_representer(list, _FlowListDumper.represent_list)
+
+
+def resolve_path(path):
     return (PROJECT_ROOT / Path(path).expanduser()).resolve()
 
 
-def stored_path(path):
-    resolved = project_path(path)
+def shorten_path(path):
+    resolved = resolve_path(path)
     try:
         return resolved.relative_to(PROJECT_ROOT).as_posix()
     except ValueError:
@@ -24,8 +33,8 @@ def load_yaml(path):
     try:
         with path.open(encoding="utf-8") as file:
             data = yaml.safe_load(file)
-    except yaml.YAMLError as exc:
-        raise ValueError(f"invalid YAML: {path}") from exc
+    except yaml.YAMLError as error:
+        raise ValueError(f"invalid YAML: {path}") from error
     if data is None:
         data = {}
     if not isinstance(data, dict):
@@ -33,22 +42,12 @@ def load_yaml(path):
     return data
 
 
-class _Dumper(yaml.SafeDumper):
-    def represent_list(self, values):
-        return self.represent_sequence("tag:yaml.org,2002:seq", values, flow_style=True)
-
-
-_Dumper.add_representer(list, _Dumper.represent_list)
-
-
 def dump_yaml(data):
-    return (
-        "\n".join(
-            yaml.dump({key: value}, Dumper=_Dumper, sort_keys=False)
-            for key, value in to_dict(data).items()
-        )
-        or "{}\n"
+    sections = (
+        yaml.dump({key: value}, Dumper=_FlowListDumper, sort_keys=False)
+        for key, value in to_dict(data).items()
     )
+    return "\n".join(sections) or "{}\n"
 
 
 def save_yaml(path, data):
@@ -63,4 +62,4 @@ def load_config(path):
 
 
 def load_generation_settings():
-    return build_generation_settings(load_yaml(PROJECT_ROOT / "config" / "gen.yaml"))
+    return build_generation_settings(load_yaml(GENERATION_SETTINGS))

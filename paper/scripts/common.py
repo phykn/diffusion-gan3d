@@ -8,7 +8,7 @@ import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from src.axes import AXIS_NAMES, PLANES, PORE_PHASE
-from src.config.io import PROJECT_ROOT, project_path
+from src.config.io import PROJECT_ROOT, resolve_path
 from src.data.images import list_images, read_labels
 from src.data.phases import encode_phases
 from src.data.resize import resize_phases
@@ -146,7 +146,7 @@ def connectivity(volumes):
 
 
 def first_image(config):
-    path = list_images(project_path(config.data.images["xy"][0]))[0]
+    path = list_images(resolve_path(config.data.images["xy"][0]))[0]
     return path, read_labels(path)
 
 

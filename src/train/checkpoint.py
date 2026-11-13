@@ -6,7 +6,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import torch
 
-from src.config.schema import CONFIG_TYPES, build_config
+from src.config.build import build_config
+from src.config.schema import CONFIG_TYPES
 from src.export import STAGE_NAMES
 from src.storage import torch_save
 

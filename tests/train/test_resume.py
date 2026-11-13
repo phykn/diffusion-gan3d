@@ -13,8 +13,8 @@ import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 import train
+from src.config.build import change_setting
 from src.config.io import PROJECT_ROOT
-from src.config.schema import update
 from src.train.checkpoint import complete_checkpoint, resolve_checkpoint
 from src.train.run import resume_stage, train_stage
 
@@ -22,14 +22,14 @@ LOSSES = ("loss/generator", "loss/generator_total", "loss/critic", "loss/vf")
 
 
 def _config(base, steps, **values):
-    config = update(base, "train.total_steps", steps)
+    config = change_setting(base, "train.total_steps", steps)
     for path, value in {
         "train.weights_every_steps": 1,
         "train.archive_every_steps": 1,
         "train.structure_every_steps": 0,
         **values,
     }.items():
-        config = update(config, path, value)
+        config = change_setting(config, path, value)
     return config
 
 

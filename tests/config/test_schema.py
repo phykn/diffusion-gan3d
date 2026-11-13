@@ -1,6 +1,7 @@
 import pytest
 
-from src.config.schema import LRConfig, build_config, plane_groups, to_dict, update
+from src.config.build import build_config, change_setting, to_dict
+from src.config.schema import LRConfig, group_planes
 
 
 def _values(**data):
@@ -48,8 +49,8 @@ def test_missing_data_key():
 
 
 def test_update_and_groups():
-    config = update(build_config(_values()), "train.total_steps", 3)
+    config = change_setting(build_config(_values()), "train.total_steps", 3)
     assert config.train.total_steps == 3
-    assert plane_groups(config) == {"xy_xz_yz": (0, 1, 2)}
-    split = update(config, "model.critic.plane_groups", [["xy"], ["xz", "yz"]])
-    assert plane_groups(split) == {"xy": (0,), "xz_yz": (1, 2)}
+    assert group_planes(config) == {"xy_xz_yz": (0, 1, 2)}
+    split = change_setting(config, "model.critic.plane_groups", [["xy"], ["xz", "yz"]])
+    assert group_planes(split) == {"xy": (0,), "xz_yz": (1, 2)}

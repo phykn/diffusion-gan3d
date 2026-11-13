@@ -1,11 +1,11 @@
 import torch
 
-from src.config.schema import update
+from src.config.build import change_setting
 from src.data.augment import augment_volumes, build_volume_transforms
 
 
 def test_bank_without_flips_is_identity(tiny_configs):
-    config = update(tiny_configs["sr"], "lr_bank.flips", False)
+    config = change_setting(tiny_configs["sr"], "lr_bank.flips", False)
     transforms = build_volume_transforms(config)
     volumes = torch.rand(3, 2, 4, 4, 4)
     for seed in range(100):
