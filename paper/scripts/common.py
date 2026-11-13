@@ -9,8 +9,8 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 from src.axes import AXIS_NAMES, PLANES, PORE_PHASE
 from src.config.io import PROJECT_ROOT, project_path
-from src.data.crops import phase_channels, resize_phases
 from src.data.images import list_images, read_labels
+from src.data.phases import encode_phases, resize_phases
 from src.device import default_device
 from src.stats.sections import compare_sections, section_statistics
 from src.stats.volume import interface_density, spanning_fractions, tortuosity
@@ -160,7 +160,7 @@ def real_crops(config, patch_size):
         top = int(rng.randint(0, height - size + 1))
         left = int(rng.randint(0, width - size + 1))
         crops.append(labels[top : top + size, left : left + size])
-    probs = phase_channels(torch.from_numpy(np.stack(crops)), config.data.num_phases)
+    probs = encode_phases(torch.from_numpy(np.stack(crops)), config.data.num_phases)
     return resize_phases(probs, (patch_size,) * 2)
 
 

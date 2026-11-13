@@ -173,14 +173,15 @@ def build_stage_configs(sample):
 
 
 def measure_data(config, planes):
-    from src.data.height import depth_profile, height_extent
+    from src.data.height import measure_height
+    from src.data.profile import measure_depth_profile
 
     values = {}
     if config.conditioning.height_enabled:
-        values["height_extent"] = height_extent(planes)
+        values["height_extent"] = measure_height(planes)
     if config.profile_enabled:
         values["depth_profile"] = freeze(
-            depth_profile(
+            measure_depth_profile(
                 planes,
                 config.data.num_phases,
                 config.conditioning.spatial_profile.num_bins,

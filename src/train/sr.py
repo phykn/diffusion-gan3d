@@ -7,9 +7,9 @@ from tqdm import trange
 from src.axes import PLANES
 from src.config.io import load_generation_settings
 from src.config.schema import SRConfig
-from src.data.crops import CropSampler, phase_channels, resize_phases
-from src.data.height import image_profile
-from src.data.orientation import augment_volumes, bank_symmetries
+from src.data.augment import augment_volumes, build_symmetries
+from src.data.crops import CropSampler
+from src.data.phases import encode_phases, measure_image_profile, resize_phases
 from src.export import (
     build_diffusion,
     check_export,
@@ -44,7 +44,7 @@ def corrupt_coarse(low, probability, strength, generator):
     mask = F.interpolate(blocks, size=low.shape[2:], mode="nearest").bool() & active
     labels = randint(low.shape[1], (count, *shape[2:]), generator, device)
     replacement = F.interpolate(
-        phase_channels(labels, low.shape[1]), size=low.shape[2:], mode="nearest"
+        encode_phases(labels, low.shape[1]), size=low.shape[2:], mode="nearest"
     )
     corrupted = torch.where(mask, replacement, low)
     # Matching replacements do not count toward the realized level.
@@ -85,7 +85,7 @@ class Bank:
 def crop_profile(image, origin, extent, crop_size, bins):
     """The depth profile of one side crop as a constant profile over the
     whole source height, flat beyond the crop."""
-    values = image_profile(image[None], bins)[0].T.tolist()  # [bins][K]
+    values = measure_image_profile(image[None], bins)[0].T.tolist()  # [bins][K]
     start = origin / extent
     length = crop_size / extent
     points = [[0.0, values[0]]] if start > 0 else []
@@ -119,7 +119,7 @@ class SRTrainer(Trainer):
         self.lr_export = check_export(lr, "lr")
         self.lr_config = export_config(self.lr_export)
         check_lr_source(self.lr_config, config)
-        self.symmetries = bank_symmetries(config)
+        self.symmetries = build_symmetries(config)
         # LR-grid side crops: the conditions of each bank volume.
         self.side_samplers = (
             {

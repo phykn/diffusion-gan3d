@@ -2,10 +2,9 @@ import torch
 
 from src.axes import PLANES
 from src.config.schema import LRConfig
-from src.data.height import image_profile, rebin_profile
-from src.data.pairs import sample_pairs
+from src.data.phases import measure_image_profile, rebin_profile
 from src.stats.labels import phase_profile
-from src.train.core import StepInputs, Trainer, schedule_ramp
+from src.train.core import StepInputs, Trainer, sample_sections, schedule_ramp
 from src.train.losses.mirror_balance import mirror_balance_loss
 from src.train.losses.spatial_profile import profile_loss
 from src.train.losses.transition import real_transition_loss
@@ -49,7 +48,7 @@ class LRTrainer(Trainer):
             )
         if profile_enabled:
             profile = rebin_profile(
-                image_profile(
+                measure_image_profile(
                     real[axis].images, bins=conditioning.spatial_profile.num_bins
                 ),
                 self.patch_size,
@@ -119,18 +118,19 @@ class LRTrainer(Trainer):
                 continue
             real[axis] = crops.images
             # Sample before critic augmentation so directions keep their meaning.
-            sampled = sample_pairs(
-                clean_probs,
-                clean_probs,
+            volumes = (clean_probs,)
+            if height is not None:
+                volumes += (height.detach(),)
+            sampled = sample_sections(
+                volumes,
                 axis,
                 self.config.train.slice_pairs_per_plane,
                 self.random["pairs"],
-                height=height,
             )
             fake[axis] = sampled[0]
             if height is not None:
                 real_heights[axis] = crops.heights
-                fake_heights[axis] = sampled[2]
+                fake_heights[axis] = sampled[1]
         value, values = real_transition_loss(
             real,
             fake,

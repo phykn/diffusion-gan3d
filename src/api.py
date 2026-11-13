@@ -5,7 +5,7 @@ from functools import cached_property
 import torch
 
 from src.config.io import load_generation_settings
-from src.data.crops import phase_channels, resize_anchor
+from src.data.phases import encode_phases, resize_phases
 from src.device import check_device, default_device
 from src.export import (
     build_diffusion,
@@ -103,7 +103,10 @@ class LowResolutionAPI:
             raise ValueError(
                 f"image must be a {self.crop_size} x {self.crop_size} original crop."
             )
-        return resize_anchor(image, self.input_size, self.num_phases)
+        probs = encode_phases(image[None], self.num_phases)
+        probs = resize_phases(probs, (self.input_size,) * 2)[0]
+        # Area resizing can round a full cell to 1 + eps; anchors require [0, 1].
+        return probs.clamp_(0.0, 1.0)
 
     def plan(self, *, blocks=None, shape=None, overlap=None, margin=None):
         """The tile plan of a request. margin (default: the denoiser's
@@ -229,7 +232,7 @@ def lr_fractions(low, num_phases):
         return low
     if low.ndim != 3:
         raise ValueError("LR labels must have shape (D, H, W).")
-    return phase_channels(low.detach().cpu()[None], num_phases)[0]
+    return encode_phases(low.detach().cpu()[None], num_phases)[0]
 
 
 class SuperResolutionAPI:

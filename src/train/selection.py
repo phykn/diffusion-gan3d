@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 from src.config.io import save_yaml
-from src.data.crops import downsample
+from src.data.phases import downsample
 from src.export import write_export
 from src.rng import make_generator
 from src.sampling.conditions import LRConditions, SRConditions

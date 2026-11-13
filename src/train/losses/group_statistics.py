@@ -2,7 +2,7 @@ from itertools import combinations
 
 import torch
 
-from src.data.crops import resize_phases
+from src.data.phases import resize_phases
 from src.stats.pairs import volume_pairs
 
 

@@ -1,12 +1,12 @@
 import torch
 
 from src.config.schema import update
-from src.data.orientation import augment_volumes, bank_symmetries
+from src.data.augment import augment_volumes, build_symmetries
 
 
 def test_bank_without_flips_is_identity(tiny_configs):
     config = update(tiny_configs["sr"], "lr_bank.flips", False)
-    symmetries = bank_symmetries(config)
+    symmetries = build_symmetries(config)
     volumes = torch.rand(3, 2, 4, 4, 4)
     for seed in range(100):
         generator = torch.Generator().manual_seed(seed)
@@ -14,5 +14,5 @@ def test_bank_without_flips_is_identity(tiny_configs):
 
 
 def test_bank_with_flips_uses_cube_symmetries(tiny_configs):
-    symmetries = bank_symmetries(tiny_configs["sr"])
-    assert symmetries.count == 48
+    symmetries = build_symmetries(tiny_configs["sr"])
+    assert len(symmetries.orders) * 2 ** len(symmetries.flip_axes) == 48

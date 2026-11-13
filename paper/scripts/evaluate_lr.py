@@ -24,7 +24,7 @@ from paper.scripts.common import (
 )
 from src.api import LowResolutionAPI, PlaneAnchor
 from src.config.io import load_config, load_generation_settings, load_yaml, stored_path
-from src.data.crops import phase_channels, resize_phases
+from src.data.phases import encode_phases, resize_phases
 from src.stats.anchor import measure_boundaries, measure_slice_smoothness
 from src.stats.sections import (
     label_sections,
@@ -132,7 +132,7 @@ def real_tilt(source, config):
     data = config.data
     shape = tuple(n * data.lo_res_size // data.crop_size for n in source.shape)
     labels = torch.tensor(source).long()[None]
-    probs = resize_phases(phase_channels(labels, data.num_phases), shape)
+    probs = resize_phases(encode_phases(labels, data.num_phases), shape)
     labels = label_sections(probs)[0].argmax(0).numpy()
     tilt = tilt_balance([labels[None]], phase=1)["yx"]
     return {key: tilt[key] for key in TILT_KEYS}

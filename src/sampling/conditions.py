@@ -3,14 +3,9 @@ import math
 import torch
 import torch.nn.functional as F
 
-from src.data.crops import coarse_region
-from src.data.height import (
-    check_extent,
-    grid_spacing,
-    height_field,
-    integrate_profile,
-    validate_profile,
-)
+from src.data.height import build_heights, check_extent
+from src.data.phases import upsample_region
+from src.data.profile import integrate_profile, validate_profile
 from src.device import wide_dtype
 
 
@@ -36,7 +31,7 @@ class HeightRange:
 
     def __init__(self, config, plan, origin, extent):
         self.enabled = config.conditioning.height_enabled
-        self.spacing = grid_spacing(config.data.crop_size, config.patch_size)
+        self.spacing = config.data.crop_size / config.patch_size
         self.margin = plan.margin
         if not self.enabled:
             if extent is not None:
@@ -68,7 +63,7 @@ class HeightRange:
         return self.origin + (tile.source[0].start - self.margin) * self.spacing
 
     def field(self, tile, device):
-        return height_field(
+        return build_heights(
             tile.shape, self.tile_origin(tile), self.spacing, self.extent, device
         )
 
@@ -164,7 +159,7 @@ class SRConditions:
 
     def __call__(self, index, tile):
         start = tuple(region.start for region in tile.source)
-        coarse = coarse_region(self.low, start, tile.shape, self.scale)
+        coarse = upsample_region(self.low, start, tile.shape, self.scale)
         result = {"coarse": coarse.to(self.device, torch.float32)}
         if self.height.enabled:
             result["height"] = self.height.field(tile, self.device)

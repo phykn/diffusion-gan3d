@@ -16,17 +16,22 @@ class PlaneImages:
 
 def load_images(folders, num_phases):
     planes = {}
+    loaded = {}
     for plane in PLANES:
         if plane not in folders:
             continue
         sources = folders[plane]
         if len({folder.resolve() for folder in sources}) != len(sources):
             raise ValueError(f"{plane} folders must not contain duplicates.")
-        paths = tuple(list_images(folder) for folder in sources)
-        images = tuple(
-            tuple(read_labels(path, num_phases) for path in group) for group in paths
-        )
-        planes[plane] = PlaneImages(paths, images)
+        groups = []
+        for folder in sources:
+            key = folder.resolve()
+            if key not in loaded:
+                paths = list_images(folder)
+                images = tuple(read_labels(path, num_phases) for path in paths)
+                loaded[key] = paths, images
+            groups.append(loaded[key])
+        planes[plane] = PlaneImages(*zip(*groups))
     return planes
 
 
@@ -82,3 +87,13 @@ def infer_num_phases(planes):
             f"Largest label in: {source}"
         )
     return largest + 1
+
+
+def list_side_images(planes):
+    return [
+        image
+        for name, plane in planes.items()
+        if name != PLANES[0]
+        for group in plane.images
+        for image in group
+    ]

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import torch
 
-from src.data.crops import phase_channels
+from src.data.phases import encode_phases
 
 CONFLICT_TOLERANCE = 1e-5
 
@@ -71,7 +71,7 @@ def anchor_fractions(image, num_phases):
         return image
     if image.ndim != 2:
         raise ValueError("anchor labels must have shape [H, W].")
-    return phase_channels(image.detach().cpu()[None], num_phases)[0]
+    return encode_phases(image.detach().cpu()[None], num_phases)[0]
 
 
 def anchor_origin(anchor, image_shape, plane_shape):

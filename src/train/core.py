@@ -6,10 +6,9 @@ from torch import nn
 
 from src.axes import AXES, PLANES
 from src.config.schema import plane_groups
+from src.data.augment import SectionAugment, build_plane_policies
 from src.data.crops import CropSampler
-from src.data.height import grid_spacing, height_field
-from src.data.orientation import CriticAugment, plane_policies
-from src.data.pairs import sample_pairs
+from src.data.height import build_heights
 from src.device import gpu_amp, wide_dtype
 from src.export import build_denoiser, build_diffusion, export_payload
 from src.model.critic import PairCritic2D
@@ -124,6 +123,15 @@ def schedule_ramp(step, ramp):
     return min((step + 1) / ramp, 1.0)
 
 
+def sample_sections(volumes, axis, count, generator):
+    dim = axis + 2
+    batch, size = volumes[0].shape[0], volumes[0].shape[dim]
+    choices = torch.randint(batch * size, (count,), generator=generator)
+    choices = choices.to(volumes[0].device)
+    indices = (choices // size, slice(None), choices % size)
+    return tuple(volume.movedim(dim, 2)[indices] for volume in volumes)
+
+
 class Trainer:
     """State and update rules shared by both stages.
 
@@ -174,10 +182,10 @@ class Trainer:
         self.denoiser_amp = gpu_amp(mixed, self.device)
         self.critic_amp = mixed and self.device.type == "cuda"
         self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.denoiser_amp)
-        self.augment = CriticAugment(
-            plane_policies(config), config.augmentation.probability
+        self.augment = SectionAugment(
+            build_plane_policies(config), config.augmentation.probability
         )
-        self.spacing = grid_spacing(config.data.crop_size, self.patch_size)
+        self.spacing = config.data.crop_size / self.patch_size
         self.updates = {name: 0 for name in (*self.critics, "generator")}
         self.completed_steps = 0
         self.generator_updated = True
@@ -309,7 +317,7 @@ class Trainer:
             real = RealCrops(images=sample.images.to(self.device))
             if self.height and axis != 0:
                 real.origins, real.extents = sample.origins, sample.extents
-                real.heights = height_field(
+                real.heights = build_heights(
                     sample.images.shape[-2:],
                     sample.origins,
                     self.spacing,
@@ -320,7 +328,7 @@ class Trainer:
         return crops
 
     def volume_height(self, origins, extents):
-        return height_field(
+        return build_heights(
             (self.patch_size,) * 3, origins, self.spacing, extents, self.device
         )
 
@@ -395,15 +403,14 @@ class Trainer:
         volume_height = inputs.conditions.get("height")
         pairs = {}
         for axis in self.axes:
-            real = inputs.real[axis]
-            height = volume_height if real.heights is not None else None
-            sampled = sample_pairs(
-                previous,
-                current,
+            volumes = (previous, current)
+            if volume_height is not None and inputs.real[axis].heights is not None:
+                volumes += (volume_height.detach(),)
+            sampled = sample_sections(
+                volumes,
                 axis,
                 self.config.train.slice_pairs_per_plane,
                 self.random["pairs"],
-                height=height,
             )
             pairs[axis] = Pairs(*self.augment(sampled, axis, self.random["augment"]))
         return pairs

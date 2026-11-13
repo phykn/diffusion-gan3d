@@ -1,4 +1,4 @@
-from src.data.crops import downsample
+from src.data.phases import downsample
 
 
 def consistency_loss(

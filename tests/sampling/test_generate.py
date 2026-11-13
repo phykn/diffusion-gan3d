@@ -3,7 +3,8 @@ import torch
 
 import src.api
 from src.api import LowResolutionAPI
-from src.data.height import height_field, integrate_profile, validate_profile
+from src.data.height import build_heights
+from src.data.profile import integrate_profile, validate_profile
 from src.sampling.conditions import LRConditions
 
 
@@ -56,7 +57,9 @@ def test_each_z_tile_gets_the_height_and_profile_of_its_depth(height_api, monkey
     config = height_api.config
     spacing = config.data.crop_size / config.patch_size
     extent = config.data.height_extent
-    whole_height = height_field((depth, 1, 1), origin, spacing, extent)[0, 0, :, 0, 0]
+    whole_height = build_heights((depth, 1, 1), origin, spacing, extent, None)[
+        0, 0, :, 0, 0
+    ]
     spec = config.data.depth_profile
     knots, values = validate_profile(spec, height_api.num_phases)
     whole_profile = integrate_profile(

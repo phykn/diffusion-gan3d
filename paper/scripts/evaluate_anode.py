@@ -22,7 +22,7 @@ from paper.scripts.evaluate_sr import lr_agreement, upsample_linear, upsample_ne
 from src.api import SuperResolutionAPI
 from src.axes import AXIS_NAMES, PLANES
 from src.config.io import load_yaml, project_path, stored_path
-from src.data.crops import downsample, phase_channels
+from src.data.phases import downsample, encode_phases
 from src.stats.sections import compare_sections, label_sections, section_statistics
 from src.stats.volume import (
     chord_mean,
@@ -138,7 +138,7 @@ def real_volume_paths(data):
 def lr_grid(volume, scale, phases):
     """Real labels area-downsampled like training crops, ties broken at random."""
     shape = tuple(n // scale for n in volume.shape)
-    probs = downsample(phase_channels(volume.long()[None], phases), shape)[0]
+    probs = downsample(encode_phases(volume.long()[None], phases), shape)[0]
     return label_sections(probs.movedim(0, 1)).argmax(1).to(torch.uint8)
 
 
