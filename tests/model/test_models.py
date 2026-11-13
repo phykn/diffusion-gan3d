@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from src.model.critic import CriticScores, PairCritic2D
-from src.model.denoiser import ChannelNormSiLU3D, Denoiser3D, channel_norm_silu
+from src.model.denoiser import ChannelNormSiLU3D, Denoiser3D, apply_norm_silu
 
 MPS = torch.backends.mps.is_available()
 
@@ -58,7 +58,7 @@ def test_apple_gpu_fused_norm_matches_the_eager_one(dtype):
     weights = torch.randn_like(inputs)
     results = []
     module = ChannelNormSiLU3D(8, affine=False).to("mps")
-    for norm in (module, partial(channel_norm_silu, eps=module.eps)):
+    for norm in (module, partial(apply_norm_silu, eps=module.eps)):
         values = [v.clone().requires_grad_() for v in (inputs, scale, shift)]
         output = norm(*values)
         (output.float() * weights.float()).sum().backward()
@@ -143,9 +143,11 @@ def test_forward_is_the_body_of_the_embedding():
         profile_present=present,
     )
     with torch.no_grad():
-        logits = model.logits(x, time, latent, vf=vf, vf_present=present, **conditions)
+        logits = model.predict_logits(
+            x, time, latent, vf=vf, vf_present=present, **conditions
+        )
         emb = model.embed(time, latent, vf, present)
-        body = model.forward_body(x, emb, **conditions)
+        body = model.run_network(x, emb, **conditions)
     torch.testing.assert_close(logits, body)
 
 
@@ -195,30 +197,31 @@ def test_guidance_blends_the_unconditional_branch_without_vf_and_profile():
         height=height,
     )
     with torch.no_grad():
-        conditional = model.logits(x, time, latent, **conditioned)
-        unconditional = model.logits(x, time, latent, height=height)
+        conditional = model.predict_logits(x, time, latent, **conditioned)
+        unconditional = model.predict_logits(x, time, latent, height=height)
         for guidance in (0.0, 0.5, 1.0, 2.0):
             expected = unconditional + guidance * (conditional - unconditional)
             torch.testing.assert_close(
-                model.guided_logits(x, time, latent, guidance, **conditioned),
+                model.predict_guided_logits(x, time, latent, guidance, **conditioned),
                 expected,
             )
         # Without vf and profile there is nothing to drop.
         torch.testing.assert_close(
-            model.guided_logits(x, time, latent, 0.0, height=height), unconditional
+            model.predict_guided_logits(x, time, latent, 0.0, height=height),
+            unconditional,
         )
 
 
 def test_guidance_takes_one_pass_without_a_guided_condition(monkeypatch):
     model = _denoiser()
     calls = []
-    original = model.logits
+    original = model.predict_logits
     monkeypatch.setattr(
-        model, "logits", lambda *a, **k: calls.append(1) or original(*a, **k)
+        model, "predict_logits", lambda *a, **k: calls.append(1) or original(*a, **k)
     )
     x, time, latent = _inputs()
-    model.guided_logits(x, time, latent, 0.9)
-    model.guided_logits(x, time, latent, 1.0, vf=torch.full((1, 3), 1 / 3))
+    model.predict_guided_logits(x, time, latent, 0.9)
+    model.predict_guided_logits(x, time, latent, 1.0, vf=torch.full((1, 3), 1 / 3))
     assert len(calls) == 2
 
 

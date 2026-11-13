@@ -8,27 +8,22 @@ from src.device import adaptive_pool
 from src.model.layers import (
     AdaptiveResBlock,
     SinusoidalEmbedding,
-    embedding_mlp,
+    build_embedding_mlp,
     run_block,
 )
+
+MAX_NORM_GROUPS = 32
 
 
 @dataclass(frozen=True)
 class CriticScores:
     logits_global: torch.Tensor
-    levels: tuple["CriticScores", ...] = ()
-
-
-def area_pyramid(images, min_size):
-    yield images
-    while min(images.shape[-2:]) >= 2 * min_size:
-        images = adaptive_pool(images, tuple(n // 2 for n in images.shape[-2:]))
-        yield images
+    levels: tuple = ()
 
 
 class GroupNormSiLU(nn.GroupNorm):
     def __init__(self, channels, affine=True):
-        super().__init__(self.choose_groups(channels), channels, affine=affine)
+        super().__init__(self._choose_groups(channels), channels, affine=affine)
 
     def forward(self, x, scale=None, shift=None):
         x = super().forward(x)
@@ -37,9 +32,9 @@ class GroupNormSiLU(nn.GroupNorm):
         return F.silu(x)
 
     @staticmethod
-    def choose_groups(channels):
-        limit = min(32, max(channels // 2, 1))
-        for groups in range(limit, 0, -1):
+    def _choose_groups(channels):
+        most = min(MAX_NORM_GROUPS, max(channels // 2, 1))
+        for groups in range(most, 0, -1):
             if channels % groups == 0:
                 return groups
 
@@ -69,45 +64,44 @@ class PairCritic2D(nn.Module):
         )
         self.input = nn.Conv2d(2 * num_phases, widths[0], 3, padding=1)
         self.blocks = nn.ModuleList(
-            AdaptiveResBlock(GroupNormSiLU, nn.Conv2d, ch, embedding_channels)
-            for ch in widths
+            AdaptiveResBlock(GroupNormSiLU, nn.Conv2d, width, embedding_channels)
+            for width in widths
         )
         self.downsample = nn.ModuleList(
-            nn.Conv2d(source, target, 3, stride=2, padding=1)
-            for source, target in zip(widths[:-1], widths[1:], strict=True)
+            nn.Conv2d(narrow, wide, 3, stride=2, padding=1)
+            for narrow, wide in zip(widths[:-1], widths[1:], strict=True)
         )
         self.output_norm = GroupNormSiLU(widths[-1])
         self.output = nn.Linear(widths[-1], 1)
         self.time_embedding = SinusoidalEmbedding(embedding_channels)
-        self.time_mlp = embedding_mlp(embedding_channels, embedding_channels)
+        self.time_mlp = build_embedding_mlp(embedding_channels, embedding_channels)
 
     def forward(self, x_previous, x_current, time, height=None):
-        inputs = torch.cat((x_previous, x_current), dim=1)
-        return self.score(inputs, self.embed(time, inputs), height)
-
-    def embed(self, time, ref):
-        return self.time_mlp(
-            self.time_embedding(time.to(device=ref.device)).to(dtype=ref.dtype)
+        pair = torch.cat((x_previous, x_current), dim=1)
+        embedding = self.time_mlp(
+            self.time_embedding(time.to(device=pair.device)).to(dtype=pair.dtype)
         )
-
-    def score(self, inputs, embedding, height=None):
         scores = tuple(
-            self.score_level(level, embedding, height)
-            for level in area_pyramid(inputs, self.pyramid_min_size)
+            self._score_one_size(resized, embedding, height)
+            for resized in self._build_pyramid(pair)
         )
         return CriticScores(scores[0].logits_global, scores if len(scores) > 1 else ())
 
-    def score_level(self, inputs, embedding, height):
-        x = self.input(inputs)
+    def _build_pyramid(self, pair):
+        yield pair
+        while min(pair.shape[-2:]) >= 2 * self.pyramid_min_size:
+            pair = adaptive_pool(pair, tuple(size // 2 for size in pair.shape[-2:]))
+            yield pair
+
+    def _score_one_size(self, pair, embedding, height):
+        x = self.input(pair)
         # xy sections have no height field: they are scored without one.
         if self.height_input is not None and height is not None:
-            x = x + self.height_input(
-                adaptive_pool(height.to(inputs), inputs.shape[-2:])
-            )
+            x = x + self.height_input(adaptive_pool(height.to(pair), pair.shape[-2:]))
         checkpointing = self.gradient_checkpointing and self.training
-        for idx, block in enumerate(self.blocks):
+        for level, block in enumerate(self.blocks):
             x = run_block(block, x, embedding, checkpointing)
-            if idx < len(self.downsample):
-                x = self.downsample[idx](x)
+            if level < len(self.downsample):
+                x = self.downsample[level](x)
         x = self.output_norm(x).mean(dim=(-2, -1))
         return CriticScores(logits_global=self.output(x).squeeze(1))

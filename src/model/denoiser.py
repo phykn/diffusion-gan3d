@@ -9,26 +9,11 @@ from src.model.layers import (
     INV_SQRT_TWO,
     AdaptiveResBlock,
     SinusoidalEmbedding,
-    embedding_mlp,
+    build_embedding_mlp,
     run_block,
 )
 
-
-def channel_norm_silu(x, scale, shift, eps):
-    dtype = x.dtype
-    h = x.float()
-    var, mean = torch.var_mean(h, dim=1, keepdim=True, correction=0)
-    h = ((h - mean) * torch.rsqrt(var + eps)).to(dtype)
-    return F.silu(h * scale.to(dtype) + shift.to(dtype))
-
-
-@cache
-def fused_channel_norm_silu():
-    # Eager MPS runs each step over the whole volume and keeps every
-    # intermediate for backward; one compiled kernel makes the denoiser step
-    # about an eighth faster and its peak memory about a third smaller.
-    # Created on first use: importing the compiler takes about a second.
-    return torch.compile(channel_norm_silu)
+MEASURED_CONDITIONS = ("vf", "vf_present", "profile", "profile_present")
 
 
 class ChannelNormSiLU3D(nn.Module):
@@ -44,18 +29,13 @@ class ChannelNormSiLU3D(nn.Module):
 
     def forward(self, x, scale=None, shift=None):
         if scale is None:
-            shape = (1, -1, 1, 1, 1)
-            scale, shift = self.scale.view(shape), self.shift.view(shape)
-        # The compiled kernel recompiles for each new input dtype and
-        # requires_grad, and fp32 parameters, fp16 modulation and frozen EMA
-        # weights would otherwise use up its recompile limit. fp32 is lossless
-        # and keeps the kernel's own rounding.
+            per_channel = (1, -1, 1, 1, 1)
+            scale, shift = self.scale.view(per_channel), self.shift.view(per_channel)
+        # One dtype and no stray requires_grad keep the MPS kernel from recompiling.
         scale, shift = scale.float(), shift.float()
         if not torch.is_grad_enabled():
             scale, shift = scale.detach(), shift.detach()
-        norm_silu = (
-            fused_channel_norm_silu() if x.device.type == "mps" else channel_norm_silu
-        )
+        norm_silu = compile_norm_silu() if x.device.type == "mps" else apply_norm_silu
         return norm_silu(x, scale, shift, self.eps)
 
 
@@ -83,80 +63,80 @@ class Denoiser3D(nn.Module):
         coarse_enabled=False,
     ):
         super().__init__()
-        channels = tuple(base_channels * scale for scale in channel_multipliers)
-        if not channels or any(channel < 2 for channel in channels):
+        widths = tuple(base_channels * multiplier for multiplier in channel_multipliers)
+        if not widths or any(width < 2 for width in widths):
             raise ValueError(
                 "denoiser channels must be at least two for channel normalization."
             )
         if coarse_enabled and profile_enabled:
             raise ValueError("SR denoisers do not accept a depth profile.")
-        self.downsample_factor = 2 ** (len(channels) - 1)
+        self.downsample_factor = 2 ** (len(widths) - 1)
         self.gradient_checkpointing = gradient_checkpointing
         self.coarse_enabled = coarse_enabled
 
         self.time_emb = SinusoidalEmbedding(embedding_channels)
-        self.time_mlp = embedding_mlp(embedding_channels, embedding_channels)
-        self.latent_mlp = embedding_mlp(latent_channels, embedding_channels)
-        self.input = Conv3d(num_phases, channels[0], 3, padding=1)
+        self.time_mlp = build_embedding_mlp(embedding_channels, embedding_channels)
+        self.latent_mlp = build_embedding_mlp(latent_channels, embedding_channels)
+        self.input = Conv3d(num_phases, widths[0], 3, padding=1)
         self.profile_input = (
-            Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
+            Conv3d(num_phases, widths[0], 3, padding=1, bias=False)
             if profile_enabled
             else None
         )
         self.height_input = (
-            Conv3d(1, channels[0], 3, padding=1, bias=False) if height_enabled else None
+            Conv3d(1, widths[0], 3, padding=1, bias=False) if height_enabled else None
         )
 
-        block = partial(AdaptiveResBlock, ChannelNormSiLU3D, Conv3d)
+        make_block = partial(AdaptiveResBlock, ChannelNormSiLU3D, Conv3d)
         self.encoder = nn.ModuleList()
         self.downsample = nn.ModuleList()
-        for idx, ch in enumerate(channels):
-            self.encoder.append(block(ch, embedding_channels))
-            if idx + 1 < len(channels):
+        for level, width in enumerate(widths):
+            self.encoder.append(make_block(width, embedding_channels))
+            if level + 1 < len(widths):
                 self.downsample.append(
                     nn.Sequential(
-                        Conv3d(ch, ch, 3, stride=2, padding=1),
-                        Conv3d(ch, channels[idx + 1], 1),
+                        Conv3d(width, width, 3, stride=2, padding=1),
+                        Conv3d(width, widths[level + 1], 1),
                     )
                 )
 
         self.middle = nn.ModuleList(
-            block(channels[-1], embedding_channels) for _ in range(2)
+            make_block(widths[-1], embedding_channels) for _ in range(2)
         )
 
         self.upsample = nn.ModuleList()
         self.decoder = nn.ModuleList()
-        ch = channels[-1]
-        for skip_ch in reversed(channels[:-1]):
-            self.upsample.append(Upsample3D(ch, skip_ch))
-            self.decoder.append(block(skip_ch, embedding_channels))
-            ch = skip_ch
+        width = widths[-1]
+        for skip_width in reversed(widths[:-1]):
+            self.upsample.append(Upsample3D(width, skip_width))
+            self.decoder.append(make_block(skip_width, embedding_channels))
+            width = skip_width
 
-        self.output_norm = ChannelNormSiLU3D(channels[0])
-        self.output = Conv3d(channels[0], num_phases, 3, padding=1)
+        self.output_norm = ChannelNormSiLU3D(widths[0])
+        self.output = Conv3d(widths[0], num_phases, 3, padding=1)
 
         self.vf_mlp = None
         if not coarse_enabled:
-            vf_out = nn.Linear(embedding_channels, embedding_channels)
+            vf_last = nn.Linear(embedding_channels, embedding_channels)
             self.vf_mlp = nn.Sequential(
-                nn.Linear(num_phases, embedding_channels), nn.SiLU(), vf_out
+                nn.Linear(num_phases, embedding_channels), nn.SiLU(), vf_last
             )
-            nn.init.zeros_(vf_out.weight)
-            nn.init.zeros_(vf_out.bias)
+            nn.init.zeros_(vf_last.weight)
+            nn.init.zeros_(vf_last.bias)
 
         self.coarse_input = (
-            Conv3d(num_phases, channels[0], 3, padding=1, bias=False)
+            Conv3d(num_phases, widths[0], 3, padding=1, bias=False)
             if coarse_enabled
             else None
         )
         self.corruption_embedding = (
-            embedding_mlp(1, embedding_channels) if coarse_enabled else None
+            build_embedding_mlp(1, embedding_channels) if coarse_enabled else None
         )
 
     def forward(self, x_current, time, latent, **conditions):
-        return self.decode(self.logits(x_current, time, latent, **conditions))
+        return self.decode(self.predict_logits(x_current, time, latent, **conditions))
 
-    def logits(
+    def predict_logits(
         self,
         x_current,
         time,
@@ -171,15 +151,15 @@ class Denoiser3D(nn.Module):
     ):
         if self.coarse_enabled and vf_present is not None:
             raise ValueError("SR denoisers do not accept volume fractions.")
-        emb = self.embed(
+        embedding = self.embed(
             time,
             latent.to(x_current),
             vf=vf,
             vf_present=vf_present,
         )
-        return self.forward_body(
+        return self.run_network(
             x_current,
-            emb,
+            embedding,
             height=height,
             profile=profile,
             profile_present=profile_present,
@@ -187,25 +167,44 @@ class Denoiser3D(nn.Module):
             corruption_level=corruption_level,
         )
 
+    def predict_guided_logits(self, x_current, time, latent, guidance, **conditions):
+        if (
+            self.coarse_enabled
+            or guidance == 1.0
+            or (conditions.get("vf") is None and conditions.get("profile") is None)
+        ):
+            return self.predict_logits(x_current, time, latent, **conditions)
+        unmeasured = {
+            key: value
+            for key, value in conditions.items()
+            if key not in MEASURED_CONDITIONS
+        }
+        unconditional = self.predict_logits(x_current, time, latent, **unmeasured)
+        if guidance == 0.0:
+            return unconditional
+        conditional = self.predict_logits(x_current, time, latent, **conditions)
+        baseline = unconditional.float()
+        return baseline + guidance * (conditional.float() - baseline)
+
     def embed(self, time, latent, vf=None, vf_present=None):
-        time_emb = self.time_mlp(
+        time_embedding = self.time_mlp(
             self.time_emb(time.to(latent.device)).to(dtype=latent.dtype)
         )
-        emb = (time_emb + self.latent_mlp(latent)) * INV_SQRT_TWO
+        embedding = (time_embedding + self.latent_mlp(latent)) * INV_SQRT_TWO
         if vf is None:
-            return emb
+            return embedding
         if self.vf_mlp is None:
             raise ValueError("SR denoisers do not accept volume fractions.")
-        vf_emb = self.vf_mlp(vf.to(device=latent.device, dtype=latent.dtype))
+        vf_embedding = self.vf_mlp(vf.to(device=latent.device, dtype=latent.dtype))
         if vf_present is None:
-            return emb + vf_emb
+            return embedding + vf_embedding
         vf_present = vf_present.to(device=latent.device)
-        return torch.where(vf_present[:, None], emb + vf_emb, emb)
+        return torch.where(vf_present[:, None], embedding + vf_embedding, embedding)
 
-    def forward_body(
+    def run_network(
         self,
         x_current,
-        emb,
+        embedding,
         height=None,
         profile=None,
         profile_present=None,
@@ -225,7 +224,7 @@ class Denoiser3D(nn.Module):
         if self.coarse_enabled:
             if corruption_level is None:
                 corruption_level = x_current.new_zeros(x_current.shape[0])
-            emb = emb + self.corruption_embedding(
+            embedding = embedding + self.corruption_embedding(
                 corruption_level.to(x_current).reshape(-1, 1)
             )
             x = x + self.coarse_input(coarse.to(x_current).mul(2).sub(1))
@@ -236,55 +235,56 @@ class Denoiser3D(nn.Module):
         elif height is not None:
             raise ValueError("height conditioning is disabled.")
         if profile is not None:
-            if self.profile_input is None:
-                raise ValueError("profile conditioning is disabled.")
-            shape = x_current.shape[-3:]
-            if profile.ndim != 3 or profile.shape[-1] != shape[0]:
-                raise ValueError("profile must match the volume depth.")
-            field = profile.to(x_current)[..., None, None].expand(-1, -1, *shape)
-            field = field * 2 - 1
-            if profile_present is not None:
-                field = field * profile_present.to(field).reshape(-1, 1, 1, 1, 1)
-            x = x + self.profile_input(field)
-        checkpointing = self.gradient_checkpointing and self.training
-        skips = []
-        for idx, block in enumerate(self.encoder):
-            x = run_block(block, x, emb, checkpointing)
-            if idx < len(self.downsample):
-                skips.append(x)
-                x = self.downsample[idx](x)
-
-        for block in self.middle:
-            x = run_block(block, x, emb, checkpointing)
-
-        for upsample, block, skip in zip(
-            self.upsample, self.decoder, reversed(skips), strict=True
-        ):
-            # Adding the skip instead of concatenating it keeps the full-resolution
-            # decoder at its own width, which dominates the step time.
-            x = (upsample(x, size=skip.shape[-3:]) + skip) * INV_SQRT_TWO
-            x = run_block(block, x, emb, checkpointing)
-
-        return self.output(self.output_norm(x))
-
-    def guided_logits(self, x_current, time, latent, guidance, **conditions):
-        measured = ("vf", "vf_present", "profile", "profile_present")
-        if (
-            self.coarse_enabled
-            or guidance == 1.0
-            or (conditions.get("vf") is None and conditions.get("profile") is None)
-        ):
-            return self.logits(x_current, time, latent, **conditions)
-        unconditional_conditions = {
-            key: value for key, value in conditions.items() if key not in measured
-        }
-        unconditional = self.logits(x_current, time, latent, **unconditional_conditions)
-        if guidance == 0.0:
-            return unconditional
-        conditional = self.logits(x_current, time, latent, **conditions)
-        baseline = unconditional.float()
-        return baseline + guidance * (conditional.float() - baseline)
+            x = x + self._embed_profile(x_current, profile, profile_present)
+        return self._run_unet(x, embedding)
 
     @staticmethod
     def decode(logits):
         return 2.0 * logits.softmax(dim=1) - 1.0
+
+    def _embed_profile(self, x_current, profile, profile_present):
+        if self.profile_input is None:
+            raise ValueError("profile conditioning is disabled.")
+        shape = x_current.shape[-3:]
+        if profile.ndim != 3 or profile.shape[-1] != shape[0]:
+            raise ValueError("profile must match the volume depth.")
+        layers = profile.to(x_current)[..., None, None].expand(-1, -1, *shape)
+        layers = layers * 2 - 1
+        if profile_present is not None:
+            layers = layers * profile_present.to(layers).reshape(-1, 1, 1, 1, 1)
+        return self.profile_input(layers)
+
+    def _run_unet(self, x, embedding):
+        checkpointing = self.gradient_checkpointing and self.training
+        skips = []
+        for level, block in enumerate(self.encoder):
+            x = run_block(block, x, embedding, checkpointing)
+            if level < len(self.downsample):
+                skips.append(x)
+                x = self.downsample[level](x)
+
+        for block in self.middle:
+            x = run_block(block, x, embedding, checkpointing)
+
+        for upsample, block, skip in zip(
+            self.upsample, self.decoder, reversed(skips), strict=True
+        ):
+            # Adding the skip keeps the decoder narrower than concatenating it.
+            x = (upsample(x, size=skip.shape[-3:]) + skip) * INV_SQRT_TWO
+            x = run_block(block, x, embedding, checkpointing)
+
+        return self.output(self.output_norm(x))
+
+
+def apply_norm_silu(x, scale, shift, eps):
+    dtype = x.dtype
+    normalized = x.float()
+    variance, mean = torch.var_mean(normalized, dim=1, keepdim=True, correction=0)
+    normalized = ((normalized - mean) * torch.rsqrt(variance + eps)).to(dtype)
+    return F.silu(normalized * scale.to(dtype) + shift.to(dtype))
+
+
+@cache
+def compile_norm_silu():
+    # On MPS one compiled kernel is faster and uses less memory than eager steps.
+    return torch.compile(apply_norm_silu)

@@ -3,7 +3,7 @@ import torch
 from torch import nn
 
 from src.model import conv
-from src.model.conv import Conv3d, conv3d_weight
+from src.model.conv import Conv3d, compute_weight_gradient
 
 MPS = torch.backends.mps.is_available()
 
@@ -16,7 +16,7 @@ def test_unfolded_weight_gradient_matches_the_native_one(monkeypatch, chunk_byte
     x = torch.randn(2, 3, 5, 6, 7, dtype=torch.float64)
     grad = torch.randn(2, 4, 5, 6, 7, dtype=torch.float64)
     expected = torch.nn.grad.conv3d_weight(x, (4, 3, 3, 3, 3), grad, padding=1)
-    torch.testing.assert_close(conv3d_weight(x, grad, 3), expected)
+    torch.testing.assert_close(compute_weight_gradient(x, grad, 3), expected)
 
 
 def test_cpu_keeps_the_native_convolution():

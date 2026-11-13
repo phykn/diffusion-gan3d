@@ -65,7 +65,7 @@ class Predictor:
         with torch.autocast(
             device_type=self.device.type, dtype=torch.float16, enabled=self.amp
         ):
-            logits = self.model.guided_logits(
+            logits = self.model.predict_guided_logits(
                 values, time, latent, guidance, **conditions
             )
         return Denoiser3D.decode(logits.float())
