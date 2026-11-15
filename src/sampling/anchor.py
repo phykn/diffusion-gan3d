@@ -65,8 +65,6 @@ class TileAnchors:
         self.device = device
         placed = place_anchors(anchors, plan.output_shape, num_phases, plan.offsets)
         self.anchors_per_tile = []
-        if not placed:
-            return
         for tile in plan.tiles:
             in_tile = [
                 cropped
@@ -115,13 +113,10 @@ def place_anchors(anchors, output_shape, num_phases, offsets=(0, 0, 0)):
         ):
             raise ValueError("anchor.index is outside the generated volume.")
         values = _read_fractions(anchor.image, num_phases).mul(2).sub(1)
-        plane_shape = tuple(
-            output_shape[axis] for axis in range(3) if axis != anchor.axis
-        )
+        plane_axes = [axis for axis in range(3) if axis != anchor.axis]
+        plane_shape = tuple(output_shape[axis] for axis in plane_axes)
         row, col = _locate_image(anchor, values.shape[-2:], plane_shape)
-        row_offset, col_offset = (
-            offsets[axis] for axis in range(3) if axis != anchor.axis
-        )
+        row_offset, col_offset = (offsets[axis] for axis in plane_axes)
         placed.append(
             _PlacedAnchor(
                 values,
