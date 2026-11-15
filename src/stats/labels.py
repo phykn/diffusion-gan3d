@@ -3,8 +3,6 @@ import torch
 from src.data.resize import rebin_profile
 from src.device import assert_all, wide_dtype
 
-LABEL_CHUNK_ELEMENTS = 1024**2
-
 
 def phase_labels(values, num_phases=None):
     values = torch.as_tensor(values)
@@ -33,13 +31,13 @@ def phase_fractions(values, num_phases):
     return counts.to(wide_dtype(counts.device)).div(values.numel())
 
 
-def _label_chunks(values, num_phases=None):
+def _label_chunks(values, num_phases):
     # Split views before conversion, including for non-contiguous input. A
     # flatten/reshape of the full input could itself allocate another volume.
     pending = [values]
     while pending:
         part = pending.pop()
-        if part.numel() <= LABEL_CHUNK_ELEMENTS:
+        if part.numel() <= 1024**2:
             yield phase_labels(part, num_phases)
         else:
             axis = max(range(part.ndim), key=lambda axis: part.shape[axis])
