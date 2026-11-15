@@ -95,3 +95,10 @@ def test_a_height_conditioned_sr_stage_refines_at_a_depth(tiny_anode_sr_run):
     assert high.shape == (32, 32, 32)
     with pytest.raises(ValueError, match="outside the source image height"):
         api.refine(low, seed=0, height_origin=48.0)
+
+
+def test_a_mirror_symmetric_sr_stage_keeps_the_mirror_balance(tiny_sr_run):
+    # Downsample consistency cannot see a shear finer than an LR voxel.
+    events = EventAccumulator(str(tiny_sr_run / "tensorboard"))
+    events.Reload()
+    assert "loss/mirror_balance" in events.Tags()["scalars"]

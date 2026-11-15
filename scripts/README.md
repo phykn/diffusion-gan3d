@@ -96,8 +96,8 @@ A sample is one file in [config/samples/](../config/samples/); copy
     fractions at each height. Generation then keeps its z margins inside the source
     height, since no training crop reaches past the top or bottom of an image.
   - `mirror_symmetric: true` makes each volume's phase pairs along mirrored diagonals
-    agree in LR (`loss.mirror_balance`), so the generator cannot shear the volume to keep two
-    section planes realistic at the cost of the third. `false` turns that off, flips and
+    agree in both stages (`loss.mirror_balance`), so the generator cannot shear the volume
+    to keep two section planes realistic at the cost of the third. `false` turns that off, flips and
     rotates sections less often (probability 0.2 instead of 0.5) so a tilt stays visible,
     and never flips, rotates, or swaps axes of SR's LR input volumes (`lr_bank.flips`),
     which would reverse their tilt.

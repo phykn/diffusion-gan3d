@@ -142,6 +142,7 @@ class SRLoss(Settings):
     r2_weight: NonNegativeFloat = 0.1
     r1_every_steps: PositiveInt = 8
     downsample_consistency_weight: NonNegativeFloat = 10.0
+    mirror_balance: MirrorBalance = MirrorBalance()
     group_statistics: SRGroupStatistics = SRGroupStatistics()
     downsample_mse_tolerance: NonNegativeFloat = 0.005
 

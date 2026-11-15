@@ -98,11 +98,8 @@ def _expand_structure(structure, planes, stage):
             values["conditioning"]["spatial_profile"] = {"enabled": True}
             values["loss"] = {"spatial_profile_weight": PROFILE_LOSS_WEIGHT}
     if structure["mirror_symmetric"]:
-        # SR follows the LR volume through downsample consistency.
-        if stage == "lr":
-            values.setdefault("loss", {})["mirror_balance"] = {
-                "weight": MIRROR_LOSS_WEIGHT
-            }
+        # SR too: downsample consistency holds only above the LR voxel scale.
+        values.setdefault("loss", {})["mirror_balance"] = {"weight": MIRROR_LOSS_WEIGHT}
     else:
         values["augmentation"] = {"probability": TILTED_FLIP_PROBABILITY}
         if stage == "sr":

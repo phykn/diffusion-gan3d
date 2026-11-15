@@ -16,6 +16,7 @@ from src.rng import RunRandom, randn
 from src.train.burn_in import burn_in_values
 from src.train.losses.gan import critic_objective, relativistic_loss
 from src.train.losses.group_statistics import group_statistics_loss
+from src.train.losses.mirror_balance import mirror_balance_loss
 from src.train.metrics import structure_metrics
 
 
@@ -566,6 +567,17 @@ class Trainer:
         metrics["loss/group_statistics"] = value.detach()
         metrics["group_statistics/ramp"] = value.new_tensor(ramp)
         return group_statistics.weight * ramp * value, metrics
+
+    def mirror_balance_term(self, clean_probs):
+        mirror_balance = self.config.loss.mirror_balance
+        if not mirror_balance.weight > 0:
+            return None, {}
+        # The x0 prediction of every transition must keep the mirror symmetry.
+        value, metrics = mirror_balance_loss(
+            clean_probs, mirror_balance.max_gap, mirror_balance.tolerance
+        )
+        metrics["loss/mirror_balance"] = value.detach()
+        return mirror_balance.weight * value, metrics
 
     def measure_structure(self, step, inputs, clean_probs):
         every = self.config.train.structure_every_steps

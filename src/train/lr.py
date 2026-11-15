@@ -6,7 +6,6 @@ from src.data.profile import measure_image_profile
 from src.data.resize import rebin_profile
 from src.stats.labels import phase_profile
 from src.train.core import StepInputs, Trainer, sample_sections, schedule_ramp
-from src.train.losses.mirror_balance import mirror_balance_loss
 from src.train.losses.spatial_profile import profile_loss
 from src.train.losses.transition import real_transition_loss
 from src.train.losses.volume_fraction import vf_loss
@@ -133,17 +132,6 @@ class LRTrainer(Trainer):
         metrics.update(values)
         metrics["loss/real_transition"] = value.detach()
         return ramp * real_transition.weight * value, metrics
-
-    def mirror_balance_term(self, clean_probs):
-        mirror_balance = self.config.loss.mirror_balance
-        if not mirror_balance.weight > 0:
-            return None, {}
-        # The x0 prediction of every transition must keep the mirror symmetry.
-        value, metrics = mirror_balance_loss(
-            clean_probs, mirror_balance.max_gap, mirror_balance.tolerance
-        )
-        metrics["loss/mirror_balance"] = value.detach()
-        return mirror_balance.weight * value, metrics
 
     def profile_term(self, clean_probs, target):
         if target is None:
