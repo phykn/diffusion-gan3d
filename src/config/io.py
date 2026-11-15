@@ -2,7 +2,7 @@ from pathlib import Path
 
 import yaml
 
-from src.config.build import build_config, parse, to_dict
+from src.config.build import parse, to_dict
 from src.config.schema import GenerationSettings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -54,10 +54,6 @@ def save_yaml(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(dump_yaml(data), encoding="utf-8")
-
-
-def load_config(path):
-    return build_config(load_yaml(path))
 
 
 def load_generation_settings():
