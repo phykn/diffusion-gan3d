@@ -10,10 +10,7 @@ def section_pairs(images, dim, gap):
 
 
 def volume_pairs(probs, axis, gap, preserve_height):
-    """Undirected pair tables of [B, K, D, H, W] volumes along a volume axis.
-
-    [B, K, K], or [B, D, K, K] per z when preserve_height keeps the z layers.
-    """
+    """Undirected pair tables along a volume axis: [B, K, K], or [B, D, K, K]."""
     dim = axis + 2
     length = probs.shape[dim] - gap
     left = probs.narrow(dim, 0, length)
@@ -28,11 +25,8 @@ def volume_pairs(probs, axis, gap, preserve_height):
 
 
 def pair_correlations(probs, reach):
-    """Sums of probs[:, p](x) * probs[:, q](x + o) over x, indexed [b, p, q, *o].
-
-    Zero padding keeps offsets up to reach along each axis free of wraparound;
-    a negative offset sits at its index modulo the padded size.
-    """
+    """Sums of probs[:, p](x) * probs[:, q](x + o) over x, indexed [b, p, q, *o];
+    a negative offset sits at its index modulo the padded size."""
     depth, height, width = probs.shape[2:]
     sizes = [n + min(reach, n - 1) for n in (depth, height, width)]
     # Padding by hand: MPS pads five-dimensional tensors on a fallback that warns.
@@ -55,8 +49,7 @@ def mirror_differences(correlations, shape, first, second, offsets):
         index[second] = along_second % sizes[second]
         return correlations[..., index[0], index[1], index[2]]
 
-    # A table counts (p, q) and (q, p) alike, and the sum for (q, p) at o is
-    # the sum for (p, q) at -o.
+    # (q, p) at o is (p, q) at -o, so each sum adds both to count pairs undirected.
     plus = at(a, b) + at(-a, -b)
     minus = at(a, -b) + at(-a, b)
     voxels = (shape[first] - a) * (shape[second] - b) * shape[3 - first - second]
