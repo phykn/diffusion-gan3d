@@ -68,7 +68,6 @@ def update_ema(ema, model, decay):
         ema_parameter.lerp_(parameter, 1.0 - decay)
     for ema_buffer, buffer in zip(ema.buffers(), model.buffers(), strict=True):
         ema_buffer.copy_(buffer)
-    ema.eval()
 
 
 def build_critics(config):
@@ -345,7 +344,6 @@ class Trainer:
                 current = self.diffusion.sample_posterior(
                     current, prediction, index, self.noise(shape)
                 )
-        current = current.detach()
         latent = self.latent(batch)
         noise = self.noise(shape) if transition else None
         with self.autocast(self.denoiser_amp):

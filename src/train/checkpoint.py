@@ -12,7 +12,6 @@ from src.storage import torch_save
 
 FORMAT = "diffusion-gan3d.train"
 VERSION = 3
-_NAME = re.compile(r"step_(\d+)\.pt")
 
 
 def save_checkpoint(payload, root, export_payload):
@@ -49,7 +48,7 @@ def resolve_checkpoint(value):
         root = path / "checkpoints" if (path / "checkpoints").is_dir() else path
         candidates = []
         for candidate in root.glob("step_*.pt"):
-            match = _NAME.fullmatch(candidate.name)
+            match = re.fullmatch(r"step_(\d+)\.pt", candidate.name)
             if match:
                 candidates.append((int(match[1]), candidate))
         for _, candidate in sorted(candidates, reverse=True):

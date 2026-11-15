@@ -16,19 +16,14 @@ from src.stats.sections import (
     section_statistics,
 )
 
-# Fixed real crops per plane, and the seed behind them and behind every scored
-# volume, so each step meets the same data and noise.
+# Fixed real crops per plane, so each step meets the same data.
 REFERENCE_CROPS = 64
-SEED = 0
-# Generated sections per plane, spread over the scored volumes. A fixed count
-# keeps the statistics cost growing with section area, not volume size, while
-# still outnumbering the real crops.
-SECTIONS = 2 * REFERENCE_CROPS
 
 
 def build_reference(samplers):
     """Real crops per plane axis, identical for every run on this data."""
-    generator = make_generator(SEED)
+    # Scored volumes use fixed seeds too, so each step also meets the same noise.
+    generator = make_generator(0)
     reference = {}
     for axis, sampler in sorted(samplers.items()):
         crops = sampler.sample(REFERENCE_CROPS, generator)
@@ -160,10 +155,8 @@ class CheckpointSelection:
         self.save_report(root)
 
     def state_dict(self):
-        best = self.best()
         return {
             "history": [dict(entry) for entry in self.history],
-            "best_step": None if best is None else best["step"],
             "best_state": self.best_state,
         }
 
@@ -256,7 +249,9 @@ def pick_sections(volumes, axis, phases):
     """One-hot sections along axis, evenly spaced over all volumes' slices."""
     depth = volumes[0].shape[axis]
     total = len(volumes) * depth
-    count = min(SECTIONS, total)
+    # A fixed count keeps the statistics cost growing with section area, not
+    # volume size, while still outnumbering the real crops.
+    count = min(2 * REFERENCE_CROPS, total)
     indices = torch.linspace(0, total - 1, count).round().long().tolist()
     # Only the picked slices leave the uint8 volumes.
     labels = torch.stack(

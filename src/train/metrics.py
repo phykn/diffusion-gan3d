@@ -22,14 +22,19 @@ def structure_metrics(probs, real, groups):
     """structure/* tags of [B, K, D, H, W] predictions against real sections."""
     # One scheduled transfer; never called from a diffusion or critic inner loop.
     probs = probs.detach().float().cpu()
-    percolation, metrics = measure_percolation(probs.argmax(1).numpy(), probs.shape[1])
+    labels = probs.argmax(1).numpy()
+    percolation, metrics = measure_percolation(labels, probs.shape[1])
     curves, sections = measure_sections(probs, real)
-    return {**metrics, **sections, **measure_axis_gaps(percolation, curves, groups)}
+    return {
+        **metrics,
+        **measure_tilt(labels, probs.shape[1]),
+        **sections,
+        **measure_axis_gaps(percolation, curves, groups),
+    }
 
 
 def measure_percolation(labels, phases):
-    """Spanning fraction of each phase along z/y/x, and the tilt balance of each
-    solid phase."""
+    """Spanning fraction of each phase along z/y/x."""
     metrics = {}
     percolation = np.zeros((phases, 3))
     for phase in range(phases):
@@ -53,12 +58,19 @@ def measure_percolation(labels, phases):
             metrics[f"structure/phase_{phase}/percolation_lower_bound_{name}"] = float(
                 np.mean(lower, axis=0)[axis]
             )
+    return percolation, metrics
+
+
+def measure_tilt(labels, phases):
+    """Per-particle tilt sign of each solid phase; a mirror-symmetric structure
+    stays near zero."""
+    metrics = {}
+    for phase in range(phases):
         if phase == PORE_PHASE:
             continue
-        # Per-particle tilt sign; a mirror-symmetric structure stays near zero.
         for name, stats in tilt_balance(labels, phase).items():
             metrics[f"structure/phase_{phase}/tilt_balance_{name}"] = stats["balance"]
-    return percolation, metrics
+    return metrics
 
 
 def measure_sections(probs, real):
