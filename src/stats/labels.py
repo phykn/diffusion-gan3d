@@ -51,11 +51,7 @@ def voxel_accuracy(actual, expected):
 
 
 def phase_profile(values, phases, bins=None):
-    """Phase fractions per z of [B, K, D, H, W] fractions or [B, D, H, W] labels.
-
-    Only training diagnostics call it, on fractions and their argmax, so the
-    labels skip validation and its per-step device sync.
-    """
+    """Phase fractions per z of [B, K, D, H, W] fractions or [B, D, H, W] labels."""
     if values.ndim == 5:
         result = values.float().mean((-1, -2))
     else:
