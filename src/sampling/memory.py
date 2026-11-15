@@ -33,7 +33,7 @@ class MemoryEstimate:
     host_bytes: int
     tiles: int
     shape: tuple
-    stored_bytes: int = 0
+    stored_bytes: int
 
     def device_total(self, storage):
         return self.device_bytes + (self.stored_bytes if storage == "cuda" else 0)
@@ -50,8 +50,7 @@ def estimate_memory(
     *,
     probabilities=False,
     guided=False,
-    profile=False,
-    coarse=False,
+    volume_input=False,
     cfg=False,
     extra_host_bytes=0,
 ):
@@ -68,7 +67,7 @@ def estimate_memory(
 
     buffers = FLOAT_BYTES * (BUFFER_VALUES_PER_PHASE * num_phases + BUFFER_VALUES)
     working = buffers * tile_voxels + _estimate_activations(
-        channels, num_phases, tile_voxels, profile or coarse, guided, cfg
+        channels, num_phases, tile_voxels, volume_input, guided, cfg
     )
     output_bytes = FLOAT_BYTES * num_phases if probabilities else 1
     host = output_bytes * output_voxels + extra_host_bytes
@@ -123,12 +122,12 @@ def get_cuda_budget(device):
     return int((free + reusable) * USABLE_FRACTION)
 
 
-def _estimate_activations(channels, num_phases, voxels, has_volume_input, guided, cfg):
+def _estimate_activations(channels, num_phases, voxels, volume_input, guided, cfg):
     activations = max(
         MIN_ACTIVATION_BYTES,
         ACTIVATION_VALUES_PER_CHANNEL * FLOAT_BYTES * channels * voxels,
     )
-    if has_volume_input:
+    if volume_input:
         activations += FLOAT_BYTES * (num_phases + channels) * voxels
     if guided:
         # The anchor guide keeps the activations for its gradient, per CFG pass.

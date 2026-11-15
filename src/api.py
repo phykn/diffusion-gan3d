@@ -54,8 +54,8 @@ class SamplingRequest:
     probabilities: bool
     guided: bool = False
     cfg: bool = False
-    profile: bool = False
-    coarse: bool = False
+    # A profile or coarse input adds a volume to the denoiser input.
+    volume_input: bool = False
     extra_host_bytes: int = 0
 
     @cached_property
@@ -68,9 +68,8 @@ class SamplingRequest:
             predictor.device,
             probabilities=self.probabilities,
             guided=self.guided,
-            profile=self.profile,
+            volume_input=self.volume_input,
             cfg=self.cfg,
-            coarse=self.coarse,
             extra_host_bytes=self.extra_host_bytes,
         )
 
@@ -185,7 +184,7 @@ class LowResolutionAPI:
             self.config.model.generator.channels[0],
             probabilities,
             guided=guided,
-            profile=self.config.profile_enabled,
+            volume_input=self.config.profile_enabled,
             cfg=cfg,
         )
 
@@ -375,7 +374,7 @@ class SuperResolutionAPI:
             plan,
             self.config.model.generator.channels[0],
             probabilities,
-            coarse=True,
+            volume_input=True,
             # The LR fractions and their padded copy stay in RAM.
             extra_host_bytes=4 * self.num_phases * (low + padded),
         )

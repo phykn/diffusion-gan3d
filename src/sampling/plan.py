@@ -6,8 +6,6 @@ from itertools import pairwise, product
 
 import torch
 
-SR_MARGIN_VOXELS = 8
-
 
 @dataclass(frozen=True)
 class Tile:
@@ -145,11 +143,11 @@ def check_non_negative(value, name):
 
 
 def choose_sr_margin(scale):
-    # Rounded up to whole LR cells.
-    return math.lcm(SR_MARGIN_VOXELS, scale)
+    # Eight voxels, rounded up to whole LR cells.
+    return math.lcm(8, scale)
 
 
-def build_tile_window(tile, overlap, device=None):
+def build_tile_window(tile, overlap, device):
     z, y, x = (
         _build_axis_window(length, overlap, before, after, device)
         for length, (before, after) in zip(tile.shape, tile.blend_widths, strict=True)

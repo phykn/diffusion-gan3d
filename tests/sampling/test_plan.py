@@ -20,7 +20,7 @@ def test_tiles_cover_the_region_once(size):
     weight = torch.zeros(plan.region_shape)
     for tile in plan.tiles:
         owner[tile.target] += 1
-        weight[tile.source] += build_tile_window(tile, plan.overlap)[0, 0]
+        weight[tile.source] += build_tile_window(tile, plan.overlap, None)[0, 0]
         assert tile.shape == plan.tile_shape
     assert bool((owner == 1).all())
     assert bool((weight > 0).all())

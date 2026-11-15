@@ -10,7 +10,15 @@ from src.device import wide_dtype
 from src.sampling.plan import make_plan, parse_shape
 
 HEIGHT_TOLERANCE = 1e-6
-VF_TOLERANCE = 1e-5
+
+
+def make_height_plan(
+    config, output_shape, patch, margin, overlap, origin=0.0, extent=None, step=1
+):
+    """make_plan with z margins that stay inside the source height."""
+    depth = parse_shape(output_shape, "output shape")[0]
+    z_margins = HeightRange(config, origin, extent).z_margins(depth, margin, step)
+    return make_plan(output_shape, patch, margin, overlap, z_margins)
 
 
 class HeightRange:
@@ -19,7 +27,7 @@ class HeightRange:
     def __init__(self, config, origin, extent):
         self.enabled = config.conditioning.height_enabled
         self.pixels_per_cell = config.data.crop_size / config.patch_size
-        self.top = 0
+        self.top_margin = 0
         if not self.enabled:
             if extent is not None or origin != 0:
                 raise ValueError(
@@ -44,7 +52,7 @@ class HeightRange:
         cells inside the source: training never sees a height past a z face."""
         if not self.enabled:
             return margin, margin
-        above, below = self._free_cells(depth)
+        above, below = self._cells_around(depth)
         return tuple(
             min(margin, math.floor(cells + HEIGHT_TOLERANCE) // step * step)
             for cells in (above, below)
@@ -52,15 +60,16 @@ class HeightRange:
 
     def place(self, plan):
         """Check that the plan's z margins stay inside the source height."""
-        self.top = plan.z_margins[0]
+        self.top_margin = plan.z_margins[0]
         if not self.enabled:
             return
-        above, below = self._free_cells(plan.output_shape[0])
+        above, below = self._cells_around(plan.output_shape[0])
         top, bottom = plan.z_margins
         if top > above + HEIGHT_TOLERANCE or bottom > below + HEIGHT_TOLERANCE:
             raise ValueError("z margins reach past the source image height.")
 
-    def _free_cells(self, depth):
+    def _cells_around(self, depth):
+        """Cells of source height above and below a depth-cell output."""
         output_height = depth * self.pixels_per_cell
         if (
             not math.isfinite(self.origin)
@@ -70,33 +79,28 @@ class HeightRange:
             raise ValueError(
                 "height_origin places the volume outside the source image height."
             )
-        free_below = self.extent - self.origin - output_height
-        return self.origin / self.pixels_per_cell, free_below / self.pixels_per_cell
+        below = self.extent - self.origin - output_height
+        return self.origin / self.pixels_per_cell, below / self.pixels_per_cell
 
-    def locate_tile(self, tile):
-        cells_below_origin = tile.source[0].start - self.top
-        return self.origin + cells_below_origin * self.pixels_per_cell
+    def tile_origin(self, tile):
+        """Source row of the tile's top face."""
+        cells_from_output_top = tile.source[0].start - self.top_margin
+        return self.origin + cells_from_output_top * self.pixels_per_cell
 
     def build_heights(self, tile, device):
         return build_heights(
             tile.shape,
-            self.locate_tile(tile),
+            self.tile_origin(tile),
             self.pixels_per_cell,
             self.extent,
             device,
         )
 
 
-def make_height_plan(
-    config, output_shape, patch, margin, overlap, origin=0.0, extent=None, step=1
-):
-    """make_plan with z margins that stay inside the source height."""
-    depth = parse_shape(output_shape, "output shape")[0]
-    z_margins = HeightRange(config, origin, extent).z_margins(depth, margin, step)
-    return make_plan(output_shape, patch, margin, overlap, z_margins)
-
-
 class LRConditions:
+    """Per tile: vf, and for a height model the height field and the depth
+    profile over the tile's rows (whose mean then replaces vf)."""
+
     def __init__(
         self,
         config,
@@ -109,25 +113,24 @@ class LRConditions:
         height_extent=None,
     ):
         self.device = device
-        self.num_phases = config.data.num_phases
+        num_phases = config.data.num_phases
         self.height = HeightRange(config, height_origin, height_extent)
         self.height.place(plan)
-        profile_enabled = config.profile_enabled
-        if vf_profile is None and vf is None and profile_enabled:
+        if vf_profile is None and vf is None and config.profile_enabled:
             # Height alone flattens strong depth gradients; use the training one.
             vf_profile = config.data.depth_profile
         self.profile = None
         if vf_profile is not None:
-            if not profile_enabled:
+            if not config.profile_enabled:
                 raise ValueError("vf_profile requires a profile-conditioned LR model.")
             self.profile = (
-                *validate_profile(vf_profile, self.num_phases),
+                *validate_profile(vf_profile, num_phases),
                 vf_profile["interpolation"],
             )
-        self.vf = _normalize_vf(vf, self.num_phases, device)
+        self.vf = _normalize_vf(vf, num_phases, device)
         if self.profile is not None and self.vf is not None:
-            profile = self._integrate_profile(plan.output_shape[0], self.height.origin)
-            if not torch.allclose(self.vf, profile.mean(-1), atol=VF_TOLERANCE, rtol=0):
+            whole = self._integrate_profile(plan.output_shape[0], self.height.origin)
+            if not torch.allclose(self.vf, whole.mean(-1), atol=1e-5, rtol=0):
                 raise ValueError(
                     "vf must equal the profile mean over the final output interval."
                 )
@@ -138,7 +141,7 @@ class LRConditions:
             conditions["height"] = self.height.build_heights(tile, self.device)
             if self.profile is not None:
                 profile = self._integrate_profile(
-                    tile.shape[0], self.height.locate_tile(tile)
+                    tile.shape[0], self.height.tile_origin(tile)
                 )
                 conditions.update(profile=profile, vf=profile.mean(-1))
         return conditions
@@ -159,7 +162,9 @@ class LRConditions:
 
 
 class SRConditions:
-    # `low` is the LR fractions [K, d, h, w] of the output.
+    """Per tile: the LR fractions low [K, d, h, w] of the output enlarged to
+    the tile, and for a height model the height field."""
+
     def __init__(
         self,
         config,
@@ -170,6 +175,7 @@ class SRConditions:
         height_origin=0.0,
         height_extent=None,
     ):
+        self.device = device
         self.scale = config.scale_factor
         expected = tuple(size // self.scale for size in plan.output_shape)
         if low.ndim != 4 or tuple(low.shape[1:]) != expected:
@@ -180,7 +186,6 @@ class SRConditions:
         # Outside the output the coarse input repeats its faces.
         padding = (side, side, side, side, top, bottom)
         self.low = F.pad(low, padding, mode="replicate")
-        self.device = device
         self.height = HeightRange(config, height_origin, height_extent)
         self.height.place(plan)
 

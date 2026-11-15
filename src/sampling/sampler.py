@@ -23,7 +23,7 @@ class Predictor:
         self.latent_channels = config.model.generator.latent_channels
         self.amp = gpu_amp(config.train.mixed_precision, device)
 
-    def __call__(self, noisy, time, latent, guidance=1.0, **conditions):
+    def __call__(self, noisy, time, latent, guidance, **conditions):
         conditions = {
             name: value for name, value in conditions.items() if value is not None
         }
@@ -184,8 +184,6 @@ class TileSampler:
             for region, slab_region in slab.split(finished):
                 slab_region = (*BATCH_AND_CHANNELS, *slab_region)
                 weights = slab.weight[slab_region]
-                if not bool((weights > 0).all()):
-                    raise RuntimeError("blend weights must cover the output slab.")
                 clean = slab.prediction[slab_region] / weights
                 if output is None:
                     state_region = (*BATCH_AND_CHANNELS, *region)
@@ -218,7 +216,6 @@ def _write_output(output, region, clean, offsets):
         output[(slice(None), *destination)] = fractions
 
 
-@torch.no_grad()
 def _pick_labels(channels):
     shape = channels.shape[1:]
     labels = torch.empty(shape, dtype=torch.uint8, device="cpu")
@@ -229,7 +226,6 @@ def _pick_labels(channels):
     return labels
 
 
-@torch.no_grad()
 def _normalize_fractions(clean):
     fractions = clean.float().add_(1).mul_(0.5).clamp_(0, 1)
     total = fractions.sum(1, keepdim=True).clamp_min_(torch.finfo(fractions.dtype).eps)

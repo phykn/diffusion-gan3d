@@ -80,7 +80,7 @@ def test_a_generation_over_the_ram_budget_stops_before_sampling(monkeypatch):
 
 
 def test_storage_cuda_needs_a_cuda_device():
-    estimate = MemoryEstimate(0, 0, 1, (64, 64, 64))
+    estimate = MemoryEstimate(0, 0, 1, (64, 64, 64), 0)
     with pytest.raises(ValueError, match="requires a CUDA device"):
         check_memory(estimate, torch.device("cpu"), "cuda")
     with pytest.raises(ValueError, match="storage must be one of"):

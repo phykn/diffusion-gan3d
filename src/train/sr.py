@@ -161,7 +161,7 @@ class SRTrainer(Trainer):
                 cfg.model.generator.channels[0],
                 self.device,
                 probabilities=True,
-                profile=cfg.profile_enabled,
+                volume_input=cfg.profile_enabled,
             )
             self._lr_sampling = sampler, plan, estimate
         return self._lr_sampling
