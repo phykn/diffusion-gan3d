@@ -120,6 +120,12 @@ def test_a_height_outside_the_source_is_rejected(height_api):
         height_api.generate(seed=0, height_origin=-1)
 
 
+@pytest.mark.parametrize("height", [{"height_origin": 4.0}, {"height_extent": 64.0}])
+def test_a_height_without_a_height_model_is_rejected(tiny_api, height):
+    with pytest.raises(ValueError, match="require a height-conditioned model"):
+        tiny_api.generate(seed=0, **height)
+
+
 def test_an_output_smaller_than_the_patch_is_rejected(tiny_api):
     with pytest.raises(ValueError, match="at least the patch"):
         tiny_api.generate(shape=tiny_api.input_size - 1, seed=0)

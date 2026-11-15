@@ -21,8 +21,11 @@ class HeightRange:
         self.pixels_per_cell = config.data.crop_size / config.patch_size
         self.top = 0
         if not self.enabled:
-            if extent is not None:
-                raise ValueError("height_extent requires a height-conditioned model.")
+            if extent is not None or origin != 0:
+                raise ValueError(
+                    "height_origin and height_extent require a height-conditioned "
+                    "model."
+                )
             self.origin, self.extent = 0.0, None
             return
         if extent is None:
@@ -176,7 +179,7 @@ class SRConditions:
         low = low.detach().to("cpu", torch.float32)[None]
         # Outside the output the coarse input repeats its faces.
         padding = (side, side, side, side, top, bottom)
-        self.low = F.pad(low, padding, mode="replicate") if any(padding) else low
+        self.low = F.pad(low, padding, mode="replicate")
         self.device = device
         self.height = HeightRange(config, height_origin, height_extent)
         self.height.place(plan)
@@ -200,8 +203,7 @@ def _normalize_vf(vf, num_phases, device):
         raise ValueError("vf values must be finite.")
     if bool((values < 0).any()):
         raise ValueError("vf values must be non-negative.")
-    largest = values.max()
-    if largest == 0:
+    total = values.sum()
+    if total == 0:
         raise ValueError("vf sum must not be zero.")
-    values = values / largest
-    return (values / values.sum()).to(device=device, dtype=torch.float32)[None]
+    return (values / total).to(device=device, dtype=torch.float32)[None]
