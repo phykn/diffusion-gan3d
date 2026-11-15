@@ -297,9 +297,10 @@ class SRTrainer(Trainer):
         loss = self.config.loss
         extra = inputs.extra
         low = extra["low"]
-        diagnostics = {}
         total = clean_probs.sum(dtype=torch.float32) * 0.0
-        total = self.add_group_statistics(total, inputs, clean_probs, diagnostics, low)
+        value, diagnostics = self.group_statistics_term(inputs, clean_probs, low)
+        if value is not None:
+            total = total + value
         consistency, error = consistency_loss(
             clean_probs, low, loss.downsample_mse_tolerance, extra["coarse_mask"]
         )

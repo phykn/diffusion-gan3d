@@ -16,61 +16,22 @@ class LRTrainer(Trainer):
     config: LRConfig
 
     def prepare(self, step, transition):
-        config = self.config
-        conditioning = config.conditioning
-        height = self.height
-        profile_enabled = conditioning.spatial_profile.enabled
-        batch = config.train.volume_batch_size
         real = self.real_crops()
         # Height, profile and vf of a volume share one side crop.
-        candidates = (
-            tuple(axis for axis in self.axes if axis != 0) if height else self.axes
+        choices = (
+            tuple(axis for axis in self.axes if axis != 0) if self.height else self.axes
         )
-        axis = (
-            candidates[0]
-            if height and len(candidates) == 1
-            else candidates[
-                int(torch.randint(len(candidates), (), generator=self.random["train"]))
-            ]
-        )
-        fractions = real[axis].images.float().mean((2, 3))
-        indices = torch.arange(batch, device=fractions.device) % len(fractions)
-        target_vf = fractions[indices]
-        # Samples that keep vf and profile; the rest train the CFG branch.
-        vf_present = (
-            torch.rand(batch, generator=self.random["train"])
-            >= conditioning.cfg_dropout_probability
-        )
-        conditions = {"vf": target_vf, "vf_present": vf_present.to(self.device)}
-        extra = {}
-        if height:
-            conditions["height"] = self.volume_height(
-                real[axis].origins[:batch], real[axis].extents[:batch]
-            )
-        if profile_enabled:
-            profile = rebin_profile(
-                measure_image_profile(
-                    real[axis].images, bins=conditioning.spatial_profile.num_bins
-                ),
-                self.patch_size,
-            )[:batch]
-            target_vf = profile.mean(-1)
-            conditions.update(
-                profile=profile,
-                profile_present=vf_present.to(self.device),
-                vf=target_vf,
-            )
-            extra["profile"] = profile
-        extra.update(target_vf=target_vf, vf_present=vf_present)
-        diagnostics = {
-            "conditioning/vf_active": vf_present.any(),
-            "conditioning/vf_fraction": vf_present.float().mean(),
-        }
-        if height:
+        if self.height and len(choices) == 1:
+            axis = choices[0]
+        else:
+            index = torch.randint(len(choices), (), generator=self.random["train"])
+            axis = choices[int(index)]
+        conditions, extra, diagnostics = self.crop_conditions(real[axis])
+        if self.height:
             diagnostics.update(
                 {
                     f"conditioning/source/{PLANES[side]}": int(axis == side)
-                    for side in candidates
+                    for side in choices
                 }
             )
         return StepInputs(
@@ -82,35 +43,64 @@ class LRTrainer(Trainer):
             diagnostics=diagnostics,
         )
 
-    def objective(self, inputs, clean_probs):
-        loss = self.config.loss
-        extra = inputs.extra
-        diagnostics = {}
-        vf = vf_loss(clean_probs, extra["target_vf"], extra["vf_present"])
-        diagnostics["loss/vf"] = vf.detach()
-        total = loss.volume_fraction_weight * vf
-        real_transition = loss.real_transition
-        ramp = schedule_ramp(inputs.step, real_transition.ramp_steps)
-        diagnostics["loss/real_transition_ramp"] = ramp
-        if real_transition.weight > 0 and inputs.transition == 0:
-            value = self.real_transition(inputs, clean_probs, diagnostics)
-            diagnostics["loss/real_transition"] = value.detach()
-            total = total + ramp * real_transition.weight * value
-        total = self.add_group_statistics(total, inputs, clean_probs, diagnostics)
-        mirror_balance = loss.mirror_balance
-        if mirror_balance.weight > 0:
-            # The x0 prediction of every transition must keep the mirror symmetry.
-            value, values = mirror_balance_loss(
-                clean_probs, mirror_balance.max_gap, mirror_balance.tolerance
+    def crop_conditions(self, crops):
+        """Denoiser conditions, loss targets and metrics from one side crop."""
+        conditioning = self.config.conditioning
+        batch = self.config.train.volume_batch_size
+        indices = torch.arange(batch, device=crops.images.device) % len(crops.images)
+        # Samples that keep vf and profile; the rest train the CFG branch.
+        present = (
+            torch.rand(batch, generator=self.random["train"])
+            >= conditioning.cfg_dropout_probability
+        )
+        conditions = {"vf_present": present.to(self.device)}
+        extra = {"vf_present": present}
+        if self.height:
+            conditions["height"] = self.volume_height(
+                crops.origins[indices.cpu()], crops.extents[indices.cpu()]
             )
-            total = total + mirror_balance.weight * value
-            diagnostics.update(values)
-            diagnostics["loss/mirror_balance"] = value.detach()
-        if "profile" in extra:
-            total = total + self.profile(clean_probs, extra["profile"], diagnostics)
-        return total, diagnostics
+        if conditioning.spatial_profile.enabled:
+            profile = rebin_profile(
+                measure_image_profile(
+                    crops.images, bins=conditioning.spatial_profile.num_bins
+                ),
+                self.patch_size,
+            )[indices]
+            target_vf = profile.mean(-1)
+            conditions.update(profile=profile, profile_present=present.to(self.device))
+            extra["profile"] = profile
+        else:
+            target_vf = crops.images.float().mean((2, 3))[indices]
+        conditions["vf"] = target_vf
+        extra["target_vf"] = target_vf
+        diagnostics = {
+            "conditioning/vf_active": present.any(),
+            "conditioning/vf_fraction": present.float().mean(),
+        }
+        return conditions, extra, diagnostics
 
-    def real_transition(self, inputs, clean_probs, diagnostics):
+    def objective(self, inputs, clean_probs):
+        extra = inputs.extra
+        vf = vf_loss(clean_probs, extra["target_vf"], extra["vf_present"])
+        total = self.config.loss.volume_fraction_weight * vf
+        metrics = {"loss/vf": vf.detach()}
+        for value, values in (
+            self.real_transition_term(inputs, clean_probs),
+            self.group_statistics_term(inputs, clean_probs),
+            self.mirror_balance_term(clean_probs),
+            self.profile_term(clean_probs, extra.get("profile")),
+        ):
+            metrics.update(values)
+            if value is not None:
+                total = total + value
+        return total, metrics
+
+    def real_transition_term(self, inputs, clean_probs):
+        real_transition = self.config.loss.real_transition
+        ramp = schedule_ramp(inputs.step, real_transition.ramp_steps)
+        metrics = {"loss/real_transition_ramp": ramp}
+        if not (real_transition.weight > 0 and inputs.transition == 0):
+            return None, metrics
         real, fake, real_heights, fake_heights = {}, {}, {}, {}
         height = inputs.conditions.get("height")
         for axis in self.axes:
@@ -135,32 +125,43 @@ class LRTrainer(Trainer):
         value, values = real_transition_loss(
             real,
             fake,
-            self.config.loss.real_transition.max_gap,
+            real_transition.max_gap,
             real_heights if height is not None else None,
             fake_heights if height is not None else None,
             self.augment.rotatable_axes,
         )
-        diagnostics.update(values)
-        return value
+        metrics.update(values)
+        metrics["loss/real_transition"] = value.detach()
+        return ramp * real_transition.weight * value, metrics
 
-    def profile(self, clean_probs, target, diagnostics):
+    def mirror_balance_term(self, clean_probs):
+        mirror_balance = self.config.loss.mirror_balance
+        if not mirror_balance.weight > 0:
+            return None, {}
+        # The x0 prediction of every transition must keep the mirror symmetry.
+        value, metrics = mirror_balance_loss(
+            clean_probs, mirror_balance.max_gap, mirror_balance.tolerance
+        )
+        metrics["loss/mirror_balance"] = value.detach()
+        return mirror_balance.weight * value, metrics
+
+    def profile_term(self, clean_probs, target):
+        if target is None:
+            return None, {}
         # The real crop profile is the target for CFG-dropped samples too: the
         # height field alone must carry the depth gradient at generation.
-        config = self.config
+        conditioning = self.config.conditioning
         value = profile_loss(
             clean_probs,
             target,
-            config.conditioning.spatial_profile.num_bins,
-            config.loss.spatial_profile_weight,
+            conditioning.spatial_profile.num_bins,
+            self.config.loss.spatial_profile_weight,
         )
         detached = clean_probs.detach()
         soft = detached.mean((-1, -2))
         labels = phase_profile(detached.argmax(1), self.num_phases)
-        diagnostics.update(
-            {
-                "profile/loss": value.detach(),
-                "profile/soft_mae": (soft - target).abs().mean(),
-                "profile/label_mae": (labels - target).abs().mean(),
-            }
-        )
-        return value
+        return value, {
+            "profile/loss": value.detach(),
+            "profile/soft_mae": (soft - target).abs().mean(),
+            "profile/label_mae": (labels - target).abs().mean(),
+        }

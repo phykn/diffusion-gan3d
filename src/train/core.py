@@ -93,8 +93,11 @@ def validate_loss(loss, name):
     return loss
 
 
-def step_optimizer(optimizer, scaler, diagnostics, name):
-    """Step unless the gradient is not finite; that is an error without AMP."""
+def step_optimizer(optimizer, scaler, name):
+    """Step unless the gradient is not finite; that is an error without AMP.
+
+    Returns whether it stepped and the gradient metrics.
+    """
     scaler.unscale_(optimizer)
     grads = [
         p.grad.detach().float()
@@ -107,14 +110,15 @@ def step_optimizer(optimizer, scaler, diagnostics, name):
     dtype = wide_dtype(grads[0].device)
     norm = torch.stack([torch.linalg.vector_norm(g, dtype=dtype) for g in grads]).norm()
     finite = bool(torch.isfinite(norm))
-    diagnostics[f"gradient/{name}"] = norm if finite else None
-    diagnostics[f"skipped/{name}"] = int(not finite)
     if not finite and not scaler.is_enabled():
         raise FloatingPointError(
             f"non-finite {name} gradient; optimizer was not stepped."
         )
     scaler.step(optimizer)
-    return finite
+    return finite, {
+        f"gradient/{name}": norm if finite else None,
+        f"skipped/{name}": int(not finite),
+    }
 
 
 def schedule_ramp(step, ramp):
@@ -188,9 +192,6 @@ class Trainer:
         self.spacing = config.data.crop_size / self.patch_size
         self.updates = {name: 0 for name in (*self.critics, "generator")}
         self.completed_steps = 0
-        self.generator_updated = True
-        self.diagnostics: dict = {}
-        self.scheduled = burn_in_values(config, 0)
 
     @staticmethod
     def _adam(module, lr, betas):
@@ -253,49 +254,37 @@ class Trainer:
     # Step ------------------------------------------------------------------
 
     def step(self, step, transition=None):
-        self.diagnostics = {}
-        self.scheduled = self.apply_burn_in(step)
+        scheduled = self.apply_burn_in(step)
         self.denoiser.train()
         self.critics.train()
         inputs = self.prepare(step, transition)
-        self.diagnostics.update(inputs.diagnostics)
         previous, current, prediction = self.generate_pair(
             inputs.transition, inputs.conditions
         )
         clean_probs = (prediction + 1.0) * 0.5
         fake = self.fake_pairs(previous, current, inputs)
         real = self.real_pairs(inputs)
-        critic_losses, r1 = self.update_critics(inputs.transition, fake, real)
-        generator = self.update_generator(inputs, clean_probs, fake, real)
+        critic_metrics = self.update_critics(inputs.transition, fake, real, scheduled)
+        updated, generator_metrics = self.update_generator(
+            inputs, clean_probs, fake, real
+        )
         self.scaler.update()
-        self.after_step(step, inputs, clean_probs)
+        structure = self.measure_structure(step, inputs, clean_probs)
         self.completed_steps = step + 1
-        self.diagnostics["amp/scale"] = self.scaler.get_scale()
-        if self.generator_updated:
-            update_ema(self.ema, self.denoiser, self.scheduled.ema_decay)
-        scalars = {
-            "loss/generator": generator["adversarial"],
-            "loss/generator_total": generator["total"],
-            "loss/critic": sum(value for value in critic_losses if value is not None),
-            "loss/r1": r1,
-            "sampling/transition": inputs.transition,
-            **{
-                f"critic_plane/{PLANES[axis]}": value
-                for axis, value in enumerate(critic_losses)
-            },
-            **self.diagnostics,
-        }
-        return materialize(scalars)
-
-    def after_step(self, step, inputs, clean_probs):
-        """Structure metrics of the prediction every structure_every_steps."""
-        every = self.config.train.structure_every_steps
-        if every and (step + 1) % every == 0:
-            real = {axis: crops.images for axis, crops in inputs.real.items()}
-            self.diagnostics.update(structure_metrics(clean_probs, real, self.groups))
+        if updated:
+            update_ema(self.ema, self.denoiser, scheduled.ema_decay)
+        return materialize(
+            {
+                "sampling/transition": inputs.transition,
+                **inputs.diagnostics,
+                **critic_metrics,
+                **generator_metrics,
+                **structure,
+                "amp/scale": self.scaler.get_scale(),
+            }
+        )
 
     def apply_burn_in(self, step):
-        """Set this step's learning rates and beta2; return its scheduled values."""
         values = burn_in_values(self.config, step)
         for name, optimizer in self.optimizers.items():
             lr = values.generator_lr if name == "generator" else values.critic_lr
@@ -303,6 +292,8 @@ class Trainer:
                 group["lr"] = lr
                 group["betas"] = values.betas
         return values
+
+    # Inputs ----------------------------------------------------------------
 
     def sample_transition(self):
         timesteps = self.diffusion.timesteps
@@ -333,42 +324,7 @@ class Trainer:
             (self.patch_size,) * 3, origins, self.spacing, extents, self.device
         )
 
-    def add_group_statistics(self, total, inputs, clean_probs, diagnostics, low=None):
-        """total plus the ramped group-statistics term on transition 0. SR passes
-        its LR input low: differences low already has are allowed on top."""
-        group_statistics = self.config.loss.group_statistics
-        ramp = schedule_ramp(inputs.step, group_statistics.ramp_steps)
-        if group_statistics.weight > 0 and inputs.transition == 0 and ramp > 0:
-            value, values = group_statistics_loss(
-                clean_probs,
-                self.groups,
-                group_statistics.max_gap,
-                group_statistics.tolerance,
-                self.height,
-                low,
-            )
-            total = total + group_statistics.weight * ramp * value
-            diagnostics.update(values)
-            diagnostics["loss/group_statistics"] = value.detach()
-            diagnostics["group_statistics/ramp"] = value.new_tensor(ramp)
-        return total
-
-    def make_time(self, transition, batch):
-        return torch.full((batch,), transition, device=self.device, dtype=torch.long)
-
-    def latent(self, batch):
-        channels = self.config.model.generator.latent_channels
-        return randn((batch, channels), self.random["train"], self.device)
-
-    def noise(self, shape):
-        return torch.randn(
-            tuple(shape), generator=self.random["noise"], device=self.device
-        )
-
-    def autocast(self, enabled):
-        return torch.autocast(
-            device_type=self.device.type, dtype=torch.float16, enabled=enabled
-        )
+    # Generated and real pairs ----------------------------------------------
 
     def generate_pair(self, transition, conditions):
         """Run the reverse chain from noise to x_t+1 without gradients, then
@@ -399,6 +355,23 @@ class Trainer:
                 current, prediction, transition, noise
             )
         return previous, current, prediction
+
+    def make_time(self, transition, batch):
+        return torch.full((batch,), transition, device=self.device, dtype=torch.long)
+
+    def latent(self, batch):
+        channels = self.config.model.generator.latent_channels
+        return randn((batch, channels), self.random["train"], self.device)
+
+    def noise(self, shape):
+        return torch.randn(
+            tuple(shape), generator=self.random["noise"], device=self.device
+        )
+
+    def autocast(self, enabled):
+        return torch.autocast(
+            device_type=self.device.type, dtype=torch.float16, enabled=enabled
+        )
 
     def fake_pairs(self, previous, current, inputs):
         volume_height = inputs.conditions.get("height")
@@ -433,102 +406,112 @@ class Trainer:
             pairs[axis] = Pairs(*self.augment(values, axis, self.random["augment"]))
         return pairs
 
-    def lazy_update(self, name):
-        """Whether the next update of name is one with R1/R2 or diagnostics."""
-        return (self.updates[name] + 1) % self.config.loss.r1_every_steps == 0
+    # Critics ---------------------------------------------------------------
 
-    def regularization(self, name):
-        """Lazy R1/R2 schedule and weights for one critic's next update."""
-        loss = self.config.loss
-        regularize = self.lazy_update(name)
-        scale = self.scheduled.regularization_scale if regularize else 0.0
-        return regularize, loss.r1_weight * scale, loss.r2_weight * scale
-
-    def update_critics(self, transition, fake, real):
-        """Per-axis adversarial critic losses (R1/R2 excluded) and mean R1.
+    def update_critics(self, transition, fake, real, scheduled):
+        """Step every plane-group critic once; return its metrics.
 
         Planes no critic judged and steps without R1 give None, not zero.
         """
-        critic_losses = [None] * len(AXES)
-        r1_sum = None
-        interval = self.config.loss.r1_every_steps
+        plane_losses = [None] * len(AXES)
+        r1_total = None
+        metrics = {}
         for group, axes in self.groups.items():
-            regularize, r1_weight, r2_weight = self.regularization(group)
+            regularize, r1_weight, r2_weight = self.regularization(group, scheduled)
             weight = 1.0 / (len(axes) * len(self.groups))
-            critic = self.critics[group]
             optimizer = self.optimizers[group]
             optimizer.zero_grad(set_to_none=True)
             for axis in axes:
-                # Copies keep the shared real pairs free of gradients for the
-                # generator update.
-                real_prev = real[axis].previous.detach().requires_grad_(r1_weight > 0)
-                real_curr = real[axis].current.detach()
-                fake_prev = fake[axis].previous.detach().float()
-                fake_prev = fake_prev.requires_grad_(r2_weight > 0)
-                fake_curr = fake[axis].current.detach().float()
-                with self.autocast(self.critic_amp and not regularize):
-                    real_score = critic(
-                        real_prev,
-                        real_curr,
-                        self.make_time(transition, len(real_prev)),
-                        **real[axis].conditions(),
-                    )
-                    fake_score = critic(
-                        fake_prev,
-                        fake_curr,
-                        self.make_time(transition, len(fake_prev)),
-                        **fake[axis].conditions(),
-                    )
-                    # Fake volumes take their heights from real crops, so each
-                    # pair compares (section, height) samples.
-                    losses = critic_objective(
-                        relativistic_loss(real_score, fake_score),
-                        real_score,
-                        fake_score,
-                        (real_prev,),
-                        (fake_prev,),
-                        r1_weight=r1_weight,
-                        r2_weight=r2_weight,
-                        interval=interval,
-                    )
+                losses, real_score, fake_score = self.critic_losses(
+                    group,
+                    transition,
+                    real[axis],
+                    fake[axis],
+                    regularize,
+                    r1_weight,
+                    r2_weight,
+                )
                 prefix = f"{group}/{axis}"
-                self.diagnostics[f"score/{prefix}/real"] = real_score[0].detach().mean()
-                self.diagnostics[f"score/{prefix}/fake"] = fake_score[0].detach().mean()
+                metrics[f"score/{prefix}/real"] = real_score[0].detach().mean()
+                metrics[f"score/{prefix}/fake"] = fake_score[0].detach().mean()
                 if r1_weight > 0:
                     r1 = losses.r1.detach() * weight
-                    r1_sum = r1 if r1_sum is None else r1_sum + r1
+                    r1_total = r1 if r1_total is None else r1_total + r1
                 if r2_weight > 0:
-                    self.diagnostics[f"r2/{prefix}"] = losses.r2.detach()
+                    metrics[f"r2/{prefix}"] = losses.r2.detach()
                 loss = validate_loss(losses.total, f"critic {prefix}")
                 self.scaler.scale(loss * weight).backward()
-                critic_losses[axis] = losses.adversarial.detach() * weight
-            if step_optimizer(optimizer, self.scaler, self.diagnostics, group):
+                plane_losses[axis] = losses.adversarial.detach() * weight
+            stepped, gradient = step_optimizer(optimizer, self.scaler, group)
+            metrics.update(gradient)
+            if stepped:
                 self.updates[group] += 1
-        return critic_losses, r1_sum
+        metrics.update(
+            {
+                "loss/critic": sum(loss for loss in plane_losses if loss is not None),
+                "loss/r1": r1_total,
+                **{
+                    f"critic_plane/{PLANES[axis]}": loss
+                    for axis, loss in enumerate(plane_losses)
+                },
+            }
+        )
+        return metrics
 
-    def adversarial_loss(self, transition, fake, real):
-        losses = []
-        for group, axes in self.groups.items():
-            critic = self.critics[group]
-            for axis in axes:
-                fake_prev, fake_curr = fake[axis].previous, fake[axis].current
-                scores = critic(
-                    fake_prev,
-                    fake_curr,
-                    self.make_time(transition, len(fake_prev)),
-                    **fake[axis].conditions(),
-                )
-                real_scores = critic(
-                    real[axis].previous,
-                    real[axis].current,
-                    self.make_time(transition, len(real[axis].previous)),
-                    **real[axis].conditions(),
-                )
-                loss = relativistic_loss(scores, real_scores)
-                losses.append(loss / (len(axes) * len(self.groups)))
-        return torch.stack(losses).sum()
+    def regularization(self, group, scheduled):
+        """Whether this update of group's critic is a lazy R1/R2 one, and the
+        R1 and R2 weights it uses."""
+        loss = self.config.loss
+        regularize = (self.updates[group] + 1) % loss.r1_every_steps == 0
+        scale = scheduled.regularization_scale if regularize else 0.0
+        return regularize, loss.r1_weight * scale, loss.r2_weight * scale
+
+    def critic_losses(
+        self, group, transition, real, fake, regularize, r1_weight, r2_weight
+    ):
+        """Adversarial and R1/R2 losses of one plane, with the real and fake scores."""
+        # Copies keep the shared real pairs free of gradients for the generator
+        # update.
+        real = Pairs(
+            real.previous.detach().requires_grad_(r1_weight > 0),
+            real.current.detach(),
+            real.height,
+        )
+        fake = Pairs(
+            fake.previous.detach().float().requires_grad_(r2_weight > 0),
+            fake.current.detach().float(),
+            fake.height,
+        )
+        critic = self.critics[group]
+        with self.autocast(self.critic_amp and not regularize):
+            real_score = self.score(critic, real, transition)
+            fake_score = self.score(critic, fake, transition)
+            # Fake volumes take their heights from real crops, so each pair
+            # compares (section, height) samples.
+            losses = critic_objective(
+                relativistic_loss(real_score, fake_score),
+                real_score,
+                fake_score,
+                (real.previous,),
+                (fake.previous,),
+                r1_weight=r1_weight,
+                r2_weight=r2_weight,
+                interval=self.config.loss.r1_every_steps,
+            )
+        return losses, real_score, fake_score
+
+    def score(self, critic, pairs, transition):
+        return critic(
+            pairs.previous,
+            pairs.current,
+            self.make_time(transition, len(pairs.previous)),
+            **pairs.conditions(),
+        )
+
+    # Generator -------------------------------------------------------------
 
     def update_generator(self, inputs, clean_probs, fake, real):
+        """Step the generator once; return whether it stepped and its metrics."""
         optimizer = self.optimizers["generator"]
         optimizer.zero_grad(set_to_none=True)
         self.critics.requires_grad_(False)
@@ -536,19 +519,60 @@ class Trainer:
             # The critics score the fake pairs, so the critics' precision applies.
             with self.autocast(self.critic_amp):
                 adversarial = self.adversarial_loss(inputs.transition, fake, real)
-                extra, values = self.objective(inputs, clean_probs)
+                extra, metrics = self.objective(inputs, clean_probs)
                 total = adversarial + extra
-            self.diagnostics.update(values)
             total = validate_loss(total, "generator")
             self.scaler.scale(total).backward()
-            self.generator_updated = step_optimizer(
-                optimizer, self.scaler, self.diagnostics, "generator"
-            )
-            if self.generator_updated:
+            stepped, gradient = step_optimizer(optimizer, self.scaler, "generator")
+            if stepped:
                 self.updates["generator"] += 1
         finally:
             self.critics.requires_grad_(True)
-        return {"adversarial": adversarial.detach(), "total": total.detach()}
+        return stepped, {
+            "loss/generator": adversarial.detach(),
+            "loss/generator_total": total.detach(),
+            **metrics,
+            **gradient,
+        }
+
+    def adversarial_loss(self, transition, fake, real):
+        losses = []
+        for group, axes in self.groups.items():
+            critic = self.critics[group]
+            for axis in axes:
+                loss = relativistic_loss(
+                    self.score(critic, fake[axis], transition),
+                    self.score(critic, real[axis], transition),
+                )
+                losses.append(loss / (len(axes) * len(self.groups)))
+        return torch.stack(losses).sum()
+
+    def group_statistics_term(self, inputs, clean_probs, low=None):
+        """The ramped group-statistics loss on transition 0 (None otherwise) and
+        its metrics. SR passes its LR input low: differences low already has
+        are allowed on top."""
+        group_statistics = self.config.loss.group_statistics
+        ramp = schedule_ramp(inputs.step, group_statistics.ramp_steps)
+        if not (group_statistics.weight > 0 and inputs.transition == 0 and ramp > 0):
+            return None, {}
+        value, metrics = group_statistics_loss(
+            clean_probs,
+            self.groups,
+            group_statistics.max_gap,
+            group_statistics.tolerance,
+            self.height,
+            low,
+        )
+        metrics["loss/group_statistics"] = value.detach()
+        metrics["group_statistics/ramp"] = value.new_tensor(ramp)
+        return group_statistics.weight * ramp * value, metrics
+
+    def measure_structure(self, step, inputs, clean_probs):
+        every = self.config.train.structure_every_steps
+        if not every or (step + 1) % every:
+            return {}
+        real = {axis: crops.images for axis, crops in inputs.real.items()}
+        return structure_metrics(clean_probs, real, self.groups)
 
 
 def materialize(scalars):
