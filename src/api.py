@@ -82,20 +82,25 @@ class SamplingRequest:
         )
 
 
+def load_predictor(weights, stage, device):
+    """An export's payload, settings and denoiser predictor on device."""
+    payload = read_export(weights, stage)
+    config = export_config(payload)
+    model = load_denoiser(payload, config).to(device)
+    diffusion = build_diffusion(config).to(device)
+    return payload, config, Predictor(model, diffusion, config, device)
+
+
 class LowResolutionAPI:
     def __init__(self, weights, device=None):
         self.device = check_device(default_device() if device is None else device)
-        payload = read_export(weights, "lr")
-        self.config = export_config(payload)
-        model = load_denoiser(payload, self.config).to(self.device)
-        diffusion = build_diffusion(self.config).to(self.device)
+        _, self.config, self.predictor = load_predictor(weights, "lr", self.device)
         data = self.config.data
         self.crop_size = data.crop_size
         self.input_size = data.lo_res_size
         self.num_phases = data.num_phases
-        self.default_margin = model.downsample_factor
+        self.default_margin = self.predictor.model.downsample_factor
         self.settings = load_generation_settings()
-        self.predictor = Predictor(model, diffusion, self.config, self.device)
 
     def prepare_image(self, image):
         if image.shape != (self.crop_size, self.crop_size):
@@ -132,17 +137,22 @@ class LowResolutionAPI:
         probabilities=False,
     ):
         plan = self.plan(blocks=blocks, shape=shape, overlap=overlap, margin=margin)
-        guidance = self.settings.guidance if guidance is None else float(guidance)
-        strength = self._anchor_strength(anchor_strength)
+        guidance, strength = self._guidance(guidance, anchor_strength)
         return self._request(
             plan,
-            bool(tuple(anchors)) and strength > 0,
+            bool(tuple(anchors)) and check_strength(strength) > 0,
             probabilities,
             guidance not in (0.0, 1.0),
         ).estimate
 
-    def _anchor_strength(self, value):
-        return self.settings.anchor_strength if value is None else check_strength(value)
+    def _guidance(self, guidance, anchor_strength):
+        """guidance and anchor_strength, defaulting to config/gen.yaml."""
+        settings = self.settings
+        if guidance is None:
+            guidance = settings.guidance
+        if anchor_strength is None:
+            anchor_strength = settings.anchor_strength
+        return float(guidance), anchor_strength
 
     def _request(self, plan, guided, probabilities, cfg):
         return SamplingRequest(
@@ -189,7 +199,7 @@ class LowResolutionAPI:
         height_extent=None,
         vf_profile=None,
     ):
-        guidance = self.settings.guidance if guidance is None else float(guidance)
+        guidance, strength = self._guidance(guidance, anchor_strength)
         plan = self.plan(blocks=blocks, shape=shape, overlap=overlap, margin=margin)
         conditions = LRConditions(
             self.config,
@@ -199,11 +209,6 @@ class LowResolutionAPI:
             vf_profile=vf_profile,
             height_origin=height_origin,
             height_extent=height_extent,
-        )
-        strength = (
-            self.settings.anchor_strength
-            if anchor_strength is None
-            else anchor_strength
         )
         anchors = TileAnchors(anchors, plan, self.num_phases, strength, self.device)
         cfg = conditions.has_measured_condition and guidance not in (0.0, 1.0)
@@ -243,10 +248,9 @@ class SuperResolutionAPI:
 
     def __init__(self, weights, device=None, lr_weights=None):
         self.device = check_device(default_device() if device is None else device)
-        payload = read_export(weights, "sr")
-        self.config = export_config(payload)
-        model = load_denoiser(payload, self.config).to(self.device)
-        diffusion = build_diffusion(self.config).to(self.device)
+        payload, self.config, self.predictor = load_predictor(
+            weights, "sr", self.device
+        )
         data = self.config.data
         self.crop_size = data.crop_size
         self.lo_res_size = data.lo_res_size
@@ -254,7 +258,6 @@ class SuperResolutionAPI:
         self.scale_factor = self.config.scale_factor
         self.num_phases = data.num_phases
         self.default_margin = choose_sr_margin(self.scale_factor)
-        self.predictor = Predictor(model, diffusion, self.config, self.device)
         self.lr = LowResolutionAPI(
             payload["lr"] if lr_weights is None else lr_weights, self.device
         )

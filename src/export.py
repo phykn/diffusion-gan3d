@@ -13,12 +13,7 @@ VERSION = 3
 STAGE_NAMES = {"lr": "LR", "sr": "SR"}
 
 
-def export_payload(
-    config,
-    step,
-    model,
-    lr=None,
-):
+def export_payload(config, step, model, lr=None):
     if (config.stage == "sr") != (lr is not None):
         raise ValueError("an SR export carries its LR export; an LR export does not.")
     payload = {
@@ -44,15 +39,6 @@ def write_export(path, payload, *, overwrite=True):
     return torch_save(dict(payload), path, overwrite=overwrite)
 
 
-def resolve_export(weights):
-    path = Path(weights).expanduser()
-    if path.is_dir():
-        path = path / "generator.pt"
-    if not path.is_file():
-        raise FileNotFoundError(f"export not found: {path}")
-    return path
-
-
 def read_export(weights, stage):
     """Load and check an export: a run folder, a generator.pt or a payload."""
     if isinstance(weights, Mapping):
@@ -60,6 +46,15 @@ def read_export(weights, stage):
     path = resolve_export(weights)
     payload = torch.load(path, map_location="cpu", weights_only=True)
     return check_export(payload, stage, path)
+
+
+def resolve_export(weights):
+    path = Path(weights).expanduser()
+    if path.is_dir():
+        path = path / "generator.pt"
+    if not path.is_file():
+        raise FileNotFoundError(f"export not found: {path}")
+    return path
 
 
 def check_export(payload, stage, path=None):
@@ -79,6 +74,13 @@ def check_export(payload, stage, path=None):
 
 def export_config(payload):
     return build_config(payload["config"])
+
+
+def load_denoiser(payload, config):
+    """EMA denoiser of an export, in eval mode on the CPU."""
+    model = build_denoiser(config)
+    model.load_state_dict(payload["model"], strict=True)
+    return model.eval().requires_grad_(False)
 
 
 def build_denoiser(config):
@@ -102,28 +104,17 @@ def build_diffusion(config):
     return Diffusion(diffusion.num_steps, diffusion.beta_min, diffusion.beta_max)
 
 
-def load_denoiser(payload, config):
-    """EMA denoiser of an export, in eval mode on the CPU."""
-    model = build_denoiser(config)
-    model.load_state_dict(payload["model"], strict=True)
-    return model.eval().requires_grad_(False)
-
-
-# Settings an SR model shares with the LR model whose volumes it refines.
-SOURCE_KEYS = (
-    "data.crop_size",
-    "data.lo_res_size",
-    "data.hi_res_size",
-    "data.num_phases",
-    "conditioning.height_enabled",
-    "data.height_extent",
-)
-
-
 def check_lr_source(lr, sr):
     """SR source: the LR settings an SR model depends on must be its own."""
     differences = []
-    for key in SOURCE_KEYS:
+    for key in (
+        "data.crop_size",
+        "data.lo_res_size",
+        "data.hi_res_size",
+        "data.num_phases",
+        "conditioning.height_enabled",
+        "data.height_extent",
+    ):
         section, name = key.split(".")
         mine = getattr(getattr(sr, section), name)
         theirs = getattr(getattr(lr, section), name)
