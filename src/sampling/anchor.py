@@ -49,13 +49,12 @@ class AnchorGuide:
 
     def __call__(self, predictor, noisy, time, latent, guidance, conditions):
         with torch.enable_grad():
-            state = noisy.detach().clone().requires_grad_(True)
+            state = noisy.detach().requires_grad_(True)
             prediction = predictor(state, time, latent, guidance, **conditions)
             error = (prediction - self.image).square().mul(self.mask).sum()
             (gradient,) = torch.autograd.grad(error, state)
         # The RMS error keeps the step the same however large the anchor area is.
-        anchor_voxels = self.mask.sum().clamp_min(1)
-        rms = (error.detach() / anchor_voxels).sqrt().clamp_min(SMALLEST_ERROR)
+        rms = (error.detach() / self.mask.sum()).sqrt().clamp_min(SMALLEST_ERROR)
         return prediction.detach(), gradient * (self.strength / rms)
 
 
