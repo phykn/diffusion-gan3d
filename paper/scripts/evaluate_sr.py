@@ -15,6 +15,7 @@ from paper.scripts.common import (
     cached,
     connectivity,
     describe_volumes,
+    interface_density,
     mean_std,
     parse_args,
     real_crops,
@@ -29,7 +30,6 @@ from src.stats.sections import (
     section_errors,
     section_statistics,
 )
-from src.stats.volume import interface_density
 from src.train.selection import lr_mse
 
 DESCRIPTION = (

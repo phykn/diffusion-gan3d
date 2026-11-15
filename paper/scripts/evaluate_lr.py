@@ -17,13 +17,15 @@ from paper.scripts.common import (
     connectivity,
     describe_volumes,
     first_image,
+    interface_density,
+    load_config,
     mean_std,
     parse_args,
     real_crops,
     wall_minutes,
 )
 from src.api import LowResolutionAPI, PlaneAnchor
-from src.config.io import load_config, load_generation_settings, load_yaml, shorten_path
+from src.config.io import load_generation_settings, load_yaml, shorten_path
 from src.data.phases import encode_phases
 from src.data.resize import resize_phases
 from src.stats.anchor import measure_boundaries, measure_slice_smoothness
@@ -34,7 +36,6 @@ from src.stats.sections import (
     two_point,
 )
 from src.stats.volume import (
-    interface_density,
     tilt_balance,
 )
 

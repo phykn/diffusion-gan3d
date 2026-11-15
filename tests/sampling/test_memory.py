@@ -51,7 +51,7 @@ def default_sr_export(random_export, default_configs):
 @pytest.mark.skipif(GPU is None, reason="needs CUDA or MPS")
 @pytest.mark.parametrize(
     "options",
-    [{"size": 64}, {"blocks": [2, 2, 2]}, {"blocks": [2, 2, 2], "anchors": 1}],
+    [{"shape": 64}, {"blocks": [2, 2, 2]}, {"blocks": [2, 2, 2], "anchors": 1}],
 )
 def test_measured_gpu_memory_stays_under_the_estimate(default_lr_export, options):
     measured = probe(default_lr_export, GPU, options)

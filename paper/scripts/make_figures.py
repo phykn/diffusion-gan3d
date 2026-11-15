@@ -15,11 +15,17 @@ from PIL import Image, ImageDraw
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from paper.scripts.common import cache_dir, first_image, read_metrics, real_crops
+from paper.scripts.common import (
+    cache_dir,
+    first_image,
+    load_config,
+    read_metrics,
+    real_crops,
+)
 from paper.scripts.evaluate_anode import lr_grid, real_volume_paths
 from paper.scripts.evaluate_lr import DISTANCES
 from paper.scripts.evaluate_sr import upsample_linear, upsample_nearest
-from src.config.io import load_config, resolve_path
+from src.config.io import resolve_path
 from src.stats.sections import label_sections
 from src.storage import load_volume
 

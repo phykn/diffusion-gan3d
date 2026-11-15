@@ -13,6 +13,8 @@ from paper.scripts.common import (
     TILT_KEYS,
     cache_dir,
     cached,
+    chord_mean,
+    interface_density,
     mean_std,
     normalized,
     parse_args,
@@ -26,9 +28,7 @@ from src.data.phases import encode_phases
 from src.data.resize import downsample
 from src.stats.sections import compare_sections, label_sections, section_statistics
 from src.stats.volume import (
-    chord_mean,
     component_slopes,
-    interface_density,
     spanning_fractions,
     tilt_balance,
     tortuosity,

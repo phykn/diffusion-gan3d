@@ -1,6 +1,6 @@
 import torch
 
-from src.stats.volume import interface_density
+from paper.scripts.common import interface_density
 
 
 def test_interface_density_averages_given_axes():

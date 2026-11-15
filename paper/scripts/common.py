@@ -8,13 +8,14 @@ import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from src.axes import AXIS_NAMES, PLANES, PORE_PHASE
-from src.config.io import PROJECT_ROOT, resolve_path
+from src.config.build import build_config
+from src.config.io import PROJECT_ROOT, load_yaml, resolve_path
 from src.data.images import list_images, read_labels
 from src.data.phases import encode_phases
 from src.data.resize import resize_phases
 from src.device import default_device
 from src.stats.sections import compare_sections, section_statistics
-from src.stats.volume import interface_density, spanning_fractions, tortuosity
+from src.stats.volume import spanning_fractions, tortuosity
 from src.storage import torch_save
 from src.train.selection import pick_sections
 
@@ -183,3 +184,28 @@ def read_metrics(log_dir):
 def wall_minutes(log_dir):
     times = [event.wall_time for _, event in read_events(log_dir)]
     return (max(times) - min(times)) / 60
+
+
+def load_config(path):
+    return build_config(load_yaml(path))
+
+
+def chord_mean(volume, phase, axis):
+    lines = np.moveaxis(np.asarray(volume) == phase, axis, -1)
+    lines = lines.reshape(-1, lines.shape[-1])
+    edges = np.diff(np.pad(lines, ((0, 0), (1, 1))).astype(np.int8), axis=1)
+    runs = int((edges == 1).sum())
+    return float(lines.sum() / max(runs, 1))
+
+
+def interface_density(labels, dims):
+    values = [
+        (
+            labels.narrow(dim, 1, labels.shape[dim] - 1)
+            != labels.narrow(dim, 0, labels.shape[dim] - 1)
+        )
+        .float()
+        .mean()
+        for dim in dims
+    ]
+    return float(torch.stack(values).mean())

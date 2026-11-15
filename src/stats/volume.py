@@ -115,24 +115,3 @@ def tilt_balance(volumes, phase, threshold=0.05, min_voxels=8):
             "sem": float(values.std(ddof=1) / np.sqrt(count)) if count > 1 else 0.0,
         }
     return result
-
-
-def chord_mean(volume, phase, axis):
-    lines = np.moveaxis(np.asarray(volume) == phase, axis, -1)
-    lines = lines.reshape(-1, lines.shape[-1])
-    edges = np.diff(np.pad(lines, ((0, 0), (1, 1))).astype(np.int8), axis=1)
-    runs = int((edges == 1).sum())
-    return float(lines.sum() / max(runs, 1))
-
-
-def interface_density(labels, dims):
-    values = [
-        (
-            labels.narrow(dim, 1, labels.shape[dim] - 1)
-            != labels.narrow(dim, 0, labels.shape[dim] - 1)
-        )
-        .float()
-        .mean()
-        for dim in dims
-    ]
-    return float(torch.stack(values).mean())
