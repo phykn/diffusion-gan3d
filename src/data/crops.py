@@ -16,7 +16,7 @@ class Crops:
 
 class CropSampler:
     def __init__(self, plane, crop_size, patch_size, num_phases):
-        self.folders = plane.images
+        self.folder_images = plane.images
         self.crop_size = crop_size
         self.patch_size = patch_size
         self.num_phases = num_phases
@@ -29,7 +29,7 @@ class CropSampler:
                     )
 
     def sample(self, count, generator):
-        images = self.folders[self._draw(len(self.folders), generator)]
+        images = self.folder_images[self._draw(len(self.folder_images), generator)]
         picks = torch.randint(len(images), (count,), generator=generator).tolist()
         size = self.crop_size
         crops, top_rows, image_heights = [], [], []

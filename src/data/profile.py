@@ -9,7 +9,6 @@ from src.data.images import list_side_images
 from src.data.resize import rebin_profile
 
 ROUND_DIGITS = 4
-SUM_TOLERANCE = 1e-6
 Number = Annotated[float, Field(strict=True)]
 
 
@@ -65,7 +64,7 @@ def validate_profile(spec, num_phases):
     if (fractions < 0).any() or (fractions > 1).any():
         raise invalid
     sums = fractions.sum(1)
-    if not torch.allclose(sums, torch.ones_like(sums), atol=SUM_TOLERANCE, rtol=0):
+    if not torch.allclose(sums, torch.ones_like(sums), atol=1e-6, rtol=0):
         raise invalid
     return positions, fractions
 

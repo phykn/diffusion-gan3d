@@ -5,10 +5,6 @@ from PIL import Image
 
 from src.axes import PLANES
 
-IMAGE_EXTENSIONS = {".png", ".tif", ".tiff", ".bmp", ".pgm"}
-UINT8_LABELS = 256
-XY_PLANE = PLANES[0]
-
 
 @dataclass(frozen=True)
 class PlaneImages:
@@ -46,7 +42,8 @@ def list_images(folder):
         sorted(
             path
             for path in folder.iterdir()
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+            if path.is_file()
+            and path.suffix.lower() in {".png", ".tif", ".tiff", ".bmp", ".pgm"}
         )
     )
     if not paths:
@@ -74,7 +71,7 @@ def read_labels(path, num_phases=None):
 
 
 def infer_num_phases(planes):
-    label_seen = np.zeros(UINT8_LABELS, dtype=bool)
+    label_seen = np.zeros(256, dtype=bool)
     largest, largest_path = -1, None
     for plane in planes.values():
         for images, paths in zip(plane.images, plane.paths):
@@ -97,7 +94,7 @@ def list_side_images(planes):
     return [
         image
         for name, plane in planes.items()
-        if name != XY_PLANE
+        if name != PLANES[0]
         for images in plane.images
         for image in images
     ]
