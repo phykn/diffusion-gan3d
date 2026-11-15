@@ -8,9 +8,6 @@ from src.model.denoiser import Denoiser3D
 from src.rng import make_generator, randn
 from src.sampling.plan import build_tile_window
 
-LABEL_CHUNK_VOXELS = 1024**2
-# An fp16 state scored the same but cut the measured peak memory by only 1-2%.
-STATE_DTYPE = torch.float32
 BATCH_AND_CHANNELS = (slice(None), slice(None))
 
 
@@ -45,7 +42,7 @@ class _BlendSlab:
         self.prediction = torch.zeros((1, num_phases, *shape), device=device)
         self.guide_step = torch.zeros_like(self.prediction) if guided else None
 
-    def add(self, tile, window, prediction, guide_step=None):
+    def add(self, tile, window, prediction, guide_step):
         weighted = [
             (self.prediction, prediction.float() * window),
             (self.weight, window),
@@ -107,15 +104,12 @@ class TileSampler:
         )
         storage_device = device if storage == "cuda" else torch.device("cpu")
         tiles = plan.tiles
-        state = torch.empty(
-            (1, num_phases, *plan.region_shape),
-            device=storage_device,
-            dtype=STATE_DTYPE,
-        )
+        # An fp16 state scored the same but cut the measured peak memory by only 1-2%.
+        state = torch.empty((1, num_phases, *plan.region_shape), device=storage_device)
         for tile in tiles:
             shape = (1, num_phases, *(part.stop - part.start for part in tile.target))
             state[(*BATCH_AND_CHANNELS, *tile.target)] = randn(
-                shape, generator, storage_device, STATE_DTYPE
+                shape, generator, storage_device
             )
         output = torch.empty(
             (num_phases, *plan.output_shape) if probabilities else plan.output_shape,
@@ -130,9 +124,7 @@ class TileSampler:
                 is_last_step = transition == 0
                 layer_start = 0
                 for index, tile in enumerate(tiles):
-                    noisy = state[(*BATCH_AND_CHANNELS, *tile.source)].to(
-                        device=device, dtype=torch.float32
-                    )
+                    noisy = state[(*BATCH_AND_CHANNELS, *tile.source)].to(device)
                     tile_conditions = conditions(tile)
                     tile_guide = None
                     if guide is not None and not is_last_step:
@@ -187,14 +179,14 @@ class TileSampler:
                 clean = slab.prediction[slab_region] / weights
                 if output is None:
                     state_region = (*BATCH_AND_CHANNELS, *region)
-                    current = state[state_region].float()
+                    current = state[state_region]
                     noise = randn(current.shape, generator, current.device)
                     previous = diffusion.sample_posterior(
                         current, clean, transition, noise
                     )
                     if slab.guide_step is not None:
                         previous = previous - slab.guide_step[slab_region] / weights
-                    state[state_region] = previous.to(state.dtype)
+                    state[state_region] = previous
                 else:
                     _write_output(output, region, clean, plan.offsets)
                 slab.clear(slab_region)
@@ -212,14 +204,14 @@ def _write_output(output, region, clean, offsets):
     if output.ndim == 3:
         output[tuple(destination)] = _pick_labels(values.squeeze(0))
     else:
-        fractions = _normalize_fractions(values.clone()).squeeze(0)
+        fractions = _normalize_fractions(values).squeeze(0)
         output[(slice(None), *destination)] = fractions
 
 
 def _pick_labels(channels):
     shape = channels.shape[1:]
     labels = torch.empty(shape, dtype=torch.uint8, device="cpu")
-    depth = min(shape[0], max(1, LABEL_CHUNK_VOXELS // math.prod(shape[1:])))
+    depth = max(1, 1024**2 // math.prod(shape[1:]))
     for start in range(0, shape[0], depth):
         layers = slice(start, start + depth)
         labels[layers].copy_(channels[:, layers].argmax(0).to(torch.uint8))
@@ -227,6 +219,6 @@ def _pick_labels(channels):
 
 
 def _normalize_fractions(clean):
-    fractions = clean.float().add_(1).mul_(0.5).clamp_(0, 1)
+    fractions = clean.add_(1).mul_(0.5).clamp_(0, 1)
     total = fractions.sum(1, keepdim=True).clamp_min_(torch.finfo(fractions.dtype).eps)
     return fractions.div_(total)

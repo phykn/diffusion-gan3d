@@ -49,6 +49,7 @@ class TilePlan:
     @cached_property
     def tiles(self):
         tiles = []
+        # z varies slowest: the sampler finishes one z layer of tiles at a time.
         for positions in product(*(range(count) for count in self.tiles_per_axis)):
             source, target, blend_widths = [], [], []
             for axis, position in enumerate(positions):
@@ -121,7 +122,7 @@ def make_plan(output_shape, patch, margin, overlap, z_margins=None):
     )
 
 
-def parse_shape(value, name="shape"):
+def parse_shape(value, name):
     if isinstance(value, int) and not isinstance(value, bool):
         shape = (value, value, value)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
@@ -169,8 +170,9 @@ def _build_axis_window(length, overlap, before, after, device):
         return window
     positions = torch.arange(overlap, device=device, dtype=torch.float32)
     ramp = torch.sin(positions * (math.pi / (2 * overlap))).square()
+    # A blend width is 0 or the whole overlap.
     if before:
-        window[:before] = ramp[-before:]
+        window[:before] = ramp
     if after:
-        window[-after:] = ramp.flip(0)[:after]
+        window[-after:] = ramp.flip(0)
     return window

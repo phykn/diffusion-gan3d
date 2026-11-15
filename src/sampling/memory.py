@@ -4,12 +4,9 @@ from dataclasses import dataclass
 import psutil
 import torch
 
-from src.sampling.sampler import STATE_DTYPE
-
 STORAGES = ("auto", "cpu", "cuda")
 USABLE_FRACTION = 0.8
 FLOAT_BYTES = 4
-STATE_BYTES = torch.finfo(STATE_DTYPE).bits // 8
 # Measured on Apple silicon; tests/sampling/test_memory.py repeats it. The
 # activation sizes overstate large MPS tiles about threefold, which is safe.
 # Allocator blocks and kernels that do not grow with the volume.
@@ -58,7 +55,7 @@ def estimate_memory(
     tile_voxels = math.prod(plan.tile_shape)
     output_voxels = math.prod(plan.output_shape)
 
-    state = STATE_BYTES * num_phases * region_voxels
+    state = FLOAT_BYTES * num_phases * region_voxels
     slab_voxels = plan.tile_shape[0] * math.prod(plan.region_shape[1:])
     slab_values = (2 if guided else 1) * num_phases + 1
     slab = FLOAT_BYTES * slab_values * slab_voxels
