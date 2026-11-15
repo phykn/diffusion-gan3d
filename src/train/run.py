@@ -135,23 +135,25 @@ def sr_config(config, lr_dir):
 
 
 def resume(args):
-    device = check_device(args.device)
-    stage = load_checkpoint(resolve_checkpoint(args.resume))["stage"]
-    lr_dir, sr_dir = stage_dirs(args.run_dir)
-    run_dir = lr_dir if stage == "lr" else sr_dir
     stage, run_dir = resume_stage(
-        args.resume, device, run_dir, steps=args.steps, path_map=args.path_map
+        args.resume,
+        check_device(args.device),
+        args.run_dir,
+        steps=args.steps,
+        path_map=args.path_map,
     )
     success(f"{stage.upper()} training finished: {run_dir}")
     if stage == "lr":
         path_field("Next", f"python train.py <sample> --run-dir {args.run_dir}  (SR)")
 
 
-def resume_stage(resume, device, run_dir, steps=None, path_map=None):
-    """Continue one stage from a checkpoint into the new run_dir."""
+def resume_stage(resume, device, name, steps=None, path_map=None):
+    """Continue one stage from a checkpoint into the new NAME-<stage>."""
+    payload = relocate(load_checkpoint(resolve_checkpoint(resume)), path_map)
+    lr_dir, sr_dir = stage_dirs(name)
+    run_dir = lr_dir if payload["stage"] == "lr" else sr_dir
     if run_dir.exists():
         raise FileExistsError(f"run directory already exists: {run_dir}")
-    payload = relocate(load_checkpoint(resolve_checkpoint(resume)), path_map)
     config = saved_config(payload)
     if steps is not None:
         config = change_setting(config, "train.total_steps", steps)
