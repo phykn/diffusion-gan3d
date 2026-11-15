@@ -60,7 +60,7 @@ def test_small_schedule_preserves_markov_step_noise(dtype):
 
 
 def test_sample_pair_uses_correlated_markov_transition():
-    process = Diffusion(6)
+    process = Diffusion(6, 0.1, 20.0)
     clean = torch.linspace(-1.0, 1.0, 2 * 2 * 3 * 3).reshape(2, 2, 3, 3)
     previous_noise = torch.linspace(1.0, -1.0, clean.numel()).reshape_as(clean)
     step_noise = torch.full_like(clean, 0.25)
@@ -84,7 +84,7 @@ def test_sample_pair_uses_correlated_markov_transition():
 
 
 def test_transition_zero_posterior_is_exactly_deterministic():
-    process = Diffusion(4)
+    process = Diffusion(4, 0.1, 20.0)
     current = torch.randn(3, 1, 4, 4)
     pred = torch.randn_like(current)
     noise = torch.full_like(current, 1_000.0)
@@ -110,7 +110,7 @@ def test_transition_zero_posterior_is_exactly_deterministic():
 def test_transition_zero_skips_posterior_work(
     monkeypatch,
 ):
-    process = Diffusion(4)
+    process = Diffusion(4, 0.1, 20.0)
     current = torch.randn(1, 2, 4, 4)
     pred = torch.randn_like(current)
 
@@ -123,7 +123,7 @@ def test_transition_zero_skips_posterior_work(
 
 
 def test_scalar_and_uniform_tensor_transitions_are_equivalent():
-    process = Diffusion(6)
+    process = Diffusion(6, 0.1, 20.0)
     clean = torch.linspace(-1.0, 1.0, 2 * 2 * 3 * 3).reshape(2, 2, 3, 3)
     current = clean.flip(-1)
     prediction = clean.tanh()
@@ -165,7 +165,7 @@ def test_scalar_and_uniform_tensor_transitions_are_equivalent():
 
 
 def test_mixed_posterior_transitions_preserve_deterministic_items():
-    process = Diffusion(5)
+    process = Diffusion(5, 0.1, 20.0)
     current = torch.randn(3, 2, 3, 3)
     prediction = torch.randn_like(current)
     noise = torch.randn_like(current)
@@ -186,7 +186,7 @@ def test_mixed_posterior_transitions_preserve_deterministic_items():
 
 
 def test_mix_noise_takes_one_state_per_batch_item():
-    process = Diffusion(5)
+    process = Diffusion(5, 0.1, 20.0)
     clean = torch.zeros(3, 1, 2, 2, 2)
     noise = torch.ones_like(clean)
     states = torch.tensor([0, 2, 5])
@@ -200,11 +200,9 @@ def test_mix_noise_takes_one_state_per_batch_item():
 
 
 def test_invalid_state_and_transition_ranges_are_rejected():
-    process = Diffusion(3)
+    process = Diffusion(3, 0.1, 20.0)
     values = torch.zeros(2, 1, 4, 4)
 
-    with pytest.raises(ValueError, match="state must be between"):
-        process.prepare_time(4, values, process.timesteps, "state")
     with pytest.raises(ValueError, match="transition must be between"):
         process.sample_pair(values, 3, values, values)
     with pytest.raises(ValueError, match="transition must be between"):
@@ -215,12 +213,12 @@ def test_invalid_state_and_transition_ranges_are_rejected():
 def test_diffusion_rejects_non_integer_states(state):
     values = torch.zeros(2, 1, 2, 2)
     with pytest.raises(ValueError, match="integer"):
-        Diffusion(3).prepare_time(state, values, 3, "state")
+        Diffusion(3, 0.1, 20.0).sample_pair(values, state, values, values)
 
 
 def test_noise_is_required_above_transition_zero():
     # Every draw comes from src.rng, so the schedule never draws its own noise.
-    process = Diffusion(3)
+    process = Diffusion(3, 0.1, 20.0)
     values = torch.zeros(2, 1, 2, 2)
     with pytest.raises(ValueError, match="noise is required"):
         process.sample_posterior(values, values, 1)
@@ -232,7 +230,7 @@ def test_noise_is_required_above_transition_zero():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_cuda_posterior_does_not_read_host_scalars():
     device = torch.device("cuda")
-    diffusion = Diffusion(2).to(device)
+    diffusion = Diffusion(2, 0.1, 20.0).to(device)
     current = torch.randn(1, 2, 4, 4, 4, device=device)
     time = torch.tensor([1], device=device)
     with torch.profiler.profile(

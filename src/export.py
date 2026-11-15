@@ -85,11 +85,9 @@ def load_denoiser(payload, config):
 
 def build_denoiser(config):
     """The stage's denoiser, untrained, from its settings."""
-    channels = config.model.generator.channels
     return Denoiser3D(
         num_phases=config.data.num_phases,
-        base_channels=channels[0],
-        channel_multipliers=tuple(value // channels[0] for value in channels),
+        channels=config.model.generator.channels,
         embedding_channels=config.model.generator.embedding_channels,
         latent_channels=config.model.generator.latent_channels,
         gradient_checkpointing=config.model.gradient_checkpointing,

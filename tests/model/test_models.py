@@ -13,16 +13,27 @@ MPS = torch.backends.mps.is_available()
 def _denoiser(**kwargs):
     options = dict(
         num_phases=3,
-        base_channels=4,
-        channel_multipliers=(1, 2),
+        channels=(4, 8),
         embedding_channels=8,
         latent_channels=4,
+        gradient_checkpointing=False,
+        height_enabled=False,
+        profile_enabled=False,
+        coarse_enabled=False,
     )
     return Denoiser3D(**{**options, **kwargs})
 
 
 def _critic(**kwargs):
-    return PairCritic2D(num_phases=3, channels=(4, 8), embedding_channels=8, **kwargs)
+    options = dict(
+        num_phases=3,
+        channels=(4, 8),
+        embedding_channels=8,
+        gradient_checkpointing=False,
+        height_channels=0,
+        pyramid_min_size=16,
+    )
+    return PairCritic2D(**{**options, **kwargs})
 
 
 def _inputs(batch=1, size=(4, 4, 4), phases=3):
@@ -58,7 +69,7 @@ def test_apple_gpu_fused_norm_matches_the_eager_one(dtype):
     weights = torch.randn_like(inputs)
     results = []
     module = ChannelNormSiLU3D(8, affine=False).to("mps")
-    for norm in (module, partial(apply_norm_silu, eps=module.eps)):
+    for norm in (module, partial(apply_norm_silu, eps=1.0e-5)):
         values = [v.clone().requires_grad_() for v in (inputs, scale, shift)]
         output = norm(*values)
         (output.float() * weights.float()).sum().backward()
@@ -103,11 +114,6 @@ def test_3d_norm_is_independent_at_each_spatial_position():
     normalized = F.layer_norm(inputs.movedim(1, -1), (4,)).movedim(-1, 1)
     assert torch.allclose(output, F.silu(normalized), atol=1.0e-6)
     assert norm(inputs.half()).dtype == torch.float16
-
-
-def test_denoiser_rejects_a_single_normalized_channel():
-    with pytest.raises(ValueError, match="at least two"):
-        Denoiser3D(3, 1, (1, 2), 8, 4)
 
 
 def test_denoiser_downsamples_by_two():
@@ -245,7 +251,7 @@ def test_height_and_profile_inputs_are_checked():
 
 
 def test_single_voxel_bottleneck_is_supported():
-    model = _denoiser(channel_multipliers=(1, 2, 4, 8))
+    model = _denoiser(channels=(4, 8, 16, 32))
     output = model(torch.randn(1, 3, 8, 8, 8), torch.zeros(1), torch.zeros(1, 4))
     assert output.shape == (1, 3, 8, 8, 8)
 
@@ -264,7 +270,7 @@ def test_critic_scores_pairs_at_every_pyramid_level():
 
 def test_critic_requires_two_feature_levels():
     with pytest.raises(ValueError, match="two levels"):
-        PairCritic2D(3, (4,), 8)
+        _critic(channels=(4,))
 
 
 def test_height_critic_scores_xy_sections_without_a_height_field():

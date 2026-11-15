@@ -5,7 +5,7 @@ from src.device import assert_all
 
 
 class Diffusion(nn.Module):
-    def __init__(self, timesteps, beta_min=0.1, beta_max=20.0):
+    def __init__(self, timesteps, beta_min, beta_max):
         super().__init__()
         if not beta_min < beta_max:
             raise ValueError("beta_min must be below beta_max.")
@@ -35,9 +35,7 @@ class Diffusion(nn.Module):
             self.register_buffer(name, values.to(torch.float32), persistent=False)
 
     def sample_pair(self, clean, transition, previous_noise, step_noise):
-        transitions = self.prepare_time(
-            transition, clean, self.timesteps - 1, "transition"
-        )
+        transitions = self.prepare_transitions(transition, clean)
         previous = self.mix_noise(clean, transitions, previous_noise)
         step_noise = self._validate_shape("step_noise", step_noise, clean)
         states = transitions + 1
@@ -54,9 +52,7 @@ class Diffusion(nn.Module):
         prediction = self._validate_shape("pred", prediction, current)
         if type(transition) is int and transition == 0:
             return prediction
-        transitions = self.prepare_time(
-            transition, current, self.timesteps - 1, "transition"
-        )
+        transitions = self.prepare_transitions(transition, current)
         if transitions.device.type == "cpu" and not bool(transitions.any()):
             return prediction
         if noise is None:
@@ -85,8 +81,8 @@ class Diffusion(nn.Module):
         )
         return mean, variance
 
-    @staticmethod
-    def prepare_time(value, like, limit, name):
+    def prepare_transitions(self, value, like):
+        limit, name = self.timesteps - 1, "transition"
         batch = like.shape[0]
         if type(value) is int:
             if not 0 <= value <= limit:

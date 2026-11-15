@@ -13,13 +13,10 @@ from src.model.layers import (
     run_block,
 )
 
-MEASURED_CONDITIONS = ("vf", "vf_present", "profile", "profile_present")
-
 
 class ChannelNormSiLU3D(nn.Module):
-    def __init__(self, channels, eps=1.0e-5, affine=True):
+    def __init__(self, channels, affine=True):
         super().__init__()
-        self.eps = eps
         if affine:
             self.scale = nn.Parameter(torch.ones(channels))
             self.shift = nn.Parameter(torch.zeros(channels))
@@ -36,7 +33,7 @@ class ChannelNormSiLU3D(nn.Module):
         if not torch.is_grad_enabled():
             scale, shift = scale.detach(), shift.detach()
         norm_silu = compile_norm_silu() if x.device.type == "mps" else apply_norm_silu
-        return norm_silu(x, scale, shift, self.eps)
+        return norm_silu(x, scale, shift, 1.0e-5)
 
 
 class Upsample3D(nn.Module):
@@ -53,23 +50,16 @@ class Denoiser3D(nn.Module):
     def __init__(
         self,
         num_phases,
-        base_channels,
-        channel_multipliers,
+        channels,
         embedding_channels,
         latent_channels,
-        gradient_checkpointing=False,
-        height_enabled=False,
-        profile_enabled=False,
-        coarse_enabled=False,
+        gradient_checkpointing,
+        height_enabled,
+        profile_enabled,
+        coarse_enabled,
     ):
         super().__init__()
-        widths = tuple(base_channels * multiplier for multiplier in channel_multipliers)
-        if not widths or any(width < 2 for width in widths):
-            raise ValueError(
-                "denoiser channels must be at least two for channel normalization."
-            )
-        if coarse_enabled and profile_enabled:
-            raise ValueError("SR denoisers do not accept a depth profile.")
+        widths = tuple(channels)
         self.downsample_factor = 2 ** (len(widths) - 1)
         self.gradient_checkpointing = gradient_checkpointing
         self.coarse_enabled = coarse_enabled
@@ -189,7 +179,7 @@ class Denoiser3D(nn.Module):
         unmeasured = {
             key: value
             for key, value in conditions.items()
-            if key not in MEASURED_CONDITIONS
+            if key not in ("vf", "vf_present", "profile", "profile_present")
         }
         unconditional = self.predict_logits(x_current, time, latent, **unmeasured)
         if guidance == 0.0:

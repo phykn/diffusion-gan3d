@@ -5,8 +5,6 @@ from torch.autograd.function import once_differentiable
 
 # Larger weight-gradient chunks barely help on MPS and raise peak memory.
 CHUNK_BYTES = 64 * 2**20
-# Smaller grids already take the native MPS weight gradient quickly.
-MIN_VOXELS = 32**3
 
 
 class _Conv3dFunction(torch.autograd.Function):
@@ -42,26 +40,18 @@ class Conv3d(nn.Conv3d):
         needs_gradient = torch.is_grad_enabled() and (
             weight.requires_grad or x.requires_grad
         )
-        is_plain = (
-            self.stride == (1, 1, 1)
-            and self.dilation == (1, 1, 1)
-            and self.groups == 1
-            and self.padding_mode == "zeros"
-        )
-        if not (x.device.type == "mps" and needs_gradient and is_plain):
+        # Every layer pads to keep its size; only the downsampling ones stride.
+        if not (x.device.type == "mps" and needs_gradient and self.stride == (1, 1, 1)):
             return super()._conv_forward(x, weight, bias)
-        if self.kernel_size == (1, 1, 1) and self.padding == (0, 0, 0):
+        if self.kernel_size == (1, 1, 1):
             # Summing pointwise gradients over the whole grid can overflow fp16.
             with torch.autocast("mps", enabled=False):
                 out = torch.matmul(weight.flatten(1), x.flatten(2).float())
             if bias is not None:
                 out = out + bias[:, None]
             return out.view(x.shape[0], -1, *x.shape[2:])
-        if (
-            self.kernel_size == (3, 3, 3)
-            and self.padding == (1, 1, 1)
-            and x.shape[2:].numel() >= MIN_VOXELS
-        ):
+        # Smaller grids already take the native MPS weight gradient quickly.
+        if x.shape[2:].numel() >= 32**3:
             return _Conv3dFunction.apply(x, weight, bias)
         return super()._conv_forward(x, weight, bias)
 

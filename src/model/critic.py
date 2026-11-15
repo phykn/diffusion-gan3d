@@ -10,8 +10,6 @@ from src.model.layers import (
     run_block,
 )
 
-MAX_NORM_GROUPS = 32
-
 
 class GroupNormSiLU(nn.GroupNorm):
     def __init__(self, channels, affine=True):
@@ -25,7 +23,7 @@ class GroupNormSiLU(nn.GroupNorm):
 
     @staticmethod
     def _choose_groups(channels):
-        most = min(MAX_NORM_GROUPS, max(channels // 2, 1))
+        most = min(32, max(channels // 2, 1))
         for groups in range(most, 0, -1):
             if channels % groups == 0:
                 return groups
@@ -37,10 +35,9 @@ class PairCritic2D(nn.Module):
         num_phases,
         channels,
         embedding_channels,
-        gradient_checkpointing=False,
-        *,
-        height_channels=0,
-        pyramid_min_size=16,
+        gradient_checkpointing,
+        height_channels,
+        pyramid_min_size,
     ):
         super().__init__()
         widths = tuple(channels)

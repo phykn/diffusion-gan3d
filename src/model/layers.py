@@ -6,7 +6,6 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 INV_SQRT_TWO = 1.0 / math.sqrt(2.0)
-LONGEST_PERIOD = 10_000.0
 
 
 class SinusoidalEmbedding(nn.Module):
@@ -15,7 +14,7 @@ class SinusoidalEmbedding(nn.Module):
         half = channels // 2
         steps = torch.arange(half, dtype=torch.float32)
         last_step = max(half - 1, 1)
-        frequencies = torch.exp(-math.log(LONGEST_PERIOD) * steps / last_step)
+        frequencies = torch.exp(-math.log(10_000.0) * steps / last_step)
         self.channels = channels
         self.register_buffer("frequencies", frequencies, persistent=False)
 
