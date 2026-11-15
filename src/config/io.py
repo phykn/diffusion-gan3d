@@ -2,10 +2,10 @@ from pathlib import Path
 
 import yaml
 
-from src.config.build import build_config, build_generation_settings, to_dict
+from src.config.build import build_config, parse, to_dict
+from src.config.schema import GenerationSettings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-GENERATION_SETTINGS = PROJECT_ROOT / "config" / "gen.yaml"
 
 
 class _FlowListDumper(yaml.SafeDumper):
@@ -47,14 +47,13 @@ def dump_yaml(data):
         yaml.dump({key: value}, Dumper=_FlowListDumper, sort_keys=False)
         for key, value in to_dict(data).items()
     )
-    return "\n".join(sections) or "{}\n"
+    return "\n".join(sections)
 
 
 def save_yaml(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(dump_yaml(data), encoding="utf-8")
-    return path
 
 
 def load_config(path):
@@ -62,4 +61,4 @@ def load_config(path):
 
 
 def load_generation_settings():
-    return build_generation_settings(load_yaml(GENERATION_SETTINGS))
+    return parse(GenerationSettings, load_yaml(PROJECT_ROOT / "config" / "gen.yaml"))

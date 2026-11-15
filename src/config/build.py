@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from pydantic import ValidationError
 from pydantic_core import to_jsonable_python
 
-from src.config.schema import CONFIG_TYPES, STAGES, GenerationSettings
+from src.config.schema import CONFIG_TYPES, STAGES
 
 
 def build_config(values):
@@ -15,10 +15,6 @@ def build_config(values):
     _validate_plane_groups(config)
     _validate_conditioning(config)
     return config
-
-
-def build_generation_settings(values):
-    return parse(GenerationSettings, values)
 
 
 def parse(settings_type, values):
@@ -57,12 +53,8 @@ def freeze(value):
 
 
 def _validate_model(config):
-    widths = config.model.generator.channels
-    if any(width % widths[0] for width in widths):
-        raise ValueError(
-            "model.generator.channels must be integer multiples of its first value."
-        )
-    if config.patch_size % 2 ** (len(widths) - 1):
+    levels = len(config.model.generator.channels)
+    if config.patch_size % 2 ** (levels - 1):
         raise ValueError(
             "the patch size must be divisible by the generator's downsampling."
         )

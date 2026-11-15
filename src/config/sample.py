@@ -10,7 +10,6 @@ from src.data.images import infer_num_phases, load_images
 from src.data.profile import measure_depth_profile
 
 SAMPLES_DIR = PROJECT_ROOT / "config" / "samples"
-TEMPLATE = "config/samples/default.yaml"
 
 # smooth_l1 is quadratic at these profile errors, so a weight of 1.0 barely pulls.
 PROFILE_LOSS_WEIGHT = 30.0
@@ -35,7 +34,9 @@ def load_sample(sample):
     try:
         values = to_dict(parse(Sample, load_yaml(path)))
     except ValueError as error:
-        raise ValueError(f"{path.name}: {error}; see {TEMPLATE}.") from None
+        raise ValueError(
+            f"{path.name}: {error}; see config/samples/default.yaml."
+        ) from None
     images = {}
     for plane in PLANES:
         if plane in values["images"]:
