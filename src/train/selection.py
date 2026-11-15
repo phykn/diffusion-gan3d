@@ -40,37 +40,6 @@ def build_reference(samplers):
     return reference
 
 
-def weights_path(root, step):
-    return root / "selection" / f"generator_{step:08d}.pt"
-
-
-def pick_sections(volumes, axis, phases):
-    """One-hot sections along axis, evenly spaced over all volumes' slices."""
-    depth = volumes[0].shape[axis]
-    total = len(volumes) * depth
-    count = min(SECTIONS, total)
-    indices = torch.linspace(0, total - 1, count).round().long().tolist()
-    # Only the picked slices leave the uint8 volumes.
-    labels = torch.stack(
-        [volumes[index // depth].select(axis, index % depth) for index in indices]
-    )
-    return torch.nn.functional.one_hot(labels.long(), phases).movedim(-1, 1).float()
-
-
-def ema_predictor(trainer):
-    return Predictor(trainer.ema, trainer.diffusion, trainer.config, trainer.device)
-
-
-def lr_mse(high, low):
-    """MSE between downsampled HR labels and the LR fractions they refine."""
-    shape = tuple(low.shape[-3:])
-    coarse = torch.cat(
-        [downsample((high == phase)[None, None], shape) for phase in range(len(low))],
-        1,
-    )
-    return float((coarse[0] - low).square().mean())
-
-
 class CheckpointSelection:
     """Export the step whose sections best match the real data, not the last one.
 
@@ -261,3 +230,34 @@ class SRCheckpointSelection(CheckpointSelection):
     def load_state_dict(self, state):
         super().load_state_dict(state)
         self.inputs = state["inputs"]
+
+
+def ema_predictor(trainer):
+    return Predictor(trainer.ema, trainer.diffusion, trainer.config, trainer.device)
+
+
+def pick_sections(volumes, axis, phases):
+    """One-hot sections along axis, evenly spaced over all volumes' slices."""
+    depth = volumes[0].shape[axis]
+    total = len(volumes) * depth
+    count = min(SECTIONS, total)
+    indices = torch.linspace(0, total - 1, count).round().long().tolist()
+    # Only the picked slices leave the uint8 volumes.
+    labels = torch.stack(
+        [volumes[index // depth].select(axis, index % depth) for index in indices]
+    )
+    return torch.nn.functional.one_hot(labels.long(), phases).movedim(-1, 1).float()
+
+
+def lr_mse(high, low):
+    """MSE between downsampled HR labels and the LR fractions they refine."""
+    shape = tuple(low.shape[-3:])
+    coarse = torch.cat(
+        [downsample((high == phase)[None, None], shape) for phase in range(len(low))],
+        1,
+    )
+    return float((coarse[0] - low).square().mean())
+
+
+def weights_path(root, step):
+    return root / "selection" / f"generator_{step:08d}.pt"

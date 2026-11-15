@@ -51,17 +51,18 @@ def critic_objective(
 
 
 def gradient_penalty(scores, inputs):
-    return torch.stack(
-        [input_gradient_penalty(logits, inputs) for logits in scores]
-    ).mean()
-
-
-def input_gradient_penalty(logits, inputs):
-    grads = torch.autograd.grad(
-        outputs=logits.sum(), inputs=tuple(inputs), create_graph=True, only_inputs=True
-    )
-    batch = logits.shape[0]
-    norm = torch.zeros(batch, device=logits.device)
-    for grad in grads:
-        norm = norm + grad.square().reshape(batch, -1).sum(1)
-    return norm.mean()
+    """Mean squared input-gradient norm of each score scale."""
+    penalties = []
+    for logits in scores:
+        grads = torch.autograd.grad(
+            outputs=logits.sum(),
+            inputs=tuple(inputs),
+            create_graph=True,
+            only_inputs=True,
+        )
+        batch = logits.shape[0]
+        norm = torch.zeros(batch, device=logits.device)
+        for grad in grads:
+            norm = norm + grad.square().reshape(batch, -1).sum(1)
+        penalties.append(norm.mean())
+    return torch.stack(penalties).mean()

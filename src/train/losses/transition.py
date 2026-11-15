@@ -4,75 +4,7 @@ from src.axes import PLANE_DIRECTIONS, PLANES
 from src.stats.pairs import section_pairs
 
 
-def height_intervals(height, dim, gap):
-    rows = height[:, 0, :, 0].float()
-    width = (rows[:, 1:] - rows[:, :-1]).mean(1, keepdim=True)
-    centers = (rows[:, :-gap] + rows[:, gap:]) * 0.5 if dim == 2 else rows
-    return (centers - width * 0.5).flatten(), (centers + width * 0.5).flatten()
-
-
-@torch.no_grad()
-def transition_statistics(real, max_gap, heights=None, rotations=()):
-    """Observed row-wise tables, keeping separate crops and directions."""
-    statistics = {}
-    for axis, images in real.items():
-        if not len(images) or (
-            heights is not None and (axis not in heights or images.shape[-2] < 2)
-        ):
-            continue
-        images = images.detach()
-        pooled = {}
-        with torch.autocast(device_type=images.device.type, enabled=False):
-            for dim in (2, 3):
-                for gap in range(1, min(max_gap + 1, images.shape[dim])):
-                    if heights is None and axis in rotations:
-                        if gap not in pooled:
-                            pooled[gap] = torch.cat(
-                                [
-                                    section_pairs(image, 2, gap)
-                                    for image in (images, images.transpose(2, 3))
-                                    if gap < image.shape[2]
-                                ],
-                                1,
-                            )
-                        statistics[axis, dim, gap] = pooled[gap]
-                        continue
-                    statistics[axis, dim, gap] = section_pairs(images, dim, gap)
-    return statistics
-
-
-def match_height(real, fake, real_height, fake_height, dim, gap):
-    real = real.flatten(0, 1)
-    fake = fake.flatten(0, 1)
-    real_low, real_high = height_intervals(real_height, dim, gap)
-    fake_low, fake_high = height_intervals(fake_height, dim, gap)
-    errors, counts = [], []
-    # Bound row matching memory independently of the number of sampled slices.
-    for start in range(0, len(fake), 128):
-        stop = start + 128
-        overlap = (
-            torch.minimum(fake_high[start:stop, None], real_high[None])
-            - torch.maximum(fake_low[start:stop, None], real_low[None])
-        ).clamp_min(0)
-        weight = overlap.sum(1)
-        target = torch.einsum("fr,rcd->fcd", overlap, real)
-        target = target / weight.clamp_min(1e-8)[:, None, None]
-        valid = weight > 1e-8
-        error = 0.5 * (fake[start:stop] - target).abs().sum((1, 2))
-        errors.append((error * valid).sum())
-        counts.append(valid.sum())
-    count = torch.stack(counts).sum()
-    return torch.stack(errors).sum() / count.clamp_min(1), count
-
-
-def real_transition_loss(
-    real,
-    fake,
-    max_gap,
-    real_heights=None,
-    fake_heights=None,
-    rotations=(),
-):
+def real_transition_loss(real, fake, max_gap, real_heights, fake_heights, rotations):
     """Match observed in-plane transitions at equal LR-grid separations.
 
     Height-conditioned samples compare row statistics over overlapping normalized
@@ -133,3 +65,64 @@ def real_transition_loss(
         valid = torch.stack(active)
         total = (torch.stack(losses) * valid).sum() / valid.sum().clamp_min(1)
         return total, diagnostics
+
+
+@torch.no_grad()
+def transition_statistics(real, max_gap, heights, rotations):
+    """Observed row-wise tables, keeping separate crops and directions."""
+    statistics = {}
+    for axis, images in real.items():
+        if not len(images) or (
+            heights is not None and (axis not in heights or images.shape[-2] < 2)
+        ):
+            continue
+        images = images.detach()
+        pooled = {}
+        with torch.autocast(device_type=images.device.type, enabled=False):
+            for dim in (2, 3):
+                for gap in range(1, min(max_gap + 1, images.shape[dim])):
+                    if heights is None and axis in rotations:
+                        if gap not in pooled:
+                            pooled[gap] = torch.cat(
+                                [
+                                    section_pairs(image, 2, gap)
+                                    for image in (images, images.transpose(2, 3))
+                                    if gap < image.shape[2]
+                                ],
+                                1,
+                            )
+                        statistics[axis, dim, gap] = pooled[gap]
+                        continue
+                    statistics[axis, dim, gap] = section_pairs(images, dim, gap)
+    return statistics
+
+
+def match_height(real, fake, real_height, fake_height, dim, gap):
+    real = real.flatten(0, 1)
+    fake = fake.flatten(0, 1)
+    real_low, real_high = height_intervals(real_height, dim, gap)
+    fake_low, fake_high = height_intervals(fake_height, dim, gap)
+    errors, counts = [], []
+    # Bound row matching memory independently of the number of sampled slices.
+    for start in range(0, len(fake), 128):
+        stop = start + 128
+        overlap = (
+            torch.minimum(fake_high[start:stop, None], real_high[None])
+            - torch.maximum(fake_low[start:stop, None], real_low[None])
+        ).clamp_min(0)
+        weight = overlap.sum(1)
+        target = torch.einsum("fr,rcd->fcd", overlap, real)
+        target = target / weight.clamp_min(1e-8)[:, None, None]
+        valid = weight > 1e-8
+        error = 0.5 * (fake[start:stop] - target).abs().sum((1, 2))
+        errors.append((error * valid).sum())
+        counts.append(valid.sum())
+    count = torch.stack(counts).sum()
+    return torch.stack(errors).sum() / count.clamp_min(1), count
+
+
+def height_intervals(height, dim, gap):
+    rows = height[:, 0, :, 0].float()
+    width = (rows[:, 1:] - rows[:, :-1]).mean(1, keepdim=True)
+    centers = (rows[:, :-gap] + rows[:, gap:]) * 0.5 if dim == 2 else rows
+    return (centers - width * 0.5).flatten(), (centers + width * 0.5).flatten()

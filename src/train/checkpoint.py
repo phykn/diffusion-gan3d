@@ -15,6 +15,14 @@ VERSION = 3
 _NAME = re.compile(r"step_(\d+)\.pt")
 
 
+def save_checkpoint(payload, root, export_payload):
+    path, export = checkpoint_paths(root, payload["step"])
+    torch_save(payload, path, overwrite=False)
+    torch_save(export_payload, export, overwrite=False)
+    complete_checkpoint(path)
+    return path
+
+
 def checkpoint_paths(root, step):
     """A new step's training and EMA export files under root/checkpoints."""
     folder = root / "checkpoints"
@@ -32,15 +40,6 @@ def complete_checkpoint(path):
         file.write(f"{path.stat().st_size}\n")
         file.flush()
         os.fsync(file.fileno())
-
-
-def is_complete(path):
-    try:
-        return path.with_suffix(".complete").read_text(encoding="ascii") == (
-            f"{path.stat().st_size}\n"
-        )
-    except (FileNotFoundError, UnicodeError):
-        return False
 
 
 def resolve_checkpoint(value):
@@ -64,12 +63,13 @@ def resolve_checkpoint(value):
     return path
 
 
-def save_checkpoint(payload, root, export_payload):
-    path, export = checkpoint_paths(root, payload["step"])
-    torch_save(payload, path, overwrite=False)
-    torch_save(export_payload, export, overwrite=False)
-    complete_checkpoint(path)
-    return path
+def is_complete(path):
+    try:
+        return path.with_suffix(".complete").read_text(encoding="ascii") == (
+            f"{path.stat().st_size}\n"
+        )
+    except (FileNotFoundError, UnicodeError):
+        return False
 
 
 def load_checkpoint(path):
@@ -82,52 +82,6 @@ def load_checkpoint(path):
     ):
         raise ValueError(f"not a v{VERSION} training checkpoint: {path}.")
     return dict(payload)
-
-
-def _missing_keys(cls, values, path=""):
-    missing = []
-    for name, setting in cls.model_fields.items():
-        key = f"{path}{name}"
-        if name not in values:
-            missing.append(key)
-        elif is_section(setting) and isinstance(values[name], Mapping):
-            missing.extend(_missing_keys(setting.annotation, values[name], f"{key}."))
-    return missing
-
-
-def saved_config(payload):
-    """The checkpoint config under the current schema; no key is filled in."""
-    values = payload["config"]
-    stage = values.get("stage") if isinstance(values, Mapping) else None
-    if stage not in CONFIG_TYPES:
-        raise ValueError("checkpoint config has no valid stage.")
-    try:
-        config = build_config(values)
-    except ValueError as error:
-        raise ValueError(f"checkpoint config does not match this version: {error}")
-    missing = _missing_keys(CONFIG_TYPES[stage], values)
-    if missing:
-        raise ValueError(
-            "checkpoint config does not match this version: missing "
-            + ", ".join(missing)
-        )
-    return config
-
-
-def _pure_path(value):
-    text = str(value).replace("\\", "/")
-    return PureWindowsPath(text) if PureWindowsPath(text).drive else PurePosixPath(text)
-
-
-def _remap(value, pairs, matched):
-    for old, new in pairs:
-        try:
-            relative = _pure_path(value).relative_to(old)
-        except ValueError:
-            continue
-        matched.add(old)
-        return new.joinpath(*relative.parts).as_posix()
-    return value
 
 
 def relocate(payload, path_map):
@@ -168,3 +122,49 @@ def relocate(payload, path_map):
         [[old.as_posix(), new.as_posix()] for old, new in pairs],
     ]
     return result
+
+
+def _remap(value, pairs, matched):
+    for old, new in pairs:
+        try:
+            relative = _pure_path(value).relative_to(old)
+        except ValueError:
+            continue
+        matched.add(old)
+        return new.joinpath(*relative.parts).as_posix()
+    return value
+
+
+def _pure_path(value):
+    text = str(value).replace("\\", "/")
+    return PureWindowsPath(text) if PureWindowsPath(text).drive else PurePosixPath(text)
+
+
+def saved_config(payload):
+    """The checkpoint config under the current schema; no key is filled in."""
+    values = payload["config"]
+    stage = values.get("stage") if isinstance(values, Mapping) else None
+    if stage not in CONFIG_TYPES:
+        raise ValueError("checkpoint config has no valid stage.")
+    try:
+        config = build_config(values)
+    except ValueError as error:
+        raise ValueError(f"checkpoint config does not match this version: {error}")
+    missing = _missing_keys(CONFIG_TYPES[stage], values)
+    if missing:
+        raise ValueError(
+            "checkpoint config does not match this version: missing "
+            + ", ".join(missing)
+        )
+    return config
+
+
+def _missing_keys(cls, values, path=""):
+    missing = []
+    for name, setting in cls.model_fields.items():
+        key = f"{path}{name}"
+        if name not in values:
+            missing.append(key)
+        elif is_section(setting) and isinstance(values[name], Mapping):
+            missing.extend(_missing_keys(setting.annotation, values[name], f"{key}."))
+    return missing

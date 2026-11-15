@@ -7,7 +7,7 @@ import yaml
 import train
 from src.api import LowResolutionAPI
 from src.export import FORMAT, VERSION, read_export
-from src.train.run import DONE
+from src.train.loop import DONE
 
 
 def test_train_cli_writes_the_lr_run(tiny_sample, tmp_path):

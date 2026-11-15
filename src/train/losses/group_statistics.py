@@ -6,14 +6,7 @@ from src.data.resize import resize_phases
 from src.stats.pairs import volume_pairs
 
 
-def group_statistics_loss(
-    probs,
-    groups,
-    max_gap,
-    tolerance,
-    preserve_height=False,
-    coarse=None,
-):
+def group_statistics_loss(probs, groups, max_gap, tolerance, preserve_height, coarse):
     """Penalize per-volume phase-pair differences between plane normals beyond
     tolerance (plus, for SR, the difference the coarse input already has)."""
     zero = probs.sum(dtype=torch.float32) * 0.0

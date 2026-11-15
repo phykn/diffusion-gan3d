@@ -22,8 +22,14 @@ def structure_metrics(probs, real, groups):
     """structure/* tags of [B, K, D, H, W] predictions against real sections."""
     # One scheduled transfer; never called from a diffusion or critic inner loop.
     probs = probs.detach().float().cpu()
-    phases = probs.shape[1]
-    labels = probs.argmax(1).numpy()
+    percolation, metrics = measure_percolation(probs.argmax(1).numpy(), probs.shape[1])
+    curves, sections = measure_sections(probs, real)
+    return {**metrics, **sections, **measure_axis_gaps(percolation, curves, groups)}
+
+
+def measure_percolation(labels, phases):
+    """Spanning fraction of each phase along z/y/x, and the tilt balance of each
+    solid phase."""
     metrics = {}
     percolation = np.zeros((phases, 3))
     for phase in range(phases):
@@ -52,7 +58,14 @@ def structure_metrics(probs, real, groups):
         # Per-particle tilt sign; a mirror-symmetric structure stays near zero.
         for name, stats in tilt_balance(labels, phase).items():
             metrics[f"structure/phase_{phase}/tilt_balance_{name}"] = stats["balance"]
-    generated_curves = {}
+    return percolation, metrics
+
+
+def measure_sections(probs, real):
+    """Section errors per plane against the real crops, and the generated
+    two-point curves."""
+    metrics = {}
+    curves = {}
     for axis, images in real.items():
         images = label_sections(images.detach().cpu())
         planes = probs.movedim(axis + 2, 1).flatten(0, 1)
@@ -62,9 +75,16 @@ def structure_metrics(probs, real, groups):
         )
         for name, value in section_errors(images, fake)._asdict().items():
             metrics[f"structure/{PLANES[axis]}/{name}"] = value
-        generated_curves[axis] = two_point(fake)
+        curves[axis] = two_point(fake)
+    return curves, metrics
+
+
+def measure_axis_gaps(percolation, curves, groups):
+    """How far the axes judged by one critic differ in percolation and two-point
+    correlation."""
+    metrics = {}
     for group, axes in groups.items():
-        pairs = list(combinations([a for a in axes if a in generated_curves], 2))
+        pairs = list(combinations([a for a in axes if a in curves], 2))
         if not pairs:
             continue
         metrics[f"structure/{group}/percolation_axis_gap"] = float(
@@ -78,9 +98,7 @@ def structure_metrics(probs, real, groups):
                     np.mean(
                         [
                             float((x - y).abs().mean())
-                            for x, y in zip(
-                                generated_curves[a], generated_curves[b], strict=True
-                            )
+                            for x, y in zip(curves[a], curves[b], strict=True)
                         ]
                     )
                     for a, b in pairs
