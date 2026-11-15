@@ -8,8 +8,6 @@ def phase_labels(values, num_phases=None):
     values = torch.as_tensor(values)
     if values.numel() == 0 or values.is_complex():
         raise ValueError("phase labels must be non-empty real integers.")
-    if num_phases is not None and (type(num_phases) is not int or num_phases < 1):
-        raise ValueError("num_phases must be a positive integer.")
     labels = values.to(torch.int64)
     valid = (labels >= 0).all()
     if values.is_floating_point():
@@ -53,16 +51,15 @@ def voxel_accuracy(actual, expected):
 
 
 def phase_profile(values, phases, bins=None):
-    """Phase fractions per z of [B, K, D, H, W] fractions or [B, D, H, W] labels."""
+    """Phase fractions per z of [B, K, D, H, W] fractions or [B, D, H, W] labels.
+
+    Only training diagnostics call it, on fractions and their argmax, so the
+    labels skip validation and its per-step device sync.
+    """
     if values.ndim == 5:
-        if values.shape[1] != phases:
-            raise ValueError("phase count differs from the probability channels.")
         result = values.float().mean((-1, -2))
-    elif values.ndim == 4:
-        labels = phase_labels(values, phases)
-        result = torch.stack(
-            [(labels == phase).float().mean((-1, -2)) for phase in range(phases)], 1
-        )
     else:
-        raise ValueError("expected batched 3D labels or phase fractions.")
+        result = torch.stack(
+            [(values == phase).float().mean((-1, -2)) for phase in range(phases)], 1
+        )
     return result if bins is None else rebin_profile(result, bins)
