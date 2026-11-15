@@ -46,8 +46,7 @@ def component_slopes(labels, phase, min_voxels=8):
     labels = np.asarray(labels)
     components, count = ndi.label(labels == phase)
     y, x = (axis.ravel().astype(np.float64) for axis in np.indices(labels.shape[1:]))
-    # Accumulate coordinate moments one z slice at a time, so memory follows the
-    # slice area rather than the volume.
+    # Moments add up one z slice at a time, so memory follows the slice area.
     names = ("n", "z", "y", "x", "zy", "zx", "yx", "yy", "xx")
     sums = {name: np.zeros(count + 1) for name in names}
     for z, plane in enumerate(components):
@@ -85,11 +84,8 @@ def component_slopes(labels, phase, min_voxels=8):
 
 
 def tilt_balance(volumes, phase, threshold=0.05, min_voxels=8):
-    """Signed tilt statistics of one phase, pooled over volumes.
-
-    `balance` is the fraction tilted positive minus the fraction tilted
-    negative; a mirror-symmetric microstructure has balance and mean near zero.
-    """
+    """Signed tilt statistics of one phase, pooled over volumes; balance and mean
+    stay near zero for a mirror-symmetric structure."""
     pooled = {name: [] for name in TILT_PAIRS}
     for volume in volumes:
         for name, values in component_slopes(volume, phase, min_voxels).items():
