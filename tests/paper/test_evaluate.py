@@ -4,9 +4,12 @@ import json
 from pathlib import Path
 
 import pytest
+import torch
 
 from paper.scripts import evaluate_anode, evaluate_lr, evaluate_sr, make_figures
 from paper.scripts.common import cache_dir, cached
+from paper.scripts.evaluate_lr import nested_plane_order, pool_similarity
+from paper.scripts.evaluate_sr import lr_agreement, upsample_linear, upsample_nearest
 
 ROOT = Path(__file__).parents[2]
 ASSETS = ROOT / "paper" / "assets"
@@ -144,3 +147,31 @@ def test_reuse_keeps_same_named_runs_separate(tmp_path):
     assert cached(first_cache, True, lambda: [1]) == [1]
     assert cached(second_cache, True, lambda: [2]) == [2]
     assert cached(first_cache, True, lambda: [3]) == [1]
+
+
+def test_upsampling_baselines_keep_lr_labels():
+    low = torch.nn.functional.one_hot(torch.randint(2, (4, 4, 4)), 2)
+    low = low.movedim(-1, 0).float()
+
+    nearest = upsample_nearest(low, 2)
+    assert nearest.shape == (8, 8, 8)
+    assert lr_agreement(nearest, low) == 1.0
+    assert upsample_linear(low, 2).shape == (8, 8, 8)
+    assert upsample_nearest(low, 3).shape == (12, 12, 12)
+
+
+def test_nested_plane_order_covers_every_plane_in_nested_prefixes():
+    order = nested_plane_order(8)
+
+    assert sorted(order) == list(range(8))
+    assert order[0] == 4
+    assert set(order[:2]) <= set(order[:4])
+
+
+def test_pool_similarity_rewards_coarse_match():
+    target = torch.zeros((8, 8), dtype=torch.long)
+    shifted = target.clone()
+    shifted[0, 0] = 1
+
+    assert pool_similarity(target, target) == 1.0
+    assert pool_similarity(shifted, target) == pytest.approx(1 - 1 / 64)

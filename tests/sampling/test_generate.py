@@ -100,3 +100,18 @@ def test_an_output_smaller_than_the_patch_is_rejected(tiny_api):
 def test_blocks_and_shape_together_are_rejected(tiny_api):
     with pytest.raises(ValueError, match="only one of blocks and shape"):
         tiny_api.generate(blocks=(2, 2, 2), shape=(32, 32, 32), seed=0)
+
+
+def test_generate_labels_and_fractions(tiny_lr_run):
+    api = LowResolutionAPI(tiny_lr_run, device="cpu")
+    volume = api.generate(shape=16, seed=0)
+    assert volume.dtype == torch.uint8
+    assert set(volume.unique().tolist()) <= {0, 1}
+    probs = api.generate_probs(shape=16, seed=0)
+    assert probs.shape == (2, 16, 16, 16)
+    torch.testing.assert_close(probs.sum(0), torch.ones(16, 16, 16))
+    with pytest.raises(ValueError, match="storage"):
+        api.generate(storage="disk")
+    with pytest.raises(ValueError, match="original crop"):
+        api.prepare_image(torch.zeros(16, 16, dtype=torch.long))
+    assert api.prepare_image(torch.zeros(32, 32, dtype=torch.long)).shape == (2, 16, 16)
