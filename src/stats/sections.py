@@ -6,11 +6,8 @@ import torch
 
 
 def label_sections(sections):
-    """One-hot sections, with exact phase ties broken at random.
-
-    Area-downsampled crops hold exact ties such as 0.5/0.5, which argmax would
-    all give to the lowest phase.
-    """
+    """One-hot sections; random tie-breaking keeps exact ties of area-downsampled
+    crops, such as 0.5/0.5, from all going to the lowest phase."""
     generator = torch.Generator().manual_seed(0)
     noise = torch.rand(sections.shape, generator=generator) * 1e-3
     labels = (sections.float() + noise).argmax(1)
@@ -66,11 +63,8 @@ def chord_distribution(labels, phases):
 
 
 def cluster_statistics(labels, phases):
-    """Per phase: 4-connected clusters per section pixel and mean cluster area.
-
-    Sections show how a phase splits into separate regions, which two-point and
-    chord statistics miss: merged pores and fragmented solid can match both.
-    """
+    """Per phase: 4-connected clusters per pixel and mean cluster area, which
+    tell merged pores and fragmented solid apart where two-point and chords match."""
     pixels = labels.size
     density, area = np.zeros(phases), np.zeros(phases)
     for phase in range(phases):
@@ -118,10 +112,8 @@ def section_errors(real, fake):
 
 
 def half_split_errors(sections):
-    """Errors between the even and odd halves of real one-hot sections.
-
-    The sampling noise of the real data puts every error on one scale.
-    """
+    """Errors between the even and odd halves of real sections: the data's own
+    sampling noise, which puts every error on one scale."""
     return [
         max(error, 1e-6) for error in section_errors(sections[0::2], sections[1::2])
     ]
