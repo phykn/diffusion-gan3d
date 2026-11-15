@@ -15,9 +15,8 @@ class CriticObjective:
 def relativistic_loss(preferred, other):
     """RpGAN loss: each other sample should score below its paired preferred one.
 
-    Judging pairs instead of single samples removes the mode-dropping optima of
-    the logistic loss, where a generator covering one mode of the data already
-    looks real. The smaller batch is reused to pair every sample.
+    Pairs remove the logistic loss's mode-dropping optima; the smaller batch is
+    reused to pair every sample.
     """
     losses = []
     for first, second in zip(preferred, other, strict=True):
@@ -54,12 +53,7 @@ def gradient_penalty(scores, inputs):
     """Mean squared input-gradient norm of each score scale."""
     penalties = []
     for logits in scores:
-        grads = torch.autograd.grad(
-            outputs=logits.sum(),
-            inputs=tuple(inputs),
-            create_graph=True,
-            only_inputs=True,
-        )
+        grads = torch.autograd.grad(logits.sum(), inputs, create_graph=True)
         batch = logits.shape[0]
         norm = torch.zeros(batch, device=logits.device)
         for grad in grads:

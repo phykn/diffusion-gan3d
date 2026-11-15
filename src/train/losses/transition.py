@@ -11,7 +11,7 @@ def real_transition_loss(real, fake, max_gap, real_heights, fake_heights, rotati
     height intervals. No observations are inferred for a plane's normal axis.
     """
     zero = next(iter(fake.values())).sum(dtype=torch.float32) * 0.0
-    groups: dict[tuple[str, int], list] = {}
+    groups = {}
     height_enabled = fake_heights is not None
     statistics = transition_statistics(
         real, max_gap, real_heights if height_enabled else None, rotations

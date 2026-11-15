@@ -48,7 +48,6 @@ def group_statistics_loss(probs, groups, max_gap, tolerance, preserve_height, co
                         allowance = (
                             allowance + (ref_a - ref_b).abs().sum((-2, -1)) * 0.5
                         )
-                    # ReLU has zero gradient at the allowance boundary as well.
                     penalty = (error - allowance).relu()
                     errors.append(error.mean())
                     penalties.append(penalty.mean())

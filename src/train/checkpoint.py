@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import torch
 
 from src.config.build import build_config
-from src.config.schema import CONFIG_TYPES, is_section
+from src.config.schema import is_section
 from src.export import STAGE_NAMES
 from src.storage import torch_save
 
@@ -15,22 +15,15 @@ VERSION = 3
 
 
 def save_checkpoint(payload, root, export_payload):
-    path, export = checkpoint_paths(root, payload["step"])
-    torch_save(payload, path, overwrite=False)
-    torch_save(export_payload, export, overwrite=False)
-    complete_checkpoint(path)
-    return path
-
-
-def checkpoint_paths(root, step):
-    """A new step's training and EMA export files under root/checkpoints."""
     folder = root / "checkpoints"
-    path = folder / f"step_{step:08d}.pt"
-    export = folder / f"generator_{step:08d}.pt"
+    path = folder / f"step_{payload['step']:08d}.pt"
+    export = folder / f"generator_{payload['step']:08d}.pt"
     for target in (path, export, path.with_suffix(".complete")):
         if target.exists():
             raise FileExistsError(target)
-    return path, export
+    torch_save(payload, path, overwrite=False)
+    torch_save(export_payload, export, overwrite=False)
+    complete_checkpoint(path)
 
 
 def complete_checkpoint(path):
@@ -98,7 +91,7 @@ def relocate(payload, path_map):
         pairs.append((old, PurePosixPath(Path(new).expanduser().as_posix())))
     # Longest prefix first, so a nested OLD wins over its parent.
     pairs.sort(key=lambda pair: len(pair[0].parts), reverse=True)
-    matched: set = set()
+    matched = set()
     config = dict(payload["config"])
     data = dict(config["data"])
     data["images"] = {
@@ -142,14 +135,11 @@ def _pure_path(value):
 def saved_config(payload):
     """The checkpoint config under the current schema; no key is filled in."""
     values = payload["config"]
-    stage = values.get("stage") if isinstance(values, Mapping) else None
-    if stage not in CONFIG_TYPES:
-        raise ValueError("checkpoint config has no valid stage.")
     try:
         config = build_config(values)
     except ValueError as error:
         raise ValueError(f"checkpoint config does not match this version: {error}")
-    missing = _missing_keys(CONFIG_TYPES[stage], values)
+    missing = _missing_keys(type(config), values)
     if missing:
         raise ValueError(
             "checkpoint config does not match this version: missing "

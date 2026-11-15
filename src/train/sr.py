@@ -6,7 +6,6 @@ from tqdm import trange
 
 from src.axes import PLANES
 from src.config.io import load_generation_settings
-from src.config.schema import SRConfig
 from src.data.augment import augment_volumes, build_volume_transforms
 from src.data.crops import CropSampler
 from src.data.phases import encode_phases
@@ -100,29 +99,16 @@ def crop_profile(image, origin, extent, crop_size, bins):
 
 
 class SRTrainer(Trainer):
-    """SR learns to refine volumes the frozen LR model makes, so it trains on a bank
-    of them rather than on downsampled real data. Each volume takes its height and
-    depth profile from a random real side crop; one volume is replaced every
-    lr_bank.refresh_every_steps. The bank and the LR export travel in the
-    checkpoint, so a resume needs neither the LR run nor its images.
+    """SR refines volumes of the frozen LR model, kept in a bank that travels in
+    the checkpoint; each takes its height and profile from a real side crop.
     """
 
-    config: SRConfig
-
-    def __init__(
-        self,
-        config,
-        device,
-        planes,
-        lr,
-        bank=None,
-    ):
+    def __init__(self, config, device, planes, lr, bank=None):
         super().__init__(config, device, planes)
         self.lr_export = check_export(lr, "lr")
         self.lr_config = export_config(self.lr_export)
         check_lr_source(self.lr_config, config)
         self.volume_transforms = build_volume_transforms(config)
-        # LR-grid side crops: the conditions of each bank volume.
         self.side_samplers = (
             {
                 axis: CropSampler(
@@ -139,8 +125,6 @@ class SRTrainer(Trainer):
         )
         self._lr_sampling = None
         self.bank = self.create_bank() if bank is None else bank
-
-    # Bank ------------------------------------------------------------------
 
     def bank_sampling(self):
         if self._lr_sampling is None:
@@ -251,8 +235,6 @@ class SRTrainer(Trainer):
             bank.height_extents[index] = record["height_extent"]
         bank.conditions[index] = record
         bank.next_index = (index + 1) % len(bank.volumes)
-
-    # Stage hooks -------------------------------------------------------------
 
     def export_payload(self, step, model):
         return export_payload(self.config, step, model, lr=self.lr_export)

@@ -16,13 +16,12 @@ from src.stats.sections import (
     section_statistics,
 )
 
-# Fixed real crops per plane, so each step meets the same data.
+# Fixed crops and seeds, so every step meets the same data and noise.
 REFERENCE_CROPS = 64
 
 
 def build_reference(samplers):
     """Real crops per plane axis, identical for every run on this data."""
-    # Scored volumes use fixed seeds too, so each step also meets the same noise.
     generator = make_generator(0)
     reference = {}
     for axis, sampler in sorted(samplers.items()):
@@ -36,23 +35,19 @@ def build_reference(samplers):
 
 
 class CheckpointSelection:
-    """Export the step whose sections best match the real data, not the last one.
+    """Export the step whose sections best match fixed real crops, not the last.
 
-    Only 2D sections of the real material exist, so a step is judged by how well
-    the sections of its volumes match fixed real crops: two-point correlation,
-    chord lengths, and how each phase splits into clusters. The last carries what
-    sections reveal of 3D connectivity. LR scores unanchored volumes; SR scores its
-    refinements of fixed LR bank volumes at the HR resolution.
+    Only 2D sections of the material exist, so a step is scored on two-point
+    correlation, chord lengths and per-phase cluster splits of its sections.
     """
 
     def __init__(self, reference, samples, height_enabled):
         self.reference = reference
         self.samples = samples
         self.height_enabled = height_enabled
-        self.history: list[dict] = []
-        # EMA weights of the best step, kept in the training state so a resume
-        # from any checkpoint can restore them.
-        self.best_state: dict | None = None
+        self.history = []
+        # Best EMA weights travel in the checkpoint, so any resume restores them.
+        self.best_state = None
         self.real = {}
         self.noise = {}
         for axis, plane in reference.items():
@@ -64,7 +59,6 @@ class CheckpointSelection:
         """Height condition of each scored volume, cycling over side crops."""
         if not self.height_enabled:
             return [{}] * self.samples
-        # xy crops carry no depth.
         axes = [axis for axis in self.reference if axis != 0]
         heights = []
         for index in range(self.samples):
@@ -215,8 +209,7 @@ class SRCheckpointSelection(CheckpointSelection):
             high = sampler.sample(plan, seed=index, conditions=conditions)
             errors.append(lr_mse(high, source))
             volumes.append(high)
-        # LR agreement is recorded, not scored: SR learns to repair corrupted
-        # LR input, so following it exactly is not the goal.
+        # Recorded, not scored: SR is meant to repair corrupted LR input.
         return {**self.score(volumes), "lr_mse": float(np.mean(errors))}
 
     def state_dict(self):
@@ -249,11 +242,9 @@ def pick_sections(volumes, axis, phases):
     """One-hot sections along axis, evenly spaced over all volumes' slices."""
     depth = volumes[0].shape[axis]
     total = len(volumes) * depth
-    # A fixed count keeps the statistics cost growing with section area, not
-    # volume size, while still outnumbering the real crops.
+    # A fixed count bounds the cost and still outnumbers the real crops.
     count = min(2 * REFERENCE_CROPS, total)
     indices = torch.linspace(0, total - 1, count).round().long().tolist()
-    # Only the picked slices leave the uint8 volumes.
     labels = torch.stack(
         [volumes[index // depth].select(axis, index % depth) for index in indices]
     )

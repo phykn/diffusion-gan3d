@@ -20,7 +20,6 @@ def write_metrics(writer, step, metrics):
 @torch.no_grad()
 def structure_metrics(probs, real, groups):
     """structure/* tags of [B, K, D, H, W] predictions against real sections."""
-    # One scheduled transfer; never called from a diffusion or critic inner loop.
     probs = probs.detach().float().cpu()
     labels = probs.argmax(1).numpy()
     percolation, metrics = measure_percolation(labels, probs.shape[1])
@@ -50,14 +49,11 @@ def measure_percolation(labels, phases):
                 ]
             )
         percolation[phase] = np.mean(span, axis=0)
-        # Percolation is transport along an axis, named z/y/x.
+        lower = np.mean(lower, axis=0)
         for axis, name in enumerate(AXIS_NAMES):
-            metrics[f"structure/phase_{phase}/percolation_{name}"] = percolation[
-                phase, axis
-            ]
-            metrics[f"structure/phase_{phase}/percolation_lower_bound_{name}"] = float(
-                np.mean(lower, axis=0)[axis]
-            )
+            prefix = f"structure/phase_{phase}/percolation"
+            metrics[f"{prefix}_{name}"] = percolation[phase, axis]
+            metrics[f"{prefix}_lower_bound_{name}"] = float(lower[axis])
     return percolation, metrics
 
 

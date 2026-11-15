@@ -12,12 +12,10 @@ class BurnInValues:
 
 
 def burn_in_values(config, step):
-    """Over the first burn_in.steps steps a cosine curve moves the learning rates,
-    Adam beta2, the R1/R2 weights and the EMA half-life from their start values to
-    their end values; afterwards they stay at the end values. Large early steps
-    need a low beta2, and a smaller learning rate and weaker regularization later
-    slow the critic down once the generator has the structure (Huang et al., The
-    GAN is dead; long live the GAN!, 2024, Appendix D).
+    """Cosine-move lr, Adam beta2, R1/R2 scale and EMA half-life from start to
+    end over burn_in.steps (Huang et al., The GAN is dead; long live the GAN!,
+    2024, Appendix D): early large steps need a low beta2, and a slower critic
+    later lets the generator keep the structure.
     """
     optim, burn_in = config.optim, config.burn_in
     progress = (
@@ -30,8 +28,7 @@ def burn_in_values(config, step):
         return start + (end - start) * progress
 
     lr_scale = move(1.0, burn_in.lr_scale)
-    # The EMA half-life grows from zero, so early averages hold no weights
-    # from the random initialization; ema_decay sets the final half-life.
+    # A half-life growing from zero keeps the random init out of the EMA.
     half_life = (
         progress * math.log(0.5) / math.log(optim.ema_decay)
         if optim.ema_decay > 0

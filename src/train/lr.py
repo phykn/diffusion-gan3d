@@ -1,7 +1,6 @@
 import torch
 
 from src.axes import PLANES
-from src.config.schema import LRConfig
 from src.data.profile import measure_image_profile
 from src.data.resize import rebin_profile
 from src.stats.labels import phase_profile
@@ -12,8 +11,6 @@ from src.train.losses.volume_fraction import vf_loss
 
 
 class LRTrainer(Trainer):
-    config: LRConfig
-
     def prepare(self, step, transition):
         real = self.real_crops()
         # Height, profile and vf of a volume share one side crop.

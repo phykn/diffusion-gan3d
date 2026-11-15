@@ -94,10 +94,8 @@ def validate_loss(loss, name):
 
 
 def step_optimizer(optimizer, scaler, name):
-    """Step unless the gradient is not finite; that is an error without AMP.
-
-    Returns whether it stepped and the gradient metrics.
-    """
+    """Step unless the gradient is not finite (an error without AMP); return
+    whether it stepped and the gradient metrics."""
     scaler.unscale_(optimizer)
     grads = [
         p.grad.detach().float()
@@ -162,8 +160,6 @@ class Trainer:
             )
             for plane, images in planes.items()
         }
-        # Initial weights come from train.seed too, without touching the
-        # process's global generator.
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(config.train.seed)
             denoiser = build_denoiser(config)
@@ -195,10 +191,7 @@ class Trainer:
 
     @staticmethod
     def _adam(module, lr, betas):
-        # Fused Adam runs one kernel per step instead of several per tensor.
         return torch.optim.Adam(module.parameters(), lr=lr, betas=betas, fused=True)
-
-    # Stage hooks -----------------------------------------------------------
 
     def prepare(self, step, transition):
         raise NotImplementedError
@@ -251,8 +244,6 @@ class Trainer:
         self.random.load_state(state["rng"])
         self.completed_steps = state["step"]
 
-    # Step ------------------------------------------------------------------
-
     def step(self, step, transition=None):
         scheduled = self.apply_burn_in(step)
         self.denoiser.train()
@@ -293,8 +284,6 @@ class Trainer:
                 group["betas"] = values.betas
         return values
 
-    # Inputs ----------------------------------------------------------------
-
     def sample_transition(self):
         timesteps = self.diffusion.timesteps
         return int(torch.randint(timesteps, (), generator=self.random["train"]))
@@ -323,8 +312,6 @@ class Trainer:
         return build_heights(
             (self.patch_size,) * 3, origins, self.spacing, extents, self.device
         )
-
-    # Generated and real pairs ----------------------------------------------
 
     def generate_pair(self, transition, conditions):
         """Run the reverse chain from noise to x_t+1 without gradients, then
@@ -363,9 +350,7 @@ class Trainer:
         return randn((batch, channels), self.random["train"], self.device)
 
     def noise(self, shape):
-        return torch.randn(
-            tuple(shape), generator=self.random["noise"], device=self.device
-        )
+        return torch.randn(shape, generator=self.random["noise"], device=self.device)
 
     def autocast(self, enabled):
         return torch.autocast(
@@ -404,8 +389,6 @@ class Trainer:
                 values += (real.heights,)
             pairs[axis] = Pairs(*self.augment(values, axis, self.random["augment"]))
         return pairs
-
-    # Critics ---------------------------------------------------------------
 
     def update_critics(self, transition, fake, real, scheduled):
         """Step every plane-group critic once; return its metrics.
@@ -469,8 +452,7 @@ class Trainer:
         self, group, transition, real, fake, regularize, r1_weight, r2_weight
     ):
         """Adversarial and R1/R2 losses of one plane, with the real and fake scores."""
-        # Copies keep the shared real pairs free of gradients for the generator
-        # update.
+        # Detached copies keep the shared pairs gradient-free for the generator.
         real = Pairs(
             real.previous.detach().requires_grad_(r1_weight > 0),
             real.current.detach(),
@@ -485,8 +467,6 @@ class Trainer:
         with self.autocast(self.critic_amp and not regularize):
             real_score = self.score(critic, real, transition)
             fake_score = self.score(critic, fake, transition)
-            # Fake volumes take their heights from real crops, so each pair
-            # compares (section, height) samples.
             losses = critic_objective(
                 relativistic_loss(real_score, fake_score),
                 real_score,
@@ -506,8 +486,6 @@ class Trainer:
             self.make_time(transition, len(pairs.previous)),
             **pairs.conditions(),
         )
-
-    # Generator -------------------------------------------------------------
 
     def update_generator(self, inputs, clean_probs, fake, real):
         """Step the generator once; return whether it stepped and its metrics."""

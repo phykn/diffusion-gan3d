@@ -21,8 +21,7 @@ def mirror_balance_loss(probs, max_gap, tolerance):
     with torch.autocast(device_type=probs.device.type, enabled=False):
         probs = probs.float()
         shape = probs.shape[2:]
-        # One FFT gives the pair sums at every offset; on Apple MPS this is about
-        # fifteen times faster than multiplying shifted windows offset by offset.
+        # One FFT gives every offset's pair sums, ~15x faster on MPS than shifts.
         correlations = pair_correlations(probs, 2 * max_gap)
         for name, (first, second) in MIRROR_PLANES.items():
             offsets = [

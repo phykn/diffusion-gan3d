@@ -21,9 +21,7 @@ DONE = ".done"
 
 
 class TrainingRun:
-    """One stage's step loop in its run folder: metrics every step, a scored
-    best export every weights_every_steps, a checkpoint every
-    archive_every_steps, and a save at the step boundary on Ctrl+C."""
+    """One stage's step loop in its run folder; Ctrl+C saves at a step boundary."""
 
     def __init__(self, trainer, root, payload=None):
         self.trainer = trainer
@@ -64,8 +62,7 @@ class TrainingRun:
                 dynamic_ncols=True,
             ) as bar,
         ):
-            # Whether the trainer and the saved files agree, so an interrupt
-            # here may save; never mid-step or mid-save.
+            # True while trainer and saved files agree, so an interrupt may save.
             at_boundary = True
             try:
                 for step in bar:
@@ -145,10 +142,7 @@ class TrainingRun:
 
 @contextmanager
 def deferred_sigint():
-    """Let a training step finish before handling a terminal interrupt.
-
-    A second interrupt stops at once, and the loop saves nothing mid-step.
-    """
+    """Let the current step finish on Ctrl+C; a second one stops at once."""
     requested = Event()
 
     def interrupt(*_):
