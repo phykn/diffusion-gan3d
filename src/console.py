@@ -31,7 +31,7 @@ def paint(text, *styles):
 
 
 def emit(text=""):
-    # tqdm.write keeps an open progress bar intact; with none it is a print.
+    # tqdm.write keeps an open progress bar intact.
     tqdm.write(text)
     sys.stdout.flush()
 

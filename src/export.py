@@ -77,14 +77,12 @@ def export_config(payload):
 
 
 def load_denoiser(payload, config):
-    """EMA denoiser of an export, in eval mode on the CPU."""
     model = build_denoiser(config)
     model.load_state_dict(payload["model"], strict=True)
     return model.eval().requires_grad_(False)
 
 
 def build_denoiser(config):
-    """The stage's denoiser, untrained, from its settings."""
     return Denoiser3D(
         num_phases=config.data.num_phases,
         channels=config.model.generator.channels,
@@ -103,7 +101,7 @@ def build_diffusion(config):
 
 
 def check_lr_source(lr, sr):
-    """SR source: the LR settings an SR model depends on must be its own."""
+    """Raise if the SR settings differ from the LR ones the SR model depends on."""
     differences = []
     for key in (
         "data.crop_size",

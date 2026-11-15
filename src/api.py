@@ -81,7 +81,6 @@ class SamplingRequest:
 
 
 def load_predictor(weights, stage, device):
-    """An export's payload, settings and denoiser predictor on device."""
     payload = read_export(weights, stage)
     config = export_config(payload)
     model = load_denoiser(payload, config).to(device)
@@ -169,7 +168,6 @@ class LowResolutionAPI:
         ).estimate
 
     def _guidance(self, guidance, anchor_strength):
-        """guidance and anchor_strength, defaulting to config/gen.yaml."""
         settings = self.settings
         if guidance is None:
             guidance = settings.guidance
@@ -312,7 +310,6 @@ class SuperResolutionAPI:
         height_origin=0.0,
         height_extent=None,
     ):
-        """The HR tile plan for an LR volume of low_shape."""
         scale = self.scale_factor
         shape = tuple(n * scale for n in parse_shape(low_shape, "low shape"))
         margin = check_non_negative(
@@ -354,7 +351,6 @@ class SuperResolutionAPI:
         height_origin=0.0,
         height_extent=None,
     ):
-        """Memory of refine for a CPU LR volume of low_shape."""
         plan = self.plan(
             low_shape,
             tile_size=tile_size,

@@ -40,8 +40,7 @@ class RunRandom:
             except RuntimeError:
                 if name != NOISE:
                     raise
-                # Saved on another device type: only the noise stream leaves
-                # the unbroken run, from a seed fixed by the saved state.
+                # Saved on another device type: reseed noise from the saved state.
                 digest = hashlib.sha256(state.numpy().tobytes()).digest()
                 self.generators[name].manual_seed(
                     int.from_bytes(digest[:8], "little") >> 1
