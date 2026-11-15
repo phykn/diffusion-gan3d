@@ -205,13 +205,13 @@ def nested_plane_order(size):
     return tuple(selected)
 
 
-def pool_similarity(first, second, cell=4):
+def pool_similarity(first, second):
     """One minus the mean total variation of 4x4-cell phase fractions."""
     pool = torch.nn.functional.avg_pool2d
 
     def fractions(labels):
         onehot = torch.nn.functional.one_hot(labels.long(), 2).movedim(-1, 0).float()
-        return pool(onehot[None], cell)[0]
+        return pool(onehot[None], 4)[0]
 
     return float(1 - 0.5 * (fractions(first) - fractions(second)).abs().sum(0).mean())
 
