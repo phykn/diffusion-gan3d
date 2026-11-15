@@ -35,68 +35,9 @@ from src.stats.labels import voxel_accuracy
 DISPLAY_DISTANCES = (0, 1, 2, 4, 8, 16, 32, 64)
 
 
-def select_indices(size, count):
-    """count section indices spread evenly over size."""
-    if count < 0 or count > size:
-        raise ValueError("count must be between 0 and the volume depth.")
-    return tuple((2 * index + 1) * size // (2 * count) for index in range(count))
-
-
-def select_display_index(size, indices):
-    center = size // 2
-    if not indices:
-        return center
-    return min(indices, key=lambda index: (abs(index - center), index))
-
-
-def anchor_accuracy(vol, target, indices, axis):
-    """Voxel accuracy on the anchored planes only."""
-    if not indices:
-        return None
-    index = torch.tensor(indices, dtype=torch.long)
-    actual = vol.movedim(axis, 0).index_select(0, index)
-    expected = target.movedim(axis, 0).index_select(0, index)
-    return voxel_accuracy(actual, expected)
-
-
-def format_percent(value):
-    return "n/a" if value is None else f"{value:.2%}"
-
-
-def format_ratio(value):
-    return "n/a" if value is None else f"{value:.2f}x"
-
-
-def format_profile(values, near_label):
-    valid = [(d, value) for d, value in enumerate(values) if value is not None]
-    if not valid:
-        return "n/a"
-    mean = sum(value for _, value in valid) / len(valid)
-    distance, farthest = valid[-1]
-    return (
-        f"{near_label} {format_percent(valid[0][1])}, mean {format_percent(mean)}, "
-        f"farthest {format_percent(farthest)} at distance {distance}"
-    )
-
-
-def print_anchor_effect(smoothness, profile, label):
-    peak = ""
-    if smoothness.peak_anchor_distance is not None:
-        peak = f" at distance {smoothness.peak_anchor_distance}"
-    metric(
-        "Smoothness",
-        f"p95 {format_ratio(smoothness.p95_ratio)}, "
-        f"peak {format_ratio(smoothness.max_ratio)}{peak}",
-    )
-    if smoothness.reversal_rate is not None:
-        metric(
-            "Surface bumps",
-            f"{smoothness.reversal_rate:.2%} vs baseline "
-            f"{format_percent(smoothness.baseline_reversal_rate)} "
-            f"({format_ratio(smoothness.reversal_ratio)})",
-        )
-    if profile:
-        metric("Anchor effect", format_profile(profile, label))
+def main(argv=None):
+    parser, args = parse_args(argv)
+    check_anchors(args, parser)
 
 
 def parse_args(argv):
@@ -135,11 +76,6 @@ def parse_args(argv):
     if args.anchor is not None:
         args.side = args.side or "start"
     return parser, args
-
-
-def main(argv=None):
-    parser, args = parse_args(argv)
-    check_anchors(args, parser)
 
 
 def check_anchors(args, parser):
@@ -249,6 +185,63 @@ def load_anchor_image(path, api):
     return api.prepare_image(crop.long()), (top, left, size, size), height
 
 
+def select_indices(size, count):
+    """count section indices spread evenly over size."""
+    if count < 0 or count > size:
+        raise ValueError("count must be between 0 and the volume depth.")
+    return tuple((2 * index + 1) * size // (2 * count) for index in range(count))
+
+
+def anchor_accuracy(vol, target, indices, axis):
+    """Voxel accuracy on the anchored planes only."""
+    if not indices:
+        return None
+    index = torch.tensor(indices, dtype=torch.long)
+    actual = vol.movedim(axis, 0).index_select(0, index)
+    expected = target.movedim(axis, 0).index_select(0, index)
+    return voxel_accuracy(actual, expected)
+
+
+def print_anchor_effect(smoothness, profile, label):
+    peak = ""
+    if smoothness.peak_anchor_distance is not None:
+        peak = f" at distance {smoothness.peak_anchor_distance}"
+    metric(
+        "Smoothness",
+        f"p95 {format_ratio(smoothness.p95_ratio)}, "
+        f"peak {format_ratio(smoothness.max_ratio)}{peak}",
+    )
+    if smoothness.reversal_rate is not None:
+        metric(
+            "Surface bumps",
+            f"{smoothness.reversal_rate:.2%} vs baseline "
+            f"{format_percent(smoothness.baseline_reversal_rate)} "
+            f"({format_ratio(smoothness.reversal_ratio)})",
+        )
+    if profile:
+        metric("Anchor effect", format_profile(profile, label))
+
+
+def format_profile(values, near_label):
+    valid = [(d, value) for d, value in enumerate(values) if value is not None]
+    if not valid:
+        return "n/a"
+    mean = sum(value for _, value in valid) / len(valid)
+    distance, farthest = valid[-1]
+    return (
+        f"{near_label} {format_percent(valid[0][1])}, mean {format_percent(mean)}, "
+        f"farthest {format_percent(farthest)} at distance {distance}"
+    )
+
+
+def format_percent(value):
+    return "n/a" if value is None else f"{value:.2%}"
+
+
+def format_ratio(value):
+    return "n/a" if value is None else f"{value:.2f}x"
+
+
 def show_result(vol, target, indices, axis, num_phases):
     slices = vol.movedim(axis, 0)
     index = select_display_index(slices.shape[0], indices)
@@ -306,6 +299,13 @@ def show_result(vol, target, indices, axis, num_phases):
     )
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     plt.show()
+
+
+def select_display_index(size, indices):
+    center = size // 2
+    if not indices:
+        return center
+    return min(indices, key=lambda index: (abs(index - center), index))
 
 
 def render_strip(volume, anchor, axis, side, num_phases, output, show):

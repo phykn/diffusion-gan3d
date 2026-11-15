@@ -1,22 +1,17 @@
 import argparse
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from src.axes import PLANES  # noqa: E402
-from src.config.io import PROJECT_ROOT, load_generation_settings  # noqa: E402
-from src.console import path_field  # noqa: E402
-from src.device import default_device  # noqa: E402
-from src.export import resolve_export  # noqa: E402
-from src.storage import save_volume  # noqa: E402
+from src.axes import PLANES
+from src.config.io import PROJECT_ROOT, load_generation_settings
+from src.console import path_field
+from src.device import default_device
+from src.export import resolve_export
+from src.storage import save_volume
 
 DIFF_CMAP = ListedColormap(("#f7f7f7", "#e63946"))
 

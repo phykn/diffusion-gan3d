@@ -30,54 +30,6 @@ from src.stats.labels import phase_fractions
 from src.storage import load_probabilities, load_volume, save_probabilities, save_volume
 
 
-def latest_sr():
-    paths = (PROJECT_ROOT / "run").glob("*-sr/generator.pt")
-    for path in sorted(
-        paths, key=lambda candidate: candidate.stat().st_mtime, reverse=True
-    ):
-        try:
-            read_export(path, "sr")
-        except ValueError:
-            continue
-        return path
-    raise FileNotFoundError(f"No v{VERSION} SR export found in run/. Supply --weight.")
-
-
-def comparison(low, high, phases, path, show):
-    fig, panels = plt.subplots(3, 3, figsize=(10, 10))
-    for row, (title, volume) in enumerate(
-        (("LR", low), ("Nearest baseline", high), ("Generated HR", high))
-    ):
-        for axis, plane in enumerate(PLANES):
-            index = volume.shape[axis] // 2
-            if row == 1:
-                # The three displayed planes match 3D nearest interpolation
-                # without allocating a second complete HR volume.
-                source_index = index * low.shape[axis] // high.shape[axis]
-                image = low.select(axis, source_index)
-                size = tuple(n for a, n in enumerate(high.shape) if a != axis)
-                image = F.interpolate(
-                    image[None, None].float(), size=size, mode="nearest"
-                )[0, 0]
-            else:
-                image = volume.select(axis, index)
-            panels[row, axis].imshow(
-                image.numpy(),
-                cmap="gray",
-                vmin=0,
-                vmax=max(1, phases - 1),
-                interpolation="nearest",
-            )
-            panels[row, axis].set_title(f"{title} / {plane} / index {index}")
-            panels[row, axis].axis("off")
-    fig.suptitle("Same field of view — generated HR has no measured 3D reference")
-    fig.tight_layout()
-    fig.savefig(path, dpi=160)
-    if show:
-        plt.show()
-    plt.close(fig)
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Refine an LR volume with SR; the SR export carries its LR model."
@@ -212,6 +164,19 @@ def check_refinement(args):
         napari.run()
 
 
+def latest_sr():
+    paths = (PROJECT_ROOT / "run").glob("*-sr/generator.pt")
+    for path in sorted(
+        paths, key=lambda candidate: candidate.stat().st_mtime, reverse=True
+    ):
+        try:
+            read_export(path, "sr")
+        except ValueError:
+            continue
+        return path
+    raise FileNotFoundError(f"No v{VERSION} SR export found in run/. Supply --weight.")
+
+
 def read_low_resolution(sr, args, options):
     if args.input:
         reader = (
@@ -226,6 +191,41 @@ def read_low_resolution(sr, args, options):
     gc.collect()
     empty_cache(sr.device)
     return low, source
+
+
+def comparison(low, high, phases, path, show):
+    fig, panels = plt.subplots(3, 3, figsize=(10, 10))
+    for row, (title, volume) in enumerate(
+        (("LR", low), ("Nearest baseline", high), ("Generated HR", high))
+    ):
+        for axis, plane in enumerate(PLANES):
+            index = volume.shape[axis] // 2
+            if row == 1:
+                # The three displayed planes match 3D nearest interpolation
+                # without allocating a second complete HR volume.
+                source_index = index * low.shape[axis] // high.shape[axis]
+                image = low.select(axis, source_index)
+                size = tuple(n for a, n in enumerate(high.shape) if a != axis)
+                image = F.interpolate(
+                    image[None, None].float(), size=size, mode="nearest"
+                )[0, 0]
+            else:
+                image = volume.select(axis, index)
+            panels[row, axis].imshow(
+                image.numpy(),
+                cmap="gray",
+                vmin=0,
+                vmax=max(1, phases - 1),
+                interpolation="nearest",
+            )
+            panels[row, axis].set_title(f"{title} / {plane} / index {index}")
+            panels[row, axis].axis("off")
+    fig.suptitle("Same field of view — generated HR has no measured 3D reference")
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    if show:
+        plt.show()
+    plt.close(fig)
 
 
 if __name__ == "__main__":
