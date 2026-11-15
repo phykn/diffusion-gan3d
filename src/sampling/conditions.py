@@ -7,16 +7,19 @@ from src.data.height import build_heights, check_extent
 from src.data.profile import integrate_profile, validate_profile
 from src.data.resize import upsample_region
 from src.device import wide_dtype
+from src.sampling.plan import make_plan, parse_shape
 
 HEIGHT_TOLERANCE = 1e-6
 VF_TOLERANCE = 1e-5
 
 
 class HeightRange:
-    def __init__(self, config, plan, origin, extent):
+    """Where an output lies in the source height, in source pixels."""
+
+    def __init__(self, config, origin, extent):
         self.enabled = config.conditioning.height_enabled
         self.pixels_per_cell = config.data.crop_size / config.patch_size
-        self.margin = plan.margin
+        self.top = 0
         if not self.enabled:
             if extent is not None:
                 raise ValueError("height_extent requires a height-conditioned model.")
@@ -32,7 +35,30 @@ class HeightRange:
         if isinstance(origin, bool) or not isinstance(origin, (int, float)):
             raise ValueError("height_origin must be a number (source pixels).")
         self.origin = float(origin)
-        output_height = plan.output_shape[0] * self.pixels_per_cell
+
+    def z_margins(self, depth, margin, step=1):
+        """Top and bottom margins of a depth-cell output, cut to whole steps of
+        cells inside the source: training never sees a height past a z face."""
+        if not self.enabled:
+            return margin, margin
+        above, below = self._free_cells(depth)
+        return tuple(
+            min(margin, math.floor(cells + HEIGHT_TOLERANCE) // step * step)
+            for cells in (above, below)
+        )
+
+    def place(self, plan):
+        """Check that the plan's z margins stay inside the source height."""
+        self.top = plan.z_margins[0]
+        if not self.enabled:
+            return
+        above, below = self._free_cells(plan.output_shape[0])
+        top, bottom = plan.z_margins
+        if top > above + HEIGHT_TOLERANCE or bottom > below + HEIGHT_TOLERANCE:
+            raise ValueError("z margins reach past the source image height.")
+
+    def _free_cells(self, depth):
+        output_height = depth * self.pixels_per_cell
         if (
             not math.isfinite(self.origin)
             or self.origin < 0
@@ -41,9 +67,11 @@ class HeightRange:
             raise ValueError(
                 "height_origin places the volume outside the source image height."
             )
+        free_below = self.extent - self.origin - output_height
+        return self.origin / self.pixels_per_cell, free_below / self.pixels_per_cell
 
     def locate_tile(self, tile):
-        cells_below_origin = tile.source[0].start - self.margin
+        cells_below_origin = tile.source[0].start - self.top
         return self.origin + cells_below_origin * self.pixels_per_cell
 
     def build_heights(self, tile, device):
@@ -54,6 +82,15 @@ class HeightRange:
             self.extent,
             device,
         )
+
+
+def make_height_plan(
+    config, output_shape, patch, margin, overlap, origin=0.0, extent=None, step=1
+):
+    """make_plan with z margins that stay inside the source height."""
+    depth = parse_shape(output_shape, "output shape")[0]
+    z_margins = HeightRange(config, origin, extent).z_margins(depth, margin, step)
+    return make_plan(output_shape, patch, margin, overlap, z_margins)
 
 
 class LRConditions:
@@ -70,7 +107,8 @@ class LRConditions:
     ):
         self.device = device
         self.num_phases = config.data.num_phases
-        self.height = HeightRange(config, plan, height_origin, height_extent)
+        self.height = HeightRange(config, height_origin, height_extent)
+        self.height.place(plan)
         profile_enabled = config.profile_enabled
         if vf_profile is None and vf is None and profile_enabled:
             # Height alone flattens strong depth gradients; use the training one.
@@ -133,14 +171,15 @@ class SRConditions:
         expected = tuple(size // self.scale for size in plan.output_shape)
         if low.ndim != 4 or tuple(low.shape[1:]) != expected:
             raise ValueError(f"LR fractions must have shape [C, {expected}].")
-        margin_cells = plan.margin // self.scale
+        side = plan.margin // self.scale
+        top, bottom = (cells // self.scale for cells in plan.z_margins)
         low = low.detach().to("cpu", torch.float32)[None]
         # Outside the output the coarse input repeats its faces.
-        self.low = (
-            F.pad(low, (margin_cells,) * 6, mode="replicate") if margin_cells else low
-        )
+        padding = (side, side, side, side, top, bottom)
+        self.low = F.pad(low, padding, mode="replicate") if any(padding) else low
         self.device = device
-        self.height = HeightRange(config, plan, height_origin, height_extent)
+        self.height = HeightRange(config, height_origin, height_extent)
+        self.height.place(plan)
 
     def __call__(self, tile):
         start = tuple(region.start for region in tile.source)

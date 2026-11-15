@@ -46,8 +46,8 @@ def main(argv=None):
     parser.add_argument(
         "--margin",
         type=non_negative_int,
-        help="Voxels generated and discarded on every outer face "
-        "(default: the model's).",
+        help="Voxels generated and discarded on every outer face, on z only within "
+        "the source height (default: the model's).",
     )
     parser.add_argument(
         "--vf-profile",
@@ -75,7 +75,12 @@ def check_generation(args):
     }
     if args.vf_profile is not None:
         options["vf_profile"] = load_vf_profile(args.vf_profile)
-    plan = api.plan(blocks=blocks, overlap=args.overlap, margin=args.margin)
+    height = {
+        key: options[key]
+        for key in ("height_origin", "height_extent")
+        if key in options
+    }
+    plan = api.plan(blocks=blocks, overlap=args.overlap, margin=args.margin, **height)
     field(
         "Plan",
         f"{' × '.join(map(str, plan.tiles_per_axis))} tiles ({plan.tile_count} total), "

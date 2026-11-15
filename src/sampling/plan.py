@@ -23,14 +23,21 @@ class Tile:
 
 @dataclass(frozen=True)
 class TilePlan:
-    # All in (z, y, x). The region is the output plus `margin` on every face.
+    # All in (z, y, x). The region is the output plus `margin` on the y and x
+    # faces and `z_margins` (top, bottom) on the z faces.
     output_shape: tuple
     margin: int
+    z_margins: tuple
     overlap: int
     tile_shape: tuple
     region_shape: tuple
     tile_starts: tuple
     seams: tuple
+
+    @property
+    def offsets(self):
+        """Where the output starts in the region, per axis."""
+        return (self.z_margins[0], self.margin, self.margin)
 
     @property
     def tiles_per_axis(self):
@@ -67,21 +74,28 @@ class TilePlan:
     @property
     def output_seams(self):
         return tuple(
-            tuple(
-                seam - self.margin
-                for seam in seams
-                if self.margin < seam < size + self.margin
+            tuple(seam - offset for seam in seams if offset < seam < size + offset)
+            for seams, size, offset in zip(
+                self.seams, self.output_shape, self.offsets, strict=True
             )
-            for seams, size in zip(self.seams, self.output_shape, strict=True)
         )
 
 
-def make_plan(output_shape, patch, margin, overlap):
+def make_plan(output_shape, patch, margin, overlap, z_margins=None):
+    """z_margins (top, bottom) default to margin; a height-conditioned volume
+    keeps them inside the source height (src/sampling/conditions.py)."""
     output_shape = parse_shape(output_shape, "output shape")
     patch = parse_shape(patch, "patch")
     check_non_negative(margin, "margin")
     check_non_negative(overlap, "overlap")
-    region_shape = tuple(size + 2 * margin for size in output_shape)
+    z_margins = (margin, margin) if z_margins is None else tuple(z_margins)
+    for value in z_margins:
+        check_non_negative(value, "z margin")
+    widths = (sum(z_margins), 2 * margin, 2 * margin)
+    region_shape = tuple(
+        size + width for size, width in zip(output_shape, widths, strict=True)
+    )
+    # Tiles keep one size on every axis; only the region loses cut z margins.
     tile_shape = tuple(
         min(size + 2 * margin, region)
         for size, region in zip(patch, region_shape, strict=True)
@@ -100,6 +114,7 @@ def make_plan(output_shape, patch, margin, overlap):
     return TilePlan(
         output_shape=output_shape,
         margin=margin,
+        z_margins=z_margins,
         overlap=overlap,
         tile_shape=tile_shape,
         region_shape=region_shape,

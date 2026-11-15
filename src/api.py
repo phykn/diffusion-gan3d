@@ -16,13 +16,12 @@ from src.export import (
     read_export,
 )
 from src.sampling.anchor import PlaneAnchor, TileAnchors, check_strength
-from src.sampling.conditions import LRConditions, SRConditions
+from src.sampling.conditions import LRConditions, SRConditions, make_height_plan
 from src.sampling.memory import check_memory, estimate_memory
 from src.sampling.plan import (
     TilePlan,
     check_non_negative,
     choose_sr_margin,
-    make_plan,
     parse_shape,
 )
 from src.sampling.sampler import Predictor, TileSampler
@@ -112,16 +111,32 @@ class LowResolutionAPI:
         # Area resizing can round a full cell to 1 + eps; anchors require [0, 1].
         return probs.clamp_(0.0, 1.0)
 
-    def plan(self, *, blocks=None, shape=None, overlap=None, margin=None):
+    def plan(
+        self,
+        *,
+        blocks=None,
+        shape=None,
+        overlap=None,
+        margin=None,
+        height_origin=0.0,
+        height_extent=None,
+    ):
         """The tile plan of a request. margin (default: the denoiser's
-        downsample factor) is generated around the output and cropped off."""
+        downsample factor) is generated around the output and cropped off; on
+        the z faces only as far as the source height reaches."""
         overlap = check_non_negative(
             self.settings.overlap if overlap is None else overlap, "overlap"
         )
         margin = self.default_margin if margin is None else margin
         patch = self.input_size
-        return make_plan(
-            output_shape(blocks, shape, patch, overlap), patch, margin, overlap
+        return make_height_plan(
+            self.config,
+            output_shape(blocks, shape, patch, overlap),
+            patch,
+            margin,
+            overlap,
+            height_origin,
+            height_extent,
         )
 
     def estimate_memory(
@@ -135,8 +150,17 @@ class LowResolutionAPI:
         guidance=None,
         anchor_strength=None,
         probabilities=False,
+        height_origin=0.0,
+        height_extent=None,
     ):
-        plan = self.plan(blocks=blocks, shape=shape, overlap=overlap, margin=margin)
+        plan = self.plan(
+            blocks=blocks,
+            shape=shape,
+            overlap=overlap,
+            margin=margin,
+            height_origin=height_origin,
+            height_extent=height_extent,
+        )
         guidance, strength = self._guidance(guidance, anchor_strength)
         return self._request(
             plan,
@@ -200,7 +224,14 @@ class LowResolutionAPI:
         vf_profile=None,
     ):
         guidance, strength = self._guidance(guidance, anchor_strength)
-        plan = self.plan(blocks=blocks, shape=shape, overlap=overlap, margin=margin)
+        plan = self.plan(
+            blocks=blocks,
+            shape=shape,
+            overlap=overlap,
+            margin=margin,
+            height_origin=height_origin,
+            height_extent=height_extent,
+        )
         conditions = LRConditions(
             self.config,
             plan,
@@ -272,7 +303,16 @@ class SuperResolutionAPI:
             raise ValueError(f"tile_size must be a positive multiple of {scale}.")
         return tile_size, min(8 // scale, (tile_size - 1) // (2 * scale)) * scale
 
-    def plan(self, low_shape, *, tile_size=None, overlap=None, margin=None):
+    def plan(
+        self,
+        low_shape,
+        *,
+        tile_size=None,
+        overlap=None,
+        margin=None,
+        height_origin=0.0,
+        height_extent=None,
+    ):
         """The HR tile plan for an LR volume of low_shape."""
         scale = self.scale_factor
         shape = tuple(n * scale for n in parse_shape(low_shape, "low shape"))
@@ -283,14 +323,26 @@ class SuperResolutionAPI:
             raise ValueError(f"margin must be a multiple of the LR/HR scale ({scale}).")
         if tile_size is None:
             overlap = check_non_negative(0 if overlap is None else overlap, "overlap")
-            return make_plan(shape, shape, margin, overlap)
-        tile_size, default_overlap = self.default_tiling(tile_size)
-        overlap = check_non_negative(
-            default_overlap if overlap is None else overlap, "overlap"
+            tile_size = shape
+        else:
+            tile_size, default_overlap = self.default_tiling(tile_size)
+            overlap = check_non_negative(
+                default_overlap if overlap is None else overlap, "overlap"
+            )
+            if 2 * overlap % scale:
+                raise ValueError(
+                    f"2 * overlap must be a multiple of the scale ({scale})."
+                )
+        return make_height_plan(
+            self.config,
+            shape,
+            tile_size,
+            margin,
+            overlap,
+            height_origin,
+            height_extent,
+            step=scale,
         )
-        if 2 * overlap % scale:
-            raise ValueError(f"2 * overlap must be a multiple of the scale ({scale}).")
-        return make_plan(shape, tile_size, margin, overlap)
 
     def estimate_memory(
         self,
@@ -300,9 +352,18 @@ class SuperResolutionAPI:
         overlap=None,
         margin=None,
         probabilities=False,
+        height_origin=0.0,
+        height_extent=None,
     ):
         """Memory of refine for a CPU LR volume of low_shape."""
-        plan = self.plan(low_shape, tile_size=tile_size, overlap=overlap, margin=margin)
+        plan = self.plan(
+            low_shape,
+            tile_size=tile_size,
+            overlap=overlap,
+            margin=margin,
+            height_origin=height_origin,
+            height_extent=height_extent,
+        )
         return self._request(plan, probabilities).estimate
 
     def _request(self, plan, probabilities):
@@ -345,7 +406,12 @@ class SuperResolutionAPI:
     ):
         probs = lr_fractions(low, self.num_phases)
         plan = self.plan(
-            probs.shape[1:], tile_size=tile_size, overlap=overlap, margin=margin
+            probs.shape[1:],
+            tile_size=tile_size,
+            overlap=overlap,
+            margin=margin,
+            height_origin=height_origin,
+            height_extent=height_extent,
         )
         conditions = SRConditions(
             self.config,

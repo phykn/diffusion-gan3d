@@ -5,8 +5,8 @@ from src.config.io import save_yaml
 from src.data.resize import downsample
 from src.export import write_export
 from src.rng import make_generator
-from src.sampling.conditions import LRConditions, SRConditions
-from src.sampling.plan import choose_sr_margin, make_plan
+from src.sampling.conditions import LRConditions, SRConditions, make_height_plan
+from src.sampling.plan import choose_sr_margin
 from src.sampling.sampler import Predictor, TileSampler
 from src.stats.sections import (
     SectionErrors,
@@ -87,10 +87,11 @@ class CheckpointSelection:
     def evaluate(self, trainer):
         config = trainer.config
         patch = config.patch_size
-        plan = make_plan((patch,) * 3, patch, trainer.ema.downsample_factor, 0)
+        margin = trainer.ema.downsample_factor
         sampler = TileSampler(ema_predictor(trainer))
         volumes = []
         for index, height in enumerate(self.heights()):
+            plan = height_plan(config, patch, margin, height)
             conditions = LRConditions(config, plan, trainer.device, **height)
             volumes.append(sampler.sample(plan, seed=index, conditions=conditions))
         return self.score(volumes)
@@ -210,11 +211,12 @@ class SRCheckpointSelection(CheckpointSelection):
     def evaluate(self, trainer):
         config = trainer.config
         patch = config.patch_size
-        plan = make_plan((patch,) * 3, patch, choose_sr_margin(config.scale_factor), 0)
+        margin = choose_sr_margin(config.scale_factor)
         sampler = TileSampler(ema_predictor(trainer))
         low = self.inputs["volumes"]
         volumes, errors = [], []
         for index, height in enumerate(self.heights()):
+            plan = height_plan(config, patch, margin, height, config.scale_factor)
             source = low[index % len(low)]
             conditions = SRConditions(config, plan, source, trainer.device, **height)
             high = sampler.sample(plan, seed=index, conditions=conditions)
@@ -230,6 +232,20 @@ class SRCheckpointSelection(CheckpointSelection):
     def load_state_dict(self, state):
         super().load_state_dict(state)
         self.inputs = state["inputs"]
+
+
+def height_plan(config, patch, margin, height, step=1):
+    """The plan of one scored patch-size volume at its height."""
+    return make_height_plan(
+        config,
+        (patch,) * 3,
+        patch,
+        margin,
+        0,
+        height.get("height_origin", 0.0),
+        height.get("height_extent"),
+        step,
+    )
 
 
 def ema_predictor(trainer):

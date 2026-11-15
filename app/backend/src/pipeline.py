@@ -49,12 +49,21 @@ class HighResolutionPipeline:
     def prepare_image(self, image):
         return self.lr.prepare_image(image)
 
-    def estimate_memory(self, *, blocks=None, shape=None, anchors=()):
+    def estimate_memory(
+        self,
+        *,
+        blocks=None,
+        shape=None,
+        anchors=(),
+        height_origin=0.0,
+        height_extent=None,
+    ):
+        height = {"height_origin": height_origin, "height_extent": height_extent}
         low = self.lr.estimate_memory(
-            blocks=blocks, shape=shape, anchors=anchors, probabilities=True
+            blocks=blocks, shape=shape, anchors=anchors, probabilities=True, **height
         )
         return PipelineEstimate(
-            low, self.sr.estimate_memory(low.shape, **self.sr_tiling)
+            low, self.sr.estimate_memory(low.shape, **self.sr_tiling, **height)
         )
 
     def check_memory(self, estimate):

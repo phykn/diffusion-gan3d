@@ -93,7 +93,8 @@ A sample is one file in [config/samples/](../config/samples/); copy
 - `structure` says what the material looks like:
   - `isotropic: false` judges `xy` sections apart from `xz`/`yz` sections.
   - `depth_gradient: true` conditions both stages on height and, in LR, on the phase
-    fractions at each height.
+    fractions at each height. Generation then keeps its z margins inside the source
+    height, since no training crop reaches past the top or bottom of an image.
   - `mirror_symmetric: true` makes each volume's phase pairs along mirrored diagonals
     agree in LR (`loss.mirror_balance`), so the generator cannot shear the volume to keep two
     section planes realistic at the cost of the third. `false` turns that off, flips and

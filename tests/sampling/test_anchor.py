@@ -32,7 +32,7 @@ def test_each_tile_gets_its_part_of_the_anchors():
     plan = make_plan(SHAPE, 4, margin=2, overlap=1)
     assert plan.tile_count > 1
     whole_image, whole_mask = encode_anchors(
-        place_anchors(anchors, plan.output_shape, 3, plan.margin), plan.region_shape
+        place_anchors(anchors, plan.output_shape, 3, plan.offsets), plan.region_shape
     )
     tiles = TileAnchors(anchors, plan, 3, 1.0)
     for index, tile in enumerate(plan.tiles):

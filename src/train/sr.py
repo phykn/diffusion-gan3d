@@ -21,7 +21,7 @@ from src.export import (
     load_denoiser,
 )
 from src.rng import rand, randint
-from src.sampling.conditions import LRConditions
+from src.sampling.conditions import LRConditions, make_height_plan
 from src.sampling.memory import check_memory, estimate_memory
 from src.sampling.plan import make_plan
 from src.sampling.sampler import Predictor, TileSampler
@@ -199,6 +199,15 @@ class SRTrainer(Trainer):
             if key in record
         }
         sampler, plan, estimate = self.bank_sampling()
+        plan = make_height_plan(
+            self.lr_config,
+            plan.output_shape,
+            self.lr_config.patch_size,
+            plan.margin,
+            plan.overlap,
+            record.get("height_origin", 0.0),
+            record.get("height_extent"),
+        )
         conditions = LRConditions(self.lr_config, plan, self.device, **options)
         return sampler.sample(
             plan,

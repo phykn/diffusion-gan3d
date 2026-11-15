@@ -83,7 +83,8 @@ def describe_model(inference, config):
     low, high = 2, config.max_blocks
     while low <= high:
         count = (low + high) // 2
-        shape = inference.estimate_memory(blocks=(count, 1, 1)).shape
+        # Along x: a z run of blocks could leave the source height.
+        shape = inference.estimate_memory(blocks=(1, 1, count)).shape
         if max(shape) <= config.max_size:
             limit = count
             low = count + 1
@@ -106,7 +107,11 @@ def generate_volume(inference, request, config):
         "shape": request.shape,
         "anchors": tuple(anchor.to_anchor() for anchor in request.anchors),
     }
-    estimate = inference.estimate_memory(**geometry)
+    height = {
+        "height_origin": request.height_origin,
+        "height_extent": request.height_extent,
+    }
+    estimate = inference.estimate_memory(**geometry, **height)
     if (
         max(estimate.shape) > config.max_size
         or math.prod(estimate.shape) > config.max_voxels
@@ -123,6 +128,5 @@ def generate_volume(inference, request, config):
     return inference.generate(
         **geometry,
         seed=request.seed,
-        height_origin=request.height_origin,
-        height_extent=request.height_extent,
+        **height,
     )

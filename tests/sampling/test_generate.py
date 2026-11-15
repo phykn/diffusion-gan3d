@@ -2,7 +2,8 @@ import pytest
 import torch
 
 import src.api
-from src.api import LowResolutionAPI
+import src.sampling.conditions
+from src.api import LowResolutionAPI, SuperResolutionAPI
 from src.data.height import build_heights
 from src.data.profile import integrate_profile, validate_profile
 from src.sampling.conditions import LRConditions
@@ -49,14 +50,14 @@ def test_each_z_tile_gets_the_height_and_profile_of_its_depth(height_api, monkey
             return result
 
     monkeypatch.setattr(src.api, "LRConditions", Recorded)
-    origin = 3.0
-    blocks = {"blocks": (2, 1, 1), "overlap": 4}
+    # A source taller than the training images keeps both z margins whole.
+    origin, extent = 20.0, 200.0
+    blocks = {"blocks": (2, 1, 1), "overlap": 4, "height_extent": extent}
     height_api.generate(seed=0, height_origin=origin, **blocks)
-    plan = height_api.plan(**blocks)
+    plan = height_api.plan(height_origin=origin, **blocks)
     depth = plan.output_shape[0]
     config = height_api.config
     spacing = config.data.crop_size / config.patch_size
-    extent = config.data.height_extent
     whole_height = build_heights((depth, 1, 1), origin, spacing, extent, None)[
         0, 0, :, 0, 0
     ]
@@ -70,9 +71,10 @@ def test_each_z_tile_gets_the_height_and_profile_of_its_depth(height_api, monkey
     second = next(item for item in calls if item[0].source[0].start == starts[1])
     tile, result = second
     # Output cells this tile owns, in output and in tile coordinates.
-    first = max(tile.target[0].start, plan.margin)
-    last = min(tile.target[0].stop, plan.margin + depth)
-    output = slice(first - plan.margin, last - plan.margin)
+    top = plan.offsets[0]
+    first = max(tile.target[0].start, top)
+    last = min(tile.target[0].stop, top + depth)
+    output = slice(first - top, last - top)
     local = slice(first - tile.source[0].start, last - tile.source[0].start)
     assert output.stop > output.start
     torch.testing.assert_close(
@@ -82,6 +84,32 @@ def test_each_z_tile_gets_the_height_and_profile_of_its_depth(height_api, monkey
         result["profile"][0, :, local], whole_profile[:, output], atol=1e-5, rtol=0
     )
     torch.testing.assert_close(result["vf"], result["profile"].mean(-1))
+
+
+def test_full_depth_sees_only_heights_inside_the_source(
+    tiny_height_configs, random_export, height_api, monkeypatch
+):
+    # Training crops lie inside the image, so their heights never reach -1 or 1;
+    # generation must not feed the clamped heights of cells past a z face.
+    seen = []
+
+    def record(*args):
+        heights = build_heights(*args)
+        seen.append(heights)
+        return heights
+
+    monkeypatch.setattr(src.sampling.conditions, "build_heights", record)
+    config = height_api.config
+    extent = config.data.height_extent
+    depth = round(extent * config.patch_size / config.data.crop_size)
+    low = height_api.generate_probs(
+        shape=(depth, 16, 16), seed=0, height_origin=0.0, overlap=4
+    )
+    sr_config = tiny_height_configs["sr"]
+    sr = SuperResolutionAPI(random_export(sr_config, "height_sr", lr=config), "cpu")
+    sr.refine(low, seed=0, height_origin=0.0)
+    values = torch.cat([heights.flatten() for heights in seen])
+    assert values.abs().max() < 1
 
 
 def test_a_height_outside_the_source_is_rejected(height_api):

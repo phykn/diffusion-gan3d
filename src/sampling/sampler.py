@@ -198,18 +198,18 @@ class TileSampler:
                         previous = previous - slab.guide_step[slab_region] / weights
                     state[state_region] = previous.to(state.dtype)
                 else:
-                    _write_output(output, region, clean, plan.margin)
+                    _write_output(output, region, clean, plan.offsets)
                 slab.clear(slab_region)
 
 
-def _write_output(output, region, clean, margin):
+def _write_output(output, region, clean, offsets):
     source, destination = [], []
-    for part, size in zip(region, output.shape[-3:], strict=True):
-        first, last = max(part.start, margin), min(part.stop, margin + size)
+    for part, size, offset in zip(region, output.shape[-3:], offsets, strict=True):
+        first, last = max(part.start, offset), min(part.stop, offset + size)
         if first >= last:
             return
         source.append(slice(first - part.start, last - part.start))
-        destination.append(slice(first - margin, last - margin))
+        destination.append(slice(first - offset, last - offset))
     values = clean[(*BATCH_AND_CHANNELS, *source)]
     if output.ndim == 3:
         output[tuple(destination)] = _pick_labels(values.squeeze(0))

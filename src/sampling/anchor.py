@@ -63,7 +63,7 @@ class TileAnchors:
     def __init__(self, anchors, plan, num_phases, strength, device=None):
         self.strength = check_strength(strength)
         self.device = device
-        placed = place_anchors(anchors, plan.output_shape, num_phases, plan.margin)
+        placed = place_anchors(anchors, plan.output_shape, num_phases, plan.offsets)
         self.anchors_per_tile = []
         if not placed:
             return
@@ -101,7 +101,7 @@ def check_strength(value):
     return float(value)
 
 
-def place_anchors(anchors, output_shape, num_phases, margin=0):
+def place_anchors(anchors, output_shape, num_phases, offsets=(0, 0, 0)):
     placed = []
     for anchor in anchors:
         if not isinstance(anchor, PlaneAnchor):
@@ -119,9 +119,16 @@ def place_anchors(anchors, output_shape, num_phases, margin=0):
             output_shape[axis] for axis in range(3) if axis != anchor.axis
         )
         row, col = _locate_image(anchor, values.shape[-2:], plane_shape)
+        row_offset, col_offset = (
+            offsets[axis] for axis in range(3) if axis != anchor.axis
+        )
         placed.append(
             _PlacedAnchor(
-                values, anchor.axis, anchor.index + margin, row + margin, col + margin
+                values,
+                anchor.axis,
+                anchor.index + offsets[anchor.axis],
+                row + row_offset,
+                col + col_offset,
             )
         )
     return placed
