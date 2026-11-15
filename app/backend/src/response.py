@@ -3,7 +3,7 @@ from fastapi.responses import Response
 from src.stats.volume import pore_tortuosity
 
 
-def volume_response(volume, device, tortuosity=False):
+def volume_response(volume, device, tortuosity):
     shape = ",".join(str(axis) for axis in volume.shape)
     headers = {"X-Volume-Shape": shape}
     if tortuosity:
