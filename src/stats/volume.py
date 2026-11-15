@@ -27,11 +27,7 @@ def spanning_fractions(mask):
 def tortuosity(volume, phase, axis, device):
     import taufactor as tau
 
-    if isinstance(volume, torch.Tensor):
-        values = volume.detach().cpu().numpy()
-    else:
-        values = np.asarray(volume)
-    conductive = np.moveaxis(values == phase, axis, 0)
+    conductive = np.moveaxis(np.asarray(volume) == phase, axis, 0)
     # The solver does not converge without a path between the two faces.
     if spanning_fractions(conductive)[0] == 0.0:
         return math.inf
@@ -48,8 +44,6 @@ def tortuosity(volume, phase, axis, device):
 
 def component_slopes(labels, phase, min_voxels=8):
     labels = np.asarray(labels)
-    if labels.ndim != 3:
-        raise ValueError("tilt labels must be a 3D volume.")
     components, count = ndi.label(labels == phase)
     y, x = (axis.ravel().astype(np.float64) for axis in np.indices(labels.shape[1:]))
     # Accumulate coordinate moments one z slice at a time, so memory follows the
