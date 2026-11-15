@@ -1,13 +1,8 @@
-import logging
 import math
 
 import numpy as np
 import scipy.ndimage as ndi
 import torch
-
-from src.axes import PORE_PHASE
-
-logger = logging.getLogger(__name__)
 
 # Volume axes are (z, y, x); "zy" is the slope dz/dy of a particle's voxels.
 TILT_PAIRS = {"zy": (0, 1), "zx": (0, 2), "yx": (1, 2)}
@@ -49,18 +44,6 @@ def tortuosity(volume, phase, axis, device):
     if math.isnan(result) or result <= 0:
         raise RuntimeError("tortuosity solver returned an invalid result.")
     return result
-
-
-def pore_tortuosity(volume, device):
-    try:
-        return tortuosity(volume, phase=PORE_PHASE, axis=0, device=device)
-    except (RuntimeError, ValueError, ZeroDivisionError) as exc:
-        # Memory exhaustion is a request failure, not a missing metric; MPS
-        # reports it as a plain RuntimeError.
-        if isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc):
-            raise
-        logger.warning("pore tortuosity unavailable: %s", exc)
-        return None
 
 
 def component_slopes(labels, phase, min_voxels=8):

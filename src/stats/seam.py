@@ -47,7 +47,7 @@ def measure_seams(vol, seams, band_size, num_phases):
         stride = max(1, (max(sections.shape[-2:]) + 511) // 512)
         sections = sections[:, ::stride, ::stride]
         for idx in sorted(band | set(interior)):
-            counts = transition_counts(sections[idx], sections[idx + 1], num_phases)
+            counts = _transition_counts(sections[idx], sections[idx + 1], num_phases)
             if idx in band:
                 band_counts[idx] = counts
             else:
@@ -56,8 +56,8 @@ def measure_seams(vol, seams, band_size, num_phases):
         axis_tv = []
         axis_delta = []
         for seam_counts in band_counts.values():
-            axis_tv.append(transition_tv(seam_counts, inner_counts))
-            delta = continuation_delta(seam_counts, inner_counts)
+            axis_tv.append(_transition_tv(seam_counts, inner_counts))
+            delta = _continuation_delta(seam_counts, inner_counts)
             if delta is not None:
                 axis_delta.append(delta)
         tvs.append(max(axis_tv))
@@ -68,7 +68,7 @@ def measure_seams(vol, seams, band_size, num_phases):
     )
 
 
-def transition_counts(previous, current, num_phases):
+def _transition_counts(previous, current, num_phases):
     previous = phase_labels(previous, num_phases)
     current = phase_labels(current, num_phases).to(previous.device)
     if previous.shape != current.shape:
@@ -78,15 +78,11 @@ def transition_counts(previous, current, num_phases):
     return counts.reshape(num_phases, num_phases).to(wide_dtype(counts.device))
 
 
-def transition_tv(first, second):
-    first, second = _transition_matrices(first, second)
-    first = first / first.sum()
-    second = second / second.sum()
-    return float(0.5 * (first - second).abs().sum())
+def _transition_tv(first, second):
+    return float(0.5 * (first / first.sum() - second / second.sum()).abs().sum())
 
 
-def continuation_delta(first, second):
-    first, second = _transition_matrices(first, second)
+def _continuation_delta(first, second):
     first_totals = first.sum(dim=1)
     second_totals = second.sum(dim=1)
     supported = (first_totals > 0) & (second_totals > 0)
@@ -95,26 +91,3 @@ def continuation_delta(first, second):
     first_values = first.diagonal()[supported] / first_totals[supported]
     second_values = second.diagonal()[supported] / second_totals[supported]
     return float((first_values - second_values).abs().max())
-
-
-def _transition_matrices(first, second):
-    first = torch.as_tensor(first)
-    first = first.to(wide_dtype(first.device))
-    second = torch.as_tensor(second, dtype=first.dtype, device=first.device)
-    if (
-        first.ndim != 2
-        or first.shape[0] != first.shape[1]
-        or first.shape != second.shape
-        or first.numel() == 0
-    ):
-        raise ValueError(
-            "transition matrices must have the same non-empty square shape."
-        )
-    for counts in (first, second):
-        if not bool((torch.isfinite(counts) & (counts >= 0)).all()) or not bool(
-            counts.sum() > 0
-        ):
-            raise ValueError(
-                "transition counts must be finite, non-negative and nonzero."
-            )
-    return first, second
