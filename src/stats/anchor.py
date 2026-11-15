@@ -21,8 +21,6 @@ class SliceSmoothness:
 
 
 def measure_boundaries(vol, indices, axis):
-    if not indices:
-        return BoundaryQuality(None, None, None)
     slices = vol.movedim(axis, 0)
     pair_count = slices.shape[0] - 1
     boundaries = {
@@ -52,12 +50,13 @@ def measure_distance_divergence(anchored, baseline, indices, axis):
     distances = (positions[:, None] - anchors[None, :]).abs().amin(dim=1)
     result = [None] * anchored_slices.shape[0]
     for distance in distances.unique().tolist():
-        if distance < len(result):
-            result[distance] = float(changes[distances == distance].mean())
+        result[distance] = float(changes[distances == distance].mean())
     return tuple(result)
 
 
 def measure_slice_smoothness(vol, indices, axis, baseline):
+    if baseline.shape != vol.shape:
+        raise ValueError("baseline must have the same shape as volume.")
     acceleration = _slice_acceleration(vol, axis)
     if acceleration.numel() == 0:
         return SliceSmoothness(None, None, None, None, None, None)
@@ -68,8 +67,6 @@ def measure_slice_smoothness(vol, indices, axis, baseline):
     peak_distance = (
         None if not indices else min(abs(peak_index - index) for index in indices)
     )
-    if baseline.shape != vol.shape:
-        raise ValueError("baseline must have the same shape as volume.")
     reversal_rate = _slice_reversal_rate(vol, axis)
     baseline_acceleration = _slice_acceleration(baseline, axis)
     baseline_p95 = float(torch.quantile(baseline_acceleration, 0.95))
