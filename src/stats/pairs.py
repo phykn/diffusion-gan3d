@@ -9,7 +9,7 @@ def section_pairs(images, dim, gap):
     return torch.einsum("bcrw,bdrw->brcd", left, right) / left.shape[-1]
 
 
-def volume_pairs(probs, axis, gap, preserve_height=False):
+def volume_pairs(probs, axis, gap, preserve_height):
     """Undirected pair tables of [B, K, D, H, W] volumes along a volume axis.
 
     [B, K, K], or [B, D, K, K] per z when preserve_height keeps the z layers.

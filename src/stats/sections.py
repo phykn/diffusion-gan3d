@@ -5,13 +5,42 @@ import scipy.ndimage as ndi
 import torch
 
 
-def two_point(probs, max_lag=16):
-    """Per in-plane axis, S2 per phase and lag of [B, K, H, W] sections: [K, L]."""
+def label_sections(sections):
+    """One-hot sections, with exact phase ties broken at random.
+
+    Area-downsampled crops hold exact ties such as 0.5/0.5, which argmax would
+    all give to the lowest phase.
+    """
+    generator = torch.Generator().manual_seed(0)
+    noise = torch.rand(sections.shape, generator=generator) * 1e-3
+    labels = (sections.float() + noise).argmax(1)
+    return torch.nn.functional.one_hot(labels, sections.shape[1]).movedim(-1, 1).float()
+
+
+class SectionStatistics(NamedTuple):
+    two_point: list
+    chords: list
+    clusters: tuple
+
+
+def section_statistics(sections):
+    phases = sections.shape[1]
+    labels = sections.argmax(1).numpy()
+    return SectionStatistics(
+        two_point(sections),
+        chord_distribution(labels, phases),
+        cluster_statistics(labels, phases),
+    )
+
+
+def two_point(probs):
+    """Per in-plane axis, S2 per phase and lag (up to 16) of [B, K, H, W]
+    sections: [K, L]."""
     values = []
     mean = probs.mean((0, 2, 3))
     for axis in (-2, -1):
         curve = [mean]
-        for lag in range(1, min(max_lag + 1, probs.shape[axis])):
+        for lag in range(1, min(17, probs.shape[axis])):
             length = probs.shape[axis] - lag
             left = probs.narrow(axis, 0, length)
             right = probs.narrow(axis, lag, length)
@@ -56,34 +85,6 @@ class SectionErrors(NamedTuple):
     two_point_mae: float
     chord_tv: float
     cluster_error: float
-
-
-def label_sections(sections, seed=0):
-    """One-hot sections, with exact phase ties broken at random.
-
-    Area-downsampled crops hold exact ties such as 0.5/0.5, which argmax would
-    all give to the lowest phase.
-    """
-    generator = torch.Generator().manual_seed(seed)
-    noise = torch.rand(sections.shape, generator=generator) * 1e-3
-    labels = (sections.float() + noise).argmax(1)
-    return torch.nn.functional.one_hot(labels, sections.shape[1]).movedim(-1, 1).float()
-
-
-class SectionStatistics(NamedTuple):
-    two_point: list
-    chords: list
-    clusters: tuple
-
-
-def section_statistics(sections):
-    phases = sections.shape[1]
-    labels = sections.argmax(1).numpy()
-    return SectionStatistics(
-        two_point(sections),
-        chord_distribution(labels, phases),
-        cluster_statistics(labels, phases),
-    )
 
 
 def compare_sections(real, fake):

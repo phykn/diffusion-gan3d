@@ -6,7 +6,6 @@ import scipy.ndimage as ndi
 import torch
 
 from src.axes import PORE_PHASE
-from src.device import default_device
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ def spanning_fractions(mask):
     return tuple(fractions)
 
 
-def tortuosity(volume, phase=0, axis=0, device=None):
+def tortuosity(volume, phase, axis, device):
     import taufactor as tau
 
     if isinstance(volume, torch.Tensor):
@@ -42,8 +41,7 @@ def tortuosity(volume, phase=0, axis=0, device=None):
     if spanning_fractions(conductive)[0] == 0.0:
         return math.inf
     conductive = conductive.astype(np.uint8)
-    selected_device = torch.device(default_device() if device is None else device)
-    solver = tau.Solver(conductive, device=str(selected_device))
+    solver = tau.Solver(conductive, device=str(torch.device(device)))
     solver.solve(verbose=False, conv_crit=1e-3)
     if not solver.converged:
         raise RuntimeError("tortuosity solver did not converge.")

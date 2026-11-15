@@ -6,19 +6,6 @@ from src.device import assert_all, wide_dtype
 LABEL_CHUNK_ELEMENTS = 1024**2
 
 
-def _label_chunks(values, num_phases=None):
-    # Split views before conversion, including for non-contiguous input. A
-    # flatten/reshape of the full input could itself allocate another volume.
-    pending = [values]
-    while pending:
-        part = pending.pop()
-        if part.numel() <= LABEL_CHUNK_ELEMENTS:
-            yield phase_labels(part, num_phases)
-        else:
-            axis = max(range(part.ndim), key=lambda axis: part.shape[axis])
-            pending.extend(part.split((part.shape[axis] + 1) // 2, dim=axis))
-
-
 def phase_labels(values, num_phases=None):
     values = torch.as_tensor(values)
     if values.numel() == 0 or values.is_complex():
@@ -44,6 +31,19 @@ def phase_fractions(values, num_phases):
         chunk_counts = torch.bincount(labels.reshape(-1), minlength=num_phases)
         counts = chunk_counts if counts is None else counts.add_(chunk_counts)
     return counts.to(wide_dtype(counts.device)).div(values.numel())
+
+
+def _label_chunks(values, num_phases=None):
+    # Split views before conversion, including for non-contiguous input. A
+    # flatten/reshape of the full input could itself allocate another volume.
+    pending = [values]
+    while pending:
+        part = pending.pop()
+        if part.numel() <= LABEL_CHUNK_ELEMENTS:
+            yield phase_labels(part, num_phases)
+        else:
+            axis = max(range(part.ndim), key=lambda axis: part.shape[axis])
+            pending.extend(part.split((part.shape[axis] + 1) // 2, dim=axis))
 
 
 def voxel_accuracy(actual, expected):

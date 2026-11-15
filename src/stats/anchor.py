@@ -57,7 +57,7 @@ def measure_distance_divergence(anchored, baseline, indices, axis):
     return tuple(result)
 
 
-def measure_slice_smoothness(vol, indices, axis, baseline=None):
+def measure_slice_smoothness(vol, indices, axis, baseline):
     acceleration = _slice_acceleration(vol, axis)
     if acceleration.numel() == 0:
         return SliceSmoothness(None, None, None, None, None, None)
@@ -68,24 +68,18 @@ def measure_slice_smoothness(vol, indices, axis, baseline=None):
     peak_distance = (
         None if not indices else min(abs(peak_index - index) for index in indices)
     )
+    if baseline.shape != vol.shape:
+        raise ValueError("baseline must have the same shape as volume.")
     reversal_rate = _slice_reversal_rate(vol, axis)
-    baseline_reversal_rate = None
-    p95_ratio = None
-    max_ratio = None
-    reversal_ratio = None
-    if baseline is not None:
-        if baseline.shape != vol.shape:
-            raise ValueError("baseline must have the same shape as volume.")
-        baseline_acceleration = _slice_acceleration(baseline, axis)
-        baseline_p95 = float(torch.quantile(baseline_acceleration, 0.95))
-        baseline_max = float(baseline_acceleration.max())
-        baseline_reversal_rate = _slice_reversal_rate(baseline, axis)
-        if baseline_p95 > 0.0:
-            p95_ratio = p95 / baseline_p95
-        if baseline_max > 0.0:
-            max_ratio = float(maximum) / baseline_max
-        if baseline_reversal_rate > 0.0:
-            reversal_ratio = reversal_rate / baseline_reversal_rate
+    baseline_acceleration = _slice_acceleration(baseline, axis)
+    baseline_p95 = float(torch.quantile(baseline_acceleration, 0.95))
+    baseline_max = float(baseline_acceleration.max())
+    baseline_reversal_rate = _slice_reversal_rate(baseline, axis)
+    p95_ratio = p95 / baseline_p95 if baseline_p95 > 0.0 else None
+    max_ratio = float(maximum) / baseline_max if baseline_max > 0.0 else None
+    reversal_ratio = (
+        reversal_rate / baseline_reversal_rate if baseline_reversal_rate > 0.0 else None
+    )
     return SliceSmoothness(
         p95_ratio,
         max_ratio,
